@@ -1,7 +1,8 @@
 //! Properties of a tree item as a two-column grid. The grid does not care where it is shown:
 //! today in PrePoMax's double-click dialog, it fits a side panel just as well.
 
-use plx_mesh::SurfaceDefinition;
+use plx_mesh::{ElementShape, SurfaceDefinition};
+use plx_model::{ModelSpace, element_type_options};
 
 use crate::model::Model;
 use crate::results::format_value;
@@ -48,9 +49,25 @@ fn field_name(model: &Model, field: usize) -> String {
         .map_or_else(String::new, |f| f.name.clone())
 }
 
-/// Shows the properties of `item` in a grid; with `name`, the name can be edited.
-pub fn show(ui: &mut egui::Ui, model: Option<&Model>, item: &TreeItem, name: Option<&mut String>) {
+/// Element types of a part being edited in the properties: one per element type of the
+/// part, in the order of [`crate::model::PartInfo::element_types`].
+pub struct ElementTypes<'a> {
+    pub types: &'a mut [String],
+    pub space: ModelSpace,
+}
+
+/// Shows the properties of `item` in a grid; with `name`, the name can be edited, with
+/// `types` the element types of a part.
+pub fn show(
+    ui: &mut egui::Ui,
+    model: Option<&Model>,
+    item: &TreeItem,
+    name: Option<&mut String>,
+    types: Option<ElementTypes>,
+) {
     let mut name = name;
+    let mut types = types;
+    let mut type_row = 0;
     let mut rows: Vec<(&'static str, String)> = Vec::new();
     match model {
         Some(model) => rows_of(model, item, &mut rows),
@@ -66,18 +83,67 @@ pub fn show(ui: &mut egui::Ui, model: Option<&Model>, item: &TreeItem, name: Opt
         .show(ui, |ui| {
             for (key, value) in rows {
                 ui.label(key);
-                match name.as_deref_mut().filter(|_| key == "Name") {
-                    Some(name) => {
-                        let edit = egui::TextEdit::singleline(name).desired_width(200.0);
-                        ui.add(edit);
+                let edited_type = match &mut types {
+                    Some(edit) if key == "Element type" => {
+                        type_row += 1;
+                        let space = edit.space;
+                        (edit.types.get_mut(type_row - 1)).map(|t| (t, space))
                     }
-                    None => {
-                        ui.label(value);
+                    _ => None,
+                };
+                if let Some((type_name, space)) = edited_type {
+                    element_type_combo(ui, type_row, type_name, space, &value);
+                } else {
+                    match name.as_deref_mut().filter(|_| key == "Name") {
+                        Some(name) => {
+                            let edit = egui::TextEdit::singleline(name).desired_width(200.0);
+                            ui.add(edit);
+                        }
+                        None => {
+                            ui.label(value);
+                        }
                     }
                 }
                 ui.end_row();
             }
         });
+}
+
+/// PrePoMax's element type of a part: the CalculiX types with the same nodes, as a combo
+/// box with the element count after it. `row` shows `type_name (count)`; a shape with one
+/// type only keeps it as text.
+fn element_type_combo(
+    ui: &mut egui::Ui,
+    index: usize,
+    type_name: &mut String,
+    space: ModelSpace,
+    row: &str,
+) {
+    let count = row.rsplit_once(' ').map_or("", |(_, count)| count);
+    let mut options = ElementShape::from_type_name(type_name)
+        .map(|shape| element_type_options(shape, space))
+        .unwrap_or_default();
+    if !(options.iter()).any(|o| o.eq_ignore_ascii_case(type_name)) {
+        options.insert(0, type_name.clone());
+    }
+    if options.len() < 2 {
+        ui.label(row);
+        return;
+    }
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt(("element type", index))
+            .selected_text(type_name.as_str())
+            .width(120.0)
+            .show_ui(ui, |ui| {
+                for option in options {
+                    let selected = option.eq_ignore_ascii_case(type_name);
+                    if ui.selectable_label(selected, &option).clicked() {
+                        *type_name = option;
+                    }
+                }
+            });
+        ui.label(count);
+    });
 }
 
 fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)>) {

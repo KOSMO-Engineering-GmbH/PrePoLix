@@ -216,6 +216,10 @@ mod tests {
                 plx_model::SetKind::Nodes,
                 Region::Nodes(vec![1]),
             )],
+            element_types: vec![plx_model::PartElementType {
+                part: "EALL".into(),
+                type_name: "C3D20".into(),
+            }],
             constraints: Vec::new(),
             ties: vec![Tie {
                 master: Region::Faces(vec![(1, 2)]),

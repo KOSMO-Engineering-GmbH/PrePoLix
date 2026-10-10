@@ -82,6 +82,8 @@ struct Workbench {
     dialog: Option<TreeItem>,
     /// Name typed in the properties window of a part, with why it cannot be taken.
     part_name: (String, Option<String>),
+    /// Element types of the part in the properties window, as the user picks them.
+    part_types: Vec<String>,
     /// Part the open context menu of the 3D view belongs to.
     menu_part: Option<usize>,
     /// Which of the three trees is shown.
@@ -214,6 +216,7 @@ impl PrepolixApp {
                 tree: TreeState::default(),
                 dialog: None,
                 part_name: Default::default(),
+                part_types: Vec::new(),
                 menu_part: None,
                 tree_view: TreeView::FeModel,
                 output,
@@ -1339,7 +1342,11 @@ impl Workbench {
         }
         if let Some(TreeItem::Part(index)) = response.open {
             let name = self.shown().and_then(|m| m.parts.get(index));
+            let types = (name.into_iter())
+                .flat_map(|p| p.element_types.iter().map(|(t, _)| t.clone()))
+                .collect();
             self.part_name = (name.map(|p| p.name.clone()).unwrap_or_default(), None);
+            self.part_types = types;
             self.dialog = Some(TreeItem::Part(index));
         } else if let Some(TreeItem::ResultFieldOutput(field)) = response.open {
             self.edit_field_output(field);
@@ -4607,7 +4614,15 @@ impl Workbench {
             .show(ctx, |ui| {
                 let (name, error) = &mut self.part_name;
                 let name = part.map(|_| name);
-                properties::show(ui, shown, &item, name);
+                // Element types are chosen for the FE model, not for results.
+                let types = (part.is_some() && self.tree_view == TreeView::FeModel)
+                    .then_some(())
+                    .zip(shown)
+                    .map(|((), model)| properties::ElementTypes {
+                        types: &mut self.part_types,
+                        space: model.fe.properties.space,
+                    });
+                properties::show(ui, shown, &item, name, types);
                 if let Some(error) = error.as_ref().filter(|_| part.is_some()) {
                     ui.add_space(4.0);
                     ui.colored_label(egui::Color32::from_rgb(200, 0, 0), error);
@@ -4625,10 +4640,33 @@ impl Workbench {
         accept |= part.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Enter));
         if let (true, Some(index)) = (accept, part) {
             let name = self.part_name.0.clone();
+            let types = std::mem::take(&mut self.part_types);
+            let fe_model = self.tree_view == TreeView::FeModel;
+            let mut retyped = Vec::new();
             let renamed = match self.shown_mut() {
-                Some(model) => model.rename_part(index, &name),
+                Some(model) => model.rename_part(index, &name).and_then(|()| {
+                    let current = (model.parts.get(index))
+                        .map(|p| p.element_types.clone())
+                        .unwrap_or_default();
+                    for ((old, _), new) in current.iter().zip(&types) {
+                        if fe_model && !old.eq_ignore_ascii_case(new) {
+                            model.set_element_type(index, new)?;
+                            retyped.push(format!("{old} to {new}"));
+                        }
+                    }
+                    Ok(())
+                }),
                 None => Ok(()),
             };
+            self.part_types = types;
+            if !retyped.is_empty() {
+                self.output.push(format!(
+                    "{name}: element type changed from {}",
+                    retyped.join(", ")
+                ));
+                self.results_changed = true;
+                self.highlighted = None;
+            }
             match renamed {
                 Ok(()) => close = true,
                 Err(error) => self.part_name.1 = Some(error),

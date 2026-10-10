@@ -29,6 +29,31 @@ switches to the #ui("FE Model") tab.
 Faces can only be meshed in 2D models and solids and lines only in 3D models. Shell meshes of
 3D models are not available yet.
 
+=== Changing the element type <element-type>
+
+As in PrePoMax, a part on the #ui("FE Model") tab can be given another element type with the
+same nodes: double-click the part and choose it in the #ui("Element type") box, then #ui("OK").
+A part with several element types has one box per type.
+
+#screenshot("part-element-type.png", [Choosing the element type of a part])
+
+#table(
+  columns: (auto, 1fr),
+  stroke: (x, y) => if y == 0 { (bottom: 0.7pt) } else { (bottom: 0.3pt + luma(200)) },
+  inset: (x: 5pt, y: 4pt),
+  table.header([*Elements*], [*Element types*]),
+  [Hexahedra], [`C3D8`, `C3D8R` (reduced integration), `C3D8I` (incompatible modes);
+    `C3D20`, `C3D20R`],
+  [Tetrahedra], [`C3D4`; `C3D10`, `C3D10T`],
+  [Quadrilaterals], [`S4`, `S4R`; `S8`, `S8R` in 3D models, the same as `CPS`, `CPE` or `CAX`
+    elements in 2D models],
+)
+
+Triangles and wedges have one type only, which is shown as text. Lines get their type from
+their section (@sections). The choice is kept with the part: meshing the part again gives the
+new elements the same type, and in a 2D model a new model space keeps the reduced integration
+(`CPS8R` becomes `CAX8R`).
+
 === Meshing errors
 
 If Gmsh fails, the output pane shows "Meshing failed: ..." with the message of Gmsh. The faces,

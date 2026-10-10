@@ -193,6 +193,17 @@ impl FeMesh {
         }
     }
 
+    /// Gives one element another type name; false if there is no element of the id.
+    pub fn set_element_type(&mut self, id: ElementId, type_name: String) -> bool {
+        match self.element_index(id) {
+            Some(index) => {
+                self.elements[index].type_name = type_name;
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Reverses the node order of triangles and quadrilaterals for which `flip` holds, which
     /// turns their normal around; corners and midside nodes stay matched.
     pub fn flip_surface_elements(&mut self, mut flip: impl FnMut(&Element) -> bool) {
