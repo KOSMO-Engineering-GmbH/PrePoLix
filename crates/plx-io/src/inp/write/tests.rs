@@ -2158,6 +2158,7 @@ fn calculix_carries_a_block_on_springs_between_two_surfaces() {
     let spring = Constraint::SurfaceToSurfaceSpring(SurfaceToSurfaceSpring {
         name: "Bearing-1".into(),
         active: true,
+        visible: true,
         master: Region::Faces(blocks.a_top.clone()),
         slave: Region::Faces(blocks.b_bottom.clone()),
         stiffness: [1000.0, 1000.0, 2000.0],
@@ -2185,6 +2186,7 @@ fn calculix_carries_a_block_on_surface_and_point_springs() {
     let surface = Constraint::SurfaceSpring(SurfaceSpring {
         name: "Surface_Spring-1".into(),
         active: true,
+        visible: true,
         region: Region::Faces(blocks.b_bottom.clone()),
         stiffness: [1000.0, 1000.0, 1000.0],
         per_area: false,
@@ -2193,6 +2195,7 @@ fn calculix_carries_a_block_on_surface_and_point_springs() {
     let point = Constraint::PointSpring(PointSpring {
         name: "Point_Spring-1".into(),
         active: true,
+        visible: true,
         region: Region::Faces(blocks.b_bottom.clone()),
         stiffness: [0.0, 0.0, 100.0],
     });
@@ -2218,6 +2221,7 @@ fn calculix_compression_only_support_takes_only_pressure() {
         let springs = Constraint::SurfaceSpring(SurfaceSpring {
             name: "Surface_Spring-1".into(),
             active: true,
+            visible: true,
             region: Region::Faces(blocks.b_bottom.clone()),
             stiffness: [1000.0, 1000.0, 1000.0],
             per_area: false,
@@ -2225,6 +2229,7 @@ fn calculix_compression_only_support_takes_only_pressure() {
         let gaps = Constraint::CompressionOnly(CompressionOnly {
             name: "Compression_Only-1".into(),
             active: true,
+            visible: true,
             region: Region::Faces(blocks.b_bottom.clone()),
             clearance: 0.0,
             spring_stiffness: None,

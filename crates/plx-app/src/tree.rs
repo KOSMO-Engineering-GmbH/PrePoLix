@@ -204,6 +204,8 @@ pub struct TreeResponse {
     pub move_step: Option<(usize, bool)>,
     /// Swap master and slave of a tie, spring connection or contact pair.
     pub swap_master_slave: Option<TreeItem>,
+    /// Hide (`false`) or show the symbol of a constraint by index, or of all (`None`).
+    pub constraint_visibility: Option<(Option<usize>, bool)>,
     /// An entry of the analysis' context menu, or the monitor by double click.
     pub analysis: Option<AnalysisAction>,
     /// Open the material library.
@@ -693,6 +695,9 @@ struct Tree<'a> {
     inactive: HashSet<TreeItem>,
     /// Items with a master and a slave, whose menu offers to swap them.
     master_slave: HashSet<TreeItem>,
+    /// Constraints with a symbol in the 3D view, and whether it is shown; hidden ones get
+    /// PrePoMax's hide icon.
+    symbols: HashMap<TreeItem, bool>,
     /// Number of steps, to disable "Move Down" on the last one.
     step_count: usize,
 }
@@ -826,6 +831,15 @@ impl Tree<'_> {
                     }
                 }
                 // PrePoMax offers the search on constraints and contact pairs.
+                if item == TreeItem::Group("Constraints") && !self.symbols.is_empty() {
+                    ui.separator();
+                    if ui.button("Show All").clicked() {
+                        self.response.constraint_visibility = Some((None, true));
+                    }
+                    if ui.button("Hide All").clicked() {
+                        self.response.constraint_visibility = Some((None, false));
+                    }
+                }
                 if matches!(item, TreeItem::Group("Constraints" | "Contact Pairs")) {
                     ui.separator();
                     if ui.button("Search Contact Pairs …").clicked() {
@@ -850,6 +864,14 @@ impl Tree<'_> {
                 if editable {
                     if ui.button("Edit …").clicked() {
                         self.response.open = Some(item.clone());
+                    }
+                    if let (TreeItem::Constraint(i), Some(&visible)) =
+                        (&item, self.symbols.get(&item))
+                    {
+                        let label = if visible { "Hide" } else { "Show" };
+                        if ui.button(label).clicked() {
+                            self.response.constraint_visibility = Some((Some(*i), !visible));
+                        }
                     }
                     if can_deactivate(&item) {
                         ui.separator();
@@ -923,6 +945,9 @@ impl Tree<'_> {
     fn icon(&self, item: &TreeItem, open: bool) -> TreeIcon {
         if self.inactive.contains(item) {
             return TreeIcon::Inactive;
+        }
+        if self.symbols.get(item) == Some(&false) {
+            return TreeIcon::Hidden;
         }
         let dots = if open {
             TreeIcon::DotsOpen
@@ -1277,6 +1302,7 @@ pub fn show(
         holds_invalid: HashSet::new(),
         closed: HashMap::new(),
         inactive: HashSet::new(),
+        symbols: HashMap::new(),
         master_slave: HashSet::new(),
         step_count: 0,
     };
@@ -1371,6 +1397,10 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             }
             if constraint.master_slave().is_some() {
                 tree.master_slave.insert(TreeItem::Constraint(i));
+            }
+            if crate::symbols::Kind::of_constraint(constraint).is_some() {
+                tree.symbols
+                    .insert(TreeItem::Constraint(i), constraint.visible());
             }
         }
         for (i, pair) in fe.contact_pairs.iter().enumerate() {

@@ -78,12 +78,14 @@ impl Type {
             Type::PointSpring => Constraint::PointSpring(PointSpring {
                 name,
                 active: true,
+                visible: true,
                 region: Region::Nodes(Vec::new()),
                 stiffness: [0.0; 3],
             }),
             Type::SurfaceSpring => Constraint::SurfaceSpring(SurfaceSpring {
                 name,
                 active: true,
+                visible: true,
                 region: faces(),
                 stiffness: [0.0; 3],
                 per_area: false,
@@ -91,6 +93,7 @@ impl Type {
             Type::CompressionOnly => Constraint::CompressionOnly(CompressionOnly {
                 name,
                 active: true,
+                visible: true,
                 region: faces(),
                 clearance: 0.0,
                 spring_stiffness: None,
@@ -103,6 +106,7 @@ impl Type {
                 Constraint::SurfaceToSurfaceSpring(SurfaceToSurfaceSpring {
                     name,
                     active: true,
+                    visible: true,
                     master: faces(),
                     slave: faces(),
                     stiffness: [0.0; 3],
@@ -524,6 +528,7 @@ mod tests {
         let connection = Constraint::SurfaceToSurfaceSpring(SurfaceToSurfaceSpring {
             name: "Lager".into(),
             active: false,
+            visible: true,
             master: Region::Surface("BORE".into()),
             slave: Region::Faces(vec![(1, 2)]),
             stiffness: [1.0, 2.0, 3.0],
@@ -532,6 +537,7 @@ mod tests {
         let spring = Constraint::PointSpring(PointSpring {
             name: "Point_Spring-1".into(),
             active: true,
+            visible: true,
             region: Region::NodeSet("FIX".into()),
             stiffness: [1.0, 0.0, 0.0],
         });
