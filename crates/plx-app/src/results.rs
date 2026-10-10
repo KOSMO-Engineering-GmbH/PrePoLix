@@ -693,20 +693,23 @@ impl ResultsView {
     /// Displacements of a whirling complex mode at the phase of the shown frame:
     /// `u_k = MAG_k cos(phase + PHA_k)` per node, PrePoMax's complex animation.
     fn whirl_displacements(phase: f32, field: &Field) -> Vec<[f32; 3]> {
-        let magnitude = ["MAG1", "MAG2", "MAG3"].map(|n| &field.component(n).unwrap().values);
-        let shift = ["PHA1", "PHA2", "PHA3"].map(|n| &field.component(n).unwrap().values);
-        (0..magnitude[0].len())
-            .map(|i| {
-                [0, 1, 2].map(|k| {
-                    let (m, p) = (magnitude[k][i], shift[k][i]);
-                    if m.is_finite() && p.is_finite() {
-                        m * (phase + p.to_radians()).cos()
-                    } else {
-                        0.0
-                    }
-                })
-            })
+        let nodes = field.component("MAG1").map_or(0, |c| c.values.len());
+        (0..nodes)
+            .map(|i| Self::whirl_displacement(phase, field, i))
             .collect()
+    }
+
+    /// [`Self::whirl_displacements`] of one node.
+    fn whirl_displacement(phase: f32, field: &Field, node: usize) -> [f32; 3] {
+        let value = |name: &str| field.component(name).map_or(f32::NAN, |c| c.values[node]);
+        [("MAG1", "PHA1"), ("MAG2", "PHA2"), ("MAG3", "PHA3")].map(|(mag, pha)| {
+            let (m, p) = (value(mag), value(pha));
+            if m.is_finite() && p.is_finite() {
+                m * (phase + p.to_radians()).cos()
+            } else {
+                0.0
+            }
+        })
     }
 
     /// Values of the shown displacement component of a whirling complex mode.
@@ -815,7 +818,8 @@ impl ResultsView {
     /// Displacement of one node as shown.
     pub fn shown_displacement(&self, node: usize) -> Option<[f32; 3]> {
         if let Some((phase, field)) = self.whirl() {
-            return Self::whirl_displacements(phase, field).get(node).copied();
+            let nodes = field.component("MAG1").map_or(0, |c| c.values.len());
+            return (node < nodes).then(|| Self::whirl_displacement(phase, field, node));
         }
         if let Some(superposition) = &self.superposition {
             return superposition.displacements.get(node).copied();
