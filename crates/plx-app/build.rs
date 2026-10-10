@@ -4,7 +4,8 @@
 use std::{env, path::PathBuf, process::Command};
 
 fn main() {
-    let icon = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets/icon/prepolix.ico");
+    let icon =
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("assets/icon/prepolix.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
     println!("cargo:rerun-if-env-changed=WINDRES");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
@@ -21,9 +22,19 @@ fn main() {
     let windres = env::var("WINDRES").unwrap_or_else(|_| {
         let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
         let cross = format!("{arch}-w64-mingw32-windres");
-        if Command::new(&cross).arg("--version").output().is_ok() { cross } else { "windres".into() }
+        if Command::new(&cross).arg("--version").output().is_ok() {
+            cross
+        } else {
+            "windres".into()
+        }
     });
-    match Command::new(&windres).args(["-O", "coff", "-i"]).arg(&rc).arg("-o").arg(&obj).status() {
+    match Command::new(&windres)
+        .args(["-O", "coff", "-i"])
+        .arg(&rc)
+        .arg("-o")
+        .arg(&obj)
+        .status()
+    {
         Ok(status) if status.success() => println!("cargo:rustc-link-arg-bins={}", obj.display()),
         _ => println!("cargo:warning={windres} failed, prepolix.exe is built without an icon"),
     }
