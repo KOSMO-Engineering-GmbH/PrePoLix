@@ -50,7 +50,7 @@ pub struct ResultsView {
     pub field: usize,
     pub component: usize,
     pub deformation: Deformation,
-    pub user_scale: f32,
+    pub user_scale: f64,
     pub levels: u32,
     /// Draw the undeformed outline behind the deformed shape.
     pub show_undeformed: bool,
@@ -448,7 +448,7 @@ impl ResultsView {
         match self.deformation {
             Deformation::Undeformed => 0.0,
             Deformation::TrueScale => 1.0,
-            Deformation::UserDefined => self.user_scale,
+            Deformation::UserDefined => self.user_scale as f32,
             Deformation::Automatic(factor) => {
                 // An increment animation keeps one scale for all frames: that of the largest
                 // displacement among them.
