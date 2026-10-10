@@ -25,10 +25,11 @@ use crate::meshing::{
 use crate::model::{self, Highlight, LoadedModel, Model};
 use crate::model_properties::{DialogResult, ModelPropertiesDialog, geometry_check};
 use crate::numeric;
+use crate::overlay::AnnotationCommand;
 use crate::overlay::{Marker, Overlay};
 use crate::path_plot::{self, PathPlot, PlotEvent};
 use crate::properties;
-use crate::query::{QueryAction, QueryWindow};
+use crate::query::{QueryAction, QueryClick, QueryWindow};
 use crate::results::{Deformation, ResultsView, format_legend_value};
 use crate::screenshot::{self, Screenshot};
 use crate::section::{PlaneDefinition, SectionDialog, SectionResult, SectionView};
@@ -527,7 +528,14 @@ impl PrepolixApp {
             ui.menu_button("Results", |ui| self.workbench.results_menu(ui));
             ui.menu_button("Tools", |ui| {
                 if ui.button("Query …").clicked() {
-                    self.workbench.query = Some(QueryWindow::default());
+                    self.workbench.open_query();
+                }
+                let annotated = self.workbench.has_annotations();
+                if ui
+                    .add_enabled(annotated, egui::Button::new("Remove Annotations"))
+                    .clicked()
+                {
+                    self.workbench.annotations(AnnotationCommand::DeleteAll);
                 }
                 ui.separator();
                 if ui.button("Settings …").clicked() {
@@ -608,6 +616,21 @@ impl PrepolixApp {
             }
             if button.secondary_clicked() {
                 self.workbench.open_exploded_dialog();
+            }
+            ui.separator();
+            // PrePoMax: Query, then Remove annotations.
+            let querying = self.workbench.query.is_some();
+            if icons::button(ui, Icon::Query, "Query", shown, querying).clicked() {
+                if querying {
+                    self.workbench.close_query();
+                } else {
+                    self.workbench.open_query();
+                }
+            }
+            let annotated = self.workbench.has_annotations();
+            let tooltip = "Remove Annotations";
+            if icons::button(ui, Icon::RemoveAnnotations, tooltip, annotated, false).clicked() {
+                self.workbench.annotations(AnnotationCommand::DeleteAll);
             }
         });
     }
@@ -897,6 +920,9 @@ impl eframe::App for PrepolixApp {
             }
             if let Some(view) = &response.response {
                 self.workbench.viewport_menu(view, response.secondary_click);
+            }
+            if let Some(command) = response.annotation {
+                self.workbench.annotations(command);
             }
             if let Some(area) = response.box_select {
                 self.workbench.box_select(&area);
@@ -2114,12 +2140,61 @@ impl Workbench {
         match query.show(ctx, model, &mut self.output) {
             QueryAction::Open => {}
             QueryAction::Changed => self.update_contour(),
-            QueryAction::Close => {
-                self.query = None;
-                self.viewport.preview = Default::default();
+            QueryAction::Add(annotation) => {
+                if let Some(model) = self.shown_mut() {
+                    model.query_annotations.push(annotation);
+                }
                 self.update_contour();
             }
+            QueryAction::RemoveAll => self.annotations(AnnotationCommand::DeleteAll),
+            QueryAction::Close => self.close_query(),
         }
+    }
+
+    fn open_query(&mut self) {
+        self.query = Some(QueryWindow::default());
+    }
+
+    /// Closes the Query window; its annotations stay in the view, as in PrePoMax.
+    fn close_query(&mut self) {
+        self.query = None;
+        self.viewport.preview = Default::default();
+        self.update_contour();
+    }
+
+    fn has_annotations(&self) -> bool {
+        self.shown()
+            .is_some_and(|model| !model.query_annotations.is_empty())
+    }
+
+    /// Deletes query annotations of the shown model, from their context menu or with Remove
+    /// Annotations.
+    fn annotations(&mut self, command: AnnotationCommand) {
+        // The label of an annotation dragged elsewhere keeps its place when one before it
+        // goes.
+        let labels = &mut self.viewport.labels.annotations;
+        match command {
+            AnnotationCommand::Delete(index) => {
+                let owners = &self.viewport.overlay.annotation_owners;
+                if let Some(marker) = owners.iter().position(|&owner| owner == index)
+                    && marker < labels.len()
+                {
+                    labels.remove(marker);
+                }
+            }
+            AnnotationCommand::DeleteAll => labels.clear(),
+        }
+        let Some(model) = self.shown_mut() else {
+            return;
+        };
+        match command {
+            AnnotationCommand::Delete(index) if index < model.query_annotations.len() => {
+                model.query_annotations.remove(index);
+            }
+            AnnotationCommand::Delete(_) => {}
+            AnnotationCommand::DeleteAll => model.query_annotations.clear(),
+        }
+        self.update_contour();
     }
 
     fn open_mesh_setup(&mut self) {
@@ -2950,8 +3025,15 @@ impl Workbench {
             };
             if let Some(model) = model {
                 let hit = model.pick_click(&click);
-                if query.click(model, hit.as_ref(), &mut self.output) {
-                    self.update_contour();
+                match query.click(model, hit.as_ref(), &mut self.output) {
+                    QueryClick::Nothing => {}
+                    QueryClick::Picked => self.update_contour(),
+                    QueryClick::Added(annotation) => {
+                        if let Some(model) = self.shown_mut() {
+                            model.query_annotations.push(annotation);
+                        }
+                        self.update_contour();
+                    }
                 }
             }
             return;
@@ -5124,14 +5206,12 @@ impl Workbench {
                 text: format!("{label}: {}\nSection plane", format_legend_value(value)),
             })
         };
-        let query = self
-            .query
-            .as_ref()
-            .map(|q| q.marks(model))
-            .unwrap_or_default();
+        let picked = self.query.as_ref().map_or(&[][..], QueryWindow::picked);
+        let query = crate::query::marks(model, picked);
         self.viewport.overlay = Overlay {
             legend: view.and_then(ResultsView::legend),
             annotations: query.markers,
+            annotation_owners: query.owners,
             status: view
                 .filter(|_| post.status_block)
                 .map_or_else(Vec::new, |v| v.status_lines(&model.file_name())),

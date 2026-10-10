@@ -33,8 +33,11 @@ pub struct Overlay {
     pub status: Vec<String>,
     pub maximum: Option<Marker>,
     pub minimum: Option<Marker>,
-    /// Labels left by the query tool, drawn like the markers.
+    /// Labels left by the query tool, drawn like the markers; a right click offers deleting
+    /// them.
     pub annotations: Vec<Marker>,
+    /// The query annotation each of `annotations` belongs to.
+    pub annotation_owners: Vec<usize>,
     /// Global origin in render coordinates, where the global axis triad is drawn.
     pub global_origin: Option<Vec3>,
     pub show_scale_bar: bool,
@@ -90,6 +93,22 @@ pub struct Marker {
     pub text: String,
 }
 
+/// What the context menu of a query annotation asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnnotationCommand {
+    /// Delete the query annotation with this index.
+    Delete(usize),
+    DeleteAll,
+}
+
+/// What was clicked in the overlay.
+#[derive(Default)]
+pub struct OverlayResponse {
+    /// An axis direction clicked in the corner triad.
+    pub axis: Option<Vec3>,
+    pub annotation: Option<AnnotationCommand>,
+}
+
 /// Where the user dragged the labels to, relative to their default places.
 #[derive(Default)]
 pub struct LabelOffsets {
@@ -116,16 +135,16 @@ pub fn project(camera: &Camera, rect: Rect, point: Vec3) -> Pos2 {
     )
 }
 
-/// Draws the annotations; returns the axis direction clicked in the corner triad, if any.
+/// Draws the annotations; returns what was clicked in them.
 pub fn draw(
     ui: &Ui,
     rect: Rect,
     camera: &Camera,
     overlay: &Overlay,
     offsets: &mut LabelOffsets,
-) -> Option<Vec3> {
+) -> OverlayResponse {
     let painter = ui.painter_at(rect);
-    let mut clicked_axis = None;
+    let mut clicked = OverlayResponse::default();
     if let Some(origin) = overlay.global_origin {
         let center = project(camera, rect, origin);
         if rect.contains(center) {
@@ -197,7 +216,7 @@ pub fn draw(
     if overlay.show_view_triad {
         let corner = rect.right_bottom() - vec2(24.0 + 45.0, 24.0 + 45.0);
         triad(&painter, camera, corner, 45.0, true);
-        clicked_axis = triad_buttons(ui, &painter, camera, corner, 45.0);
+        clicked.axis = triad_buttons(ui, &painter, camera, corner, 45.0);
     }
     for (marker, offset, id) in [
         (&overlay.minimum, &mut offsets.minimum, "minimum label"),
@@ -205,7 +224,7 @@ pub fn draw(
     ] {
         if let Some(marker) = marker {
             let point = project(camera, rect, marker.position);
-            draw_marker(ui, &painter, rect, point, &marker.text, offset, id);
+            draw_marker(ui, rect, point, &marker.text, offset, id, Sense::drag());
         }
     }
     offsets.annotations.resize(overlay.annotations.len(), None);
@@ -215,7 +234,21 @@ pub fn draw(
     {
         let point = project(camera, rect, marker.position);
         let id = format!("annotation {index}");
-        draw_marker(ui, &painter, rect, point, &marker.text, offset, &id);
+        let text = &marker.text;
+        let sense = Sense::click_and_drag();
+        let Some(response) = draw_marker(ui, rect, point, text, offset, &id, sense) else {
+            continue;
+        };
+        // PrePoMax's annotation menu; Remove Annotations of its tool bar as well.
+        response.context_menu(|ui| {
+            if ui.button("Delete").clicked() {
+                clicked.annotation = (overlay.annotation_owners.get(index))
+                    .map(|&owner| AnnotationCommand::Delete(owner));
+            }
+            if ui.button("Delete All Annotations").clicked() {
+                clicked.annotation = Some(AnnotationCommand::DeleteAll);
+            }
+        });
     }
     if let Some(legend) = &overlay.legend {
         draw_legend(ui, &painter, rect, legend, &mut offsets.legend);
@@ -223,7 +256,7 @@ pub fn draw(
     if !overlay.status.is_empty() {
         draw_status(ui, &painter, rect, &overlay.status, &mut offsets.status);
     }
-    clicked_axis
+    clicked
 }
 
 /// A dash-dotted line, the technical drawing's line for axes of symmetry.
@@ -310,10 +343,19 @@ fn draw_path(painter: &egui::Painter, points: &[Pos2]) {
 }
 
 /// Places a draggable label: its default position plus the user's offset, kept inside the
-/// view. Dragging moves the offset.
-fn drag_label(ui: &Ui, rect: Rect, id: &str, default: Pos2, size: Vec2, offset: &mut Vec2) -> Rect {
+/// view. Dragging moves the offset. Returns where it sits and its response; labels with a
+/// context menu sense clicks as well.
+fn drag_label(
+    ui: &Ui,
+    rect: Rect,
+    id: &str,
+    default: Pos2,
+    size: Vec2,
+    offset: &mut Vec2,
+    sense: Sense,
+) -> (Rect, egui::Response) {
     let frame = Rect::from_min_size(default + *offset, size);
-    let response = ui.interact(frame, ui.id().with(id), Sense::drag());
+    let response = ui.interact(frame, ui.id().with(id), sense);
     if response.dragged() {
         *offset += response.drag_delta();
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
@@ -328,7 +370,7 @@ fn drag_label(ui: &Ui, rect: Rect, id: &str, default: Pos2, size: Vec2, offset: 
         .y
         .clamp(rect.top(), (rect.bottom() - size.y).max(rect.top()));
     *offset = min - default;
-    Rect::from_min_size(min, size)
+    (Rect::from_min_size(min, size), response)
 }
 
 /// Title lines, then one box per band with the band limits as labels, maximum on top.
@@ -359,7 +401,7 @@ fn draw_legend(ui: &Ui, painter: &Painter, rect: Rect, legend: &Legend, offset: 
         title_height + levels as f32 * band.y + label_height * 0.5,
     );
     let default = rect.left_top() + vec2(MARGIN, MARGIN);
-    let frame = drag_label(ui, rect, "legend", default, size, offset);
+    let (frame, _) = drag_label(ui, rect, "legend", default, size, offset, Sense::drag());
 
     let mut top = frame.top();
     for galley in titles {
@@ -396,7 +438,7 @@ fn draw_status(ui: &Ui, painter: &Painter, rect: Rect, lines: &[String], offset:
     let size = vec2(width, line_height * galleys.len() as f32)
         + vec2(2.0 * STATUS_PADDING, STATUS_PADDING);
     let default = pos2(rect.right() - MARGIN - size.x, rect.top() + MARGIN);
-    let frame = drag_label(ui, rect, "status", default, size, offset);
+    let (frame, _) = drag_label(ui, rect, "status", default, size, offset, Sense::drag());
     painter.rect_stroke(frame, 0.0, Stroke::new(1.0, TEXT), StrokeKind::Inside);
     for (i, galley) in galleys.into_iter().enumerate() {
         let pos = frame.min
@@ -446,7 +488,7 @@ fn draw_scale_bar(
         rect.center().x - width * 0.5 - left_overhang,
         rect.bottom() - MARGIN - size.y,
     );
-    let frame = drag_label(ui, rect, "scale bar", default, size, offset);
+    let (frame, _) = drag_label(ui, rect, "scale bar", default, size, offset, Sense::drag());
     let left = frame.left() + left_overhang;
     let top = frame.bottom() - SCALE_BAR_HEIGHT;
     let field = width / SCALE_BAR_FIELDS as f32;
@@ -477,19 +519,21 @@ pub fn scale_bar_length(world_per_point: f32) -> Option<(f32, f32)> {
 }
 
 /// Framed label next to a model point, with an arrow pointing at it. The box follows the point
-/// when the view moves; dragging it changes where it sits relative to the point.
+/// when the view moves; dragging it changes where it sits relative to the point. Returns the
+/// label's response, `None` while the point is outside the view.
 fn draw_marker(
     ui: &Ui,
-    painter: &Painter,
     rect: Rect,
     point: Pos2,
     text: &str,
     offset: &mut Option<Vec2>,
     id: &str,
-) {
+    sense: Sense,
+) -> Option<egui::Response> {
     if !rect.contains(point) {
-        return;
+        return None;
     }
+    let painter = ui.painter_at(rect);
     let galley = painter.layout_no_wrap(text.to_string(), font(), TEXT);
     let size = galley.size() + 2.0 * MARKER_PADDING;
     // Above right of the point, or mirrored where the view ends.
@@ -508,7 +552,7 @@ fn draw_marker(
     };
     let mut relative = offset.unwrap_or_else(automatic);
     let before = relative;
-    let frame = drag_label(ui, rect, id, point, size, &mut relative);
+    let (frame, response) = drag_label(ui, rect, id, point, size, &mut relative, sense);
     if relative != before {
         *offset = Some(relative);
     }
@@ -538,6 +582,7 @@ fn draw_marker(
         StrokeKind::Inside,
     );
     painter.galley(frame.min + MARKER_PADDING, galley, TEXT);
+    Some(response)
 }
 
 /// Colour of result paths.
