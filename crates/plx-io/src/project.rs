@@ -84,6 +84,7 @@ pub fn bind_results(
         analysis: analysis.to_owned(),
         with_errors,
         files: Vec::new(),
+        color_scale: None,
     };
     for path in files {
         let io = |source| ProjectError::Io {
@@ -374,6 +375,13 @@ mod tests {
 
         let path = dir.join("block.plx");
         let model = FeModel::default();
+        // The colour scale the results were shown with is saved with them.
+        let mut bound = bound;
+        bound.color_scale = Some(plx_model::ColorScale {
+            spectrum: plx_model::ColorSpectrum::Viridis,
+            manual: Some([-1.5, 250.0]),
+            ..Default::default()
+        });
         save_project(&path, None, &mesh, &model, Some(&bound)).unwrap();
         let project = read_project(&path).unwrap();
         assert_eq!(project.results.as_ref(), Some(&bound));

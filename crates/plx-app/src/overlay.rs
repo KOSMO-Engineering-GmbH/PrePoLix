@@ -9,7 +9,6 @@ use egui::{
 };
 use glam::Vec3;
 use plx_render::Camera;
-use plx_render::contour::band_color;
 
 use crate::model::SECONDARY_HIGHLIGHT_COLOR;
 use crate::results::{Legend, format_legend_value, format_value};
@@ -116,14 +115,23 @@ pub fn project(camera: &Camera, rect: Rect, point: Vec3) -> Pos2 {
     )
 }
 
-/// Draws the annotations; returns the axis direction clicked in the corner triad, if any.
+/// What the user clicked in the annotations.
+#[derive(Default)]
+pub struct OverlayClicks {
+    /// Axis direction clicked in the corner triad.
+    pub axis: Option<Vec3>,
+    /// The legend was double clicked or its context menu asked for the colour scale.
+    pub edit_legend: bool,
+}
+
+/// Draws the annotations and reports what was clicked in them.
 pub fn draw(
     ui: &Ui,
     rect: Rect,
     camera: &Camera,
     overlay: &Overlay,
     offsets: &mut LabelOffsets,
-) -> Option<Vec3> {
+) -> OverlayClicks {
     let painter = ui.painter_at(rect);
     let mut clicked_axis = None;
     if let Some(origin) = overlay.global_origin {
@@ -217,13 +225,24 @@ pub fn draw(
         let id = format!("annotation {index}");
         draw_marker(ui, &painter, rect, point, &marker.text, offset, &id);
     }
+    let mut edit_legend = false;
     if let Some(legend) = &overlay.legend {
-        draw_legend(ui, &painter, rect, legend, &mut offsets.legend);
+        let response = draw_legend(ui, &painter, rect, legend, &mut offsets.legend);
+        edit_legend = response.double_clicked();
+        response.context_menu(|ui| {
+            if ui.button("Color Scale...").clicked() {
+                edit_legend = true;
+                ui.close();
+            }
+        });
     }
     if !overlay.status.is_empty() {
         draw_status(ui, &painter, rect, &overlay.status, &mut offsets.status);
     }
-    clicked_axis
+    OverlayClicks {
+        axis: clicked_axis,
+        edit_legend,
+    }
 }
 
 /// A dash-dotted line, the technical drawing's line for axes of symmetry.
@@ -312,8 +331,32 @@ fn draw_path(painter: &egui::Painter, points: &[Pos2]) {
 /// Places a draggable label: its default position plus the user's offset, kept inside the
 /// view. Dragging moves the offset.
 fn drag_label(ui: &Ui, rect: Rect, id: &str, default: Pos2, size: Vec2, offset: &mut Vec2) -> Rect {
+    drag_label_sensing(ui, rect, id, default, size, offset, Sense::drag()).0
+}
+
+/// Like [`drag_label`], also sensing clicks; returns the label's response.
+fn drag_label_response(
+    ui: &Ui,
+    rect: Rect,
+    id: &str,
+    default: Pos2,
+    size: Vec2,
+    offset: &mut Vec2,
+) -> (Rect, egui::Response) {
+    drag_label_sensing(ui, rect, id, default, size, offset, Sense::click_and_drag())
+}
+
+fn drag_label_sensing(
+    ui: &Ui,
+    rect: Rect,
+    id: &str,
+    default: Pos2,
+    size: Vec2,
+    offset: &mut Vec2,
+    sense: Sense,
+) -> (Rect, egui::Response) {
     let frame = Rect::from_min_size(default + *offset, size);
-    let response = ui.interact(frame, ui.id().with(id), Sense::drag());
+    let response = ui.interact(frame, ui.id().with(id), sense);
     if response.dragged() {
         *offset += response.drag_delta();
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
@@ -328,23 +371,39 @@ fn drag_label(ui: &Ui, rect: Rect, id: &str, default: Pos2, size: Vec2, offset: 
         .y
         .clamp(rect.top(), (rect.bottom() - size.y).max(rect.top()));
     *offset = min - default;
-    Rect::from_min_size(min, size)
+    (Rect::from_min_size(min, size), response)
 }
 
-/// Title lines, then one box per band with the band limits as labels, maximum on top.
-fn draw_legend(ui: &Ui, painter: &Painter, rect: Rect, legend: &Legend, offset: &mut Vec2) {
+/// Title lines, then one box per band with the band limits as labels, maximum on top; a
+/// manual scale adds boxes for the values beyond its limits, labelled with their extremes.
+/// Returns the legend's response, for its double click and context menu.
+fn draw_legend(
+    ui: &Ui,
+    painter: &Painter,
+    rect: Rect,
+    legend: &Legend,
+    offset: &mut Vec2,
+) -> egui::Response {
     let titles: Vec<_> = legend
         .title
         .lines()
         .map(|l| painter.layout_no_wrap(l.to_string(), font(), TEXT))
         .collect();
-    let levels = legend.levels;
-    let values: Vec<_> = (0..=levels)
-        .map(|i| {
-            let t = 1.0 - i as f32 / levels as f32;
-            let value = legend.min + t * (legend.max - legend.min);
-            painter.layout_no_wrap(format_legend_value(value), font(), TEXT)
-        })
+    let levels = legend.levels();
+    let above = legend.above.as_ref().filter(|o| o.shown);
+    let below = legend.below.as_ref().filter(|o| o.shown);
+    let mut boxes: Vec<[f32; 3]> = above.iter().map(|o| o.color).collect();
+    boxes.extend(legend.colors.iter().rev());
+    boxes.extend(below.iter().map(|o| o.color));
+    let mut labels: Vec<f32> = above.iter().map(|o| o.value).collect();
+    labels.extend((0..=levels).map(|i| {
+        let t = 1.0 - i as f32 / levels as f32;
+        legend.min + t * (legend.max - legend.min)
+    }));
+    labels.extend(below.iter().map(|o| o.value));
+    let values: Vec<_> = labels
+        .into_iter()
+        .map(|value| painter.layout_no_wrap(format_legend_value(value), font(), TEXT))
         .collect();
     let band = vec2(BAND_HEIGHT / 0.75, BAND_HEIGHT);
     let label_height = values.first().map_or(0.0, |g| g.size().y);
@@ -356,10 +415,10 @@ fn draw_legend(ui: &Ui, painter: &Painter, rect: Rect, legend: &Legend, offset: 
         .fold(0.0, f32::max);
     let size = vec2(
         width,
-        title_height + levels as f32 * band.y + label_height * 0.5,
+        title_height + boxes.len() as f32 * band.y + label_height * 0.5,
     );
     let default = rect.left_top() + vec2(MARGIN, MARGIN);
-    let frame = drag_label(ui, rect, "legend", default, size, offset);
+    let (frame, response) = drag_label_response(ui, rect, "legend", default, size, offset);
 
     let mut top = frame.top();
     for galley in titles {
@@ -368,8 +427,8 @@ fn draw_legend(ui: &Ui, painter: &Painter, rect: Rect, legend: &Legend, offset: 
         top += height + 2.0;
     }
     top += 6.0;
-    for i in 0..levels {
-        let [r, g, b] = band_color(levels - 1 - i, levels).map(|c| (c * 255.0).round() as u8);
+    for (i, color) in boxes.into_iter().enumerate() {
+        let [r, g, b] = color.map(|c| (c * 255.0).round() as u8);
         let cell = Rect::from_min_size(pos2(frame.left(), top + i as f32 * band.y), band);
         painter.rect(
             cell,
@@ -383,6 +442,7 @@ fn draw_legend(ui: &Ui, painter: &Painter, rect: Rect, legend: &Legend, offset: 
         let y = top + i as f32 * band.y - galley.size().y * 0.5;
         painter.galley(pos2(frame.left() + band.x + 8.0, y), galley, TEXT);
     }
+    response
 }
 
 /// Framed text block, by default in the top right corner.

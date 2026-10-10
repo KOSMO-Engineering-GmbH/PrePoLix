@@ -160,6 +160,11 @@ struct Workbench {
     feature_dialog: Option<FeatureDialog>,
     /// The Edit Annotation dialog of a path plot in the 3D view.
     plot_editor: Option<path_plot::EditDialog>,
+    /// The Color Scale dialog of a results file, with the scale it last applied.
+    color_scale_dialog: Option<(
+        crate::color_scale_dialog::ColorScaleDialog,
+        plx_model::ColorScale,
+    )>,
     /// The shown values on the plane of the shown plane result, in model coordinates: where
     /// the plane cuts the parts as shown, and where it cuts the undeformed mesh.
     section_values: Option<plx_render::SectionValues>,
@@ -252,6 +257,7 @@ impl PrepolixApp {
                 transformation_dialog: None,
                 feature_dialog: None,
                 plot_editor: None,
+                color_scale_dialog: None,
                 section_values: None,
                 plane_values: None,
                 section_shown: None,
@@ -889,6 +895,9 @@ impl eframe::App for PrepolixApp {
                 dialog.drag(drag);
             }
             self.workbench.path_plot_events(response.path_plots);
+            if response.edit_legend {
+                self.workbench.open_color_scale();
+            }
             if let Some(command) = response.command {
                 self.workbench.view_command = Some(command);
             }
@@ -932,6 +941,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.transformation_window(&ctx);
         self.workbench.feature_window(&ctx);
         self.workbench.plot_editor_window(&ctx);
+        self.workbench.color_scale_window(&ctx);
         self.workbench.sync_result_features();
         self.workbench.run_analysis(&ctx);
         self.workbench.poll_bound_results(&ctx);
@@ -1030,9 +1040,9 @@ impl Workbench {
                 let mut rebuild = false;
                 if let Some(view) = &mut model.results {
                     let post = &self.settings.post;
-                    if (view.levels, view.show_undeformed) != (post.levels, post.undeformed_outline)
-                    {
-                        view.levels = post.levels;
+                    let levels = view.color_scale.levels;
+                    if (levels, view.show_undeformed) != (post.levels, post.undeformed_outline) {
+                        view.color_scale.levels = post.levels;
                         view.show_undeformed = post.undeformed_outline;
                         rebuild = true;
                     }
@@ -1138,6 +1148,19 @@ impl Workbench {
                     }
                     if let Some(project) = &self.model {
                         model.fe.add_missing_features(&project.fe);
+                    }
+                    // Results read again keep their colour scale; bound results take the
+                    // one saved with the project.
+                    let previous_scale = previous
+                        .and_then(|i| self.results[i].results.as_ref())
+                        .map(|v| v.color_scale.clone());
+                    let bound_scale = (self.model.as_ref())
+                        .filter(|p| p.bound_results_file.as_ref() == Some(&model.path))
+                        .and_then(|p| p.bound_results.as_ref()?.color_scale.clone());
+                    if let (Some(view), Some(scale)) =
+                        (model.results.as_mut(), previous_scale.or(bound_scale))
+                    {
+                        view.color_scale = scale;
                     }
                     match previous {
                         Some(index) => {
@@ -1844,6 +1867,15 @@ impl Workbench {
     /// PrePoMax's Results menu.
     fn results_menu(&mut self, ui: &mut egui::Ui) {
         let any = !self.results.is_empty();
+        let shown = self.tree_view == TreeView::Results
+            && (self.results.get(self.current_result)).is_some_and(|m| m.results.is_some());
+        if ui
+            .add_enabled(shown, egui::Button::new("Color Scale …"))
+            .clicked()
+        {
+            self.open_color_scale();
+        }
+        ui.separator();
         if ui
             .add_enabled(any, egui::Button::new("Create Hot Spot …"))
             .clicked()
@@ -1915,6 +1947,9 @@ impl Workbench {
             }
             if response.transformations && enabled {
                 self.open_transformation_dialog();
+            }
+            if response.color_scale && enabled {
+                self.open_color_scale();
             }
         });
     }
@@ -2784,9 +2819,13 @@ impl Workbench {
     /// Saves mesh and FE model as a project, to the project file it came from, or to a file
     /// the user picks for a model opened from an input file or with `save_as`.
     fn save_project(&mut self, save_as: bool) {
+        let scale = self.bound_color_scale();
         let Some(model) = self.model.as_mut() else {
             return;
         };
+        if let (Some(bound), Some(scale)) = (&mut model.bound_results, scale) {
+            bound.color_scale = (scale != plx_model::ColorScale::default()).then_some(scale);
+        }
         let path = if model.is_project() && !save_as {
             model.path.clone()
         } else {
@@ -2804,6 +2843,17 @@ impl Workbench {
             }
             Err(error) => self.output.push(format!("Not saved: {error}")),
         }
+    }
+
+    /// The colour scale of the open results bound to the project, if they are open.
+    fn bound_color_scale(&self) -> Option<plx_model::ColorScale> {
+        let model = self.model.as_ref()?;
+        model.bound_results.as_ref()?;
+        // Restored from the project, or still those of the analysis that was bound.
+        let path = (model.bound_results_file.clone())
+            .or_else(|| self.analysis.as_ref().and_then(Analysis::results))?;
+        let results = self.results.iter().find(|r| r.path == path)?;
+        Some(results.results.as_ref()?.color_scale.clone())
     }
 
     /// Saves a copy of the project without the bound results, only mesh and definition, for
@@ -4390,6 +4440,55 @@ impl Workbench {
         }
     }
 
+    /// Opens the Color Scale dialog of the shown results.
+    fn open_color_scale(&mut self) {
+        if self.tree_view != TreeView::Results {
+            return;
+        }
+        let Some(view) = (self.results.get(self.current_result)).and_then(|m| m.results.as_ref())
+        else {
+            return;
+        };
+        let extremes = view.legend().map(|l| (l.min, l.max));
+        let dialog = crate::color_scale_dialog::ColorScaleDialog::new(
+            self.current_result,
+            &view.color_scale,
+            extremes,
+        );
+        self.color_scale_dialog = Some((dialog, view.color_scale.clone()));
+    }
+
+    /// The Color Scale dialog; its changes show at once.
+    fn color_scale_window(&mut self, ctx: &egui::Context) {
+        use crate::color_scale_dialog::DialogResult;
+        let Some((mut dialog, applied)) = self.color_scale_dialog.take() else {
+            return;
+        };
+        if self.tree_view != TreeView::Results || dialog.result != self.current_result {
+            return;
+        }
+        let Some(view) = (self.results.get_mut(dialog.result)).and_then(|m| m.results.as_mut())
+        else {
+            return;
+        };
+        // The number of colours can also change in the tool bar while the dialog is open.
+        if view.color_scale.levels != applied.levels {
+            dialog.draft.levels = view.color_scale.levels;
+        }
+        let result = dialog.show(ctx);
+        let scale = match result {
+            DialogResult::Open | DialogResult::Ok => dialog.draft.clone(),
+            DialogResult::Cancel => dialog.original().clone(),
+        };
+        if view.color_scale != scale {
+            view.color_scale = scale.clone();
+            self.results_changed = true;
+        }
+        if let DialogResult::Open = result {
+            self.color_scale_dialog = Some((dialog, scale));
+        }
+    }
+
     /// The Edit Annotation dialog of a path plot; its changes show at once.
     fn plot_editor_window(&mut self, ctx: &egui::Context) {
         let Some(mut dialog) = self.plot_editor.take() else {
@@ -5080,7 +5179,7 @@ impl Workbench {
             TreeView::FeModel => self.model.as_ref(),
         };
         let Some(model) = model else {
-            self.viewport.options.contour_levels = None;
+            self.viewport.options.contour = None;
             self.viewport.overlay = Overlay {
                 show_view_triad: self.settings.graphics.view_triad,
                 ..Overlay::default()
@@ -5097,8 +5196,9 @@ impl Workbench {
                 .map_or(model.fe.properties.units, |m| m.fe.properties.units),
         };
         let axis = self.axis_line(model);
-        self.viewport.options.contour_levels =
-            view.filter(|v| v.current().is_some()).map(|v| v.levels);
+        let legend = view.and_then(ResultsView::legend);
+        self.viewport.options.contour =
+            (legend.as_ref()).map(|legend| plx_render::ContourPalette::new(&legend.palette()));
         let (graphics, post) = (&self.settings.graphics, &self.settings.post);
         // The open transformation dialog shows the points and axis of the selected item.
         let transformation = (self.transformation_dialog.as_ref())
@@ -5130,7 +5230,7 @@ impl Workbench {
             .map(|q| q.marks(model))
             .unwrap_or_default();
         self.viewport.overlay = Overlay {
-            legend: view.and_then(ResultsView::legend),
+            legend,
             annotations: query.markers,
             status: view
                 .filter(|_| post.status_block)
@@ -5189,6 +5289,8 @@ struct ToolBarResponse {
     changed: bool,
     /// The transformations button was clicked.
     transformations: bool,
+    /// The colour scale button was clicked.
+    color_scale: bool,
 }
 
 /// PrePoMax's results tool bar: deformation, colour bands, transformations and the increment
@@ -5200,6 +5302,7 @@ fn results_tool_bar(
 ) -> ToolBarResponse {
     let mut changed = false;
     let mut transformations = false;
+    let mut color_scale = false;
     ui.horizontal(|ui| {
         ui.label("Deformation");
         let before = view.deformation;
@@ -5255,8 +5358,14 @@ fn results_tool_bar(
         ui.separator();
         ui.label("Color levels");
         changed |= ui
-            .add(numeric::drag_value(&mut view.levels).range(2..=plx_render::contour::MAX_LEVELS))
+            .add(
+                numeric::drag_value(&mut view.color_scale.levels)
+                    .range(2..=plx_render::contour::MAX_LEVELS),
+            )
             .changed();
+        color_scale = (ui.button("…"))
+            .on_hover_text("Color scale: spectrum and limits")
+            .clicked();
         ui.separator();
         let tip = "Transformations: symmetries and patterns";
         transformations = icons::button(ui, Icon::Transformation, tip, true, transformed).clicked();
@@ -5324,6 +5433,7 @@ fn results_tool_bar(
     ToolBarResponse {
         changed,
         transformations,
+        color_scale,
     }
 }
 

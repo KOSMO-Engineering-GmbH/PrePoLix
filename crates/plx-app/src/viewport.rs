@@ -123,6 +123,8 @@ pub struct ViewportResponse {
     pub gizmo: Option<GizmoDrag>,
     /// Path plots were moved, resized or deleted.
     pub path_plots: Vec<crate::path_plot::PlotEvent>,
+    /// The legend asked for the colour scale dialog.
+    pub edit_legend: bool,
 }
 
 /// The view entries of the 3D view's context menu.
@@ -403,10 +405,12 @@ impl Viewport {
             Color32::WHITE,
         );
         crate::symbols::draw(&painter, rect, &self.camera, &self.symbols);
-        if let Some(axis) = overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels) {
+        let clicks = overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels);
+        if let Some(axis) = clicks.axis {
             self.camera.set_axis_view(axis);
             ui.ctx().request_repaint();
         }
+        result.edit_legend = clicks.edit_legend;
         result.path_plots = crate::path_plot::draw(ui, rect, &self.camera, &mut self.path_plots);
         if let Some(gizmo) = &self.gizmo {
             self.gizmo_state.draw(&painter, gizmo, &self.camera, rect);

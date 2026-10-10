@@ -7,6 +7,7 @@
 
 mod amplitude;
 mod checks;
+pub mod color_scale;
 mod constraint;
 mod contact;
 pub mod convert;
@@ -26,6 +27,7 @@ mod validity;
 
 pub use amplitude::{Amplitude, AmplitudeTime};
 pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
+pub use color_scale::{ColorScale, ColorSpectrum};
 pub use constraint::{
     CompressionOnly, NodeTie, PointSpring, RigidBody, SurfaceSpring, SurfaceToSurfaceSpring,
 };
@@ -81,7 +83,7 @@ pub struct Project {
 
 /// The files of a finished analysis kept in the project file: the input file CalculiX ran,
 /// its results (`.frd`) and history output (`.dat`).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BoundResults {
     /// The analysis the results belong to.
     pub analysis: String,
@@ -89,6 +91,9 @@ pub struct BoundResults {
     #[serde(default)]
     pub with_errors: bool,
     pub files: Vec<BoundFile>,
+    /// The colour scale the results were last shown with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_scale: Option<ColorScale>,
 }
 
 /// A file of [`BoundResults`]: its name and its content, deflated and base64 encoded so that

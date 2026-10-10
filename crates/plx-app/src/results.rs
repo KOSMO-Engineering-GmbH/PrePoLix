@@ -1,10 +1,10 @@
-use plx_render::contour::DEFAULT_LEVELS;
+use plx_render::contour::{band_colors, normalize, rgb};
 
 use crate::animation::{Animation, AnimationKind, ColorLimits};
 use crate::sound::ModeSound;
 use glam::{DAffine3, DMat3};
 use plx_mesh::FeMesh;
-use plx_model::{Quantity, UnitSystem};
+use plx_model::{ColorScale, Quantity, UnitSystem};
 use plx_results::field_output::{self, FieldOutput};
 use plx_results::history_output::{self, HistoryOutput, HistorySet};
 use plx_results::transformation::{self, Transformation};
@@ -57,7 +57,8 @@ pub struct ResultsView {
     /// results or a contact pair in the input next to them.
     pub contact: bool,
     pub user_scale: f64,
-    pub levels: u32,
+    /// Colour spectrum, number of colours and limits of the legend.
+    pub color_scale: ColorScale,
     /// Draw the undeformed outline behind the deformed shape.
     pub show_undeformed: bool,
     /// When CalculiX ran the analysis, as written into the file.
@@ -113,9 +114,53 @@ pub struct Superposition {
 /// What the viewport legend shows.
 pub struct Legend {
     pub title: String,
+    /// Limits of the colour bands.
     pub min: f32,
     pub max: f32,
-    pub levels: u32,
+    /// Colours of the bands, minimum first.
+    pub colors: Vec<[f32; 3]>,
+    /// Values below the minimum of a manual scale, if there are any.
+    pub below: Option<OutOfRange>,
+    /// Values above the maximum of a manual scale, if there are any.
+    pub above: Option<OutOfRange>,
+}
+
+/// Values beyond the limits of a manual colour scale, drawn in a colour of their own.
+pub struct OutOfRange {
+    pub color: [f32; 3],
+    /// The extreme value beyond the limit.
+    pub value: f32,
+    /// The legend shows a box for them.
+    pub shown: bool,
+}
+
+impl Legend {
+    pub fn levels(&self) -> u32 {
+        self.colors.len() as u32
+    }
+
+    /// Range the values are normalized over for colouring: the bands', widened by one band
+    /// for each out-of-range colour, as PrePoMax's lookup table.
+    pub fn color_range(&self) -> (f32, f32) {
+        let band = (self.max - self.min) / self.levels().max(1) as f32;
+        let below = if self.below.is_some() { band } else { 0.0 };
+        let above = if self.above.is_some() { band } else { 0.0 };
+        (self.min - below, self.max + above)
+    }
+
+    /// Colours of the 3D view, minimum first: the bands between the out-of-range colours.
+    pub fn palette(&self) -> Vec<[f32; 3]> {
+        (self.below.iter().map(|o| o.color))
+            .chain(self.colors.iter().copied())
+            .chain(self.above.iter().map(|o| o.color))
+            .collect()
+    }
+
+    /// Values normalized for the palette.
+    pub fn normalize(&self, values: &[f32]) -> Vec<f32> {
+        let (min, max) = self.color_range();
+        normalize(values, min, max)
+    }
 }
 
 impl ResultsView {
@@ -129,7 +174,7 @@ impl ResultsView {
             deformation_chosen: false,
             contact: false,
             user_scale: 10.0,
-            levels: DEFAULT_LEVELS,
+            color_scale: ColorScale::default(),
             show_undeformed: true,
             date: None,
             time: None,
@@ -844,11 +889,29 @@ impl ResultsView {
 
     pub fn legend(&self) -> Option<Legend> {
         let (field, component) = self.current()?;
-        let (min, max) = match self.section_range {
+        let (low, high) = match self.section_range {
             Some(range) => range,
             None => self.value_range()?,
         };
-        let scope = if self.section_range.is_some() {
+        let scale = &self.color_scale;
+        let beyond = |value: f32, color: [u8; 3], shown: bool| OutOfRange {
+            color: rgb(color),
+            value,
+            shown,
+        };
+        let (min, max, below, above) = match scale.manual_limits() {
+            Some((min, max)) => {
+                let (min, max) = (min as f32, max as f32);
+                let below = (low < min).then(|| beyond(low, scale.min_color, scale.show_min_color));
+                let above =
+                    (high > max).then(|| beyond(high, scale.max_color, scale.show_max_color));
+                (min, max, below, above)
+            }
+            None => (low, high, None, None),
+        };
+        let scope = if scale.manual_limits().is_some() {
+            "Manual"
+        } else if self.section_range.is_some() {
             "Section plane"
         } else {
             "Automatic"
@@ -872,7 +935,9 @@ impl ResultsView {
             ),
             min,
             max,
-            levels: self.levels,
+            colors: band_colors(scale),
+            below,
+            above,
         })
     }
 }
@@ -1207,6 +1272,55 @@ mod tests {
         view.switch_increment(0);
         assert_eq!(view.animation.as_ref().unwrap().increments, [0, 1]);
         assert_eq!(view.animation.as_ref().unwrap().frame, 0);
+    }
+
+    #[test]
+    fn manual_limits_colour_values_beyond_them_apart() {
+        let mut view = ResultsView::new(
+            vec![increment(
+                1,
+                1,
+                AnalysisKind::Static,
+                &[[0.0, 0.0, 1.0], [0.0, 0.0, 2.0], [0.0, 0.0, 3.0]],
+            )],
+            Some(([0.0; 3], [10.0; 3])),
+        );
+        view.component = 3; // U3
+        let legend = view.legend().unwrap();
+        assert!(legend.title.ends_with("Automatic"));
+        assert!(legend.below.is_none() && legend.above.is_none());
+        assert_eq!(legend.normalize(&[1.0, 3.0]), [0.0, 1.0]);
+
+        view.color_scale.levels = 4;
+        view.color_scale.manual = Some([1.5, 2.5]);
+        let legend = view.legend().unwrap();
+        assert!(legend.title.ends_with("Manual"));
+        assert_eq!((legend.min, legend.max), (1.5, 2.5));
+        assert_eq!(legend.below.as_ref().map(|o| o.value), Some(1.0));
+        assert_eq!(legend.above.as_ref().map(|o| o.value), Some(3.0));
+        // One band of 0.25 for each out-of-range colour: six bands from 1.25 to 2.75.
+        assert_eq!(legend.color_range(), (1.25, 2.75));
+        let palette = legend.palette();
+        assert_eq!(palette.len(), 6);
+        assert_eq!(
+            palette[0],
+            plx_render::contour::rgb(view.color_scale.min_color)
+        );
+        assert_eq!(
+            palette[5],
+            plx_render::contour::rgb(view.color_scale.max_color)
+        );
+        let band = |v: f32| (legend.normalize(&[v])[0] * 6.0).floor().min(5.0) as usize;
+        assert_eq!([band(1.0), band(1.6), band(2.4), band(3.0)], [0, 1, 4, 5]);
+
+        // A range covering all values needs no out-of-range colours.
+        view.color_scale.manual = Some([0.0, 5.0]);
+        let legend = view.legend().unwrap();
+        assert!(legend.below.is_none() && legend.above.is_none());
+        assert_eq!(legend.color_range(), (0.0, 5.0));
+        // Invalid limits fall back to the automatic ones.
+        view.color_scale.manual = Some([2.0, 2.0]);
+        assert_eq!(view.legend().map(|l| (l.min, l.max)), Some((1.0, 3.0)));
     }
 
     #[test]

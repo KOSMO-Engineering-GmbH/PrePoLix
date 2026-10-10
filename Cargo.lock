@@ -2646,6 +2646,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "plx-mesh",
+ "plx-model",
  "wgpu",
 ]
 
