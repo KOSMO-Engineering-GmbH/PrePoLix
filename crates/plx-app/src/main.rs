@@ -24,6 +24,7 @@ mod mesh_tools;
 mod meshing;
 mod model;
 mod model_properties;
+mod motion_preview;
 mod numeric;
 mod overlay;
 mod properties;

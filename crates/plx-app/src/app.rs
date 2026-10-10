@@ -888,6 +888,7 @@ impl eframe::App for PrepolixApp {
             .update(&ctx, view, &mut workbench.output);
         self.workbench.properties_window(&ctx);
         self.workbench.editor_window(&ctx);
+        self.workbench.update_motion_preview(&ctx);
         self.workbench.confirm_delete_window(&ctx);
         self.workbench.contact_search_window(&ctx);
         self.workbench.mesh_tool_window(&ctx);
@@ -3581,6 +3582,23 @@ impl Workbench {
                 self.editor = None;
                 self.highlighted = None;
             }
+        }
+    }
+
+    /// The motion preview of a boundary condition dialog moves the nodes of its region in
+    /// the 3D view; without one they are back in place.
+    fn update_motion_preview(&mut self, ctx: &egui::Context) {
+        let Some(model) = &mut self.model else {
+            return;
+        };
+        let now = ctx.input(|i| i.time);
+        let motion = (self.editor.as_mut()).and_then(|e| e.motion_offsets(now, model));
+        if motion.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(1.0 / 30.0));
+        }
+        if model.motion != motion {
+            model.motion = motion;
+            self.results_changed |= self.tree_view == TreeView::FeModel;
         }
     }
 
