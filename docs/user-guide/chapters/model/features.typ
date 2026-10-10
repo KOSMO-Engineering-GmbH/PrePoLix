@@ -7,7 +7,12 @@ They are helpers for other functions (section views, plane results, paths, resul
 transformations) and are not written to the input file. The results have their own copy of the
 features, which can be edited on the #ui("Results") tab.
 
-Points can be typed in or picked: a node, or the centre of a clicked edge or face.
+Points can be typed in or picked with #ui("..."). In the geometry mode #ui("Points"), the default
+of the selection window, a click on a face or edge takes the corner point of the geometry nearest
+to it, also in 2D models. With #ui("More") the mesh based modes pick a node, or the centre of the
+nodes of a picked edge, element or surface, for example the centre of a hole.
+
+#screenshot("point-picks-corner.png", [Picking a point: the corner nearest to the mouse is shown])
 
 / Reference Point: a named point. #ui("Create by") offers, as in PrePoMax:
   - #ui("Coordinates"): typed in or picked, in the global system or in a coordinate system of
