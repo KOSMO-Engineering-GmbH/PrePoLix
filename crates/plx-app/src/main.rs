@@ -44,6 +44,7 @@ mod symbols;
 mod transformation_dialog;
 mod tree;
 mod tree_icons;
+mod undo;
 mod viewport;
 mod virtual_table;
 mod xy_plot;

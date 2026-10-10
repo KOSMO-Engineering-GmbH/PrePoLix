@@ -69,7 +69,7 @@ has no mesh yet opens on the #ui("Geometry") tab, opening a result file switches
   #ui("Materials")) creates a new item in it. Double-clicking #ui("Analysis-1") opens the
   monitor.
 - *Right-click* an item for its context menu (see below).
-- *Del* deletes the selected item after asking "Delete the selected item?". There is no undo.
+- *Del* deletes the selected item after asking "Delete the selected item?"; #key("Ctrl+Z") brings it back (@undo).
 - *Space* activates or deactivates the selected item while the mouse is over the tree.
 - Selecting an item highlights its region in the 3D view. Master and slave regions of contacts and
   ties get different colours.
