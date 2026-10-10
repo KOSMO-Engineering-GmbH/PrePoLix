@@ -14,7 +14,7 @@ struct Globals {
     clip: vec4<f32>,
     // x: 1 while the section view is on, y: tolerance behind the plane in world units.
     clip_options: vec4<f32>,
-    palette: array<vec4<f32>, 24>,
+    palette: array<vec4<f32>, 26>,
 };
 
 @group(0) @binding(0) var<uniform> globals: Globals;

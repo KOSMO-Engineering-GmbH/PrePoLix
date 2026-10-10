@@ -6,6 +6,7 @@ mod animation;
 mod app;
 mod cad_selection;
 mod campbell;
+mod color_scale_dialog;
 mod constraint_dialog;
 mod contact_search;
 mod contacts;

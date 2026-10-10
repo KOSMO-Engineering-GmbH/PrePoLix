@@ -126,6 +126,9 @@ struct Workbench {
     analysis: Option<Analysis>,
     /// Results being bound to or restored from the project file of the model at this path.
     bound_work: Option<(PathBuf, std::sync::mpsc::Receiver<BoundWork>)>,
+    /// What was defined on the results before the analysis ran again, for its new results
+    /// at this path.
+    carried_settings: Option<(PathBuf, plx_results::ResultsSettings)>,
     /// Problems CalculiX reported when the last analysis failed, shown in the tree.
     solver_findings: Vec<plx_model::Finding>,
     /// The findings of a tree item whose warning sign was clicked, explained in a window.
@@ -161,6 +164,11 @@ struct Workbench {
     feature_dialog: Option<FeatureDialog>,
     /// The Edit Annotation dialog of a path plot in the 3D view.
     plot_editor: Option<path_plot::EditDialog>,
+    /// The Color Scale dialog of a results file, with the scale it last applied.
+    color_scale_dialog: Option<(
+        crate::color_scale_dialog::ColorScaleDialog,
+        plx_model::ColorScale,
+    )>,
     /// The shown values on the plane of the shown plane result, in model coordinates: where
     /// the plane cuts the parts as shown, and where it cuts the undeformed mesh.
     section_values: Option<plx_render::SectionValues>,
@@ -239,6 +247,7 @@ impl PrepolixApp {
                 highlighted: None,
                 analysis: None,
                 bound_work: None,
+                carried_settings: None,
                 campbell: None,
                 solver_findings: Vec::new(),
                 findings_window: None,
@@ -253,6 +262,7 @@ impl PrepolixApp {
                 transformation_dialog: None,
                 feature_dialog: None,
                 plot_editor: None,
+                color_scale_dialog: None,
                 section_values: None,
                 plane_values: None,
                 section_shown: None,
@@ -549,6 +559,13 @@ impl PrepolixApp {
                     let line = crate::help::open_user_guide();
                     self.workbench.output.push(line);
                 }
+            });
+            // Version number, greyed out at the far right of the menu bar.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                        .color(ui.visuals().weak_text_color()),
+                );
             });
         });
     }
@@ -918,6 +935,9 @@ impl eframe::App for PrepolixApp {
                 dialog.drag(drag);
             }
             self.workbench.path_plot_events(response.path_plots);
+            if response.edit_legend {
+                self.workbench.open_color_scale();
+            }
             if let Some(command) = response.command {
                 self.workbench.view_command = Some(command);
             }
@@ -964,6 +984,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.transformation_window(&ctx);
         self.workbench.feature_window(&ctx);
         self.workbench.plot_editor_window(&ctx);
+        self.workbench.color_scale_window(&ctx);
         self.workbench.sync_result_features();
         self.workbench.run_analysis(&ctx);
         self.workbench.poll_bound_results(&ctx);
@@ -1074,9 +1095,9 @@ impl Workbench {
                 let mut camera = None;
                 if let Some(view) = &mut model.results {
                     let post = &self.settings.post;
-                    if (view.levels, view.show_undeformed) != (post.levels, post.undeformed_outline)
-                    {
-                        view.levels = post.levels;
+                    let levels = view.color_scale.levels;
+                    if (levels, view.show_undeformed) != (post.levels, post.undeformed_outline) {
+                        view.color_scale.levels = post.levels;
                         view.show_undeformed = post.undeformed_outline;
                         rebuild = true;
                     }
@@ -1180,13 +1201,28 @@ impl Workbench {
                         model.fe.result_paths = old.result_paths.clone();
                         model.fe.result_planes = old.result_planes.clone();
                     }
+                    // Results of a new run take over what was defined on those before; what
+                    // refers to nodes or elements only if the mesh stayed the same.
+                    let carried = (self.carried_settings.take())
+                        .filter(|(path, _)| *path == model.path)
+                        .map(|(_, mut settings)| {
+                            if settings.mesh != Some(model.mesh.fingerprint()) {
+                                let changes = settings.without_mesh_references();
+                                (self.output).extend(changes.into_iter().map(|change| {
+                                    format!("The mesh changed since the last results: {change}")
+                                }));
+                            }
+                            settings
+                        });
+                    let carried_over = carried.is_some();
                     // Results bound to the project come back as they were saved.
-                    let settings = (self.model.as_ref())
-                        .filter(|p| p.bound_results_file.as_ref() == Some(&model.path))
-                        .and_then(|p| p.bound_results.as_ref()?.settings.as_ref());
-                    if previous.is_none()
-                        && let Some(settings) = settings
-                    {
+                    let settings = carried.or_else(|| {
+                        (self.model.as_ref())
+                            .filter(|_| previous.is_none())
+                            .filter(|p| p.bound_results_file.as_ref() == Some(&model.path))
+                            .and_then(|p| p.bound_results.as_ref()?.settings.clone())
+                    });
+                    if let Some(settings) = &settings {
                         let warnings = model.restore_results_settings(settings);
                         self.output.extend(warnings);
                         camera = settings.view.camera.map(saved_camera);
@@ -1204,13 +1240,23 @@ impl Workbench {
                     if let Some(project) = &self.model {
                         model.fe.add_missing_features(&project.fe);
                     }
+                    // Results read again, e.g. after the analysis ran once more, keep their
+                    // colour scale.
+                    let previous_scale = previous
+                        .and_then(|i| self.results[i].results.as_ref())
+                        .map(|v| v.color_scale.clone());
+                    if let (Some(view), Some(scale)) = (model.results.as_mut(), previous_scale) {
+                        view.color_scale = scale;
+                    }
                     match previous {
                         Some(index) => {
                             // Results read again, e.g. after the analysis ran once more,
                             // keep their hot spots.
                             let mut model = model;
                             let old = std::mem::take(&mut self.results[index].hot_spots);
-                            model.hot_spots.definitions = old.definitions;
+                            if !carried_over {
+                                model.hot_spots.definitions = old.definitions;
+                            }
                             self.results[index] = model;
                             self.current_result = index;
                         }
@@ -1931,6 +1977,15 @@ impl Workbench {
     /// PrePoMax's Results menu.
     fn results_menu(&mut self, ui: &mut egui::Ui) {
         let any = !self.results.is_empty();
+        let shown = self.tree_view == TreeView::Results
+            && (self.results.get(self.current_result)).is_some_and(|m| m.results.is_some());
+        if ui
+            .add_enabled(shown, egui::Button::new("Color Scale …"))
+            .clicked()
+        {
+            self.open_color_scale();
+        }
+        ui.separator();
         if ui
             .add_enabled(any, egui::Button::new("Create Hot Spot …"))
             .clicked()
@@ -2002,6 +2057,9 @@ impl Workbench {
             }
             if response.transformations && enabled {
                 self.open_transformation_dialog();
+            }
+            if response.color_scale && enabled {
+                self.open_color_scale();
             }
         });
     }
@@ -2704,8 +2762,41 @@ impl Workbench {
         let Some(path) = self.analysis.as_ref().and_then(Analysis::results) else {
             return;
         };
+        // Results of a new run take over what was defined on those of the run before.
+        if self.analysis.as_ref().is_some_and(|a| !a.bound) {
+            self.carried_settings = self.previous_settings(&path).map(|s| (path.clone(), s));
+        }
         self.open_results = Some(path);
         self.bind_results();
+    }
+
+    /// What was defined on the results before those at `path` came: on the open bound
+    /// results, on open results at that path, or saved with the bound results.
+    fn previous_settings(&self, path: &std::path::Path) -> Option<plx_results::ResultsSettings> {
+        let model = self.model.as_ref()?;
+        let open = |file: &std::path::Path| self.results.iter().find(|r| r.path == file);
+        (model.bound_results_file.as_deref().and_then(open))
+            .or_else(|| open(path))
+            .and_then(|results| self.view_settings(results))
+            .or_else(|| model.bound_results.as_ref()?.settings.clone())
+    }
+
+    /// What the user defined on open results, with the camera of the results workspace.
+    fn view_settings(&self, results: &Model) -> Option<plx_results::ResultsSettings> {
+        let mut settings = results.results_settings()?;
+        // The results workspace's camera, in use or parked while another is shown.
+        let camera = match self.tree_view {
+            TreeView::Results => Some(self.viewport.camera()),
+            _ => self.parked_camera.as_ref(),
+        };
+        settings.view.camera = camera.map(|c| plx_results::saved_view::SavedCamera {
+            target: c.target.to_array(),
+            distance: c.distance,
+            rotation: c.rotation.to_array(),
+            scene_radius: c.scene_radius,
+        });
+        settings.view.mesh_edges = Some(self.viewport.options.mesh_edges);
+        Some(settings)
     }
 
     /// Binds the results of the finished analysis to the project: its input, results and
@@ -2933,25 +3024,17 @@ impl Workbench {
             path
         };
         // The bound results keep what the user defined on them, if they are open.
+        let bound_file = model.bound_results_file.clone();
+        let settings = (self.results.iter())
+            .find(|r| bound_file.as_ref() == Some(&r.path))
+            .map(|open| self.view_settings(open));
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
         if let Some(bound) = &mut model.bound_results
-            && let Some(open) =
-                (self.results.iter()).find(|r| Some(&r.path) == model.bound_results_file.as_ref())
+            && let Some(settings) = settings
         {
-            bound.settings = open.results_settings().map(|mut settings| {
-                // The results workspace's camera, in use or parked while another is shown.
-                let camera = match self.tree_view {
-                    TreeView::Results => Some(self.viewport.camera()),
-                    _ => self.parked_camera.as_ref(),
-                };
-                settings.view.camera = camera.map(|c| plx_results::saved_view::SavedCamera {
-                    target: c.target.to_array(),
-                    distance: c.distance,
-                    rotation: c.rotation.to_array(),
-                    scene_radius: c.scene_radius,
-                });
-                settings.view.mesh_edges = Some(self.viewport.options.mesh_edges);
-                settings
-            });
+            bound.settings = settings;
         }
         let geometry = model.geometry.as_ref();
         let results = model.bound_results.as_ref();
@@ -4566,6 +4649,55 @@ impl Workbench {
         }
     }
 
+    /// Opens the Color Scale dialog of the shown results.
+    fn open_color_scale(&mut self) {
+        if self.tree_view != TreeView::Results {
+            return;
+        }
+        let Some(view) = (self.results.get(self.current_result)).and_then(|m| m.results.as_ref())
+        else {
+            return;
+        };
+        let extremes = view.legend().map(|l| (l.min, l.max));
+        let dialog = crate::color_scale_dialog::ColorScaleDialog::new(
+            self.current_result,
+            &view.color_scale,
+            extremes,
+        );
+        self.color_scale_dialog = Some((dialog, view.color_scale.clone()));
+    }
+
+    /// The Color Scale dialog; its changes show at once.
+    fn color_scale_window(&mut self, ctx: &egui::Context) {
+        use crate::color_scale_dialog::DialogResult;
+        let Some((mut dialog, applied)) = self.color_scale_dialog.take() else {
+            return;
+        };
+        if self.tree_view != TreeView::Results || dialog.result != self.current_result {
+            return;
+        }
+        let Some(view) = (self.results.get_mut(dialog.result)).and_then(|m| m.results.as_mut())
+        else {
+            return;
+        };
+        // The number of colours can also change in the tool bar while the dialog is open.
+        if view.color_scale.levels != applied.levels {
+            dialog.draft.levels = view.color_scale.levels;
+        }
+        let result = dialog.show(ctx);
+        let scale = match result {
+            DialogResult::Open | DialogResult::Ok => dialog.draft.clone(),
+            DialogResult::Cancel => dialog.original().clone(),
+        };
+        if view.color_scale != scale {
+            view.color_scale = scale.clone();
+            self.results_changed = true;
+        }
+        if let DialogResult::Open = result {
+            self.color_scale_dialog = Some((dialog, scale));
+        }
+    }
+
     /// The Edit Annotation dialog of a path plot; its changes show at once.
     fn plot_editor_window(&mut self, ctx: &egui::Context) {
         let Some(mut dialog) = self.plot_editor.take() else {
@@ -5256,7 +5388,7 @@ impl Workbench {
             TreeView::FeModel => self.model.as_ref(),
         };
         let Some(model) = model else {
-            self.viewport.options.contour_levels = None;
+            self.viewport.options.contour = None;
             self.viewport.overlay = Overlay {
                 show_view_triad: self.settings.graphics.view_triad,
                 ..Overlay::default()
@@ -5273,8 +5405,9 @@ impl Workbench {
                 .map_or(model.fe.properties.units, |m| m.fe.properties.units),
         };
         let axis = self.axis_line(model);
-        self.viewport.options.contour_levels =
-            view.filter(|v| v.current().is_some()).map(|v| v.levels);
+        let legend = view.and_then(ResultsView::legend);
+        self.viewport.options.contour =
+            (legend.as_ref()).map(|legend| plx_render::ContourPalette::new(&legend.palette()));
         let (graphics, post) = (&self.settings.graphics, &self.settings.post);
         // The open transformation dialog shows the points and axis of the selected item.
         let transformation = (self.transformation_dialog.as_ref())
@@ -5303,7 +5436,7 @@ impl Workbench {
         let picked = self.query.as_ref().map_or(&[][..], QueryWindow::picked);
         let query = crate::query::marks(model, picked);
         self.viewport.overlay = Overlay {
-            legend: view.and_then(ResultsView::legend),
+            legend,
             annotations: query.markers,
             annotation_owners: query.owners,
             status: view
@@ -5363,6 +5496,8 @@ struct ToolBarResponse {
     changed: bool,
     /// The transformations button was clicked.
     transformations: bool,
+    /// The colour scale button was clicked.
+    color_scale: bool,
 }
 
 /// PrePoMax's results tool bar: deformation, colour bands, transformations and the increment
@@ -5374,6 +5509,7 @@ fn results_tool_bar(
 ) -> ToolBarResponse {
     let mut changed = false;
     let mut transformations = false;
+    let mut color_scale = false;
     ui.horizontal(|ui| {
         ui.label("Deformation");
         let before = view.deformation;
@@ -5429,8 +5565,14 @@ fn results_tool_bar(
         ui.separator();
         ui.label("Color levels");
         changed |= ui
-            .add(numeric::drag_value(&mut view.levels).range(2..=plx_render::contour::MAX_LEVELS))
+            .add(
+                numeric::drag_value(&mut view.color_scale.levels)
+                    .range(2..=plx_render::contour::MAX_LEVELS),
+            )
             .changed();
+        color_scale = (ui.button("…"))
+            .on_hover_text("Color scale: spectrum and limits")
+            .clicked();
         ui.separator();
         let tip = "Transformations: symmetries and patterns";
         transformations = icons::button(ui, Icon::Transformation, tip, true, transformed).clicked();
@@ -5498,6 +5640,7 @@ fn results_tool_bar(
     ToolBarResponse {
         changed,
         transformations,
+        color_scale,
     }
 }
 
