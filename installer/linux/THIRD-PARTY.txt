@@ -1,0 +1,48 @@
+PrePoLix - licenses and source code
+===================================
+
+PrePoLix is licensed under the GNU General Public License, version 3 or later
+(LICENSE.txt). The source code is at
+
+    https://github.com/KwentiN-ui/prepolix
+
+SOURCE.txt names the commit this AppImage was built from.
+
+Bundled components
+------------------
+
+Gmsh 4.15.2 (in usr/lib of the AppImage)
+    Geometry import and meshing. Copyright (C) 1997-2025 Christophe
+    Geuzaine and Jean-Francois Remacle. GNU GPL version 2 or later with
+    an exception for Netgen, METIS and OpenCASCADE, see
+    licenses/GMSH-LICENSE.txt and licenses/GMSH-CREDITS.txt.
+    The library is the unmodified official Linux package from PyPI
+    (https://pypi.org/project/gmsh/4.15.2/).
+    Source: https://gitlab.onelab.info/gmsh/gmsh/-/tree/gmsh_4_15_2
+
+    Gmsh contains, among others:
+
+    Open CASCADE Technology (OCCT)
+        PrePoLix uses functions of Open CASCADE Technology through Gmsh.
+        GNU LGPL version 2.1 with the Open CASCADE exception, see
+        licenses/OCCT-LGPL-2.1.txt and licenses/OCCT-LGPL-EXCEPTION.txt.
+        Source: https://github.com/Open-Cascade-SAS/OCCT
+
+    Netgen, TetGen/BR, HXT and more, see licenses/GMSH-CREDITS.txt.
+
+System libraries (in usr/lib of the AppImage)
+    Libraries Gmsh needs that are not part of every Linux system (GLU, Xft,
+    OpenMP and others), copied unmodified from Ubuntu. Their copyright files
+    are in usr/share/doc/<package>/copyright of the AppImage, the source is
+    available from https://packages.ubuntu.com.
+
+Noto Sans (embedded in prepolix)
+    SIL Open Font License 1.1, see licenses/NotoSans-OFL.txt.
+
+Rust libraries (compiled into prepolix)
+    egui, eframe, wgpu, glam, cpal, rfd and more under the MIT or Apache-2.0
+    license. Cargo.lock in the PrePoLix source lists them with versions; the
+    license texts are with each package on https://crates.io.
+
+CalculiX is not included. Install the solver ccx yourself and select it under
+Tools > Settings > CalculiX.

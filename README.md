@@ -55,7 +55,20 @@ PrePoLix with a Start menu entry, bundles Gmsh and can associate `.plx` project 
 
 ### Linux
 
-There is no binary package yet. Build from source, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Download `prepolix-<version>-x86_64.AppImage` from the
+[latest release](https://github.com/KwentiN-ui/prepolix/releases/latest), make it executable and
+start it:
+
+```sh
+chmod +x prepolix-*-x86_64.AppImage
+./prepolix-*-x86_64.AppImage
+```
+
+The AppImage bundles Gmsh and runs on x86_64 distributions with glibc 2.35 or newer (Ubuntu 22.04,
+Debian 12, Fedora 36 and later). To get a menu entry and open `.plx` files by double-click, integrate
+it with a tool such as [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever) or
+[AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher). To build from source instead,
+see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ### CalculiX
 

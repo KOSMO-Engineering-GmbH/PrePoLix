@@ -51,10 +51,29 @@ sudo apt install gcc-mingw-w64-x86-64 nsis
 scripts/build_windows_installer.sh     # -> target/windows-installer/
 ```
 
-A tag `v*` builds the installer and the user guide PDF with the *Release* workflow and attaches both
-to the GitHub release; *Run workflow* produces them as artifacts. PrePoLix may not write to
+A tag `v*` builds the installer, the Linux AppImage (below) and the user guide PDF with the
+*Release* workflow and attaches them to the GitHub release; *Run workflow* produces them as artifacts. PrePoLix may not write to
 `C:\Program Files` without administrator rights, so the CalculiX work directory then lives in
 `%TEMP%\prepolix`.
+
+## Linux AppImage
+
+The AppImage (`prepolix-<version>-x86_64.AppImage`) contains the release build, the Gmsh library
+with the system libraries it needs that not every distribution has (GLU, Xft, libgomp, ...), the
+desktop entry, the icon and the `.plx` file type (`installer/linux/`), plus the license texts in
+`usr/share/doc/prepolix`. [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) collects the
+libraries, [appimagetool](https://github.com/AppImage/appimagetool) packs them; the script downloads
+both (pinned versions) into `target/appimage/tools`. CalculiX is not included.
+
+```sh
+sudo apt install libasound2-dev libglu1-mesa libxft2 libxcursor1 libxinerama1 libgomp1 curl file
+scripts/build_appimage.sh     # -> target/appimage/
+```
+
+The AppImage only runs with a glibc at least as new as the build system's. The *Release* workflow
+therefore builds it on `ubuntu-22.04` (glibc 2.35) and attaches it to the release next to the Windows
+installer. Inside the AppImage `prepolix` lives in the read-only `usr/bin`, so the CalculiX work
+directory defaults to `/tmp/prepolix`.
 
 ## User guide
 
