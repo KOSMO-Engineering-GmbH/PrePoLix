@@ -4795,7 +4795,9 @@ fn results_tool_bar(
             .width(150.0)
             .show_ui(ui, |ui| {
                 for choice in Deformation::CHOICES {
-                    ui.selectable_value(&mut view.deformation, choice, choice.label());
+                    let response =
+                        ui.selectable_value(&mut view.deformation, choice, choice.label());
+                    view.deformation_chosen |= response.clicked();
                 }
             });
         changed |= view.deformation != before;

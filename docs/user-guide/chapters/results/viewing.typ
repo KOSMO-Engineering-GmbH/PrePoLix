@@ -30,8 +30,13 @@ When a result file is opened, PrePoLix shows the #ui("Results") tab with the las
 
 #fields(
   [Result], [The displayed result file.],
-  [Deformation], [#ui("Undeformed"), #ui("True scale") (default), #ui("Automatic") with
-    factors from 0.25 to 5, or #ui("User defined").],
+  [Deformation], [#ui("Undeformed"), #ui("True scale"), #ui("Automatic") with factors from
+    0.25 to 5, or #ui("User defined"). Results open in #ui("Automatic"); static and dynamic
+    steps of a model with contact open in #ui("True scale"), so touching parts do not appear to
+    penetrate each other, while mode shapes keep #ui("Automatic"). Contact is recognised by a
+    contact pair in the input file next to the results (same name, as CalculiX leaves it) or
+    contact results in the file. Until you pick a deformation yourself, it follows the shown
+    step.],
   [Factor], [The deformation scale factor; editable for #ui("User defined").],
   [Show Undeformed], [Draws the undeformed outline behind the deformed shape.],
   [Color levels], [Number of colour bands (2 to 24).],

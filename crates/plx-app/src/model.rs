@@ -272,6 +272,13 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     model.included_files = included_files;
     model.results = increments.map(|(increments, date, time)| {
         let mut view = ResultsView::new(increments, model.mesh.bounds());
+        // CalculiX writes contact into the results only on request; the input it ran, named
+        // like the results, tells.
+        let input = ["inp", "INP"].map(|e| path.with_extension(e));
+        if let Some(input) = input.into_iter().find(|p| p.is_file()) {
+            view.contact |= plx_io::inp::defines_contact(&input).unwrap_or(false);
+            view.follow_default_deformation();
+        }
         view.date = date;
         view.time = time;
         view
@@ -1310,8 +1317,7 @@ mod tests {
         assert_eq!(model.parts[0].name, "STEEL");
         let view = model.results.as_ref().unwrap();
         assert_eq!(view.current().unwrap().1.name, "ALL");
-        assert_eq!(view.deformation, crate::results::Deformation::TrueScale);
-        assert_eq!(view.scale(), 1.0);
+        assert!(view.scale() > 1.0);
         // The beam bends downwards, so the deformed bounds reach below the undeformed ones.
         let undeformed_min_z = -5.0;
         let (min, _) = model.visible_bounds().unwrap();
@@ -1322,6 +1328,20 @@ mod tests {
                 .iter()
                 .all(|v| v.scalar >= 0.0)
         );
+    }
+
+    #[test]
+    fn contact_in_the_input_next_to_the_results_opens_them_in_true_scale() {
+        let dir = std::env::temp_dir().join("prepolix_contact_results");
+        std::fs::create_dir_all(&dir).unwrap();
+        let frd = dir.join("job.frd");
+        std::fs::copy(testdata("kragbalken_c3d8.frd"), &frd).unwrap();
+        std::fs::write(dir.join("job.inp"), "*CONTACT PAIR, INTERACTION=I\nA, B\n").unwrap();
+        let model = load(&frd, UnitSystem::MmTonSC).unwrap().model;
+        std::fs::remove_dir_all(&dir).ok();
+        let view = model.results.unwrap();
+        assert!(view.contact);
+        assert_eq!(view.deformation, crate::results::Deformation::TrueScale);
     }
 
     #[test]
