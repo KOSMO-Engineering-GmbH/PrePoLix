@@ -85,17 +85,37 @@ Temperature-Displacement") computes temperatures and displacements together.
 
 Incrementation and solver fields are the same as for a static step.
 
-=== Field outputs
+=== Field outputs <step-field-outputs>
 
-Every step has a node and an element field output, which control what is written to the result
-file (`.frd`). Open them with a double-click to choose the variables:
+Field outputs control what CalculiX writes to the result file (`.frd`) as `*NODE FILE`,
+`*EL FILE` and `*CONTACT FILE`. A new step gets a node and an element field output whose
+variables depend on the step type. Create more with #ui("Create ...") on #ui("Field Outputs") of a
+step or with #menu("Model", "Create Field Output ..."). Edit one with a double-click. Hovering over
+a variable shows what it is.
 
-/ Node: `RF` (reaction forces), `U` (displacements), `NT` (temperatures), `RFL` (reaction heat
-  flux).
-/ Element: `S` (stresses), `E` (strains), `ME` (mechanical strains), `PEEQ` (equivalent plastic
-  strain), `ENER` (energy density), `HFL` (heat flux).
+#fields(
+  [Type], [#ui("Node Output"), #ui("Element Output") or #ui("Contact Output"); chosen when the
+    output is created.],
+  [Variables], [Node: `RF U PU V NT PNT RFL`. Element: `S PHS E ME PEEQ ENER HFL ERR HER ZZS SDV`;
+    `ERR` and `HER` exclude `ZZS`. Contact: `CDIS CSTR CELS PCON`.],
+  [Last iterations], [#ui("On") writes every iteration of the last increment, to find out why a
+    solution diverges.],
+  [Contact elements], [#ui("On") writes the contact elements to a `.cel` file.],
+  [Output (2D/3D)], [Element outputs only. #ui("3D") writes 1D and 2D elements in their expanded
+    3D form; #ui("Default") writes shell and plane models in 2D.],
+  [Global], [Node and element outputs. #ui("No") writes the results in the local coordinate
+    systems.],
+)
 
-The defaults depend on the step type. Field outputs cannot be added or deleted.
+#screenshot("field-output-dialog.png", [Creating an element field output])
+
+Like boundary conditions, field outputs can be deactivated and deleted from their context menu.
+A deactivated field output is left out of the input file.
+
+#screenshot("field-output-tree.png", [A deactivated contact field output])
+
+#note[Field outputs of a step are what CalculiX computes. The field outputs on the #ui("Results")
+tab derive new fields from opened results instead (@derived-fields).]
 
 === History outputs
 

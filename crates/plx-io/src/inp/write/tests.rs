@@ -106,6 +106,49 @@ fn writes_mesh_and_analysis_that_read_back() {
 }
 
 #[test]
+fn field_outputs_are_written_with_their_options_like_prepomax_does() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let outputs = &mut model.steps[0].field_outputs;
+    outputs[0].last_iterations = true;
+    outputs[0].global = false;
+    outputs[1].contact_elements = true;
+    outputs[1].dimension = OutputDimension::ThreeD;
+    outputs[1].variables = vec!["S".into(), "ERR".into()];
+    outputs.push(FieldOutput::new(
+        "CF_Output-1",
+        OutputKind::Contact,
+        &["CDIS", "CSTR"],
+    ));
+    let mut off = FieldOutput::new("NF_Output-1", OutputKind::Node, &["V"]);
+    off.active = false;
+    outputs.push(off);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "** Name: NF-Output-1\n*Node file, Last iterations, Global=No\nRF, U\n",
+        "** Name: EF-Output-1\n*El file, Contact elements, Output=3D\nS, ERR\n",
+        "** Name: CF_Output-1\n*Contact file\nCDIS, CSTR\n",
+        "** Name: NF_Output-1: Deactivated\n",
+    ] {
+        assert!(text.contains(line), "missing {line:?} in\n{text}");
+    }
+}
+
+#[test]
+fn calculix_accepts_the_options_of_field_outputs() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let outputs = &mut model.steps[0].field_outputs;
+    outputs[0].last_iterations = true;
+    outputs[0].global = false;
+    outputs[1].dimension = OutputDimension::ThreeD;
+    outputs[1].variables.push("ERR".into());
+    let Some(frd) = run_ccx("feldausgabe", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    assert!(node_value(&frd, "DISP", "U3", 99) < 0.0);
+    assert!(frd.increments.last().unwrap().field("ERROR").is_some());
+}
+
+#[test]
 fn the_chosen_solver_is_written_with_the_procedure() {
     let (mesh, mut model) = cantilever(tip_force());
     model.resolve_default_solver(EquationSolver::Pardiso);

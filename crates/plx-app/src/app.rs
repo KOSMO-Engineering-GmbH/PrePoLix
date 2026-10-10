@@ -2257,6 +2257,11 @@ impl Workbench {
                 takes_loads,
             ),
             (
+                NewItem::FieldOutput(last_step.unwrap_or(0)),
+                "Create Field Output …",
+                last_step.is_some(),
+            ),
+            (
                 NewItem::HistoryOutput(last_step.unwrap_or(0)),
                 "Create History Output …",
                 last_step.is_some(),
