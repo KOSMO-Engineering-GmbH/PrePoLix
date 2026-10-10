@@ -43,6 +43,49 @@ pub struct ResultsSettings {
     pub shown: Option<(String, String)>,
     /// Camera, annotations and display settings of the 3D view.
     pub view: saved_view::SavedView,
+    /// [`plx_mesh::FeMesh::fingerprint`] of the results' mesh, to tell whether what refers
+    /// to its nodes and elements still fits results of another run.
+    pub mesh: Option<u64>,
+}
+
+impl ResultsSettings {
+    /// Drops what refers to nodes, elements or parts of the mesh, for results of a changed
+    /// mesh: query annotations except bounding boxes and hot spots on picked nodes or faces.
+    /// Reference points at picked nodes or faces stay where they were. Returns what was
+    /// dropped or changed.
+    pub fn without_mesh_references(&mut self) -> Vec<String> {
+        use plx_model::{PointDefinition, Region};
+        let picked = |region: &Region| matches!(region, Region::Nodes(_) | Region::Faces(_));
+        let mut changes = Vec::new();
+        let annotations = self.view.annotations.len();
+        (self.view.annotations).retain(|a| matches!(a, saved_view::SavedAnnotation::BoundingBox));
+        let dropped = annotations - self.view.annotations.len();
+        if dropped > 0 {
+            changes.push(format!(
+                "{dropped} annotation(s) on nodes or elements dropped"
+            ));
+        }
+        self.hot_spots.retain(|h| {
+            let keep = !picked(&h.toe);
+            if !keep {
+                changes.push(format!("Hot spot {} on picked nodes dropped", h.name));
+            }
+            keep
+        });
+        for point in &mut self.reference_points {
+            if let PointDefinition::CenterOfGravity(region)
+            | PointDefinition::BoundingBoxCenter(region) = &point.definition
+                && picked(region)
+            {
+                point.definition = PointDefinition::Global;
+                changes.push(format!(
+                    "Reference Point {} kept at its last position",
+                    point.name
+                ));
+            }
+        }
+        changes
+    }
 }
 
 /// Kind of analysis an increment belongs to, as CalculiX reports it.
@@ -162,5 +205,32 @@ impl Increment {
                 .map(|((&x, &y), &z)| [x, y, z].map(|v| if v.is_finite() { v } else { 0.0 }))
                 .collect(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::saved_view::SavedAnnotation;
+    use plx_model::{PointDefinition, ReferencePoint, Region};
+
+    #[test]
+    fn a_changed_mesh_drops_what_refers_to_its_nodes() {
+        let mut on_faces = ReferencePoint::new("RP-1", [1.0, 2.0, 3.0]);
+        on_faces.definition = PointDefinition::CenterOfGravity(Region::Faces(vec![(7, 2)]));
+        let mut by_set = super::hot_spot::HotSpot::new("Hot_Spot-2");
+        by_set.toe = Region::NodeSet("TOE".into());
+        let mut settings = super::ResultsSettings {
+            hot_spots: vec![super::hot_spot::HotSpot::new("Hot_Spot-1"), by_set],
+            reference_points: vec![on_faces],
+            ..Default::default()
+        };
+        settings.view.annotations = vec![SavedAnnotation::Node(3), SavedAnnotation::BoundingBox];
+        assert_eq!(settings.without_mesh_references().len(), 3);
+        assert_eq!(settings.view.annotations, [SavedAnnotation::BoundingBox]);
+        assert_eq!(settings.hot_spots.len(), 1);
+        assert_eq!(settings.hot_spots[0].name, "Hot_Spot-2");
+        let point = &settings.reference_points[0];
+        assert_eq!(point.definition, PointDefinition::Global);
+        assert_eq!(point.position, [1.0, 2.0, 3.0]);
     }
 }

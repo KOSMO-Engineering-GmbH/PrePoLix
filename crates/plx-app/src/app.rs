@@ -126,6 +126,9 @@ struct Workbench {
     analysis: Option<Analysis>,
     /// Results being bound to or restored from the project file of the model at this path.
     bound_work: Option<(PathBuf, std::sync::mpsc::Receiver<BoundWork>)>,
+    /// What was defined on the results before the analysis ran again, for its new results
+    /// at this path.
+    carried_settings: Option<(PathBuf, plx_results::ResultsSettings)>,
     /// Problems CalculiX reported when the last analysis failed, shown in the tree.
     solver_findings: Vec<plx_model::Finding>,
     /// The findings of a tree item whose warning sign was clicked, explained in a window.
@@ -244,6 +247,7 @@ impl PrepolixApp {
                 highlighted: None,
                 analysis: None,
                 bound_work: None,
+                carried_settings: None,
                 campbell: None,
                 solver_findings: Vec::new(),
                 findings_window: None,
@@ -1184,13 +1188,28 @@ impl Workbench {
                         model.fe.result_paths = old.result_paths.clone();
                         model.fe.result_planes = old.result_planes.clone();
                     }
+                    // Results of a new run take over what was defined on those before; what
+                    // refers to nodes or elements only if the mesh stayed the same.
+                    let carried = (self.carried_settings.take())
+                        .filter(|(path, _)| *path == model.path)
+                        .map(|(_, mut settings)| {
+                            if settings.mesh != Some(model.mesh.fingerprint()) {
+                                let changes = settings.without_mesh_references();
+                                (self.output).extend(changes.into_iter().map(|change| {
+                                    format!("The mesh changed since the last results: {change}")
+                                }));
+                            }
+                            settings
+                        });
+                    let carried_over = carried.is_some();
                     // Results bound to the project come back as they were saved.
-                    let settings = (self.model.as_ref())
-                        .filter(|p| p.bound_results_file.as_ref() == Some(&model.path))
-                        .and_then(|p| p.bound_results.as_ref()?.settings.as_ref());
-                    if previous.is_none()
-                        && let Some(settings) = settings
-                    {
+                    let settings = carried.or_else(|| {
+                        (self.model.as_ref())
+                            .filter(|_| previous.is_none())
+                            .filter(|p| p.bound_results_file.as_ref() == Some(&model.path))
+                            .and_then(|p| p.bound_results.as_ref()?.settings.clone())
+                    });
+                    if let Some(settings) = &settings {
                         let warnings = model.restore_results_settings(settings);
                         self.output.extend(warnings);
                         camera = settings.view.camera.map(saved_camera);
@@ -1222,7 +1241,9 @@ impl Workbench {
                             // keep their hot spots.
                             let mut model = model;
                             let old = std::mem::take(&mut self.results[index].hot_spots);
-                            model.hot_spots.definitions = old.definitions;
+                            if !carried_over {
+                                model.hot_spots.definitions = old.definitions;
+                            }
                             self.results[index] = model;
                             self.current_result = index;
                         }
@@ -2728,8 +2749,41 @@ impl Workbench {
         let Some(path) = self.analysis.as_ref().and_then(Analysis::results) else {
             return;
         };
+        // Results of a new run take over what was defined on those of the run before.
+        if self.analysis.as_ref().is_some_and(|a| !a.bound) {
+            self.carried_settings = self.previous_settings(&path).map(|s| (path.clone(), s));
+        }
         self.open_results = Some(path);
         self.bind_results();
+    }
+
+    /// What was defined on the results before those at `path` came: on the open bound
+    /// results, on open results at that path, or saved with the bound results.
+    fn previous_settings(&self, path: &std::path::Path) -> Option<plx_results::ResultsSettings> {
+        let model = self.model.as_ref()?;
+        let open = |file: &std::path::Path| self.results.iter().find(|r| r.path == file);
+        (model.bound_results_file.as_deref().and_then(open))
+            .or_else(|| open(path))
+            .and_then(|results| self.view_settings(results))
+            .or_else(|| model.bound_results.as_ref()?.settings.clone())
+    }
+
+    /// What the user defined on open results, with the camera of the results workspace.
+    fn view_settings(&self, results: &Model) -> Option<plx_results::ResultsSettings> {
+        let mut settings = results.results_settings()?;
+        // The results workspace's camera, in use or parked while another is shown.
+        let camera = match self.tree_view {
+            TreeView::Results => Some(self.viewport.camera()),
+            _ => self.parked_camera.as_ref(),
+        };
+        settings.view.camera = camera.map(|c| plx_results::saved_view::SavedCamera {
+            target: c.target.to_array(),
+            distance: c.distance,
+            rotation: c.rotation.to_array(),
+            scene_radius: c.scene_radius,
+        });
+        settings.view.mesh_edges = Some(self.viewport.options.mesh_edges);
+        Some(settings)
     }
 
     /// Binds the results of the finished analysis to the project: its input, results and
@@ -2957,25 +3011,17 @@ impl Workbench {
             path
         };
         // The bound results keep what the user defined on them, if they are open.
+        let bound_file = model.bound_results_file.clone();
+        let settings = (self.results.iter())
+            .find(|r| bound_file.as_ref() == Some(&r.path))
+            .map(|open| self.view_settings(open));
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
         if let Some(bound) = &mut model.bound_results
-            && let Some(open) =
-                (self.results.iter()).find(|r| Some(&r.path) == model.bound_results_file.as_ref())
+            && let Some(settings) = settings
         {
-            bound.settings = open.results_settings().map(|mut settings| {
-                // The results workspace's camera, in use or parked while another is shown.
-                let camera = match self.tree_view {
-                    TreeView::Results => Some(self.viewport.camera()),
-                    _ => self.parked_camera.as_ref(),
-                };
-                settings.view.camera = camera.map(|c| plx_results::saved_view::SavedCamera {
-                    target: c.target.to_array(),
-                    distance: c.distance,
-                    rotation: c.rotation.to_array(),
-                    scene_radius: c.scene_radius,
-                });
-                settings.view.mesh_edges = Some(self.viewport.options.mesh_edges);
-                settings
-            });
+            bound.settings = settings;
         }
         let geometry = model.geometry.as_ref();
         let results = model.bound_results.as_ref();
