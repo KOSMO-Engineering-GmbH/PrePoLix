@@ -1,4 +1,4 @@
-; Windows-Installer für prepolix, gebaut mit NSIS 3 (makensis, läuft auch unter Linux).
+; Windows-Installer für PrePoLix, gebaut mit NSIS 3 (makensis, läuft auch unter Linux).
 ; Normalerweise ruft scripts/build_windows_installer.sh das Skript auf und übergibt:
 ;   VERSION  Programmversion, z. B. 0.1.0
 ;   STAGE    Ordner mit allen Dateien der Installation
@@ -17,6 +17,7 @@ SetCompressor /SOLID lzma
 !insertmacro REQUIRE OUTFILE
 
 !define APP "prepolix"
+!define APPNAME "PrePoLix"
 !define PROGID "prepolix.Projekt"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP}"
 !define SOURCE_URL "https://github.com/KwentiN-ui/prepolix"
@@ -24,19 +25,19 @@ SetCompressor /SOLID lzma
 !include "MUI2.nsh"
 !include "x64.nsh"
 
-Name "${APP} ${VERSION}"
+Name "${APPNAME} ${VERSION}"
 OutFile "${OUTFILE}"
 InstallDir "$PROGRAMFILES64\${APP}"
 InstallDirRegKey HKLM "Software\${APP}" "InstallDir"
 RequestExecutionLevel admin
 ManifestDPIAware true
-BrandingText "${APP} ${VERSION}"
+BrandingText "${APPNAME} ${VERSION}"
 
 VIProductVersion "${VERSION}.0"
-VIAddVersionKey /LANG=1033 "ProductName" "${APP}"
+VIAddVersionKey /LANG=1033 "ProductName" "${APPNAME}"
 VIAddVersionKey /LANG=1033 "ProductVersion" "${VERSION}"
 VIAddVersionKey /LANG=1033 "FileVersion" "${VERSION}"
-VIAddVersionKey /LANG=1033 "FileDescription" "${APP} Installer"
+VIAddVersionKey /LANG=1033 "FileDescription" "${APPNAME} Installer"
 VIAddVersionKey /LANG=1033 "LegalCopyright" "GNU GPL 3.0 or later"
 
 !define MUI_ICON "${STAGE}\prepolix.ico"
@@ -44,14 +45,14 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "GNU GPL 3.0 or later"
 !define MUI_ABORTWARNING
 !define MUI_COMPONENTSPAGE_SMALLDESC
 
-!define MUI_WELCOMEPAGE_TEXT "This wizard installs ${APP} ${VERSION}, a pre- and postprocessor for CalculiX.$\r$\n$\r$\nThe CalculiX solver (ccx) is not included. Set its path after installation under Tools > Settings.$\r$\n$\r$\n$_CLICK"
+!define MUI_WELCOMEPAGE_TEXT "This wizard installs ${APPNAME} ${VERSION}, a pre- and postprocessor for CalculiX.$\r$\n$\r$\nThe CalculiX solver (ccx) is not included. Set its path after installation under Tools > Settings.$\r$\n$\r$\n$_CLICK"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${STAGE}\LICENSE.txt"
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
 !define MUI_FINISHPAGE_RUN
-!define MUI_FINISHPAGE_RUN_TEXT "Run ${APP}"
+!define MUI_FINISHPAGE_RUN_TEXT "Run ${APPNAME}"
 !define MUI_FINISHPAGE_RUN_FUNCTION StartWithoutAdminRights
 !insertmacro MUI_PAGE_FINISH
 
@@ -62,7 +63,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "GNU GPL 3.0 or later"
 
 Function .onInit
   ${IfNot} ${RunningX64}
-    MessageBox MB_OK|MB_ICONSTOP "${APP} requires 64-bit Windows."
+    MessageBox MB_OK|MB_ICONSTOP "${APPNAME} requires 64-bit Windows."
     Abort
   ${EndIf}
   SetRegView 64
@@ -74,7 +75,7 @@ Function StartWithoutAdminRights
   Exec '"$WINDIR\explorer.exe" "$INSTDIR\prepolix.exe"'
 FunctionEnd
 
-Section "${APP} (required)" SecApp
+Section "${APPNAME} (required)" SecApp
   SectionIn RO
   SetShellVarContext all
   SetOutPath "$INSTDIR"
@@ -90,10 +91,10 @@ Section "${APP} (required)" SecApp
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
   WriteRegStr HKLM "Software\${APP}" "InstallDir" "$INSTDIR"
-  WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "${APP}"
+  WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayName" "${APPNAME}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayVersion" "${VERSION}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\prepolix.ico"
-  WriteRegStr HKLM "${UNINSTALL_KEY}" "Publisher" "${APP}"
+  WriteRegStr HKLM "${UNINSTALL_KEY}" "Publisher" "${APPNAME}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "URLInfoAbout" "${SOURCE_URL}"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
@@ -104,7 +105,7 @@ Section "${APP} (required)" SecApp
   WriteRegDWORD HKLM "${UNINSTALL_KEY}" "EstimatedSize" $0
 
   ; "Open with" offers prepolix for the files it reads.
-  WriteRegStr HKLM "Software\Classes\Applications\prepolix.exe" "FriendlyAppName" "${APP}"
+  WriteRegStr HKLM "Software\Classes\Applications\prepolix.exe" "FriendlyAppName" "${APPNAME}"
   WriteRegStr HKLM "Software\Classes\Applications\prepolix.exe\shell\open\command" "" '"$INSTDIR\prepolix.exe" "%1"'
   !macro SUPPORTED EXT
     WriteRegStr HKLM "Software\Classes\Applications\prepolix.exe\SupportedTypes" "${EXT}" ""
@@ -121,18 +122,18 @@ SectionEnd
 
 Section "Start Menu Shortcut" SecStartMenu
   SetShellVarContext all
-  CreateShortCut "$SMPROGRAMS\${APP}.lnk" "$INSTDIR\prepolix.exe" "" "$INSTDIR\prepolix.ico"
+  CreateShortCut "$SMPROGRAMS\${APPNAME}.lnk" "$INSTDIR\prepolix.exe" "" "$INSTDIR\prepolix.ico"
 SectionEnd
 
 Section /o "Desktop Shortcut" SecDesktop
   SetShellVarContext all
-  CreateShortCut "$DESKTOP\${APP}.lnk" "$INSTDIR\prepolix.exe" "" "$INSTDIR\prepolix.ico"
+  CreateShortCut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\prepolix.exe" "" "$INSTDIR\prepolix.ico"
 SectionEnd
 
-Section "Open .plx projects with ${APP}" SecAssociation
+Section "Open .plx projects with ${APPNAME}" SecAssociation
   WriteRegStr HKLM "Software\Classes\.plx" "" "${PROGID}"
   WriteRegStr HKLM "Software\Classes\.plx\OpenWithProgids" "${PROGID}" ""
-  WriteRegStr HKLM "Software\Classes\${PROGID}" "" "${APP} project"
+  WriteRegStr HKLM "Software\Classes\${PROGID}" "" "${APPNAME} project"
   WriteRegStr HKLM "Software\Classes\${PROGID}\DefaultIcon" "" "$INSTDIR\prepolix.ico"
   WriteRegStr HKLM "Software\Classes\${PROGID}\shell\open\command" "" '"$INSTDIR\prepolix.exe" "%1"'
   ; SHCNE_ASSOCCHANGED: Explorer picks up the new icon and program right away.
@@ -143,7 +144,7 @@ SectionEnd
   !insertmacro MUI_DESCRIPTION_TEXT ${SecApp} "The program with the Gmsh library for geometry import and meshing."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecStartMenu} "Start menu entry for all users."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecDesktop} "Desktop icon for all users."
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecAssociation} "Double-clicking a .plx file opens it in ${APP}."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecAssociation} "Double-clicking a .plx file opens it in ${APPNAME}."
 !insertmacro MUI_FUNCTION_DESCRIPTION_END
 
 Function un.onInit
@@ -152,8 +153,8 @@ FunctionEnd
 
 Section "Uninstall"
   SetShellVarContext all
-  Delete "$SMPROGRAMS\${APP}.lnk"
-  Delete "$DESKTOP\${APP}.lnk"
+  Delete "$SMPROGRAMS\${APPNAME}.lnk"
+  Delete "$DESKTOP\${APPNAME}.lnk"
 
   Delete "$INSTDIR\prepolix.exe"
   Delete "$INSTDIR\gmsh-4.15.dll"

@@ -41,7 +41,7 @@ cp crates/plx-app/assets/fonts/OFL.txt "$stage/licenses/NotoSans-OFL.txt"
 commit="$(git rev-parse HEAD 2>/dev/null || echo unbekannt)"
 dirty="$(git status --porcelain --untracked-files=no 2>/dev/null | head -1)"
 {
-    echo "prepolix $version"
+    echo "PrePoLix $version"
     echo "Quelltext: https://github.com/KwentiN-ui/prepolix"
     echo "Commit:    $commit${dirty:+ (mit lokalen Änderungen)}"
 } >"$stage/SOURCE.txt"

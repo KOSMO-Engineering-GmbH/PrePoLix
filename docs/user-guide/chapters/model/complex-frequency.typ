@@ -32,6 +32,12 @@ The complex frequency step takes the boundary conditions of the step before it a
 model check (@model-check) reports a missing stored frequency step as an error ("No stored
 eigenmodes") and a Coriolis step without a centrifugal load as a warning ("No rotation").
 
+Join bonded parts of a rotor with a Tie constraint (#menu("Interaction", "Create Tie ...")), not
+with a contact pair with tied surface behavior. CalculiX leaves contact pairs out of a frequency
+step without perturbation, so the parts they hold float; and even with perturbation the Coriolis
+coupling of the complex frequency step misses the contact, so whirl pairs do not split and modes
+go missing. The model check warns about both ("Contact ignored", "Contact with Coriolis").
+
 The node field output of a new complex frequency step is `U, PU`: `PU` writes the magnitude and
 phase of the displacements of every mode (`PDISP`), which the whirl animation needs.
 
@@ -54,5 +60,5 @@ The `.dat` file of the step is read into the history outputs (@history-outputs).
 part of the eigenvalue, the damping of the whirl), and `TURNING_DIRECTION` is +1 for a forward
 and −1 for a backward whirling mode, as CalculiX prints it (F or B).
 
-#note[A Campbell diagram over the speed of rotation needs one analysis per speed; PrePolix
+#note[A Campbell diagram over the speed of rotation needs one analysis per speed; PrePoLix
 runs this sweep for you, see the Campbell diagram section of the results chapter.]

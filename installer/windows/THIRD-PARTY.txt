@@ -1,7 +1,7 @@
-prepolix - Lizenzen und Quelltext
+PrePoLix - Lizenzen und Quelltext
 =================================
 
-prepolix steht unter der GNU General Public License, Version 3 oder neuer
+PrePoLix steht unter der GNU General Public License, Version 3 oder neuer
 (LICENSE.txt). Der Quelltext liegt unter
 
     https://github.com/KwentiN-ui/prepolix
@@ -23,7 +23,7 @@ Gmsh 4.15.2 (gmsh-4.15.dll)
     In Gmsh enthalten sind unter anderem:
 
     Open CASCADE Technology (OCCT)
-        prepolix nutzt über Gmsh Funktionen von Open CASCADE Technology.
+        PrePoLix nutzt über Gmsh Funktionen von Open CASCADE Technology.
         GNU LGPL Version 2.1 mit der Open-CASCADE-Ausnahme, siehe
         licenses\OCCT-LGPL-2.1.txt und licenses\OCCT-LGPL-EXCEPTION.txt.
         Quelltext: https://github.com/Open-Cascade-SAS/OCCT
@@ -36,7 +36,7 @@ Noto Sans (in prepolix.exe eingebettet)
 Rust-Bibliotheken (in prepolix.exe einkompiliert)
     egui, eframe, wgpu, glam, cpal, rfd und weitere unter MIT- oder
     Apache-2.0-Lizenz. Die vollständige Liste mit Versionen steht in
-    Cargo.lock im Quelltext von prepolix; die Lizenztexte liegen bei den
+    Cargo.lock im Quelltext von PrePoLix; die Lizenztexte liegen bei den
     jeweiligen Paketen auf https://crates.io.
 
 CalculiX wird nicht mitgeliefert. Den Solver ccx bitte selbst installieren

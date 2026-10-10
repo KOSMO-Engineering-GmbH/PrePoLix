@@ -88,7 +88,7 @@ impl Analysis {
         if !check_model && !model.fe.steps.iter().any(|s| s.active) {
             return Err("Analysis not started: all steps are deactivated.".into());
         }
-        let heading = format!("prepolix: {}", model.file_name());
+        let heading = format!("PrePoLix: {}", model.file_name());
         let mut fe = model.fe.clone();
         fe.resolve_default_solver(default_solver);
         let work_dir = solver.work_dir();

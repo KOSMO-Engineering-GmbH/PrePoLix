@@ -1,14 +1,14 @@
-# PrePolix
+# PrePoLix
 
-PrePolix is a graphical pre- and post-processor for the finite element solver
+PrePoLix is a graphical pre- and post-processor for the finite element solver
 [CalculiX](http://www.calculix.de/). It is a rebuild of [PrePoMax](https://prepomax.fs.um.si/) in
 Rust, limited to CalculiX, and runs on **Linux and Windows**. The goal is the same workflow and look as
 PrePoMax: import a geometry, mesh it, set up materials, loads and steps, run CalculiX and look at
 the results, all in one window and without editing input files by hand.
 
-![PrePolix main window with a result](docs/user-guide/images/results.png)
+![PrePoLix main window with a result](docs/user-guide/images/results.png)
 
-> PrePolix is a hobby project under active development. It is not affiliated with PrePoMax or
+> PrePoLix is a hobby project under active development. It is not affiliated with PrePoMax or
 > CalculiX. Expect rough edges and please report what you find in the
 > [issue tracker](https://github.com/KwentiN-ui/prepolix/issues).
 
@@ -47,7 +47,7 @@ Projects are saved as `.plx` files.
 
 Download `prepolix-<version>-setup.exe` from the
 [latest release](https://github.com/KwentiN-ui/prepolix/releases/latest) and run it. It installs
-PrePolix with a Start menu entry, bundles Gmsh and can associate `.plx` project files.
+PrePoLix with a Start menu entry, bundles Gmsh and can associate `.plx` project files.
 
 ### Linux
 
@@ -55,7 +55,7 @@ There is no binary package yet. Build from source, see [docs/DEVELOPMENT.md](doc
 
 ### CalculiX
 
-PrePolix does not ship the solver. Install CalculiX (`ccx`) separately, for example from
+PrePoLix does not ship the solver. Install CalculiX (`ccx`) separately, for example from
 [calculix.de](http://www.calculix.de/) or your package manager (`sudo apt install calculix-ccx`),
 and select the executable in *Tools > Settings*. A self-test button there checks that it works.
 
@@ -63,7 +63,7 @@ and select the executable in *Tools > Settings*. A self-test button there checks
 
 The **User Guide** is a PDF attached to every [release](https://github.com/KwentiN-ui/prepolix/releases/latest)
 (`prepolix-<version>-user-guide.pdf`). It starts with a first analysis step by step and then
-describes every dialog and what PrePolix writes to the CalculiX input file. The source is in
+describes every dialog and what PrePoLix writes to the CalculiX input file. The source is in
 [docs/user-guide/](docs/user-guide/).
 
 ## Contributing and development
@@ -73,11 +73,11 @@ Building from source, project layout, tests and releases are described in
 
 ## License
 
-PrePolix is licensed under the GPL-3.0-or-later, see [LICENSE](LICENSE).
+PrePoLix is licensed under the GPL-3.0-or-later, see [LICENSE](LICENSE).
 
 Gmsh is licensed under the GPL-2.0-or-later with an exception for OpenCASCADE, Netgen and METIS,
 and OpenCASCADE under the LGPL-2.1 with exception; both are compatible with the GPL-3.0. If you
-distribute PrePolix together with the Gmsh library, include `GMSH-LICENSE.txt` and point to the
+distribute PrePoLix together with the Gmsh library, include `GMSH-LICENSE.txt` and point to the
 sources: Gmsh at <https://gitlab.onelab.info/gmsh/gmsh> (tag `gmsh_4_15_2`), OpenCASCADE at
 <https://github.com/Open-Cascade-SAS/OCCT>.
 

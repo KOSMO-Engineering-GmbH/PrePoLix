@@ -26,7 +26,7 @@ come from Gmsh. The models with a step can be run directly with `ccx`.
 ## Gmsh
 
 STEP, IGES and BREP files are imported and meshed with [Gmsh](https://gmsh.info/). It is not compiled
-in but loaded as a library at run time; without it PrePolix starts normally, only import and meshing
+in but loaded as a library at run time; without it PrePoLix starts normally, only import and meshing
 are missing. For development a script downloads the official library (Gmsh 4.15, from Gmsh's PyPI
 package) into `target/gmsh`, where debug builds and tests find it:
 
@@ -35,7 +35,7 @@ python3 scripts/fetch_gmsh.py                        # Linux
 python3 scripts/fetch_gmsh.py --platform windows     # Windows
 ```
 
-To distribute PrePolix, place `libgmsh.so.4.15` or `gmsh-4.15.dll` and `GMSH-LICENSE.txt` next to the
+To distribute PrePoLix, place `libgmsh.so.4.15` or `gmsh-4.15.dll` and `GMSH-LICENSE.txt` next to the
 executable. Alternatively set the path to an existing library under *Tools > Settings > Gmsh*. On
 Linux the Gmsh library also needs `libGLU` and `libXft`.
 
@@ -52,7 +52,7 @@ scripts/build_windows_installer.sh     # -> target/windows-installer/
 ```
 
 A tag `v*` builds the installer and the user guide PDF with the *Release* workflow and attaches both
-to the GitHub release; *Run workflow* produces them as artifacts. PrePolix may not write to
+to the GitHub release; *Run workflow* produces them as artifacts. PrePoLix may not write to
 `C:\Program Files` without administrator rights, so the CalculiX work directory then lives in
 `%TEMP%\prepolix`.
 
