@@ -46,11 +46,6 @@ for entry in "linuxdeploy $linuxdeploy_url" "appimagetool $appimagetool_url"; do
 done
 
 rm -rf "$appdir"
-# The icon file names give the icon's name, which must match Icon= in the desktop entry.
-icons="$out/icons"
-mkdir -p "$icons"
-cp crates/plx-app/assets/icon/prepolix.png "$icons/prepolix.png"
-cp assets/icon/prepolix.svg "$icons/prepolix.svg"
 # Gmsh is loaded at run time, so linuxdeploy only finds it when named; it bundles the
 # libraries Gmsh links against except those every desktop system has (libGL, X11, glibc ...)
 # and points the executable's RUNPATH at usr/lib, where the loader then finds libgmsh. It also
@@ -59,7 +54,14 @@ cp assets/icon/prepolix.svg "$icons/prepolix.svg"
     --executable target/release/prepolix \
     --library "$gmsh/libgmsh.so.4.15" \
     --desktop-file installer/linux/prepolix.desktop \
-    --icon-file "$icons/prepolix.png" --icon-file "$icons/prepolix.svg"
+    --icon-file crates/plx-app/assets/icon/prepolix.png
+
+# The program icon (the file name gives the icon's name, which must match Icon= in the desktop
+# entry). linuxdeploy only links .DirIcon, which file managers, AppImageLauncher and Gear Lever
+# show for the AppImage; the AppImage spec asks for a real PNG file there.
+install -Dm644 assets/icon/prepolix.svg "$appdir/usr/share/icons/hicolor/scalable/apps/prepolix.svg"
+rm -f "$appdir/.DirIcon"
+cp crates/plx-app/assets/icon/prepolix.png "$appdir/.DirIcon"
 
 install -Dm644 installer/linux/prepolix-mime.xml "$appdir/usr/share/mime/packages/prepolix.xml"
 
