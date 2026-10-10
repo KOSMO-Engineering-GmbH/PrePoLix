@@ -50,6 +50,12 @@ pub struct ResultsView {
     pub field: usize,
     pub component: usize,
     pub deformation: Deformation,
+    /// The user picked the deformation, so it stays when another step is shown; otherwise it
+    /// follows [`ResultsView::default_deformation`].
+    pub deformation_chosen: bool,
+    /// Whether surfaces of the analysed model are in contact, from a `CONTACT` field in the
+    /// results or a contact pair in the input next to them.
+    pub contact: bool,
     pub user_scale: f64,
     pub levels: u32,
     /// Draw the undeformed outline behind the deformed shape.
@@ -119,9 +125,9 @@ impl ResultsView {
             increment: 0,
             field: 0,
             component: 0,
-            // An exaggerated deformation makes parts in contact appear to penetrate each other,
-            // which confuses new users; PrePoMax's automatic scale stays one click away.
-            deformation: Deformation::TrueScale,
+            deformation: Deformation::Automatic(1.0),
+            deformation_chosen: false,
+            contact: false,
             user_scale: 10.0,
             levels: DEFAULT_LEVELS,
             show_undeformed: true,
@@ -142,7 +148,29 @@ impl ResultsView {
             model_size: bounds.map_or(1.0, model_size),
         };
         view.increment = view.default_increment();
+        view.contact =
+            (view.increments.iter()).any(|i| i.fields.iter().any(|f| f.name == "CONTACT"));
+        view.follow_default_deformation();
         view
+    }
+
+    /// PrePoMax's automatic scale, except for contact outside eigenmode steps: exaggerated,
+    /// the touching parts appear to penetrate each other, which confuses new users. Mode
+    /// shapes are scaled arbitrarily, so they always get the automatic scale.
+    pub fn default_deformation(&self) -> Deformation {
+        let modal = self.current_increment().is_some_and(|i| i.kind.is_modal());
+        if self.contact && !modal {
+            Deformation::TrueScale
+        } else {
+            Deformation::Automatic(1.0)
+        }
+    }
+
+    /// Sets the default deformation for the shown increment unless the user picked one.
+    pub fn follow_default_deformation(&mut self) {
+        if !self.deformation_chosen {
+            self.deformation = self.default_deformation();
+        }
     }
 
     /// PrePoMax opens the last increment of the last step, or the first mode of a frequency or
@@ -194,6 +222,7 @@ impl ResultsView {
             self.field = field;
             self.component = component;
         }
+        self.follow_default_deformation();
     }
 
     /// Index of the derived field output that computes the given field.
@@ -982,7 +1011,7 @@ mod tests {
     #[test]
     fn automatic_scale_follows_prepomax() {
         // Cube of size 10, largest displacement 0.1 in z: ALL and U3 both reach 0.1.
-        let mut view = ResultsView::new(
+        let view = ResultsView::new(
             vec![increment(
                 1,
                 1,
@@ -991,12 +1020,42 @@ mod tests {
             )],
             Some(([0.0; 3], [10.0; 3])),
         );
-        assert_eq!(view.deformation, Deformation::TrueScale);
-        view.deformation = Deformation::Automatic(1.0);
+        assert_eq!(view.deformation, Deformation::Automatic(1.0));
         let max = (2.0f32 * 0.01).sqrt();
         let expected = round_significant(0.25 * 10.0 / max as f64, 2) as f32;
         assert_eq!(view.scale(), expected);
         assert_eq!(view.scale(), 18.0);
+    }
+
+    #[test]
+    fn contact_opens_in_true_scale_except_for_mode_shapes() {
+        let disp = [[0.0, 0.0, 1.0]];
+        let mut contact = increment(1, 1, AnalysisKind::Static, &disp);
+        let mut field = contact.fields[0].clone();
+        field.name = "CONTACT".into();
+        contact.fields.push(field);
+        let mut view = ResultsView::new(
+            vec![
+                contact,
+                increment(2, 1, AnalysisKind::Frequency, &disp),
+                increment(3, 1, AnalysisKind::Static, &disp),
+            ],
+            None,
+        );
+        assert!(view.contact);
+        assert_eq!(view.deformation, Deformation::TrueScale);
+        view.select_increment(1);
+        assert_eq!(view.deformation, Deformation::Automatic(1.0));
+        view.select_increment(0);
+        assert_eq!(view.deformation, Deformation::TrueScale);
+        // A deformation the user picked stays for every step.
+        (view.deformation, view.deformation_chosen) = (Deformation::Automatic(2.0), true);
+        view.select_increment(1);
+        assert_eq!(view.deformation, Deformation::Automatic(2.0));
+
+        let without = ResultsView::new(vec![increment(1, 1, AnalysisKind::Static, &disp)], None);
+        assert!(!without.contact);
+        assert_eq!(without.deformation, Deformation::Automatic(1.0));
     }
 
     #[test]

@@ -128,3 +128,28 @@ fn missing_include_is_an_io_error() {
     let err = read_inp_str("*INCLUDE, INPUT=gibt_es_nicht.inp\n", Some(&testdata(""))).unwrap_err();
     assert!(matches!(err, InpError::Io { .. }));
 }
+
+#[test]
+fn finds_contact_pairs_but_not_ties() {
+    let dir = std::env::temp_dir().join("prepolix_defines_contact");
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |name: &str, text: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    };
+    let tie = write(
+        "tie.inp",
+        "*TIE, NAME=T\nA, B\n** *CONTACT PAIR is only a comment\n",
+    );
+    assert!(!defines_contact(&tie).unwrap());
+    write(
+        "pair.inc",
+        "*Contact Pair, Interaction=I, Type=Surface to surface\nA, B\n",
+    );
+    let pair = write("pair.inp", "*INCLUDE, INPUT=pair.inc\n");
+    assert!(defines_contact(&pair).unwrap());
+    let general = write("general.inp", "*CONTACT\n*CONTACT INCLUSION\n");
+    assert!(defines_contact(&general).unwrap());
+    std::fs::remove_dir_all(&dir).ok();
+}

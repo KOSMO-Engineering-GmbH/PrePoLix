@@ -51,6 +51,20 @@ pub fn read_inp(path: &Path) -> Result<InpImport, InpError> {
     Reader::new(files).run(&lines)
 }
 
+/// Whether the input, with its included files, lets surfaces touch: a contact pair or general
+/// contact (`*CONTACT PAIR`, `*CONTACT INCLUSION`). Tied surfaces do not count, they cannot
+/// penetrate each other.
+pub fn defines_contact(path: &Path) -> Result<bool, InpError> {
+    let lines = lines::load(path, &mut Vec::new())?;
+    Ok(lines.iter().any(|line| {
+        is_keyword(&line.text)
+            && matches!(
+                KeywordLine::parse(&line.text).name.as_str(),
+                "CONTACTPAIR" | "CONTACTINCLUSION"
+            )
+    }))
+}
+
 /// Reads input given as text; `*INCLUDE` paths resolve against `base_dir`.
 pub fn read_inp_str(text: &str, base_dir: Option<&Path>) -> Result<InpImport, InpError> {
     let mut files = Vec::new();
