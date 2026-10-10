@@ -57,9 +57,24 @@ rm -rf "$appdir"
     --icon-file crates/plx-app/assets/icon/prepolix.png
 
 # The program icon (the file name gives the icon's name, which must match Icon= in the desktop
-# entry). linuxdeploy only links .DirIcon, which file managers, AppImageLauncher and Gear Lever
-# show for the AppImage; the AppImage spec asks for a real PNG file there.
-install -Dm644 assets/icon/prepolix.svg "$appdir/usr/share/icons/hicolor/scalable/apps/prepolix.svg"
+# entry), as the PNG sizes of prepolix.ico: the small ones are drawn without mesh lines, which a
+# scaled-down 256 px image or the SVG would blur into coloured smudges in menus. No SVG, since
+# desktops prefer a scalable icon over fitting PNGs. linuxdeploy only links .DirIcon, which file
+# managers, AppImageLauncher and Gear Lever show for the AppImage; the AppImage spec asks for a
+# real PNG file there.
+python3 - crates/plx-app/assets/icon/prepolix.ico "$appdir/usr/share/icons/hicolor" <<'PY'
+import pathlib, struct, sys
+data = pathlib.Path(sys.argv[1]).read_bytes()
+for i in range(struct.unpack_from("<H", data, 4)[0]):
+    width, _, _, _, _, _, size, offset = struct.unpack_from("<BBBBHHII", data, 6 + 16 * i)
+    width = width or 256
+    # The standard sizes of the hicolor theme; the .ico stores each size as a PNG.
+    if width in (16, 24, 32, 48, 64, 128, 256):
+        assert data[offset : offset + 4] == b"\x89PNG", f"{width} px is not stored as PNG"
+        icon = pathlib.Path(sys.argv[2], f"{width}x{width}", "apps", "prepolix.png")
+        icon.parent.mkdir(parents=True, exist_ok=True)
+        icon.write_bytes(data[offset : offset + size])
+PY
 rm -f "$appdir/.DirIcon"
 cp crates/plx-app/assets/icon/prepolix.png "$appdir/.DirIcon"
 
