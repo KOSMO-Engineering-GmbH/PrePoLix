@@ -938,7 +938,7 @@ fn max_deformation_of(field: &Field) -> Option<f32> {
     Some(sum.sqrt())
 }
 
-fn model_size((min, max): ([f64; 3], [f64; 3])) -> f64 {
+pub(crate) fn model_size((min, max): ([f64; 3], [f64; 3])) -> f64 {
     let d = [0, 1, 2].map(|k| max[k] - min[k]);
     let diagonal = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
     if d[2].abs() < 1e-6 * diagonal {
@@ -948,7 +948,7 @@ fn model_size((min, max): ([f64; 3], [f64; 3])) -> f64 {
     }
 }
 
-fn round_significant(value: f64, digits: i32) -> f64 {
+pub(crate) fn round_significant(value: f64, digits: i32) -> f64 {
     if value == 0.0 || !value.is_finite() {
         return value;
     }

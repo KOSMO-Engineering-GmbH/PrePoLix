@@ -89,6 +89,9 @@ pub struct Model {
     section_cells: std::sync::OnceLock<Vec<SectionCells>>,
     /// The exploded view: parts drawn and picked moved apart.
     pub explosion: Explosion,
+    /// Offsets of single nodes by index, the motion preview of a boundary condition dialog:
+    /// the nodes are drawn moved, the rest of the mesh stays put.
+    pub motion: Option<Vec<(usize, [f64; 3])>>,
     /// Node indices of each part and the part of each node, built when first needed.
     part_nodes: std::sync::OnceLock<PartNodes>,
     /// Lookups to the CAD entities of a mesh generated from geometry, built when first
@@ -377,6 +380,7 @@ impl Model {
             skins,
             section_cells: Default::default(),
             explosion: Explosion::default(),
+            motion: None,
             part_nodes: Default::default(),
             checks: Default::default(),
             cad_index: Default::default(),
@@ -569,7 +573,15 @@ impl Model {
 
     /// Node coordinates as drawn and whether a deformation is shown.
     fn deformed_coords(&self) -> (std::borrow::Cow<'_, [[f64; 3]]>, bool) {
-        let coords = self.exploded_coords();
+        let mut coords = self.exploded_coords();
+        if let Some(motion) = &self.motion {
+            let moved = coords.to_mut();
+            for &(node, offset) in motion {
+                if let Some(p) = moved.get_mut(node) {
+                    *p = [0, 1, 2].map(|k| p[k] + offset[k]);
+                }
+            }
+        }
         let Some(view) = &self.results else {
             return (coords, false);
         };

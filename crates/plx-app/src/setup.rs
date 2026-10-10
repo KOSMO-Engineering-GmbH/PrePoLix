@@ -20,10 +20,12 @@ use plx_model::{
     SurfaceInteraction, Tie, UnitSystem, next_name,
 };
 
-use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row};
+use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
 use crate::constraint_dialog::ConstraintDraft;
 use crate::contacts::{self, MasterSlave};
+use crate::icons::{self, Icon};
 use crate::model::{Highlight, Hit, Model};
+use crate::motion_preview::MotionPreview;
 use crate::numeric;
 use crate::selection::{History, Items, Operation, PartPicks, Picker, PickerAction, Target};
 use crate::tree::TreeItem;
@@ -699,6 +701,8 @@ pub struct Editor {
     error: Option<String>,
     /// The selection window shown while the region is picked in the 3D view.
     picker: Picker,
+    /// The playing preview of a displacement boundary condition's motion.
+    motion: Option<MotionPreview>,
 }
 
 pub enum EditorResult {
@@ -730,6 +734,16 @@ const FILM: &str = "Convective_Film";
 const RADIATION: &str = "Radiation";
 const GRAVITY: &str = "Gravity";
 const CENTRIFUGAL: &str = "Centrifugal_Load";
+
+/// Whether the boundary condition dialog offers a preview of the motion: a prescribed
+/// displacement that follows an amplitude of the model.
+fn previews_motion(bc: &BoundaryCondition, fe: &FeModel) -> bool {
+    matches!(bc.kind, BoundaryKind::Displacement(_))
+        && bc
+            .amplitude
+            .as_deref()
+            .is_some_and(|a| fe.amplitude(a).is_some())
+}
 
 /// The boundary condition kinds of the dialog: label, default name and the kind.
 fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
@@ -1127,6 +1141,7 @@ impl Editor {
             index: None,
             error: None,
             picker: Picker::default(),
+            motion: None,
         })
     }
 
@@ -1144,6 +1159,7 @@ impl Editor {
             index: None,
             error: None,
             picker: Picker::default(),
+            motion: None,
         }
     }
 
@@ -1176,6 +1192,7 @@ impl Editor {
             index,
             error: None,
             picker: Picker::default(),
+            motion: None,
         })
     }
 
@@ -1272,6 +1289,7 @@ impl Editor {
             index: Some(index),
             error: None,
             picker: Picker::default(),
+            motion: None,
         })
     }
 
@@ -1329,6 +1347,21 @@ impl Editor {
             Draft::Constraint(c) => c.symbol(),
             _ => None,
         }
+    }
+
+    /// The drawn node offsets of the playing motion preview at `now` (seconds of the GUI
+    /// clock), if one plays.
+    pub fn motion_offsets(&mut self, now: f64, model: &Model) -> Option<Vec<(usize, [f64; 3])>> {
+        let Draft::BoundaryCondition(_, bc, region) = &self.draft else {
+            return None;
+        };
+        let preview = self.motion.as_mut()?;
+        let BoundaryKind::Displacement(values) = bc.kind else {
+            return None;
+        };
+        let amplitude = model.fe.amplitude(bc.amplitude.as_deref()?)?;
+        let values = [values[0], values[1], values[2]];
+        Some(preview.frame(now, model, region.region(), values, amplitude))
     }
 
     /// Whether clicks in the 3D view pick for this dialog.
@@ -1559,13 +1592,53 @@ impl Editor {
                     submodel_rows(ui, step, dofs, two_d, &model.fe);
                 }
                 if bc.kind.takes_amplitude() {
-                    amplitude_row(
+                    let playing = self.motion.is_some();
+                    let playable = previews_motion(bc, &model.fe);
+                    let mut toggle = false;
+                    amplitude_row_with(
                         ui,
                         "Amplitude",
                         "bc amplitude",
                         &mut bc.amplitude,
                         &model.fe,
+                        |ui| {
+                            if playable {
+                                let (icon, tooltip) = if playing {
+                                    (Icon::Stop, "Stop the preview")
+                                } else {
+                                    (
+                                        Icon::Animate,
+                                        "Preview the prescribed motion in the 3D view",
+                                    )
+                                };
+                                toggle = icons::dialog_button(ui, icon, tooltip, true).clicked();
+                            }
+                        },
                     );
+                    if !previews_motion(bc, &model.fe) {
+                        self.motion = None;
+                    } else if toggle {
+                        self.motion = match self.motion {
+                            Some(_) => None,
+                            None => Some(MotionPreview::new(ui.input(|i| i.time), model)),
+                        };
+                    }
+                    if let Some(frame) = self.motion.as_ref().and_then(|m| m.last.as_ref()) {
+                        ui.label("");
+                        ui.weak(format!(
+                            "Time {}, motion drawn {}x",
+                            crate::results::format_value(frame.time as f32),
+                            crate::results::format_value(frame.scale as f32),
+                        ));
+                        ui.end_row();
+                        if let BoundaryKind::Displacement(values) = &bc.kind
+                            && values[3..].iter().any(Option::is_some)
+                        {
+                            ui.label("");
+                            ui.weak("Rotations are not shown in the preview.");
+                            ui.end_row();
+                        }
+                    }
                 }
                 region.ui(ui, model);
             }
@@ -4162,6 +4235,7 @@ mod tests {
             index: Some(0),
             error: None,
             picker: Picker::default(),
+            motion: None,
         }
         .apply(&mut fe);
         assert_eq!(fe.steps[0].loads[0].factor_amplitude, None);
