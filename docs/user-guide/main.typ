@@ -1,4 +1,4 @@
-// PrePolix User Guide. Build with:
+// PrePoLix User Guide. Build with:
 //   typst compile --root . --ignore-system-fonts docs/user-guide/main.typ prepolix-user-guide.pdf
 // from the repository root. The version is read from the workspace Cargo.toml, which is why
 // the root must be the repository and not this folder.

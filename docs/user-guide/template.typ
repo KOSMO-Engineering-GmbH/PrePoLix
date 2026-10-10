@@ -1,4 +1,4 @@
-// Layout of the PrePolix user guide. Only fonts embedded in Typst are used, so the PDF
+// Layout of the PrePoLix user guide. Only fonts embedded in Typst are used, so the PDF
 // looks the same on every machine (`typst compile --ignore-system-fonts`).
 
 #let accent = rgb("#2b5797")
@@ -44,7 +44,7 @@
 )
 
 #let guide(version: "dev", body) = {
-  set document(title: "PrePolix User Guide", author: "PrePolix contributors")
+  set document(title: "PrePoLix User Guide", author: "PrePoLix contributors")
   set text(font: "Libertinus Serif", size: 10.5pt, lang: "en")
   set par(justify: true, leading: 0.6em)
   set heading(numbering: "1.1")
@@ -63,7 +63,7 @@
   // Title page.
   page(margin: 3cm)[
     #v(25%)
-    #text(size: 36pt, weight: "bold", fill: accent)[PrePolix]
+    #text(size: 36pt, weight: "bold", fill: accent)[PrePoLix]
     #v(0.2em)
     #text(size: 18pt)[User Guide]
     #v(1em)
@@ -79,7 +79,7 @@
     header: context {
       if counter(page).get().first() > 2 {
         set text(size: 9pt, fill: luma(110))
-        [PrePolix User Guide #h(1fr) Version #version]
+        [PrePoLix User Guide #h(1fr) Version #version]
       }
     },
   )

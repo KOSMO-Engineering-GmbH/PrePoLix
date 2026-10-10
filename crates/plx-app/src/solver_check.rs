@@ -229,7 +229,7 @@ fn solve(
     mesh: &FeMesh,
     model: &FeModel,
 ) -> Result<FrdImport, String> {
-    let input = plx_io::inp::write_inp(mesh, model, "prepolix self-test")
+    let input = plx_io::inp::write_inp(mesh, model, "PrePoLix self-test")
         .map_err(|e| format!("Input file not written: {e}"))?;
     let mut job = Job::start(solver, dir, name, &input).map_err(|e| format!("Start: {e}"))?;
     let status = job.wait();

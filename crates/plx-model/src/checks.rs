@@ -277,7 +277,7 @@ impl Problem {
                  unknown\" or a floating point error."
             }
             Problem::SolverError => {
-                "CalculiX aborted with an error message that prepolix does not know. \
+                "CalculiX aborted with an error message that PrePoLix does not know. \
                  The exact text is shown in the Monitor."
             }
         }
