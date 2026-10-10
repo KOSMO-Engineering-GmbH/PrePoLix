@@ -716,10 +716,6 @@ impl PrepolixApp {
     }
 }
 
-fn not_implemented(ui: &mut egui::Ui) {
-    ui.label("Not implemented yet");
-}
-
 /// Moves the parts of a model between two scales of an exploded view: through the levels of a
 /// sequential disassembly one after the other, else in one animation.
 fn animate_explosion(
