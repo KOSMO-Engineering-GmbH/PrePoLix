@@ -543,7 +543,13 @@ impl PrepolixApp {
                         Some(SettingsWindow::new(&self.workbench.settings));
                 }
             });
-            ui.menu_button("Help", not_implemented);
+            ui.menu_button("Help", |ui| {
+                let tip = "Opens the user guide in the web browser";
+                if ui.button("User Guide").on_hover_text(tip).clicked() {
+                    let line = crate::help::open_user_guide();
+                    self.workbench.output.push(line);
+                }
+            });
         });
     }
 

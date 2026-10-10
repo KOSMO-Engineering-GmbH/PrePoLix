@@ -28,6 +28,7 @@ env_logger = "0.11"
 flate2 = "1"
 glam = { version = "0.34", features = ["bytemuck"] }
 log = "0.4"
+open = "5"
 png = "0.18"
 rfd = "0.17"
 ron = "0.12"

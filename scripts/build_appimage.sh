@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Builds the Linux AppImage of prepolix: release build, Gmsh library and the system libraries it
 # needs (via linuxdeploy), desktop entry, icon, .plx file type and license texts, packed with
-# appimagetool.
+# appimagetool, and the offline user guide.
 #
 #     scripts/build_appimage.sh
 #
 # Needs (Debian/Ubuntu): sudo apt install libasound2-dev libglu1-mesa libxft2 libxcursor1 \
-#                            libxinerama1 libgomp1 python3 curl file zsync
+#                            libxinerama1 libgomp1 python3 curl file zsync xz-utils
 # The AppImage runs on systems with a glibc at least as new as the build system's, so releases
 # are built on the oldest supported Ubuntu runner.
 #
@@ -38,6 +38,7 @@ version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Car
 
 cargo build --release --locked -p plx-app
 [ -f "$gmsh/libgmsh.so.4.15" ] || python3 scripts/fetch_gmsh.py --platform linux --dest "$gmsh"
+scripts/build_user_guide.sh html
 
 mkdir -p "$tools"
 for entry in "linuxdeploy $linuxdeploy_url" "appimagetool $appimagetool_url"; do
@@ -86,6 +87,8 @@ cp LICENSE "$doc/LICENSE.txt"
 cp installer/linux/THIRD-PARTY.txt "$doc/"
 cp "$gmsh/GMSH-LICENSE.txt" "$gmsh/GMSH-CREDITS.txt" installer/windows/licenses/*.txt "$doc/licenses/"
 cp crates/plx-app/assets/fonts/OFL.txt "$doc/licenses/NotoSans-OFL.txt"
+# Help > User Guide finds it at ../share/doc/prepolix next to usr/bin/prepolix.
+cp target/user-guide/user-guide.html "$doc/"
 commit="$(git rev-parse HEAD 2>/dev/null || echo unbekannt)"
 dirty="$(git status --porcelain --untracked-files=no 2>/dev/null | head -1)"
 {
