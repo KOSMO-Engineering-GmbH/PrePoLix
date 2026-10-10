@@ -217,6 +217,36 @@ pub fn load_geometry(paths: &[PathBuf], units: UnitSystem) -> Result<LoadedModel
     })
 }
 
+/// The input file CalculiX ran for a results file: named like it, next to it.
+fn companion_input(results: &Path) -> Option<PathBuf> {
+    ["inp", "INP"]
+        .map(|e| results.with_extension(e))
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
+/// Groups the elements of results into the parts of the input file they were computed from,
+/// with the part names as the input writes them; returns whether the input defines contact.
+fn adopt_input_parts(mesh: &mut FeMesh, input: &Path) -> bool {
+    match read_inp(input) {
+        Ok(import) => {
+            let parts: Vec<_> = (import.mesh.parts.into_iter())
+                .map(|mut part| {
+                    if let Some(name) = import.part_names.get(&part.name) {
+                        part.name = name.clone();
+                    }
+                    part
+                })
+                .collect();
+            mesh.adopt_parts(&parts);
+            ["CONTACTPAIR", "CONTACTINCLUSION"]
+                .iter()
+                .any(|k| import.skipped_keywords.contains_key(*k))
+        }
+        Err(_) => plx_io::inp::defines_contact(input).unwrap_or(false),
+    }
+}
+
 /// Loads a project, input, results or CAD file. CAD geometry is read in the length unit of
 /// `units`, the unit system of the model it goes into.
 pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
@@ -228,6 +258,7 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     let mut fe = FeModel::default();
     let mut geometry = None;
     let mut bound_results = None;
+    let mut contact = None;
     let (mesh, mut warnings, skipped_keywords, included_files, increments) =
         if extension(PROJECT_EXTENSION) {
             let project = plx_io::project::read_project(path).map_err(|e| e.to_string())?;
@@ -237,13 +268,16 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
             (project.mesh, Vec::new(), BTreeMap::new(), 0, None)
         } else if extension("frd") {
             let FrdImport {
-                mesh,
+                mut mesh,
                 increments,
                 warnings,
                 date,
                 time,
                 ..
             } = read_frd(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            // The results group the elements by material; the input it ran, named like the
+            // results, knows the parts.
+            contact = companion_input(path).map(|input| adopt_input_parts(&mut mesh, &input));
             (
                 mesh,
                 warnings,
@@ -257,6 +291,7 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
                 warnings,
                 skipped_keywords,
                 files,
+                ..
             } = read_inp(path).map_err(|e| e.to_string())?;
             // Plane stress, plane strain or axisymmetric elements make a 2D model.
             fe.properties.space = plx_model::ModelSpace::of_mesh(&mesh);
@@ -289,11 +324,9 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     model.included_files = included_files;
     model.results = increments.map(|(increments, date, time)| {
         let mut view = ResultsView::new(increments, model.mesh.bounds());
-        // CalculiX writes contact into the results only on request; the input it ran, named
-        // like the results, tells.
-        let input = ["inp", "INP"].map(|e| path.with_extension(e));
-        if let Some(input) = input.into_iter().find(|p| p.is_file()) {
-            view.contact |= plx_io::inp::defines_contact(&input).unwrap_or(false);
+        // CalculiX writes contact into the results only on request; the input it ran tells.
+        if let Some(contact) = contact {
+            view.contact |= contact;
             view.follow_default_deformation();
         }
         view.date = date;
@@ -1472,7 +1505,8 @@ mod tests {
     fn loads_frd_results_with_deformation() {
         let loaded = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC).unwrap();
         let model = &loaded.model;
-        assert_eq!(model.parts[0].name, "STEEL");
+        // The part of the input next to the results, not the material the file groups by.
+        assert_eq!(model.parts[0].name, "EALL");
         let view = model.results.as_ref().unwrap();
         assert_eq!(view.current().unwrap().1.name, "ALL");
         assert!(view.scale() > 1.0);
@@ -1728,6 +1762,115 @@ mod tests {
         let sxx = &stress.component("S11").unwrap().values;
         let max = sxx.iter().copied().fold(f32::MIN, f32::max);
         assert!(max > 300.0 && max < 1500.0, "largest stress {max}");
+    }
+
+    /// Parts sharing a section share a material, which is all an `.frd` file groups the
+    /// elements by; the results take the parts of the input they were computed from.
+    #[test]
+    fn results_list_the_parts_of_their_input() {
+        if std::process::Command::new("ccx")
+            .arg("-v")
+            .output()
+            .is_err()
+        {
+            eprintln!("ccx missing, test skipped");
+            return;
+        }
+        use plx_model::{
+            BoundaryCondition, BoundaryKind, Elastic, Material, Region, Section, Step,
+        };
+        // Three cubes in a row, one part each, sharing the nodes where they touch.
+        let mut mesh = FeMesh::default();
+        let mut id = 0;
+        for x in 0..=3 {
+            for (y, z) in [(0, 0), (1, 0), (1, 1), (0, 1)] {
+                id += 1;
+                mesh.set_node(id, [x as f64, y as f64, z as f64]);
+            }
+        }
+        let names = ["Solid-4", "SOLID-5", "SOLID-6"];
+        for (index, name) in names.iter().enumerate() {
+            let first = 4 * index as NodeId;
+            let nodes = (1..=8).map(|n| first + n).collect();
+            let id = index as ElementId + 1;
+            (mesh.add_element(plx_mesh::Element {
+                id,
+                type_name: "C3D8".into(),
+                shape: plx_mesh::ElementShape::Hex8,
+                nodes,
+            }))
+            .unwrap();
+            mesh.parts.push(plx_mesh::Part {
+                name: name.to_string(),
+                elements: vec![id],
+            });
+        }
+        let mut step = Step::new_static("Step-1");
+        for (name, nodes, kind) in [
+            ("Fix", vec![1, 2, 3, 4], BoundaryKind::Fixed),
+            (
+                "Pull",
+                vec![13, 14, 15, 16],
+                BoundaryKind::Displacement([Some(0.01), None, None, None, None, None]),
+            ),
+        ] {
+            step.boundary_conditions.push(BoundaryCondition {
+                name: name.into(),
+                active: true,
+                visible: true,
+                region: Region::Nodes(nodes),
+                kind,
+                amplitude: None,
+            });
+        }
+        let fe = FeModel {
+            materials: vec![Material {
+                name: "S235".into(),
+                elastic: Some(Elastic {
+                    young: 210000.0,
+                    poisson: 0.3,
+                }),
+                ..Default::default()
+            }],
+            sections: vec![Section {
+                name: "Section-1".into(),
+                material: "S235".into(),
+                region: Region::Parts(names.map(String::from).to_vec()),
+                thickness: 1.0,
+                kind: SectionKind::Solid,
+            }],
+            steps: vec![step],
+            ..FeModel::default()
+        };
+        let inp = plx_io::inp::write_inp(&mesh, &fe, "Bloecke").unwrap();
+        let dir = std::env::temp_dir().join(format!("prepolix-parts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("bloecke.inp"), inp).unwrap();
+        let status = std::process::Command::new("ccx")
+            .args(["-i", "bloecke"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "ccx: {status:?}");
+        let frd = dir.join("bloecke.frd");
+        let alone = read_frd(&frd).unwrap().mesh;
+        let parts = |mesh: &FeMesh| -> Vec<(String, Vec<ElementId>)> {
+            (mesh.parts.iter())
+                .map(|p| (p.name.clone(), p.elements.clone()))
+                .collect()
+        };
+        assert_eq!(parts(&alone), [("S235".to_string(), vec![1, 2, 3])]);
+        let results = load(&frd, UnitSystem::MmTonSC).unwrap().model;
+        // Without the input the results keep the grouping of the file.
+        std::fs::remove_file(dir.join("bloecke.inp")).unwrap();
+        let without_input = load(&frd, UnitSystem::MmTonSC).unwrap().model;
+        std::fs::remove_dir_all(&dir).unwrap();
+        let expected: Vec<_> = (names.iter().zip(1..))
+            .map(|(name, id)| (name.to_string(), vec![id]))
+            .collect();
+        assert_eq!(parts(&results.mesh), expected);
+        assert_eq!(results.parts.len(), 3);
+        assert_eq!(parts(&without_input.mesh), parts(&alone));
     }
 
     #[test]

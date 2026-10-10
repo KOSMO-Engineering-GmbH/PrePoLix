@@ -24,6 +24,14 @@ When a result file is opened, PrePoLix shows the #ui("Results") tab with the las
 / History Outputs: values from the `.dat` file and history outputs you create (@history-outputs).
 / Hot Spot Stresses, Paths, Plane Results: evaluations described in the following sections.
 
+Results list the parts of the model they were computed from, as in the #ui("FE Model") tab, also
+when several parts share a section. A `.frd` file itself only groups the elements by material;
+PrePoLix reads the parts from the input file CalculiX ran, the `.inp` file of the same name next
+to the results. Results of an analysis run from PrePoLix and results bound to a project always
+have it. A `.frd` file opened without its input file shows one part per material.
+
+#screenshot("results-parts.png", [Three parts sharing one section keep their names in the results])
+
 == Results toolbar <results-toolbar>
 
 #screenshot("results-toolbar.png", [Results toolbar])

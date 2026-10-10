@@ -340,6 +340,52 @@ impl FeMesh {
         }
         Some(old)
     }
+
+    /// Groups the elements into the parts of the mesh they were computed from, as PrePoMax
+    /// maps the parts of the model onto its results: each part takes its elements this mesh
+    /// has, in the order of `parts`; elements no part claims stay in the parts they were in.
+    /// Returns false, leaving the parts alone, when none of the elements is claimed.
+    pub fn adopt_parts(&mut self, parts: &[Part]) -> bool {
+        let mut claimed = vec![false; self.elements.len()];
+        let mut adopted = Vec::new();
+        for part in parts {
+            let elements: Vec<ElementId> = (part.elements.iter().copied())
+                .filter(|&id| {
+                    self.element_index(id)
+                        .is_some_and(|index| !std::mem::replace(&mut claimed[index], true))
+                })
+                .collect();
+            if !elements.is_empty() {
+                adopted.push(Part {
+                    name: part.name.clone(),
+                    elements,
+                });
+            }
+        }
+        if adopted.is_empty() {
+            return false;
+        }
+        for part in std::mem::take(&mut self.parts) {
+            let elements: Vec<ElementId> = (part.elements.into_iter())
+                .filter(|&id| self.element_index(id).is_some_and(|index| !claimed[index]))
+                .collect();
+            if elements.is_empty() {
+                continue;
+            }
+            let mut name = part.name;
+            let base = name.clone();
+            let same = |a: &Part, n: &str| a.name.eq_ignore_ascii_case(n);
+            for number in 2.. {
+                if !adopted.iter().any(|a| same(a, &name)) {
+                    break;
+                }
+                name = format!("{base}-{number}");
+            }
+            adopted.push(Part { name, elements });
+        }
+        self.parts = adopted;
+        true
+    }
 }
 
 /// How a mesh is stored in project files: nodes and elements without lookup tables; element
@@ -432,6 +478,46 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn adopted_parts_regroup_the_elements() {
+        let mut mesh = FeMesh::default();
+        for id in 1..=4 {
+            mesh.set_node(id, [id as f64, 0.0, 0.0]);
+        }
+        for id in 1..=5 {
+            mesh.add_element(Element {
+                id,
+                type_name: "T3D2".into(),
+                shape: ElementShape::Line2,
+                nodes: vec![1, 2],
+            })
+            .unwrap();
+        }
+        let part = |name: &str, elements: Vec<ElementId>| Part {
+            name: name.into(),
+            elements,
+        };
+        mesh.parts = vec![part("Steel", vec![1, 2, 3, 4]), part("Wood", vec![5])];
+        // Nothing of the source in the mesh: the parts stay.
+        assert!(!mesh.adopt_parts(&[part("Other", vec![9])]));
+        assert_eq!(mesh.parts[0].name, "Steel");
+        // Element 9 is not in the mesh, 4 and 5 are claimed by no source part.
+        let source = [part("Solid-1", vec![1, 3, 9]), part("steel", vec![2, 1])];
+        assert!(mesh.adopt_parts(&source));
+        let parts: Vec<_> = (mesh.parts.iter())
+            .map(|p| (p.name.as_str(), p.elements.clone()))
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("Solid-1", vec![1, 3]),
+                ("steel", vec![2]),
+                ("Steel-2", vec![4]),
+                ("Wood", vec![5]),
+            ]
+        );
+    }
 
     #[test]
     fn the_fingerprint_changes_with_the_mesh() {

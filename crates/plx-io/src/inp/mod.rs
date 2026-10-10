@@ -43,6 +43,9 @@ pub struct InpImport {
     pub skipped_keywords: BTreeMap<String, usize>,
     /// The file itself followed by every included file.
     pub files: Vec<PathBuf>,
+    /// Element sets of `*ELEMENT` blocks, which become parts, as the file writes them; set
+    /// and part names are upper case like CalculiX reads them.
+    pub part_names: BTreeMap<String, String>,
 }
 
 pub fn read_inp(path: &Path) -> Result<InpImport, InpError> {
@@ -155,6 +158,11 @@ impl Reader {
             },
             "ELEMENT" => {
                 let type_name = required("TYPE")?;
+                if let Some(set) = keyword.param("ELSET").filter(|s| !s.is_empty()) {
+                    (self.import.part_names)
+                        .entry(set.to_ascii_uppercase())
+                        .or_insert_with(|| set.to_string());
+                }
                 match ElementShape::from_type_name(&type_name) {
                     Some(shape) => Block::Element {
                         set: keyword
