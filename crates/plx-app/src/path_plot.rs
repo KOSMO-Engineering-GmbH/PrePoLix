@@ -1,0 +1,412 @@
+//! Plots of path results shown as annotations in the 3D view, which stay after the path
+//! dialog is closed and follow the shown increment: either in a box the user moves and
+//! resizes, or drawn onto the path itself, which then is the plot's distance axis.
+
+use egui::{
+    Color32, CursorIcon, Painter, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
+    vec2,
+};
+use glam::Vec3;
+use plx_model::ResultPath;
+use plx_render::Camera;
+use plx_results::path::{self, PathPoint};
+
+use crate::model::Model;
+use crate::overlay::project;
+use crate::results::format_value;
+
+const MARGIN: f32 = 20.0;
+/// Space kept free below a new box for the scale bar.
+const BOTTOM: f32 = 70.0;
+const TITLE_HEIGHT: f32 = 20.0;
+const HANDLE: f32 = 12.0;
+const MIN_SIZE: Vec2 = vec2(260.0, 160.0);
+/// Distance in points from the curve on the path within which it can be grabbed.
+const GRAB: f32 = 6.0;
+const CURVE: Color32 = Color32::from_rgb(200, 0, 160);
+const FILL: Color32 = Color32::from_rgba_premultiplied(25, 0, 20, 32);
+
+/// Where and how a plot is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    /// Top left corner of the box relative to that of the view; `None` until it is moved.
+    pub offset: Option<Vec2>,
+    pub size: Vec2,
+    /// Drawn onto the path instead of in a box.
+    pub on_path: bool,
+    /// On the path: distance in points of the largest value from the path.
+    pub height: f32,
+}
+
+impl Default for Placement {
+    fn default() -> Self {
+        Self {
+            offset: None,
+            size: vec2(400.0, 240.0),
+            on_path: false,
+            height: 80.0,
+        }
+    }
+}
+
+/// A path whose plot the 3D view shows, with where the user put it.
+pub struct PathPlot {
+    /// Name of the path in the model's features.
+    pub path: String,
+    pub placement: Placement,
+    /// Read-out points of the path as last located.
+    located: Option<(ResultPath, Result<Vec<PathPoint>, String>)>,
+}
+
+impl PathPlot {
+    pub fn new(path: String) -> Self {
+        Self {
+            path,
+            placement: Placement::default(),
+            located: None,
+        }
+    }
+
+    /// The plot to draw for the shown component of the model's results along `path`, or
+    /// `None` without results or where the path misses the mesh.
+    pub fn plot_box(&mut self, index: usize, model: &Model, path: &ResultPath) -> Option<PlotBox> {
+        let view = model.results.as_ref()?;
+        let (field, component) = view.current()?;
+        if self.located.as_ref().is_none_or(|(p, _)| p != path) {
+            let points = path
+                .samples(&model.fe)
+                .map(|samples| path::path_points(&model.mesh, &samples));
+            self.located = Some((path.clone(), points));
+        }
+        let points = self.located.as_ref()?.1.as_ref().ok()?;
+        let values = path::interpolate(points, &component.values);
+        if !values.iter().any(|v| v.is_finite()) {
+            return None;
+        }
+        let (ends, _) = crate::features::path_line(model, path)?;
+        Some(PlotBox {
+            index,
+            title: format!("{}: {} {}", path.name, field.name, component.name),
+            distances: points.iter().map(|p| p.distance).collect(),
+            values,
+            ends,
+            placement: self.placement,
+        })
+    }
+}
+
+/// A plot as the 3D view draws it.
+pub struct PlotBox {
+    /// Index of the plot in the model's list.
+    pub index: usize,
+    pub title: String,
+    pub distances: Vec<f64>,
+    pub values: Vec<f64>,
+    /// Start and end of the path in render coordinates.
+    pub ends: [Vec3; 2],
+    pub placement: Placement,
+}
+
+/// What the user did to a plot.
+pub enum PlotEvent {
+    /// Moved, resized or switched between box and path.
+    Changed {
+        index: usize,
+        placement: Placement,
+    },
+    Delete(usize),
+}
+
+/// Draws the plots over the view `rect`. Dragging a box moves it, dragging its bottom right
+/// corner resizes it; dragging a plot on its path changes its height. The context menu
+/// switches between the two and deletes the plot.
+pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, boxes: &mut [PlotBox]) -> Vec<PlotEvent> {
+    let painter = ui.painter_at(rect);
+    let mut events = Vec::new();
+    let mut stacked = 0;
+    for plot in boxes.iter_mut() {
+        let before = plot.placement;
+        let id = ui.id().with(("path plot", plot.index));
+        let response = if plot.placement.on_path {
+            draw_on_path(ui, &painter, rect, camera, plot, id)
+        } else {
+            stacked += 1;
+            draw_box(ui, &painter, rect, plot, id, stacked - 1)
+        };
+        let Some(response) = response else {
+            continue;
+        };
+        response.context_menu(|ui| {
+            let (label, on_path) = if plot.placement.on_path {
+                ("Show in Box", false)
+            } else {
+                ("Show on Path", true)
+            };
+            if ui.button(label).clicked() {
+                plot.placement.on_path = on_path;
+                ui.close();
+            }
+            if ui.button("Delete").clicked() {
+                events.push(PlotEvent::Delete(plot.index));
+                ui.close();
+            }
+        });
+        if plot.placement != before {
+            events.push(PlotEvent::Changed {
+                index: plot.index,
+                placement: plot.placement,
+            });
+        }
+    }
+    events
+}
+
+/// A plot in a box with its title; returns the box's response.
+fn draw_box(
+    ui: &Ui,
+    painter: &Painter,
+    rect: Rect,
+    plot: &mut PlotBox,
+    id: egui::Id,
+    k: usize,
+) -> Option<egui::Response> {
+    let size = plot
+        .placement
+        .size
+        .max(MIN_SIZE)
+        .min((rect.size() - vec2(2.0 * MARGIN, 2.0 * MARGIN)).max(MIN_SIZE));
+    // New boxes go to the bottom left corner, each a little above the one before.
+    let stagger = 30.0 * k as f32;
+    let default = vec2(MARGIN + stagger, rect.height() - size.y - BOTTOM - stagger);
+    let mut offset = plot.placement.offset.unwrap_or(default);
+    let frame = Rect::from_min_size(rect.min + offset, size);
+    let response = ui.interact(frame, id, Sense::click_and_drag());
+    let corner = Rect::from_min_size(frame.max - Vec2::splat(HANDLE), Vec2::splat(HANDLE));
+    let handle = ui.interact(corner, id.with("resize"), Sense::drag());
+    let mut size = size;
+    let mut changed = false;
+    if handle.dragged_by(PointerButton::Primary) {
+        size = (size + handle.drag_delta()).max(MIN_SIZE);
+        changed = true;
+    } else if response.dragged_by(PointerButton::Primary) {
+        offset += response.drag_delta();
+        changed = true;
+    }
+    if handle.hovered() || handle.dragged() {
+        ui.ctx().set_cursor_icon(CursorIcon::ResizeNwSe);
+    } else if response.dragged() {
+        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+    } else if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::Grab);
+    }
+    // Kept inside the view.
+    offset.x = offset.x.clamp(0.0, (rect.width() - size.x).max(0.0));
+    offset.y = offset.y.clamp(0.0, (rect.height() - size.y).max(0.0));
+    if changed {
+        plot.placement.offset = Some(offset);
+        plot.placement.size = size;
+    }
+    let frame = Rect::from_min_size(rect.min + offset, size);
+    painter.rect_filled(frame, 0.0, Color32::WHITE);
+    painter.text(
+        frame.min + vec2(6.0, 3.0),
+        egui::Align2::LEFT_TOP,
+        &plot.title,
+        egui::FontId::proportional(13.0),
+        Color32::BLACK,
+    );
+    let area = Rect::from_min_max(frame.min + vec2(0.0, TITLE_HEIGHT), frame.max);
+    let hover = response.hover_pos().filter(|_| !response.dragged());
+    crate::features::draw_plot(
+        painter,
+        area.shrink(1.0),
+        hover,
+        &plot.distances,
+        &plot.values,
+        "Distance",
+        false,
+    );
+    painter.rect_stroke(
+        frame,
+        0.0,
+        Stroke::new(1.0, Color32::BLACK),
+        StrokeKind::Inside,
+    );
+    // Grip lines in the resize corner.
+    let grip = Stroke::new(1.0, Color32::from_gray(140));
+    for d in [4.0, 8.0] {
+        painter.line_segment([frame.max - vec2(d, 2.0), frame.max - vec2(2.0, d)], grip);
+    }
+    Some(response)
+}
+
+/// A plot drawn onto its path: values stand off the path, perpendicular to it on screen, the
+/// largest by `height` points; returns the response while the plot is grabbed.
+fn draw_on_path(
+    ui: &Ui,
+    painter: &Painter,
+    rect: Rect,
+    camera: &Camera,
+    plot: &mut PlotBox,
+    id: egui::Id,
+) -> Option<egui::Response> {
+    let [a, b] = plot.ends.map(|p| project(camera, rect, p));
+    let along = b - a;
+    if along.length() < 1.0 {
+        return None;
+    }
+    // Perpendicular on screen, to the upper side of the path.
+    let mut normal = along.normalized().rot90();
+    if normal.y > 0.0 || (normal.y == 0.0 && normal.x > 0.0) {
+        normal = -normal;
+    }
+    let length = plot.distances.last().copied().unwrap_or(0.0);
+    let extreme = (plot.values.iter().copied())
+        .filter(|v| v.is_finite())
+        .max_by(|x, y| x.abs().total_cmp(&y.abs()))?;
+    let scale = if extreme.abs() > 0.0 {
+        plot.placement.height / extreme.abs() as f32
+    } else {
+        0.0
+    };
+    let base = |d: f64| a + along * (d / length.max(1e-300)) as f32;
+    let points: Vec<Option<(Pos2, Pos2)>> = (plot.distances.iter().zip(&plot.values))
+        .map(|(&d, &v)| {
+            v.is_finite()
+                .then(|| (base(d), base(d) + normal * v as f32 * scale))
+        })
+        .collect();
+    // Translucent area between path and curve, then the curve in gap-separated pieces.
+    let mut fill = egui::Mesh::default();
+    for pair in points.windows(2) {
+        if let [Some((b0, p0)), Some((b1, p1))] = pair {
+            let i = fill.vertices.len() as u32;
+            for corner in [*b0, *b1, *p1, *p0] {
+                fill.colored_vertex(corner, FILL);
+            }
+            fill.add_triangle(i, i + 1, i + 2);
+            fill.add_triangle(i, i + 2, i + 3);
+        }
+    }
+    painter.add(fill);
+    let stroke = Stroke::new(2.0, CURVE);
+    painter.line_segment([a, b], Stroke::new(1.5, CURVE));
+    let mut curve: Vec<Pos2> = Vec::new();
+    for point in points.iter().chain([&None]) {
+        match point {
+            Some((_, p)) => curve.push(*p),
+            None if curve.len() > 1 => {
+                painter.add(egui::Shape::line(std::mem::take(&mut curve), stroke));
+            }
+            None => curve.clear(),
+        }
+    }
+    // Labels at the smallest and largest value, and the title past the larger end.
+    let font = egui::FontId::proportional(13.0);
+    let finite = || (plot.values.iter().enumerate()).filter(|(_, v)| v.is_finite());
+    let min = finite().min_by(|x, y| x.1.total_cmp(y.1));
+    let max = finite().max_by(|x, y| x.1.total_cmp(y.1));
+    let label = |index: usize, value: f64| {
+        let Some((_, p)) = points[index] else {
+            return;
+        };
+        let side = if value >= 0.0 { normal } else { -normal };
+        painter.text(
+            p + side * 4.0,
+            anchor(side),
+            format_value(value as f32),
+            font.clone(),
+            Color32::BLACK,
+        );
+    };
+    if let Some((i, &v)) = max {
+        label(i, v);
+    }
+    if let Some((i, &v)) = min.filter(|(i, _)| Some(*i) != max.map(|m| m.0)) {
+        label(i, v);
+    }
+    let title_side = if extreme >= 0.0 { normal } else { -normal };
+    let title_at = a + title_side * (plot.placement.height + 22.0);
+    painter.text(title_at, anchor(title_side), &plot.title, font, CURVE);
+    // Grabbed where the pointer is near the curve or the path, or while dragged or its menu
+    // is open, so that the rest of the view keeps its clicks.
+    let pointer = ui.input(|i| i.pointer.hover_pos());
+    let near = pointer.is_some_and(|pointer| {
+        let segments = (points.windows(2)).filter_map(|pair| match pair {
+            [Some((_, p0)), Some((_, p1))] => Some((*p0, *p1)),
+            _ => None,
+        });
+        segments
+            .chain([(a, b)])
+            .any(|(p0, p1)| distance_to_segment(pointer, p0, p1) < GRAB)
+    });
+    let menu_open = egui::Popup::is_id_open(ui.ctx(), id.with("popup"));
+    // A press on the curve keeps it grabbed until released, also before the pointer has
+    // moved far enough for egui to call it a drag.
+    let (pressed, down) = ui.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down()));
+    let held_id = id.with("held");
+    let held = down && (near && pressed || ui.data(|d| d.get_temp(held_id).unwrap_or(false)));
+    ui.data_mut(|d| d.insert_temp(held_id, held));
+    let dragged = ui.ctx().is_being_dragged(id);
+    if !(near || menu_open || dragged || held) {
+        return None;
+    }
+    let pointer = pointer.unwrap_or(a);
+    let response = ui.interact(
+        Rect::from_center_size(pointer, Vec2::splat(4.0 * GRAB)),
+        id,
+        Sense::click_and_drag(),
+    );
+    if response.dragged_by(PointerButton::Primary) {
+        let away = response.drag_delta().dot(title_side);
+        plot.placement.height = (plot.placement.height + away).max(10.0);
+        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+    } else if response.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::Grab);
+    }
+    Some(response)
+}
+
+/// Text anchor that puts a label on the `side` of a point.
+fn anchor(side: Vec2) -> egui::Align2 {
+    let h = if side.x > 0.5 {
+        egui::Align::Min
+    } else if side.x < -0.5 {
+        egui::Align::Max
+    } else {
+        egui::Align::Center
+    };
+    let v = if side.y > 0.5 {
+        egui::Align::Min
+    } else if side.y < -0.5 {
+        egui::Align::Max
+    } else {
+        egui::Align::Center
+    };
+    egui::Align2([h, v])
+}
+
+fn distance_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
+    let ab = b - a;
+    let t = ((p - a).dot(ab) / ab.length_sq().max(1e-12)).clamp(0.0, 1.0);
+    p.distance(a + ab * t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::pos2;
+
+    #[test]
+    fn labels_sit_on_the_given_side() {
+        assert_eq!(anchor(vec2(0.0, -1.0)), egui::Align2::CENTER_BOTTOM);
+        assert_eq!(anchor(vec2(1.0, 0.0)), egui::Align2::LEFT_CENTER);
+    }
+
+    #[test]
+    fn distance_to_segment_clamps_to_its_ends() {
+        let (a, b) = (pos2(0.0, 0.0), pos2(10.0, 0.0));
+        assert_eq!(distance_to_segment(pos2(5.0, 3.0), a, b), 3.0);
+        assert_eq!(distance_to_segment(pos2(14.0, 3.0), a, b), 5.0);
+    }
+}

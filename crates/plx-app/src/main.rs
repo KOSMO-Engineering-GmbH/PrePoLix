@@ -26,6 +26,7 @@ mod model;
 mod model_properties;
 mod numeric;
 mod overlay;
+mod path_plot;
 mod properties;
 mod query;
 mod results;

@@ -77,7 +77,23 @@ the selected columns over the first one.
 
 The dialog shows minimum, maximum and a plot of the value over the distance. #ui("Copy to
 Clipboard") and #ui("Save as CSV...") export the values; #ui("Table") lists them. Points outside
-the mesh have no value.
+the mesh have no value. The dialog's height can be changed by dragging its bottom right corner; the
+plot takes the extra height.
+
+#ui("Show in View") puts the plot into the 3D view as an annotation, where it stays after the
+dialog is closed and appears in screenshots. It shows the displayed component of the current
+increment and follows when another one is selected. Drag the box to move it and its bottom right
+corner to resize it; #ui("Delete") in its context menu, or #ui("Remove from View") in the dialog,
+removes it.
+
+#screenshot("path-plot-in-view.png", [A path plot as an annotation in the 3D view])
+
+#ui("Show on Path") in the context menu draws the plot onto the path itself instead: the path is
+the distance axis, the values stand off it perpendicular on the screen over a translucent area,
+with the largest and smallest value labelled. Drag the curve away from the path or towards it to
+change its height; #ui("Show in Box") puts it back into its box.
+
+#screenshot("path-plot-on-path.png", [The same plot drawn onto its path])
 
 == Plane results
 

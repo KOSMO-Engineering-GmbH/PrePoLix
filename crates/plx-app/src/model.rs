@@ -74,6 +74,8 @@ pub struct Model {
     pub geometry_solids: usize,
     /// Hot spots defined on a results file, with their values.
     pub hot_spots: crate::hot_spots::HotSpots,
+    /// Plots of result paths shown in the 3D view.
+    pub path_plots: Vec<crate::path_plot::PathPlot>,
     /// Faces and parts drawn in the highlight colour.
     pub highlight: Highlight,
     /// The section view plane in render coordinates; picking ignores what it cuts off.
@@ -362,6 +364,7 @@ impl Model {
             cad_entities: Vec::new(),
             geometry_solids: 0,
             hot_spots: Default::default(),
+            path_plots: Vec::new(),
             highlight: Highlight::default(),
             clip: None,
             origin,
