@@ -2677,7 +2677,10 @@ fn history_output_form(
         ui.set_max_width(320.0);
         for &variable in choices {
             let mut on = output.variables.iter().any(|v| v == variable);
-            if ui.checkbox(&mut on, variable).changed() {
+            let checkbox = ui
+                .checkbox(&mut on, variable)
+                .on_hover_text(plx_model::output_variable_description(variable));
+            if checkbox.changed() {
                 output.variables.retain(|v| v != variable);
                 if on {
                     output.variables.push(variable.to_string());
@@ -2752,7 +2755,7 @@ fn field_output_form(ui: &mut Ui, output: &mut FieldOutput, taken: &[&str], new:
                     let mut on = output.variables.iter().any(|v| v == variable);
                     let checkbox = ui
                         .checkbox(&mut on, variable)
-                        .on_hover_text(plx_model::field_variable_description(variable));
+                        .on_hover_text(plx_model::output_variable_description(variable));
                     if checkbox.changed() {
                         output.variables.retain(|v| v != variable);
                         if on {

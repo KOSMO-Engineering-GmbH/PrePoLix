@@ -121,7 +121,7 @@ tab derive new fields from opened results instead (@derived-fields).]
 
 History outputs write values of a region to the `.dat` file in every increment (`*NODE PRINT`,
 `*EL PRINT`, `*CONTACT PRINT`). Create them with #ui("Create ...") on #ui("History Outputs") of a
-step.
+step. Hovering over a variable shows what it is.
 
 #fields(
   [Type], [#ui("Node Output") (region of nodes), #ui("Element Output") (parts, element set or

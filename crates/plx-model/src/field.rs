@@ -107,8 +107,9 @@ impl OutputKind {
     }
 }
 
-/// PrePoMax's description of a field variable, shown when hovering over its check box.
-pub fn field_variable_description(variable: &str) -> &'static str {
+/// PrePoMax's description of a field or history output variable, shown when hovering over its
+/// check box; the history-only variables are described as in the CalculiX manual.
+pub fn output_variable_description(variable: &str) -> &'static str {
     match variable {
         "RF" => "Reaction forces.",
         "U" => "Displacements.",
@@ -132,6 +133,12 @@ pub fn field_variable_description(variable: &str) -> &'static str {
         "CSTR" => "Contact stresses.",
         "CELS" => "Contact energy.",
         "PCON" => "Contact states for frequency and steady state dynamics calculations.",
+        "ELSE" => "Internal energy of whole elements.",
+        "ELKE" => "Kinetic energy of whole elements.",
+        "EVOL" => "Volume of whole elements.",
+        "EBHE" => "Heat generation of whole elements (body heat flux).",
+        "CNUM" => "Number of contact elements.",
+        "CF" => "Contact forces summed over the slave surface of the contact pair.",
         _ => "",
     }
 }
@@ -246,6 +253,28 @@ mod tests {
         assert!(output.check_variables().is_err());
         output.variables.clear();
         assert!(output.check_variables().is_err());
+    }
+
+    #[test]
+    fn every_output_variable_has_a_description() {
+        let history = [
+            crate::HistoryKind::Node {
+                region: crate::Region::Nodes(Vec::new()),
+            },
+            crate::HistoryKind::Element {
+                region: crate::Region::Nodes(Vec::new()),
+            },
+            crate::HistoryKind::Contact {
+                pair: String::new(),
+            },
+        ];
+        let field = OutputKind::ALL.iter().flat_map(|k| k.choices());
+        for variable in field.chain(history.iter().flat_map(|k| k.choices())) {
+            assert!(
+                !output_variable_description(variable).is_empty(),
+                "{variable}"
+            );
+        }
     }
 
     #[test]

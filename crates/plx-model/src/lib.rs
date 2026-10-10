@@ -35,7 +35,7 @@ pub use features::{
     CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource,
     PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane,
 };
-pub use field::{FieldOutput, OutputDimension, OutputKind, field_variable_description};
+pub use field::{FieldOutput, OutputDimension, OutputKind, output_variable_description};
 pub use geometry::{
     Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters,
 };
