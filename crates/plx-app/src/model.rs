@@ -349,6 +349,7 @@ impl Model {
                 .filter(|(_, part)| !part.contours)
                 .map(|(index, _)| index)
                 .collect(),
+            mesh: Some(self.mesh.fingerprint()),
             ..view.settings()
         })
         .map(|mut settings| {
@@ -1755,6 +1756,7 @@ mod tests {
             reference_points: vec![plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])],
             result_paths: vec![plx_model::ResultPath::new("Path-1")],
             plain_parts: vec![0],
+            mesh: Some(model.mesh.fingerprint()),
             increment: 0,
             shown: Some(("SCALED".into(), "VALUE".into())),
             view: plx_results::saved_view::SavedView {
