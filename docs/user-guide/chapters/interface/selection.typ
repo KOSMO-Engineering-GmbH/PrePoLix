@@ -27,8 +27,9 @@ selects.
 
 #screenshot("selection.png", [Picking faces for a load with the selection window])
 
-/ Geometry based: #ui("Faces, edges and points") selects the smooth patch of faces under the
-  cursor, or a feature edge or corner within a few pixels. #ui("Part") selects whole parts.
+/ Geometry based: #ui("Faces, edges and points") selects the CAD face under the cursor, split
+  faces included (@geometry-import), or on a mesh without geometry the smooth patch of faces;
+  near a feature edge or corner, within a few pixels, it selects that. #ui("Part") selects whole parts.
   #ui("Edge angle") and #ui("Surface angle") grow the selection across edges or faces as long as
   the angle between neighbours stays below the given value (default 30°).
 / Mesh based (#ui("More")): #ui("Node"), #ui("Element"), #ui("Edge"), #ui("Surface"),
