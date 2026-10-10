@@ -52,55 +52,103 @@ def extrude(mesh, cells, layers, z0, z1, tag):
 
 
 def gear():
-    teeth, r_hole, r_root, r_tip, width = 12, 11.0, 32.0, 42.0, 10.0
-    per_tooth, n_body, n_tooth = 8, 5, 4
-    nt = teeth * per_tooth
+    """Spur gear with involute teeth and root fillets, a thin web with spokes and windows
+    between rim and hub, and a hub that stands out on both sides."""
+    z_teeth, module, alpha = 16, 5.0, math.radians(20)
+    r_pitch = module * z_teeth / 2
+    r_tip, r_root, r_base = r_pitch + module, r_pitch - 1.25 * module, r_pitch * math.cos(alpha)
+    r_bore, r_hub, r_rim = 8.0, 15.0, r_root - 5.5
+    spokes = 5
+    pitch = 2 * math.pi / z_teeth
+    inv = lambda a: math.tan(a) - a
 
-    def body(i, j):
-        r = r_hole + (r_root - r_hole) * (i / n_body) ** 0.9
-        return (("b", i, j % nt), polar(r, 2 * math.pi * j / nt, 0)[:2])
+    def half_angle(r):
+        """Half the angular tooth thickness at radius r: involute flank, root fillet below."""
+        rr = max(r, r_base)
+        psi = pitch / 4 + inv(alpha) - inv(math.acos(min(1.0, r_base / rr)))
+        fillet = 0.35 * module
+        if r < r_root + fillet:
+            # Quarter circle that widens the tooth into the root.
+            d = (r_root + fillet - r) / fillet
+            psi += (1 - math.sqrt(max(0.0, 1 - d * d))) * fillet * 0.9 / r
+        return psi
+
+    n_tooth, across, gap_cells = 7, 4, 4
+    psi0 = half_angle(r_root)
+
+    # Angles of the nodes along the root circle within one pitch: across the tooth base,
+    # then across the gap; inner rings reuse them so everything stays conforming.
+    def ring_angle(t, j):
+        mid = t * pitch
+        if j <= across:
+            return mid - psi0 + 2 * psi0 * j / across
+        return mid + psi0 + (pitch - 2 * psi0) * (j - across) / gap_cells
+
+    per_pitch = across + gap_cells
+    n_ring = z_teeth * per_pitch
+
+    def angle(j):
+        t, k = divmod(j % n_ring, per_pitch)
+        return ring_angle(t, k)
+
+    radii = [r_bore + (r_hub - r_bore) * i / 3 for i in range(3)]
+    radii += [r_hub + (r_rim - r_hub) * i / 5 for i in range(5)]
+    radii += [r_rim + (r_root - r_rim) * i / 3 for i in range(4)]
+    zone = lambda i: "hub" if radii[i] < r_hub - 1e-9 else ("web" if radii[i] < r_rim - 1e-9 else "rim")
+
+    def ring(i, j):
+        return (("r", i, j % n_ring), polar(radii[i], angle(j), 0)[:2])
 
     def tooth(t, i, j):
-        # j = 0..4 across the tooth, which occupies half the pitch and narrows to the tip.
         if i == 0:
-            return body(n_body, t * per_tooth + 2 + j)
-        pitch = 2 * math.pi / teeth
-        mid = t * pitch + pitch / 2
-        a = mid + (j - 2) / 4 * pitch / 2 * (1 - 0.55 * i / n_tooth)
-        r = r_root + (r_tip - r_root) * i / n_tooth
+            return ring(len(radii) - 1, t * per_pitch + j)
+        u = i / n_tooth
+        r = r_root + (r_tip - r_root) * (u ** 0.85)
+        psi = half_angle(r)
+        a = t * pitch - psi + 2 * psi * j / across
         return (("t", t, i, j), polar(r, a, 0)[:2])
 
-    cells = []
-    for i in range(n_body):
-        for j in range(nt):
-            cells.append([body(i, j), body(i + 1, j), body(i + 1, j + 1), body(i, j + 1)])
-    for t in range(teeth):
+    cells = {"hub": [], "web": [], "rim": []}
+    for i in range(len(radii) - 1):
+        for j in range(n_ring):
+            a_mid = (angle(j) + angle(j + 1)) / 2 if j + 1 < n_ring else angle(j) + 0.01
+            kind = zone(i)
+            if kind == "web":
+                # Spokes stay solid, the windows between them are left open.
+                sector = (a_mid % (2 * math.pi)) / (2 * math.pi / spokes)
+                if abs(sector - round(sector)) > 0.16 and 0 < i - 3 < 4:
+                    continue
+            cells[kind].append([ring(i, j), ring(i + 1, j), ring(i + 1, j + 1), ring(i, j + 1)])
+    for t in range(z_teeth):
         for i in range(n_tooth):
-            for j in range(4):
-                cells.append([tooth(t, i, j), tooth(t, i + 1, j), tooth(t, i + 1, j + 1), tooth(t, i, j + 1)])
+            for j in range(across):
+                cells["rim"].append([tooth(t, i, j), tooth(t, i + 1, j), tooth(t, i + 1, j + 1), tooth(t, i, j + 1)])
+
     mesh = Mesh()
-    # Body and teeth share the root circle nodes; one tag keeps them conforming.
-    extrude(mesh, cells, 3, 0.0, width, "g")
+    width, web, hub = 14.0, 4.0, 3.0  # face width, web thickness, hub overhang per side
+    levels = lambda z0, z1, n: [z0 + (z1 - z0) * k / n for k in range(n + 1)]
+    def stack(quads, zs):
+        for k in range(len(zs) - 1):
+            extrude(mesh, quads, 1, zs[k], zs[k + 1], "g")
+    rim_z = levels(0, width, 4)
+    mid0, mid1 = (width - web) / 2, (width + web) / 2
+    assert mid0 in rim_z or True
+    rim_z = sorted(set([round(z, 6) for z in rim_z + [mid0, mid1]]))
+    stack(cells["rim"], rim_z)
+    stack(cells["web"], [mid0, mid1])
+    stack(cells["hub"], sorted(set(rim_z + [-hub, width + hub])))
+
     nodes = mesh.by_id()
-    fixed = [n for n, (x, y, z) in nodes.items() if math.hypot(x, y) < r_hole + 1e-6]
-    # Torque: a tangential force on one flank of every tooth.
-    pitch = 2 * math.pi / teeth
-    flank = []
-    for n, (x, y, z) in nodes.items():
-        r = math.hypot(x, y)
-        if r <= r_root + 1:
-            continue
-        a = math.atan2(y, x) % (2 * math.pi)
-        u = (r - r_root) / (r_tip - r_root)
-        for t in range(teeth):
-            a_flank = t * pitch + pitch / 2 + pitch / 4 * (1 - 0.55 * u)
-            if abs(a - a_flank % (2 * math.pi)) < 1e-6:
-                flank.append((n, a))
+    fixed = [n for n, (x, y, z) in nodes.items() if math.hypot(x, y) < r_bore + 1e-6]
+    # Torque: a tangential force on one flank of every tooth (the j = across side).
+    flank = [mesh.nodes[k][0] for k in mesh.nodes if k[1][0] == "t" and k[1][3] == across]
     loads = []
-    for n, a in flank:
-        f = -4000.0 / len(flank)
+    for n in flank:
+        x, y, _ = nodes[n]
+        a = math.atan2(y, x)
+        f = -6000.0 / len(flank)
         loads += [(n, 1, -f * math.sin(a)), (n, 2, f * math.cos(a))]
-    return mesh, fixed, loads, None, "mises"
+    return mesh, fixed, loads, None, "displacement"
 
 
 # ------------------------------------------------------------------ impeller

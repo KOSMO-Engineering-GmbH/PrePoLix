@@ -34,11 +34,10 @@
   rgb("#2a3fe0"), rgb("#1e7ff0"), rgb("#18b8e8"), rgb("#1fd6b0"), rgb("#4ad94a"),
   rgb("#b4e02c"), rgb("#f5dc1e"), rgb("#ffa21c"), rgb("#f8601a"), rgb("#e0201e"),
 )
-#let band(v) = legend.at(int(calc.clamp(v, 0.0, 0.9999) * legend.len()))
 
 // Per part: view angles, how the result maps onto the legend, and the frame.
 #let views = (
-  gear: (azimuth: -62deg, tilt: 58deg, gamma: 0.8, fill: 0.86),
+  gear: (azimuth: -62deg, tilt: 42deg, gamma: 1.0, fill: 0.86),
   impeller: (azimuth: -20deg, tilt: 50deg, gamma: 1.0, fill: 0.88),
 )
 #let view = views.at(design)
@@ -121,11 +120,14 @@
 #let xs = used.map(n => projected.at(n).at(0))
 #let ys = used.map(n => projected.at(n).at(1))
 #let (x0, x1, y0, y1) = (calc.min(..xs), calc.max(..xs), calc.min(..ys), calc.max(..ys))
-#let fill-frac = if small { calc.min(view.fill + 0.08, 0.97) } else { view.fill }
+#let fill-frac = if "fill" in sys.inputs { float(sys.inputs.fill) } else if small { calc.min(view.fill + 0.08, 0.97) } else { view.fill }
 #let zoom = fill-frac * S / calc.max(x1 - x0, y1 - y0)
+// Offset of the part on the tile in pt (x right, y down).
+#let shift = sys.inputs.at("shift", default: "0,0").split(",").map(float)
 #let screen(n) = {
   let p = projected.at(n)
-  (((p.at(0) - (x0 + x1) / 2) * zoom + S / 2) * 1pt, (S / 2 - (p.at(1) - (y0 + y1) / 2) * zoom) * 1pt)
+  (((p.at(0) - (x0 + x1) / 2) * zoom + S / 2 + shift.at(0)) * 1pt,
+   (S / 2 - (p.at(1) - (y0 + y1) / 2) * zoom + shift.at(1)) * 1pt)
 }
 
 // Visible faces, far ones first (painter's algorithm), with their normal for shading.
@@ -149,29 +151,101 @@
 
 // ---------------------------------------------------------------- drawing
 
+// Raised tile: a bevel lit from the upper left around a slightly sunken face, a glow
+// behind the part and its shadow on the face.
+#let R = 56.0
+#let bevel = 7.0
 #let background() = {
-  if not mono {
-    place(rect(width: 100%, height: 100%, radius: 56pt,
-      fill: gradient.linear(rgb("#163564"), navy, angle: 60deg)))
-  }
+  if mono { return }
+  place(rect(width: 100%, height: 100%, radius: R * 1pt,
+    fill: gradient.linear(rgb("#3a68b0"), rgb("#14305c"), rgb("#050f22"), angle: 45deg)))
+  place(dx: bevel * 1pt, dy: bevel * 1pt, rect(width: (S - 2 * bevel) * 1pt, height: (S - 2 * bevel) * 1pt,
+    radius: (R - bevel) * 1pt, fill: gradient.linear(rgb("#0c2147"), rgb("#163a70"), angle: 45deg)))
+  // Glow in the colour of the low end of the legend.
+  place(center + horizon, circle(radius: 112pt,
+    fill: gradient.radial(rgb(60, 140, 255, 110), rgb(60, 140, 255, 0), radius: 50%)))
 }
+
+#let shadow() = {
+  if mono { return }
+  place(center + horizon, dy: 22pt, ellipse(width: 236pt, height: 150pt,
+    fill: gradient.radial(rgb(0, 0, 0, 150), rgb(0, 0, 0, 60), rgb(0, 0, 0, 0), radius: 50%)))
+}
+
+// Cut a polygon of (x, y, value) corners down to the part where lo <= value <= hi
+// (Sutherland-Hodgman with the value as the clipping coordinate).
+#let clip-value(poly, keep, cut) = {
+  let out = ()
+  for i in range(poly.len()) {
+    let a = poly.at(i)
+    let b = poly.at(calc.rem(i + 1, poly.len()))
+    let ka = keep(a.at(2))
+    if ka { out.push(a) }
+    if ka != keep(b.at(2)) {
+      let t = (cut - a.at(2)) / (b.at(2) - a.at(2))
+      out.push((a.at(0) + t * (b.at(0) - a.at(0)), a.at(1) + t * (b.at(1) - a.at(1)), cut))
+    }
+  }
+  out
+}
+
+// Split a face into contour bands: the band edges run through the face like in a
+// PrePoMax contour plot instead of one colour per face.
+#let bands(corners) = {
+  let n = legend.len()
+  let vs = corners.map(c => c.at(2))
+  let k0 = calc.clamp(int(calc.min(..vs) * n), 0, n - 1)
+  let k1 = calc.clamp(int(calc.max(..vs) * n), 0, n - 1)
+  if k0 == k1 { return ((k0, corners),) }
+  let out = ()
+  for k in range(k0, k1 + 1) {
+    let poly = corners
+    if k > k0 { poly = clip-value(poly, v => v >= k / n, k / n) }
+    if k < k1 and poly.len() > 0 { poly = clip-value(poly, v => v <= (k + 1) / n, (k + 1) / n) }
+    if poly.len() >= 3 { out.push((k, poly)) }
+  }
+  out
+}
+
+#let pt2(c) = (c.at(0) * 1pt, c.at(1) * 1pt)
 
 #let part() = {
   for (f, depth, n) in visible {
     // Light from the upper left front.
     let light = calc.clamp(0.3 + 0.7 * (0.75 * n.at(2) - 0.35 * n.at(0) + 0.5 * n.at(1)), 0.0, 1.0)
-    let v = calc.pow(f.map(k => values.at(k)).sum() / 4, view.gamma)
-    let col = if light-mono { light-face.darken((1 - light) * if small { 70% } else { 40% }) }
-      else if mono { mono-ink.lighten((1 - light) * 55%) } else { band(v).darken((1 - light) * 50%) }
-    let edge = if small { 0.35pt + col }
-      else if light-mono { (paint: light-line, thickness: 0.55pt, join: "round") }
-      else if mono { (paint: white.transparentize(30%), thickness: 0.5pt, join: "round") }
-      else { (paint: rgb(0, 0, 0, 90), thickness: 0.45pt, join: "round") }
-    place(polygon(fill: col, stroke: edge, ..f.map(screen)))
+    let corners = f.map(k => {
+      let (x, y) = screen(k)
+      (x / 1pt, y / 1pt, calc.pow(values.at(k), view.gamma))
+    })
+    if mono {
+      let col = if light-mono { light-face.darken((1 - light) * if small { 70% } else { 40% }) }
+        else { mono-ink.lighten((1 - light) * 55%) }
+      let edge = if small { 0.35pt + col }
+        else if light-mono { (paint: light-line, thickness: 0.55pt, join: "round") }
+        else { (paint: white.transparentize(30%), thickness: 0.5pt, join: "round") }
+      place(polygon(fill: col, stroke: edge, ..corners.map(pt2)))
+    } else {
+      for (k, poly) in bands(corners) {
+        let col = legend.at(k).darken((1 - light) * 50%)
+        // A hairline in the fill colour closes the seams between neighbouring pieces.
+        place(polygon(fill: col, stroke: 0.35pt + col, ..poly.map(pt2)))
+      }
+      if not small {
+        place(polygon(stroke: (paint: rgb(0, 0, 0, 80), thickness: 0.4pt, join: "round"),
+          ..corners.map(pt2)))
+      }
+    }
   }
 }
 
 #box(width: 100%, height: 100%, {
   background()
-  part()
+  let tile = (S - 2 * bevel) * 1pt
+  // Everything inside the bevel is clipped to the tile face, so a large part runs into
+  // the bevel instead of floating above the tile.
+  place(dx: bevel * 1pt, dy: bevel * 1pt, box(width: tile, height: tile, clip: not mono,
+    radius: (R - bevel) * 1pt, place(dx: -bevel * 1pt, dy: -bevel * 1pt, {
+      shadow()
+      part()
+    })))
 })
