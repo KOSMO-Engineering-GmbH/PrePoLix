@@ -24,6 +24,9 @@ again with its diagram until another model is opened.
     coinciding modes there.],
   [Engine orders], [The excitation lines $f = "order" times "speed"$ drawn into the diagram, as
     a comma-separated list such as `1, 2, 3`. They can be changed after the sweep.],
+  [Frequency axis up to \[Hz\]], [Upper end of the frequency axis; 0 (default) fits the axis to
+    the modes. A limit zooms in on the low frequencies, where the order lines of a stiff rotor
+    run close to the speed axis. It can be changed at any time, also during the sweep.],
 )
 
 #ui("Start sweep") scales the centrifugal loads of the model to every speed, runs CalculiX in
@@ -35,12 +38,17 @@ progress and the messages of the runs appear below the diagram; #ui("Cancel") st
 fewer than two speeds give complex frequencies, the window says so in place of the diagram; the
 messages below name the CalculiX error of each failed speed.
 
-The diagram has one curve per mode and one line per engine order. A mode that whirls the same
+The diagram has one curve per mode and one dashed grey line per engine order.
+The order lines start at 0 rpm even though the sweep leaves
+out standstill, and carry their order as a label. A mode that whirls the same
 way at every speed carries its direction in the legend, F (forward) or B (backward) as CalculiX
 reports it. Where a mode crosses an order line, the rotor is
 excited at one of its eigenfrequencies: these crossings are listed under #ui("Critical speeds")
 with the order, the mode, its whirl, the speed in rpm and the frequency. #ui("Copy table")
-copies the frequencies of all modes at all speeds as tab-separated text.
+copies the frequencies of all modes at all speeds as tab-separated text. #ui("Export CSV ...")
+saves the same table as a CSV file, with a Save As dialog: one row per speed with the speed in
+rad/s and rpm, the frequency in Hz and the whirl (F, B or empty) of every mode, and the frequency
+of every order line. Numbers use a decimal point and the cells are separated by commas.
 
 #note[CalculiX solves the Coriolis modes in the rotating frame of reference. The frequencies of
 the diagram are therefore those an observer rotating with the shaft would see, and a pair of
