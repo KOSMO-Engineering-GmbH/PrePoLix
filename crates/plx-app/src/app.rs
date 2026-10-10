@@ -52,7 +52,7 @@ struct Workbench {
     settings: Settings,
     /// Open settings window with its unsaved draft.
     settings_window: Option<SettingsWindow>,
-    /// Open Campbell diagram window with its speed sweep.
+    /// Campbell diagram window with its speed sweep; kept with its results while hidden.
     campbell: Option<crate::campbell::CampbellWindow>,
     /// Open dialog of the model space and unit system, for a new or the open model.
     model_dialog: Option<ModelPropertiesDialog>,
@@ -2387,10 +2387,13 @@ impl Workbench {
                 "Needs an active Centrifugal load and a Complex Frequency step.",
             )
             .clicked()
-            && self.campbell.is_none()
-            && let Some(model) = self.setup_model()
         {
-            self.campbell = Some(crate::campbell::CampbellWindow::new(&model.fe));
+            // A closed window comes back with the diagram of its last sweep.
+            if let Some(window) = &mut self.campbell {
+                window.visible = true;
+            } else if let Some(model) = self.setup_model() {
+                self.campbell = Some(crate::campbell::CampbellWindow::new(&model.fe));
+            }
         }
     }
 
@@ -2399,6 +2402,10 @@ impl Workbench {
         let Some(mut window) = self.campbell.take() else {
             return;
         };
+        if !window.visible {
+            self.campbell = Some(window);
+            return;
+        }
         let can_start = self
             .setup_model()
             .is_some_and(|m| crate::campbell::applies(&m.fe) && m.mesh.element_count() > 0);
@@ -2410,9 +2417,8 @@ impl Workbench {
                 .ok_or_else(|| "No model is open.".to_string())?;
             window.start(&self.settings.solver, model, default_solver)
         });
-        if open || window.is_running() {
-            self.campbell = Some(window);
-        }
+        window.visible = open || window.is_running();
+        self.campbell = Some(window);
     }
 
     /// An entry of the analysis' context menu in the tree.
@@ -4407,6 +4413,7 @@ impl Workbench {
             self.output.push(format!("{} closed", model.file_name()));
         }
         self.geometry = None;
+        self.campbell = None;
         self.mesh_setup = None;
         self.mesh_item_editor = None;
         self.meshing = None;
