@@ -36,6 +36,15 @@ surface of a compression only support; and lines to the reference point of a rig
 #screenshot("constraint-symbols.png", [Point spring, surface spring, compression only support
   and rigid body on a cantilever])
 
+#ui("Hide") in the context menu of a constraint removes its symbol from the 3D view, #ui("Show")
+brings it back; the tree marks a hidden constraint with an eye. #ui("Hide All") and
+#ui("Show All") in the context menu of #ui("Constraints") do this for all constraints at once.
+As in PrePoMax, a hidden constraint is still drawn while it is selected, and the setting is saved
+with the project. Hiding changes only the view, not the analysis; #ui("Deactivate") leaves a
+constraint out of the input file.
+
+#screenshot("constraint-hide.png", [Hidden point spring and the context menu of Constraints])
+
 #limitation[User-defined equations are not available yet.]
 
 == Contacts <contacts>

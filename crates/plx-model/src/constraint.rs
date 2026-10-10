@@ -43,6 +43,9 @@ pub struct RigidBody {
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
+    /// Hidden constraints have no symbol in the 3D view unless selected, as in PrePoMax.
+    #[serde(default = "crate::active")]
+    pub visible: bool,
     pub region: Region,
     /// Name of the reference point ([`crate::ReferencePoint`]) the body is driven by.
     pub reference_point: String,
@@ -53,6 +56,7 @@ impl RigidBody {
         Self {
             name: name.into(),
             active: true,
+            visible: true,
             region: Region::Faces(Vec::new()),
             reference_point: reference_point.into(),
         }
@@ -65,6 +69,9 @@ pub struct PointSpring {
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
+    /// Hidden constraints have no symbol in the 3D view unless selected, as in PrePoMax.
+    #[serde(default = "crate::active")]
+    pub visible: bool,
     pub region: Region,
     /// K1..K3 of each node's spring in force per length; a zero adds no spring in that
     /// direction.
@@ -78,6 +85,9 @@ pub struct SurfaceSpring {
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
+    /// Hidden constraints have no symbol in the 3D view unless selected, as in PrePoMax.
+    #[serde(default = "crate::active")]
+    pub visible: bool,
     pub region: Region,
     /// K1..K3 of the whole surface (force per length), or per area of it (force per volume)
     /// with `per_area`.
@@ -92,6 +102,9 @@ pub struct CompressionOnly {
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
+    /// Hidden constraints have no symbol in the 3D view unless selected, as in PrePoMax.
+    #[serde(default = "crate::active")]
+    pub visible: bool,
     pub region: Region,
     /// Distance the surface can move away before the support takes load.
     pub clearance: f64,
@@ -121,6 +134,9 @@ pub struct SurfaceToSurfaceSpring {
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
+    /// Hidden constraints have no symbol in the 3D view unless selected, as in PrePoMax.
+    #[serde(default = "crate::active")]
+    pub visible: bool,
     /// The surface the springs end on.
     pub master: Region,
     /// The surface whose nodes get the springs.

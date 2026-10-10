@@ -2023,6 +2023,7 @@ mod tests {
             .push(Constraint::PointSpring(crate::PointSpring {
                 name: "Spring-1".into(),
                 active: true,
+                visible: true,
                 region: Region::Nodes(vec![7]),
                 stiffness: [0.0, 0.0, 1.0],
             }));

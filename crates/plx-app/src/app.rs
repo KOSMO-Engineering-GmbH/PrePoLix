@@ -1309,6 +1309,17 @@ impl Workbench {
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
             crate::setup::toggle_active(&mut model.fe, &item);
         }
+        if let (Some((index, visible)), Some(model)) =
+            (response.constraint_visibility, self.model.as_mut())
+        {
+            for (i, constraint) in model.fe.constraints.iter_mut().enumerate() {
+                if index.is_none_or(|index| index == i)
+                    && let Some(shown) = constraint.visible_mut()
+                {
+                    *shown = visible;
+                }
+            }
+        }
         if let (Some(item), Some(model)) = (response.swap_master_slave, self.model.as_mut())
             && crate::setup::swap_master_slave(&mut model.fe, &item)
         {
@@ -3716,12 +3727,17 @@ impl Workbench {
             if !constraint.active() || edited_constraint == Some(Some(i)) {
                 continue;
             }
+            // Like PrePoMax, a hidden constraint is still drawn while selected.
+            let is_selected =
+                edited_constraint.is_none() && selected == Some(&TreeItem::Constraint(i));
+            if !constraint.visible() && !is_selected {
+                continue;
+            }
             if let Some((kind, region)) = symbols::Kind::of_constraint(constraint) {
                 items.push(symbols::Item {
                     kind,
                     region,
-                    selected: edited_constraint.is_none()
-                        && selected == Some(&TreeItem::Constraint(i)),
+                    selected: is_selected,
                 });
             }
         }

@@ -267,6 +267,30 @@ impl Constraint {
         }
     }
 
+    /// Whether the constraint's symbol is shown; ties have none.
+    pub fn visible(&self) -> bool {
+        match self {
+            Constraint::PointSpring(c) => c.visible,
+            Constraint::SurfaceSpring(c) => c.visible,
+            Constraint::CompressionOnly(c) => c.visible,
+            Constraint::SurfaceToSurfaceSpring(c) => c.visible,
+            Constraint::RigidBody(c) => c.visible,
+            Constraint::Tie(_) | Constraint::NodeTie(_) => true,
+        }
+    }
+
+    /// The visibility of the constraint's symbol, for constraints that have one.
+    pub fn visible_mut(&mut self) -> Option<&mut bool> {
+        match self {
+            Constraint::PointSpring(c) => Some(&mut c.visible),
+            Constraint::SurfaceSpring(c) => Some(&mut c.visible),
+            Constraint::CompressionOnly(c) => Some(&mut c.visible),
+            Constraint::SurfaceToSurfaceSpring(c) => Some(&mut c.visible),
+            Constraint::RigidBody(c) => Some(&mut c.visible),
+            Constraint::Tie(_) | Constraint::NodeTie(_) => None,
+        }
+    }
+
     pub fn name_mut(&mut self) -> &mut String {
         match self {
             Constraint::PointSpring(c) => &mut c.name,
@@ -367,6 +391,17 @@ impl Tie {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constraints_saved_before_hiding_are_visible() {
+        let text =
+            r#"RigidBody((name: "Rigid_Body-1", region: Parts([]), reference_point: "RP-1"))"#;
+        let mut constraint: Constraint = ron::from_str(text).unwrap();
+        assert!(constraint.visible());
+        *constraint.visible_mut().unwrap() = false;
+        assert!(!constraint.visible());
+        assert!(Constraint::Tie(Tie::new("Tie-1")).visible_mut().is_none());
+    }
 
     #[test]
     fn swapping_turns_regions_and_a_pair_name_around() {
