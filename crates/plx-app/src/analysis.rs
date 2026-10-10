@@ -23,11 +23,14 @@ pub struct Analysis {
     finished: Option<f32>,
     status: JobStatus,
     pub monitor: bool,
+    /// The results of this run were bound to the project when they were opened.
+    pub bound: bool,
 }
 
 pub enum MonitorEvent {
     None,
-    OpenResults(PathBuf),
+    /// Open the results of the run.
+    OpenResults,
 }
 
 /// Copies the results file of a submodel's global model next to the input file `<name>.inp`
@@ -133,6 +136,7 @@ impl Analysis {
             finished: None,
             status: JobStatus::Running,
             monitor: true,
+            bound: false,
         })
     }
 
@@ -265,9 +269,8 @@ impl Analysis {
                     if ui
                         .add_enabled(results.is_some(), egui::Button::new("Results"))
                         .clicked()
-                        && let Some(path) = results
                     {
-                        event = MonitorEvent::OpenResults(path);
+                        event = MonitorEvent::OpenResults;
                     }
                 });
             });

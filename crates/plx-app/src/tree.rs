@@ -240,8 +240,6 @@ pub enum AnalysisAction {
     Monitor,
     Results,
     Kill,
-    /// Keep the results of the finished analysis in the project file.
-    BindResult,
     /// Drop the results bound to the project, to share only mesh and definition.
     RemoveBoundResult,
 }
@@ -254,7 +252,7 @@ pub struct JobState {
     pub results: bool,
     /// Results are bound to the project.
     pub bound: bool,
-    /// The analysis ran since the program started; its results can be bound.
+    /// The analysis ran since the program started; its monitor can be shown.
     pub ran: bool,
 }
 
@@ -967,15 +965,8 @@ impl Tree<'_> {
         action(ui, results, "Results", AnalysisAction::Results);
         action(ui, running, "Kill", AnalysisAction::Kill);
         ui.separator();
-        // Not in PrePoMax, which saves results with the project as a whole.
+        // Results opened from the analysis are bound to the project and saved with it.
         let bound = self.job.is_some_and(|j| j.bound);
-        let finished = self.job.is_some_and(|j| j.ran && j.results);
-        action(
-            ui,
-            finished && !running,
-            "Bind Result",
-            AnalysisAction::BindResult,
-        );
         action(
             ui,
             bound,
