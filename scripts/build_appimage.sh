@@ -6,11 +6,12 @@
 #     scripts/build_appimage.sh
 #
 # Needs (Debian/Ubuntu): sudo apt install libasound2-dev libglu1-mesa libxft2 libxcursor1 \
-#                            libxinerama1 libgomp1 python3 curl file
+#                            libxinerama1 libgomp1 python3 curl file zsync
 # The AppImage runs on systems with a glibc at least as new as the build system's, so releases
 # are built on the oldest supported Ubuntu runner.
 #
-# The AppImage ends up in target/appimage/prepolix-<version>-x86_64.AppImage.
+# The AppImage ends up in target/appimage/prepolix-<version>-x86_64.AppImage, next to its .zsync
+# file for updates.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -77,6 +78,15 @@ dirty="$(git status --porcelain --untracked-files=no 2>/dev/null | head -1)"
 } >"$doc/SOURCE.txt"
 
 appimage="$out/prepolix-$version-x86_64.AppImage"
-rm -f "$appimage"
-ARCH=x86_64 VERSION="$version" "$tools/appimagetool" --no-appstream "$appdir" "$appimage"
+rm -f "$appimage" "$appimage.zsync"
+# Update information for AppImageUpdate, Gear Lever and similar tools: they look for the newest
+# .zsync file in the latest GitHub release and download only the changed blocks. appimagetool
+# writes the .zsync file into the current directory if zsyncmake is installed; it is moved next
+# to the AppImage, and both go to the release.
+update_info="gh-releases-zsync|KwentiN-ui|PrePoLix|latest|prepolix-*-x86_64.AppImage.zsync"
+command -v zsyncmake >/dev/null || echo "Warnung: zsyncmake fehlt (apt install zsync), keine .zsync-Datei" >&2
+ARCH=x86_64 VERSION="$version" "$tools/appimagetool" --no-appstream \
+    --updateinformation "$update_info" "$appdir" "$appimage"
+zsync="$(basename "$appimage").zsync"
+[ ! -f "$zsync" ] || mv "$zsync" "$out/"
 echo "AppImage: $appimage ($(du -h "$appimage" | cut -f1))"

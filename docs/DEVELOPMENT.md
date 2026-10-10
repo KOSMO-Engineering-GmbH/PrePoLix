@@ -66,9 +66,15 @@ libraries, [appimagetool](https://github.com/AppImage/appimagetool) packs them; 
 both (pinned versions) into `target/appimage/tools`. CalculiX is not included.
 
 ```sh
-sudo apt install libasound2-dev libglu1-mesa libxft2 libxcursor1 libxinerama1 libgomp1 curl file
+sudo apt install libasound2-dev libglu1-mesa libxft2 libxcursor1 libxinerama1 libgomp1 curl file zsync
 scripts/build_appimage.sh     # -> target/appimage/
 ```
+
+The AppImage embeds the update information
+`gh-releases-zsync|KwentiN-ui|PrePoLix|latest|prepolix-*-x86_64.AppImage.zsync`, and the script writes
+the matching `.zsync` file next to it. Both are attached to the release, so AppImageUpdate, Gear Lever
+and similar tools find the latest release and only download the changed blocks. This needs the
+releases to be publicly downloadable.
 
 The AppImage only runs with a glibc at least as new as the build system's. The *Release* workflow
 therefore builds it on `ubuntu-22.04` (glibc 2.35) and attaches it to the release next to the Windows
