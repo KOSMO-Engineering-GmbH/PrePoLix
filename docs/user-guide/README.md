@@ -14,7 +14,8 @@ Run it from the repository root: `--root .` lets the document read the version f
 workspace `Cargo.toml`, so the title page always shows the current version.
 `--ignore-system-fonts` uses only the fonts built into Typst, so the PDF looks the same
 everywhere. The release workflow builds the PDF for every tag `v*` and attaches it to the GitHub
-release.
+release. The workflow `pages.yml` publishes the HTML guide on GitHub Pages
+(<https://kwentin-ui.github.io/PrePoLix/>) whenever the guide changes on `master`.
 
 The same source also compiles to a single HTML page, which the Windows installer and the AppImage
 ship for Help > User Guide:
