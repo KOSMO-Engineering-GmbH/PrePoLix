@@ -66,6 +66,10 @@ pub enum Problem {
     VelocityIgnored,
     /// A Coriolis complex frequency step without a centrifugal load before it.
     NoRotation,
+    /// Contact pairs in a frequency step without perturbation: CalculiX ignores them.
+    ContactIgnored,
+    /// Contact pairs in a complex frequency step: the Coriolis coupling goes wrong.
+    ContactWithCoriolis,
     /// Found in the solver output only.
     NoConvergence,
     /// Found in the solver output only.
@@ -86,7 +90,9 @@ impl Problem {
             | Problem::VelocityIgnored
             | Problem::NoLoad
             | Problem::NoExpansion
-            | Problem::NoRotation => Severity::Warning,
+            | Problem::NoRotation
+            | Problem::ContactIgnored
+            | Problem::ContactWithCoriolis => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -117,6 +123,8 @@ impl Problem {
             Problem::NoStoredModes => "No stored eigenmodes",
             Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
             Problem::NoRotation => "No rotation",
+            Problem::ContactIgnored => "Contact ignored",
+            Problem::ContactWithCoriolis => "Contact with Coriolis",
             Problem::NoConvergence => "No convergence",
             Problem::MpcAndSpc => "Degree of freedom bound twice",
             Problem::RotationIn2d => "Rotation in a 2D model",
@@ -258,6 +266,17 @@ impl Problem {
                  load of a static step before the Frequency step. Without a rotation the \
                  complex eigenfrequencies are those of the Frequency step."
             }
+            Problem::ContactIgnored => {
+                "CalculiX takes contact into account in a Frequency step only as a \
+                 perturbation of the static step before it. Without Perturbation the contact \
+                 pairs, tied ones included, are left out without a message: parts held only \
+                 by them float and give eigenfrequencies near zero or on weak springs."
+            }
+            Problem::ContactWithCoriolis => {
+                "CalculiX computes the Coriolis coupling of a Complex Frequency step without \
+                 the contact springs of the Frequency step. With parts joined by contact \
+                 pairs whirl pairs do not split, and modes go missing from the results."
+            }
             Problem::NoConvergence => {
                 "The Newton iteration did not converge; CalculiX kept reducing the \
                  increment and gave up (\"too many cutbacks\" or \"increment size \
@@ -377,6 +396,14 @@ impl Problem {
             Problem::VelocityIgnored => "Add a Dynamic step or deactivate the initial condition.",
             Problem::NoRotation => {
                 "Create a Centrifugal load in the static step before the Frequency step."
+            }
+            Problem::ContactIgnored => {
+                "Tick Perturbation in the Frequency step (after a static step), or join \
+                 bonded parts with a Tie constraint instead of a tied contact pair (Interaction > Create Tie)."
+            }
+            Problem::ContactWithCoriolis => {
+                "Join bonded parts with a Tie constraint (Interaction > Create Tie) instead \
+                 of a contact pair with tied surface behavior."
             }
             Problem::NoConvergence => {
                 "Check the contacts (stiffness of the Surface Interaction, Adjust, \
@@ -916,7 +943,31 @@ impl FeModel {
                 .iter()
                 .any(|w| text.contains(w))
         });
+        let contact_pairs = (self.contact_pairs.iter()).filter(|c| c.active).count();
+        if let StepKind::Frequency(settings) = &step.kind
+            && !settings.perturbation
+            && contact_pairs > 0
+        {
+            findings.push(Finding::new(
+                ModelItem::Step(s),
+                Problem::ContactIgnored,
+                format!(
+                    "{}: {contact_pairs} contact pair(s) ignored without Perturbation",
+                    step.name
+                ),
+            ));
+        }
         if let StepKind::ComplexFrequency(settings) = &step.kind {
+            if contact_pairs > 0 {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::ContactWithCoriolis,
+                    format!(
+                        "{}: {contact_pairs} contact pair(s) in the model",
+                        step.name
+                    ),
+                ));
+            }
             let before = || self.steps[..s].iter().filter(|s| s.active);
             let stored = before().rev().find_map(|s| match &s.kind {
                 StepKind::Frequency(f) => Some(f.storage),
@@ -2014,6 +2065,48 @@ mod tests {
         tie.slave = Region::Surface("LEFT".into());
         model.ties.push(tie);
         assert_eq!(check(&model, &mesh), []);
+    }
+
+    #[test]
+    fn contact_pairs_need_perturbation_in_frequency_steps_and_spoil_coriolis() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        model
+            .contact_pairs
+            .push(ContactPair::new("Contact_Pair-1", "Tied"));
+        let mut frequency = Step::new_frequency("Step-2");
+        let StepKind::Frequency(settings) = &mut frequency.kind else {
+            unreachable!()
+        };
+        settings.storage = true;
+        model.steps.push(frequency);
+        let modal = |model: &FeModel| {
+            (check(model, &mesh).into_iter())
+                .filter(|f| {
+                    matches!(
+                        f.problem,
+                        Problem::ContactIgnored | Problem::ContactWithCoriolis
+                    )
+                })
+                .map(|f| (f.item, f.problem))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            modal(&model),
+            [(ModelItem::Step(1), Problem::ContactIgnored)]
+        );
+        let StepKind::Frequency(settings) = &mut model.steps[1].kind else {
+            unreachable!()
+        };
+        settings.perturbation = true;
+        assert_eq!(modal(&model), []);
+        model.steps.push(Step::new_complex_frequency("Step-3"));
+        assert_eq!(
+            modal(&model),
+            [(ModelItem::Step(2), Problem::ContactWithCoriolis)]
+        );
+        model.contact_pairs[0].active = false;
+        assert_eq!(modal(&model), []);
     }
 
     #[test]
