@@ -4184,3 +4184,219 @@ fn calculix_submodel_follows_the_global_cantilever() {
         }
     }
 }
+
+/// The shell plate cut in half along its length at y = 5 with a symmetry boundary condition,
+/// turned by `angle` degrees about z, with the tip force of the full plate shared out.
+fn half_shell_plate(angle: f64) -> (FeMesh, FeModel, NodeId) {
+    let mut mesh = rectangle(0.0, 100.0, 5.0, 20, 1);
+    let tip = nodes_at(&mesh, 0, 100.0);
+    let edge = nodes_at(&mesh, 1, 5.0);
+    let clamped = nodes_at(&mesh, 0, 0.0);
+    let corner = (tip.iter().copied())
+        .find(|&n| mesh.node(n).unwrap()[1] == 0.0)
+        .unwrap();
+    turn(&mut mesh, angle);
+    let mut model = plane_model(
+        ModelSpace::ThreeD,
+        1.0,
+        vec![(clamped, [Some(0.0); 6])],
+        // The node on the symmetry plane carries half the share of the others.
+        LoadKind::ConcentratedForce([0.0, 0.0, -0.2]),
+        Region::Nodes(tip.iter().copied().filter(|n| !edge.contains(n)).collect()),
+    );
+    let mut middle = model.steps[0].loads[0].clone();
+    middle.name = "Load-2".into();
+    middle.kind = LoadKind::ConcentratedForce([0.0, 0.0, -0.1]);
+    middle.region = Region::Nodes(tip.iter().copied().filter(|n| edge.contains(n)).collect());
+    model.steps[0].loads.push(middle);
+    model.sections[0].kind = SectionKind::Shell {
+        thickness: 2.0,
+        offset: 0.0,
+    };
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Symmetry-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(edge),
+        kind: BoundaryKind::Symmetry { normal: None },
+        amplitude: None,
+    });
+    (mesh, model, corner)
+}
+
+#[test]
+fn a_symmetry_plane_holds_the_normal_displacement_and_the_in_plane_rotations() {
+    let (mesh, model, _) = half_shell_plate(0.0);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let expected = "** Name: Symmetry-1\n*Boundary\nInternal_Selection-1_Symmetry-1, 2, 2, 0\n\
+                    Internal_Selection-1_Symmetry-1, 4, 4, 0\n\
+                    Internal_Selection-1_Symmetry-1, 6, 6, 0\n";
+    assert!(text.contains(expected), "{text}");
+    assert!(!text.contains("*Transform"), "{text}");
+
+    // A skewed plane gets a local system with x along its normal.
+    let (mesh, model, _) = half_shell_plate(30.0);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let expected = "*Boundary\nInternal_Selection-1_Symmetry-1, 1, 1, 0\n\
+                    Internal_Selection-1_Symmetry-1, 5, 5, 0\n\
+                    Internal_Selection-1_Symmetry-1, 6, 6, 0\n";
+    assert!(text.contains(expected), "{text}");
+    let transform = text
+        .split("*Transform, Nset=Internal_Selection-1_Symmetry-1, Type=R\n")
+        .nth(1)
+        .expect("transform missing");
+    let values: Vec<f64> = (transform.lines().next().unwrap().split(','))
+        .map(|v| v.trim().parse().unwrap())
+        .collect();
+    // The normal of the plane y = 5 turned by 30 degrees, and a vector in the plane.
+    let (s, c) = 30f64.to_radians().sin_cos();
+    let normal = [-s, c, 0.0];
+    let sign = values[1].signum();
+    for k in 0..3 {
+        assert!((sign * values[k] - normal[k]).abs() < 1e-7, "{values:?}");
+    }
+    let along: f64 = (0..3).map(|k| values[3 + k] * normal[k]).sum();
+    assert!(along.abs() < 1e-7, "{values:?}");
+
+    // A single node fixes no plane.
+    let (mesh, mut model, corner) = half_shell_plate(0.0);
+    model.steps[0].boundary_conditions[1].region = Region::Nodes(vec![corner]);
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::NoSymmetryPlane { .. })
+    ));
+}
+
+/// Half the shell plate with a symmetry plane deflects like the full plate, also when the
+/// plane is no coordinate plane.
+#[test]
+fn calculix_bends_the_half_shell_plate_like_the_full_one() {
+    let (mesh, model) = shell_plate();
+    let Some(full) = run_ccx("symmetrie-voll", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let corner = (nodes_at(&mesh, 0, 100.0).into_iter())
+        .find(|&n| mesh.node(n).unwrap()[1] == 0.0)
+        .unwrap();
+    let expected = node_value(&full, "DISP", "U3", corner);
+    // CalculiX joins the expanded shell nodes of a *Transform by a knot, which makes the
+    // only element across this narrow plate a little softer than without.
+    for (angle, tolerance) in [(0.0, 1e-4), (30.0, 1e-2)] {
+        let (mesh, model, corner) = half_shell_plate(angle);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        let half = run_ccx(&format!("symmetrie-{angle}"), &text).unwrap();
+        let ours = node_value(&half, "DISP", "U3", corner);
+        assert!(
+            (ours - expected).abs() < tolerance * expected.abs(),
+            "{angle} degrees: {ours} != {expected}"
+        );
+    }
+    // Without the rotations the half plate would be softer.
+    let (mesh, mut model, corner) = half_shell_plate(0.0);
+    let edge = model.steps[0].boundary_conditions[1].region.clone();
+    model.steps[0].boundary_conditions[1] = BoundaryCondition {
+        region: edge,
+        kind: BoundaryKind::Displacement([None, Some(0.0), None, None, None, None]),
+        ..model.steps[0].boundary_conditions[1].clone()
+    };
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let free = run_ccx("symmetrie-frei", &text).unwrap();
+    let softer = node_value(&free, "DISP", "U3", corner);
+    assert!(
+        softer.abs() > 1.002 * expected.abs(),
+        "{softer} vs {expected}"
+    );
+}
+
+/// Turns the mesh by `angle` degrees about the z axis.
+fn turn(mesh: &mut FeMesh, angle: f64) {
+    let (s, c) = angle.to_radians().sin_cos();
+    for (id, x) in (mesh.node_ids().to_vec())
+        .into_iter()
+        .zip(mesh.coords().to_vec())
+    {
+        mesh.set_node(id, [c * x[0] - s * x[1], s * x[0] + c * x[1], x[2]]);
+    }
+}
+
+/// Solids have no rotations; a skewed symmetry plane holds them like a coordinate plane.
+#[test]
+fn calculix_holds_solids_in_a_skewed_symmetry_plane_alike() {
+    let mut deflections = Vec::new();
+    for angle in [0.0, 30.0] {
+        let (mut mesh, mut model) = cantilever(tip_force());
+        let side = nodes_at(&mesh, 1, 0.0);
+        turn(&mut mesh, angle);
+        model.steps[0].boundary_conditions.push(BoundaryCondition {
+            name: "Symmetry-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(side),
+            kind: BoundaryKind::Symmetry { normal: None },
+            amplitude: None,
+        });
+        let text = write_inp(&mesh, &model, "").unwrap();
+        assert_eq!(text.contains("*Transform"), angle != 0.0, "{text}");
+        let Some(frd) = run_ccx(&format!("symmetrie-solid-{angle}"), &text) else {
+            return;
+        };
+        deflections.push(node_value(&frd, "DISP", "U3", 99));
+    }
+    let [aligned, skewed] = deflections[..] else {
+        unreachable!()
+    };
+    assert!(
+        (aligned - skewed).abs() < 1e-5 * aligned.abs(),
+        "{aligned} != {skewed}"
+    );
+}
+
+/// A 2D model holds the line of a symmetry plane in its normal direction only.
+#[test]
+fn calculix_holds_a_2d_model_in_a_skewed_symmetry_line_alike() {
+    let mut tips = Vec::new();
+    for angle in [0.0, 30.0] {
+        let mut mesh = rectangle(0.0, 10.0, 2.0, 5, 1);
+        let left = nodes_at(&mesh, 0, 0.0);
+        let bottom = nodes_at(&mesh, 1, 0.0);
+        let tip = (nodes_at(&mesh, 0, 10.0).into_iter())
+            .find(|&n| mesh.node(n).unwrap()[1] == 2.0)
+            .unwrap();
+        turn(&mut mesh, angle);
+        let (s, c) = angle.to_radians().sin_cos();
+        // Pulls along the plate, so that the line moves along itself only.
+        let mut model = plane_model(
+            ModelSpace::PlaneStress,
+            1.0,
+            // Held in both directions, which a turned system at the corner keeps.
+            vec![(left, [Some(0.0), Some(0.0), None, None, None, None])],
+            LoadKind::ConcentratedForce([100.0 * c, 100.0 * s, 0.0]),
+            Region::Nodes(vec![tip]),
+        );
+        model.steps[0].boundary_conditions.push(BoundaryCondition {
+            name: "Symmetry-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(bottom),
+            kind: BoundaryKind::Symmetry { normal: None },
+            amplitude: None,
+        });
+        let text = write_inp(&mesh, &model, "").unwrap();
+        if angle == 0.0 {
+            assert!(text.contains("Symmetry-1, 2, 2, 0\n**"), "{text}");
+        }
+        let Some(frd) = run_ccx(&format!("symmetrie-2d-{angle}"), &text) else {
+            return;
+        };
+        let u = ["U1", "U2"].map(|c| node_value(&frd, "DISP", c, tip));
+        tips.push(c * u[0] + s * u[1]);
+    }
+    let [aligned, skewed] = tips[..] else {
+        unreachable!()
+    };
+    assert!(aligned > 0.0);
+    assert!(
+        (aligned - skewed).abs() < 1e-5 * aligned.abs(),
+        "{aligned} != {skewed}"
+    );
+}

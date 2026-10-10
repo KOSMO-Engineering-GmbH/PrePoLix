@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 
-use crate::Region;
+use crate::{Region, SymmetryPlane, symmetry_dofs, symmetry_plane};
 
 use crate::{
     BoundaryKind, Constraint, DefinedFieldKind, FeModel, LoadKind, Material, ModelItem, ModelSpace,
@@ -55,6 +55,15 @@ pub enum Problem {
     RotationsIgnored,
     /// A submodel boundary condition in a model without a global results file.
     NoGlobalResults,
+    /// A symmetry boundary condition whose nodes do not fix a plane.
+    NoSymmetryPlane,
+    /// A symmetry boundary condition whose nodes are not on one plane.
+    SymmetryNotPlanar,
+    /// A symmetry plane of an axisymmetric model that is not perpendicular to the axis.
+    SymmetryOffAxis,
+    /// Nodes of a symmetry plane that is no coordinate plane, which get a local coordinate
+    /// system, also used by another boundary condition or a point load.
+    SkewedSymmetryShared,
     IncrementExceedsStep,
     NoLoad,
     /// A defined temperature in a step whose materials have no thermal expansion.
@@ -87,6 +96,9 @@ impl Problem {
             | Problem::ConflictingBoundaries
             | Problem::LoadOnFixedNodes
             | Problem::RotationsIgnored
+            | Problem::SymmetryNotPlanar
+            | Problem::SymmetryOffAxis
+            | Problem::SkewedSymmetryShared
             | Problem::VelocityIgnored
             | Problem::NoLoad
             | Problem::NoExpansion
@@ -115,6 +127,10 @@ impl Problem {
             Problem::LoadOnFixedNodes => "Load on fixed nodes",
             Problem::RotationsIgnored => "Rotations without effect",
             Problem::NoGlobalResults => "No global results",
+            Problem::NoSymmetryPlane => "No symmetry plane",
+            Problem::SymmetryNotPlanar => "Symmetry region not planar",
+            Problem::SymmetryOffAxis => "Symmetry plane not perpendicular to the axis",
+            Problem::SkewedSymmetryShared => "Nodes of a skewed symmetry plane shared",
             Problem::IncrementExceedsStep => "Increment larger than the step",
             Problem::NoLoad => "No load",
             Problem::NoRigidBody => "Reference point without rigid body",
@@ -236,6 +252,30 @@ impl Problem {
                 "A submodel boundary condition takes its displacements from the results \
                  of a global model (*SUBMODEL). Without the global results file the input \
                  file cannot be written."
+            }
+            Problem::NoSymmetryPlane => {
+                "A symmetry boundary condition holds its nodes in a plane, which it takes \
+                 from the selected faces. A single node, nodes on a line (other than the \
+                 edge of shells or a line of a 2D model) or a reference point do not fix \
+                 a plane, so the input file cannot be written."
+            }
+            Problem::SymmetryNotPlanar => {
+                "A symmetry plane cuts the model in a plane: the selected faces must be \
+                 flat and lie in one plane. These nodes are not; the boundary condition \
+                 holds them normal to the best-fitting plane, which forces curved or \
+                 offset faces into a shape the real structure does not have."
+            }
+            Problem::SymmetryOffAxis => {
+                "An axisymmetric model already stands for the full revolution about the y \
+                 axis. A further symmetry can only be a mirror plane perpendicular to the \
+                 axis, i.e. a line of constant y in the model. Holding other lines normal \
+                 to themselves is a support, not a symmetry."
+            }
+            Problem::SkewedSymmetryShared => {
+                "A symmetry plane that is not a coordinate plane is written with a local \
+                 coordinate system for its nodes (*TRANSFORM). CalculiX then reads every \
+                 boundary condition and point load at these nodes in that local system \
+                 (x along the plane normal), and a node can have only one such system."
             }
             Problem::IncrementExceedsStep => {
                 "The initial increment is larger than the time period of the step. \
@@ -375,6 +415,23 @@ impl Problem {
             Problem::RotationsIgnored => {
                 "Leave UR1 to UR3 free in the boundary condition. Prescribe rotations of \
                  solids by displacements of several nodes."
+            }
+            Problem::NoSymmetryPlane => {
+                "Select the planar faces of the cut (or the edge of shells), or enter the \
+                 normal of the plane in the boundary condition."
+            }
+            Problem::SymmetryNotPlanar => {
+                "Select only the flat faces that lie in the cut plane. Use a \
+                 Displacement/Rotation boundary condition for other supports."
+            }
+            Problem::SymmetryOffAxis => {
+                "Select edges of constant y, or use a Displacement/Rotation boundary \
+                 condition for other supports."
+            }
+            Problem::SkewedSymmetryShared => {
+                "Keep other boundary conditions and point loads off the nodes of the \
+                 symmetry plane, or align the model so that the plane is a coordinate \
+                 plane."
             }
             Problem::NoGlobalResults => {
                 "Open Model > Model Properties, set the model type to Submodel and pick the results \
@@ -782,6 +839,8 @@ impl FeModel {
         }
         // Value of each constrained node and degree of freedom, with the boundary condition.
         let mut fixed: HashMap<(NodeId, usize), (usize, f64)> = HashMap::new();
+        // Symmetry planes that are no coordinate planes, by boundary condition.
+        let mut skewed: Vec<(usize, SymmetryPlane)> = Vec::new();
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
             // A step leaves out what it cannot take, as the input file does.
             if !bc.active
@@ -802,6 +861,42 @@ impl FeModel {
                     .filter(|&d| held[d])
                     .map(|d| (d, f64::NAN))
                     .collect(),
+                BoundaryKind::Symmetry { normal } => {
+                    match symmetry_plane(mesh, &bc.region, space, normal) {
+                        Err(error) => {
+                            findings.push(Finding::new(
+                                ModelItem::BoundaryCondition(s, i),
+                                Problem::NoSymmetryPlane,
+                                format!("{}: {error}", bc.name),
+                            ));
+                            Vec::new()
+                        }
+                        Ok(plane) => {
+                            if let Some(warning) = plane.warning(space) {
+                                let problem = if plane.is_planar() {
+                                    Problem::SymmetryOffAxis
+                                } else {
+                                    Problem::SymmetryNotPlanar
+                                };
+                                findings.push(Finding::new(
+                                    ModelItem::BoundaryCondition(s, i),
+                                    problem,
+                                    format!("{}: {warning}", bc.name),
+                                ));
+                            }
+                            match plane.axis() {
+                                Some(k) => symmetry_dofs(k, dofs)
+                                    .into_iter()
+                                    .map(|d| (d, 0.0))
+                                    .collect(),
+                                None => {
+                                    skewed.push((i, plane));
+                                    Vec::new()
+                                }
+                            }
+                        }
+                    }
+                }
             };
             if let BoundaryKind::Submodel { .. } = bc.kind
                 && self.properties.submodel_input().is_none()
@@ -846,6 +941,73 @@ impl FeModel {
                     format!(
                         "{count} degrees of freedom also in {} with a different value; {} applies",
                         step.boundary_conditions[other].name, bc.name
+                    ),
+                ));
+            }
+        }
+        // Supports of the skewed symmetry planes: the normal displacement and the rotations
+        // about the in-plane axes.
+        let mut skewed_supports: Vec<(NodeId, [f64; 3], bool)> = Vec::new();
+        for (index, &(i, plane)) in skewed.iter().enumerate() {
+            let nodes = step.boundary_conditions[i].region.nodes(mesh);
+            let (t1, t2) = plane.in_plane_axes();
+            for &node in &nodes {
+                skewed_supports.push((node, plane.normal, false));
+                if dofs == 6 {
+                    skewed_supports.push((node, t1, true));
+                    skewed_supports.push((node, t2, true));
+                }
+            }
+            // The local system of the nodes turns whatever else acts on them.
+            let nodes: HashSet<NodeId> = nodes.into_iter().collect();
+            let mut shared: Vec<&str> = Vec::new();
+            // Zero displacements in all directions, or zero rotations about all axes, are
+            // the same in any system.
+            let mut held: HashMap<NodeId, Vec<(usize, f64)>> = HashMap::new();
+            for (&(node, dof), &(_, value)) in &fixed {
+                if nodes.contains(&node) {
+                    held.entry(node).or_default().push((dof, value));
+                }
+            }
+            let turned = held.values().any(|values| {
+                [0..dofs.min(3), 3..dofs].into_iter().any(|block| {
+                    let inside: Vec<_> = values.iter().filter(|(d, _)| block.contains(d)).collect();
+                    !inside.is_empty()
+                        && (inside.len() < block.len() || inside.iter().any(|(_, v)| *v != 0.0))
+                })
+            });
+            if turned {
+                shared.push("boundary conditions");
+            }
+            let other_planes = skewed.iter().enumerate().any(|(other, &(j, p))| {
+                other != index
+                    && p.normal != plane.normal
+                    && (step.boundary_conditions[j].region.nodes(mesh).iter())
+                        .any(|n| nodes.contains(n))
+            });
+            if other_planes {
+                shared.push("other skewed symmetry planes");
+            }
+            let point_loads = step.kind.supports_loads()
+                && step.loads.iter().any(|load| {
+                    load.active
+                        && matches!(
+                            load.kind,
+                            LoadKind::ConcentratedForce(_) | LoadKind::Moment(_)
+                        )
+                        && load.region.nodes(mesh).iter().any(|n| nodes.contains(n))
+                });
+            if point_loads {
+                shared.push("point loads");
+            }
+            if !shared.is_empty() {
+                findings.push(Finding::new(
+                    ModelItem::BoundaryCondition(s, i),
+                    Problem::SkewedSymmetryShared,
+                    format!(
+                        "{}: its nodes also carry {}",
+                        step.boundary_conditions[i].name,
+                        shared.join(" and ")
                     ),
                 ));
             }
@@ -999,7 +1161,7 @@ impl FeModel {
             StepKind::Static(_) | StepKind::Buckle(_) | StepKind::CoupledTempDisp(_)
         );
         if static_mechanical && !constrained_by_keywords {
-            self.check_rigid_body(s, mesh, check, trusses, &fixed, findings);
+            self.check_rigid_body(s, mesh, check, trusses, &fixed, &skewed_supports, findings);
             self.check_trusses(s, mesh, trusses, &fixed, findings);
         }
     }
@@ -1025,7 +1187,8 @@ impl FeModel {
                 BoundaryKind::Submodel { dofs: driven, .. } => {
                     out.extend((0..dofs).filter(|&d| driven[d]));
                 }
-                BoundaryKind::Temperature(_) => {}
+                // A reference point fixes no plane.
+                BoundaryKind::Temperature(_) | BoundaryKind::Symmetry { .. } => {}
             }
         }
         out.sort_unstable();
@@ -1037,6 +1200,7 @@ impl FeModel {
     /// body motions a support at point x in direction n prevents are those with
     /// n . (t + w x (x - c)) != 0, so a piece is held when the rows [n, (x - c) x n] of its
     /// supports have full rank. Ties join pieces; contact pairs join them only loosely.
+    #[allow(clippy::too_many_arguments)]
     fn check_rigid_body(
         &self,
         s: usize,
@@ -1044,6 +1208,7 @@ impl FeModel {
         check: &MeshCheck,
         trusses: &Trusses,
         fixed: &HashMap<(NodeId, usize), (usize, f64)>,
+        skewed: &[(NodeId, [f64; 3], bool)],
         findings: &mut Vec<Finding>,
     ) {
         let Some((min, max)) = mesh.bounds() else {
@@ -1083,6 +1248,13 @@ impl FeModel {
                 && (mesh.node_index(node)).is_some_and(|i| trusses.rotational[i])
             {
                 support(node, axis(dof - 3), true);
+            }
+        }
+        for &(node, direction, rotation) in skewed {
+            let rotates = space == ModelSpace::ThreeD
+                && (mesh.node_index(node)).is_some_and(|i| trusses.rotational[i]);
+            if !rotation || rotates {
+                support(node, direction, rotation);
             }
         }
         let mut ties = UnionFind::new(check.pieces);
@@ -1984,6 +2156,49 @@ mod tests {
         assert!(model.uses_global_results());
         model.steps[0].kind = StepKind::Frequency(Default::default());
         assert!(!model.uses_global_results());
+    }
+
+    #[test]
+    fn symmetry_planes_need_planar_nodes_and_a_system_of_their_own() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        let symmetry = |nodes: Vec<NodeId>| BoundaryCondition {
+            name: "Symmetry-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(nodes),
+            kind: BoundaryKind::Symmetry { normal: None },
+            amplitude: None,
+        };
+        // The face y = 0.
+        model.steps[0]
+            .boundary_conditions
+            .push(symmetry(vec![1, 2, 5, 6]));
+        assert_eq!(check(&model, &mesh), []);
+        let item = ModelItem::BoundaryCondition(0, 1);
+        model.steps[0].boundary_conditions[1] = symmetry(vec![1, 2, 3, 6]);
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(item, Problem::SymmetryNotPlanar)]
+        );
+        model.steps[0].boundary_conditions[1] = symmetry(vec![2]);
+        assert!(problems(&check(&model, &mesh)).contains(&(item, Problem::NoSymmetryPlane)));
+        // The diagonal plane x = y shares the fixed nodes 1 and 5, which stay fixed in any
+        // system, and node 7 with the force, which would turn.
+        model.steps[0].boundary_conditions[1] = symmetry(vec![1, 3, 5, 7]);
+        let findings = check(&model, &mesh);
+        assert_eq!(
+            problems(&findings),
+            [(item, Problem::SkewedSymmetryShared)],
+            "{findings:?}"
+        );
+        assert!(findings[0].detail.ends_with("point loads"), "{findings:?}");
+        model.steps[0].loads[0].region = Region::Nodes(vec![6]);
+        assert_eq!(check(&model, &mesh), []);
+        // Only U1 fixed at node 1 means something else in the turned system.
+        model.steps[0].boundary_conditions[0].kind =
+            BoundaryKind::Displacement([Some(0.0), None, None, None, None, None]);
+        assert!(problems(&check(&model, &mesh)).contains(&(item, Problem::SkewedSymmetryShared)));
     }
 
     #[test]

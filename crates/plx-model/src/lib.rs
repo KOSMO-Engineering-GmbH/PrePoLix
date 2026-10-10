@@ -18,6 +18,7 @@ mod mesh_set;
 mod properties;
 mod region;
 mod section;
+mod symmetry;
 pub mod units;
 mod validity;
 
@@ -45,6 +46,7 @@ pub use region::{Region, describe_entities};
 pub use section::{
     BeamOrientation, BeamProfile, BeamSection, Section, SectionKind, line_tangent, unit_thickness,
 };
+pub use symmetry::{SymmetryError, SymmetryPlane, symmetry_dofs, symmetry_plane};
 pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, UnitSystem};
 pub use validity::{Invalid, ModelItem};
 
@@ -1221,12 +1223,22 @@ pub enum BoundaryKind {
         /// The degrees of freedom that follow the global model.
         dofs: [bool; 6],
     },
+    /// The region lies on a symmetry plane: the displacement normal to the plane and, for
+    /// beams and shells, the rotations about the two in-plane axes are zero. The plane is
+    /// fitted to the nodes of the region when it is needed, see [`symmetry_plane`].
+    Symmetry {
+        /// Normal of the plane as the user entered it; `None` takes it from the region.
+        normal: Option<[f64; 3]>,
+    },
 }
 
 impl BoundaryKind {
     /// Whether an amplitude can scale the boundary condition; fixed supports stay zero.
     pub fn takes_amplitude(&self) -> bool {
-        !matches!(self, BoundaryKind::Fixed | BoundaryKind::Submodel { .. })
+        !matches!(
+            self,
+            BoundaryKind::Fixed | BoundaryKind::Submodel { .. } | BoundaryKind::Symmetry { .. }
+        )
     }
 
     pub fn is_thermal(&self) -> bool {
