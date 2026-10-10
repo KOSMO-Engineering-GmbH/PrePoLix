@@ -461,7 +461,7 @@ impl SettingsWindow {
                             );
                             if info.untested {
                                 let (major, minor) = plx_mesher::gmsh::TESTED_VERSION;
-                                text += &format!(" prepolix is tested with Gmsh {major}.{minor}.");
+                                text += &format!(" PrePoLix is tested with Gmsh {major}.{minor}.");
                             }
                             text
                         })

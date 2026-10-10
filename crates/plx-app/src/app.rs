@@ -176,11 +176,11 @@ impl PrepolixApp {
         let render_state = cc
             .wgpu_render_state
             .clone()
-            .ok_or("prepolix requires the wgpu backend of eframe")?;
+            .ok_or("PrePoLix requires the wgpu backend of eframe")?;
         crate::style::apply(&cc.egui_ctx);
         let adapter = render_state.adapter.get_info();
         let output = vec![format!(
-            "prepolix {} started, graphics: {} ({:?})",
+            "PrePoLix {} started, graphics: {} ({:?})",
             env!("CARGO_PKG_VERSION"),
             adapter.name,
             adapter.backend
@@ -291,7 +291,7 @@ impl PrepolixApp {
                         "iges", "IGES", "igs", "IGS", "brep", "BREP",
                     ],
                 )
-                .add_filter("prepolix project (*.plx)", &["plx", "PLX"])
+                .add_filter("PrePoLix project (*.plx)", &["plx", "PLX"])
                 .add_filter("Input file (*.inp)", &["inp", "INP"])
                 .add_filter("Results file (*.frd)", &["frd", "FRD"])
                 .add_filter(GEOMETRY_FILTER.0, GEOMETRY_FILTER.1)
@@ -2276,7 +2276,7 @@ impl Workbench {
         let Some(model) = self.setup_model() else {
             return;
         };
-        let heading = format!("prepolix: {}", model.file_name());
+        let heading = format!("PrePoLix: {}", model.file_name());
         match KeywordEditor::new(&model.mesh, &model.fe, &heading) {
             Ok(editor) => self.keyword_editor = Some(editor),
             Err(error) => self
@@ -2552,7 +2552,7 @@ impl Workbench {
                 .map_or_else(|| "Project".into(), |s| s.to_string_lossy().into_owned());
             let mut dialog = rfd::FileDialog::new()
                 .set_title("Save Project")
-                .add_filter("prepolix project (*.plx)", &[model::PROJECT_EXTENSION])
+                .add_filter("PrePoLix project (*.plx)", &[model::PROJECT_EXTENSION])
                 .set_file_name(format!("{stem}.{}", model::PROJECT_EXTENSION));
             if let Some(dir) = model.path.parent() {
                 dialog = dialog.set_directory(dir);
@@ -2584,7 +2584,7 @@ impl Workbench {
         let Some(model) = self.setup_model() else {
             return;
         };
-        let heading = format!("prepolix: {}", model.file_name());
+        let heading = format!("PrePoLix: {}", model.file_name());
         let mut fe = model.fe.clone();
         fe.resolve_default_solver(default_solver);
         // Checked before asking for the file; the global results are staged once it is known.
@@ -2654,7 +2654,7 @@ impl Workbench {
             .map(|i| format!(", step {}, increment {}", i.step, i.increment))
             .unwrap_or_default();
         let heading = format!(
-            "prepolix: deformed mesh of {}{shown}, scale factor {scale}",
+            "PrePoLix: deformed mesh of {}{shown}, scale factor {scale}",
             model.file_name()
         );
         let text = match plx_io::inp::write_deformed_mesh_inp(

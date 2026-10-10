@@ -1,7 +1,7 @@
-# prepolix User Guide
+# PrePoLix User Guide
 
-The user guide is a reference for people who *use* prepolix: where to find a function, what each
-field of its dialog means and what prepolix writes to the CalculiX input file. It is written in
+The user guide is a reference for people who *use* PrePoLix: where to find a function, what each
+field of its dialog means and what PrePoLix writes to the CalculiX input file. It is written in
 English with [Typst](https://typst.app) and does not describe the code.
 
 ## Building

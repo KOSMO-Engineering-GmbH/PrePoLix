@@ -15,7 +15,7 @@ pub enum ProjectError {
     },
     #[error("{path}: not a valid project file: {message}")]
     Format { path: PathBuf, message: String },
-    #[error("{path} comes from a newer prepolix version (format {format})")]
+    #[error("{path} comes from a newer PrePoLix version (format {format})")]
     Newer { path: PathBuf, format: u32 },
 }
 
