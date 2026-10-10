@@ -1,3 +1,5 @@
+<img src="assets/icon/prepolix.svg" alt="PrePoLix icon" width="128" align="right">
+
 # PrePoLix
 
 PrePoLix is a graphical pre- and post-processor for the finite element solver

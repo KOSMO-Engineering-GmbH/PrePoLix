@@ -62,7 +62,9 @@
 
   // Title page.
   page(margin: 3cm)[
-    #v(25%)
+    #v(12%)
+    #image("../../assets/icon/prepolix.svg", width: 4.5cm)
+    #v(1.5em)
     #text(size: 36pt, weight: "bold", fill: accent)[PrePoLix]
     #v(0.2em)
     #text(size: 18pt)[User Guide]

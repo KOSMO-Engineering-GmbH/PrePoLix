@@ -62,6 +62,24 @@ The guide (English, Typst) is in [user-guide/](user-guide/). Build it with
 `typst compile --root . --ignore-system-fonts docs/user-guide/main.typ`. New features are documented
 there in the same PR, see [user-guide/README.md](user-guide/README.md).
 
+## Program icon
+
+The icon is drawn in Typst: [assets/icon/prepolix-icon.typ](../assets/icon/prepolix-icon.typ) reads a
+hexahedral CalculiX mesh of a spur gear (`assets/icon/part/gear.inp`) together with its CalculiX
+result (`gear.val`), projects the outer faces, shades them and colours them with contour bands like
+a PrePoMax result plot. Variants: `color` (on the raised tile), `light` and `mono` (one colour,
+transparent background), and a `small` detail level without mesh lines for 16 to 32 px.
+
+```sh
+python3 assets/icon/make_part.py   # only to change the gear: mesh it and solve it with ccx
+python3 scripts/make_icon.py       # export everything (typst 0.13 and Pillow)
+```
+
+`make_icon.py` writes the vector icons `assets/icon/prepolix*.svg` (README, user guide) and the
+raster files window systems need, `crates/plx-app/assets/icon/prepolix.png` (window) and
+`prepolix.ico` (16 to 256 px). The `.ico` goes into the installer and, through `crates/plx-app/build.rs`
+and MinGW's `windres`, into `prepolix.exe` itself.
+
 ## Crates
 
 | Crate | Content |

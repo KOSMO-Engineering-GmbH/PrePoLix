@@ -65,7 +65,8 @@ fn main() -> eframe::Result {
     )
 }
 
-/// The program icon for the window and the task bar, drawn by `scripts/make_icon.py`.
+/// The program icon for the window and the task bar, exported from
+/// `assets/icon/prepolix-icon.typ` by `scripts/make_icon.py`.
 fn window_icon() -> egui::IconData {
     let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!(
         "../assets/icon/prepolix.png"
