@@ -274,6 +274,8 @@ impl HistoryTable {
             x_label: table.title(columns[0]).to_string(),
             x,
             curves,
+            guides: Vec::new(),
+            y_max: None,
         })
     }
 
