@@ -212,18 +212,34 @@ pub fn amplitude_row(
     reference: &mut Option<String>,
     fe: &FeModel,
 ) {
+    amplitude_row_with(ui, label, id, reference, fe, |_| {});
+}
+
+/// [`amplitude_row`] with more widgets right of the choice, such as the motion preview's play
+/// button.
+pub fn amplitude_row_with(
+    ui: &mut Ui,
+    label: &str,
+    id: &str,
+    reference: &mut Option<String>,
+    fe: &FeModel,
+    extra: impl FnOnce(&mut Ui),
+) {
     ui.label(label);
-    let text = reference.as_deref().unwrap_or(DEFAULT);
-    egui::ComboBox::from_id_salt(id)
-        .selected_text(text)
-        .width(200.0)
-        .show_ui(ui, |ui| {
-            ui.selectable_value(reference, None, DEFAULT);
-            for amplitude in &fe.amplitudes {
-                let name = Some(amplitude.name.clone());
-                ui.selectable_value(reference, name, &amplitude.name);
-            }
-        });
+    let text = reference.clone().unwrap_or_else(|| DEFAULT.into());
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(text)
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(reference, None, DEFAULT);
+                for amplitude in &fe.amplitudes {
+                    let name = Some(amplitude.name.clone());
+                    ui.selectable_value(reference, name, &amplitude.name);
+                }
+            });
+        extra(ui);
+    });
     ui.end_row();
     if let Some(name) = reference.as_deref()
         && fe.amplitude(name).is_none()

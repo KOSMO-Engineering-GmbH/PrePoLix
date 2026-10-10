@@ -65,6 +65,10 @@ pub struct Model {
     pub fe: FeModel,
     /// CAD geometry the mesh is generated from.
     pub geometry: Option<Geometry>,
+    /// Results of the analysis bound to the project, saved with it.
+    pub bound_results: Option<plx_model::BoundResults>,
+    /// Where the bound results were written to be opened, once they were.
+    pub bound_results_file: Option<PathBuf>,
     /// The display of CAD geometry rather than a mesh: element edges are not drawn.
     is_geometry: bool,
     /// For the display of CAD geometry, the CAD face or edge of each element; element ids
@@ -85,6 +89,9 @@ pub struct Model {
     section_cells: std::sync::OnceLock<Vec<SectionCells>>,
     /// The exploded view: parts drawn and picked moved apart.
     pub explosion: Explosion,
+    /// Offsets of single nodes by index, the motion preview of a boundary condition dialog:
+    /// the nodes are drawn moved, the rest of the mesh stays put.
+    pub motion: Option<Vec<(usize, [f64; 3])>>,
     /// Node indices of each part and the part of each node, built when first needed.
     part_nodes: std::sync::OnceLock<PartNodes>,
     /// Lookups to the CAD entities of a mesh generated from geometry, built when first
@@ -213,11 +220,13 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     }
     let mut fe = FeModel::default();
     let mut geometry = None;
+    let mut bound_results = None;
     let (mesh, mut warnings, skipped_keywords, included_files, increments) =
         if extension(PROJECT_EXTENSION) {
             let project = plx_io::project::read_project(path).map_err(|e| e.to_string())?;
             fe = project.model;
             geometry = project.geometry;
+            bound_results = project.results;
             (project.mesh, Vec::new(), BTreeMap::new(), 0, None)
         } else if extension("frd") {
             let FrdImport {
@@ -267,6 +276,7 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     let mut model = Model::new(path, mesh);
     model.fe = fe;
     model.geometry = geometry;
+    model.bound_results = bound_results;
     model.warnings = warnings;
     model.skipped_keywords = skipped_keywords;
     model.included_files = included_files;
@@ -358,6 +368,8 @@ impl Model {
             results: None,
             fe: FeModel::default(),
             geometry: None,
+            bound_results: None,
+            bound_results_file: None,
             is_geometry: false,
             cad_entities: Vec::new(),
             geometry_solids: 0,
@@ -368,6 +380,7 @@ impl Model {
             skins,
             section_cells: Default::default(),
             explosion: Explosion::default(),
+            motion: None,
             part_nodes: Default::default(),
             checks: Default::default(),
             cad_index: Default::default(),
@@ -560,7 +573,15 @@ impl Model {
 
     /// Node coordinates as drawn and whether a deformation is shown.
     fn deformed_coords(&self) -> (std::borrow::Cow<'_, [[f64; 3]]>, bool) {
-        let coords = self.exploded_coords();
+        let mut coords = self.exploded_coords();
+        if let Some(motion) = &self.motion {
+            let moved = coords.to_mut();
+            for &(node, offset) in motion {
+                if let Some(p) = moved.get_mut(node) {
+                    *p = [0, 1, 2].map(|k| p[k] + offset[k]);
+                }
+            }
+        }
         let Some(view) = &self.results else {
             return (coords, false);
         };
@@ -1291,7 +1312,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("prepolix-model-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("platte.plx");
-        plx_io::project::save_project(&path, None, &model.mesh, &model.fe).unwrap();
+        plx_io::project::save_project(&path, None, &model.mesh, &model.fe, None).unwrap();
         let loaded = load(&path, UnitSystem::MmTonSC).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(loaded.model.is_project());
@@ -1470,8 +1491,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("prepolix-geometry-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bloecke.plx");
-        plx_io::project::save_project(&path, model.geometry.as_ref(), &model.mesh, &model.fe)
-            .unwrap();
+        let saved = model.geometry.as_ref();
+        plx_io::project::save_project(&path, saved, &model.mesh, &model.fe, None).unwrap();
         let reopened = load(&path, UnitSystem::MmTonSC).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(reopened.model.geometry, Some(geometry));

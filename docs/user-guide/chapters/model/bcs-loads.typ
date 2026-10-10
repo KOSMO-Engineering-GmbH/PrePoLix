@@ -23,6 +23,22 @@ plates (rotations).
 The region is a selection of faces, edges or nodes, a node set or a surface. Displacement and
 temperature boundary conditions can follow an #ui("Amplitude") (@amplitudes).
 
+=== Motion preview <motion-preview>
+
+When a displacement boundary condition follows an amplitude, a play button appears right of the
+#ui("Amplitude") field. It previews the prescribed motion in the 3D view: the nodes of the region
+move by the prescribed displacements times the amplitude, passing through the amplitude's time
+range in three seconds and starting again after a short rest. The button turns into a stop
+button; the preview also ends when the dialog closes or the amplitude is removed. Changes to the
+values, the amplitude or the region show while it plays.
+
+#screenshot("motion-preview.png", [Tip of a cantilever moved up and down by an amplitude])
+
+Only the nodes of the region move; the rest of the mesh stays in place, so the elements next to
+the region stretch. The motion is exaggerated so that the largest displacement is a quarter of
+the model size; the dialog shows the current time of the amplitude and this scale. Rotations
+(`UR1` to `UR3`) are not shown.
+
 == Loads <loads>
 
 Loads are created like boundary conditions, with #ui("Create ...") on #ui("Loads") of a step or

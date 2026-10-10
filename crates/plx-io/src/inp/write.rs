@@ -15,7 +15,7 @@ use plx_model::{
     ContactMethod, ContactPair, DefinedFieldKind, DynamicStep, FeModel, FieldOutput, FrequencyStep,
     GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
-    ModelSpace, NodeTie, OutputKind, Region, Section, SectionKind, StaticStep,
+    ModelSpace, NodeTie, OutputDimension, OutputKind, Region, Section, SectionKind, StaticStep,
     SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals,
     UserKeyword, line_tangent, symmetry_dofs, symmetry_plane,
 };
@@ -2244,12 +2244,17 @@ fn buckle_step(settings: &BuckleStep) -> (String, String) {
     (header, procedure)
 }
 
+/// `*Node file`, `*El file` or `*Contact file` of a field output, as PrePoMax's
+/// `CalNodeFile`, `CalElFile` and `CalContactFile` write them; none without variables.
 fn field_output(output: &FieldOutput, shells: bool) -> Option<Keyword> {
+    if !output.active {
+        return Some(deactivated(&output.name));
+    }
     if output.variables.is_empty() {
         return None;
     }
     let mut variables = output.variables.join(", ");
-    let keyword = match output.kind {
+    let mut header = match output.kind {
         OutputKind::Node => "*Node file",
         OutputKind::Element => {
             // PrePoMax adds nodal extrapolation of stresses unless error estimators are requested.
@@ -2259,10 +2264,32 @@ fn field_output(output: &FieldOutput, shells: bool) -> Option<Keyword> {
             }
             "*El file"
         }
-    };
-    let options = if shells { ", Output=2D" } else { "" };
+        OutputKind::Contact => "*Contact file",
+    }
+    .to_string();
+    if output.last_iterations {
+        header.push_str(", Last iterations");
+    }
+    if output.contact_elements {
+        header.push_str(", Contact elements");
+    }
+    if output.kind != OutputKind::Contact {
+        let dimension = match output.kind {
+            OutputKind::Element => output.dimension,
+            _ => OutputDimension::Default,
+        };
+        match dimension {
+            OutputDimension::Default if shells => header.push_str(", Output=2D"),
+            OutputDimension::Default => {}
+            OutputDimension::TwoD => header.push_str(", Output=2D"),
+            OutputDimension::ThreeD => header.push_str(", Output=3D"),
+        }
+        if !output.global {
+            header.push_str(", Global=No");
+        }
+    }
     Some(Keyword::generated(format!(
-        "** Name: {}\n{keyword}{options}\n{variables}\n",
+        "** Name: {}\n{header}\n{variables}\n",
         output.name
     )))
 }
