@@ -1,107 +1,86 @@
 # PrePolix
 
-Ein FEM-Präprozessor und Postprozessor für [CalculiX](http://www.calculix.de/), geschrieben in Rust und lauffähig unter Linux und Windows.
-Vorbild für Bedienung und Funktionsumfang ist [PrePoMax](https://prepomax.fs.um.si/).
+PrePolix is a graphical pre- and post-processor for the finite element solver
+[CalculiX](http://www.calculix.de/). It is a rebuild of [PrePoMax](https://prepomax.fs.um.si/) in
+Rust, limited to CalculiX, and runs on **Linux and Windows**. The goal is the same workflow and look as
+PrePoMax: import a geometry, mesh it, set up materials, loads and steps, run CalculiX and look at
+the results, all in one window and without editing input files by hand.
 
-> Status: Meilenstein M2, CalculiX-Netze (`.inp`) und -Ergebnisse (`.frd`) lassen sich öffnen und ansehen. Plan und Roadmap stehen in [docs/PLANUNG_TECH_STACK.md](docs/PLANUNG_TECH_STACK.md).
+![PrePolix main window with a result](docs/user-guide/images/results.png)
 
-## Bauen und starten
+> PrePolix is a hobby project under active development. It is not affiliated with PrePoMax or
+> CalculiX. Expect rough edges and please report what you find in the
+> [issue tracker](https://github.com/KwentiN-ui/prepolix/issues).
 
-Voraussetzung ist ein aktuelles stabiles Rust (`rustup`). Unter Linux braucht der Build außerdem die ALSA-Entwicklungsdateien für die Audioausgabe (Debian/Ubuntu: `sudo apt install libasound2-dev`, Fedora: `alsa-lib-devel`).
+## Features
 
-```sh
-cargo run --release
-```
+**Geometry and mesh**
+- Import STEP, IGES and BREP geometry, or open an existing CalculiX `.inp` mesh.
+- Tetrahedral meshing (1st and 2nd order) with [Gmsh](https://gmsh.info/): per-part meshing
+  parameters and local mesh sizes on faces and edges.
+- Mesh tools: merge nodes, mirror, transform, renumber.
+- 2D models (plane stress, plane strain, axisymmetric), shells, beams and trusses.
 
-Ein Modell oder eine Ergebnisdatei öffnest du über *Datei → Öffnen* (Strg+O), indem du eine `.inp`- oder `.frd`-Datei ins Fenster ziehst oder sie beim Start angibst:
+**Model setup**
+- Materials (elastic, plastic, thermal) with a material library; solid, shell and beam sections.
+- Boundary conditions, loads (pressure, surface and body loads, centrifugal, moments), amplitudes,
+  initial conditions and defined fields.
+- Contact pairs and ties, constraints, rigid bodies, pre-tension, submodeling.
+- Node and element sets are created implicitly from your selection, as in PrePoMax.
+- Unit systems with unit-aware input, model check, and a keyword editor for anything the GUI does not cover.
 
-```sh
-cargo run --release -- testdata/wuerfel_c3d10.inp
-cargo run --release -- testdata/kragbalken_c3d8.frd
-```
+**Analysis**
+- Static, frequency, buckling, dynamic, modal dynamics, steady-state dynamics, heat transfer and
+  coupled temperature-displacement steps, complex frequency with Campbell diagram.
+- Start CalculiX from the program and watch the solver output live.
 
-### Gmsh für Geometrie-Import und Vernetzung
+**Post-processing**
+- Contour plots, deformed shapes, section views, animations and mode shapes.
+- Derived field and history outputs, paths, planes, hot-spot search and result queries.
+- Screenshots to file or clipboard.
 
-STEP-, IGES- und BREP-Dateien importiert und vernetzt prepolix mit [Gmsh](https://gmsh.info/), das OpenCASCADE, Netgen und TetGen mitbringt. Gmsh wird nicht mitkompiliert, sondern zur Laufzeit als Bibliothek geladen; ohne sie startet prepolix normal, nur Import und Vernetzung fehlen. Für die Entwicklung holt ein Skript die offizielle Bibliothek (Gmsh 4.15, aus dem PyPI-Paket von Gmsh) nach `target/gmsh`, wo Debug-Builds und Tests sie finden:
+Projects are saved as `.plx` files.
 
-```sh
-python3 scripts/fetch_gmsh.py                        # Linux
-python3 scripts/fetch_gmsh.py --platform windows     # Windows
-```
+## Installation
 
-Für eine Weitergabe gehören `libgmsh.so.4.15` bzw. `gmsh-4.15.dll` und `GMSH-LICENSE.txt` neben die ausführbare Datei. Alternativ lässt sich unter *Werkzeuge → Einstellungen → Gmsh* der Pfad zu einer vorhandenen Bibliothek angeben und testen. Unter Linux braucht die Gmsh-Bibliothek zusätzlich `libGLU` und `libXft`.
+### Windows
 
-```sh
-cargo run --release -- testdata/platte_mit_loch.step
-```
+Download `prepolix-<version>-setup.exe` from the
+[latest release](https://github.com/KwentiN-ui/prepolix/releases/latest) and run it. It installs
+PrePolix with a Start menu entry, bundles Gmsh and can associate `.plx` project files.
 
-Unter Linux braucht das Programm zur Laufzeit `libxkbcommon-x11` (X11) bzw. `libxkbcommon` (Wayland) sowie einen Vulkan- oder OpenGL-Treiber. Die meisten Desktop-Installationen bringen das bereits mit.
+### Linux
 
-### Windows-Installer
+There is no binary package yet. Build from source, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-Der Installer (`prepolix-<version>-setup.exe`, NSIS) wird unter Linux gebaut: `prepolix.exe` entsteht per Cross-Compile mit MinGW, dazu kommen die Gmsh-DLL, das Programmsymbol und die Lizenztexte. Er installiert nach `C:\Program Files\prepolix`, legt einen Startmenü-Eintrag an (Desktop-Symbol optional), verknüpft auf Wunsch `.plx`-Projekte und trägt sich unter *Apps* zum Deinstallieren ein. CalculiX gehört nicht dazu.
+### CalculiX
 
-```sh
-sudo apt install gcc-mingw-w64-x86-64 nsis
-scripts/build_windows_installer.sh     # -> target/windows-installer/
-```
+PrePolix does not ship the solver. Install CalculiX (`ccx`) separately, for example from
+[calculix.de](http://www.calculix.de/) or your package manager (`sudo apt install calculix-ccx`),
+and select the executable in *Tools > Settings*. A self-test button there checks that it works.
 
-Ein Tag `v*` baut den Installer über den Workflow *Release* und hängt ihn an das GitHub-Release; per *Run workflow* entsteht er als Artefakt. Unter `C:\Program Files` darf prepolix ohne Administratorrechte nicht schreiben, das Arbeitsverzeichnis für CalculiX liegt dann in `%TEMP%\prepolix`.
+## Documentation
 
-## Benutzerhandbuch
+The **User Guide** is a PDF attached to every [release](https://github.com/KwentiN-ui/prepolix/releases/latest)
+(`prepolix-<version>-user-guide.pdf`). It starts with a first analysis step by step and then
+describes every dialog and what PrePolix writes to the CalculiX input file. The source is in
+[docs/user-guide/](docs/user-guide/).
 
-Das Benutzerhandbuch (Englisch, Typst) liegt in [docs/user-guide/](docs/user-guide/). Jedes Release enthält es als PDF; selbst bauen mit `typst compile --root . --ignore-system-fonts docs/user-guide/main.typ`. Neue Features werden dort im PR mitbeschrieben, siehe [docs/user-guide/README.md](docs/user-guide/README.md).
+## Contributing and development
 
-## Bedienung der 3D-Ansicht
+Building from source, project layout, tests and releases are described in
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-Wie in PrePoMax:
+## License
 
-| Aktion | Maus |
-|---|---|
-| Drehen | mittlere Taste ziehen |
-| Verschieben | Umschalt + mittlere Taste ziehen |
-| Zoomen | Mausrad (mit Strg feiner) oder Strg + mittlere Taste ziehen |
-| Auswählen, Auswahlrahmen | linke Taste (in Auswahldialogen) |
-| Kontextmenü | rechte Taste |
-| Einpassen | Doppelklick |
+PrePolix is licensed under the GPL-3.0-or-later, see [LICENSE](LICENSE).
 
-Die Standardansichten folgen PrePoMax: Y zeigt nach oben. "Vertikal" stellt die Achse senkrecht, die der Bildschirm-Hochrichtung am nächsten liegt, "Ansicht senkrecht zu" (Menü Ansicht oder Rechtsklick) schaut entlang X, Y oder Z auf die Ebene, deren Normale die Achse ist, ein Klick auf eine Achse des Koordinatenkreuzes unten rechts (Spitze oder grauer negativer Teil) schaut genauso entlang dieser Richtung, und "Isometrisch, Achse oben" zeigt die isometrische Ansicht mit X, Y oder Z nach oben.
+Gmsh is licensed under the GPL-2.0-or-later with an exception for OpenCASCADE, Netgen and METIS,
+and OpenCASCADE under the LGPL-2.1 with exception; both are compatible with the GPL-3.0. If you
+distribute PrePolix together with the Gmsh library, include `GMSH-LICENSE.txt` and point to the
+sources: Gmsh at <https://gitlab.onelab.info/gmsh/gmsh> (tag `gmsh_4_15_2`), OpenCASCADE at
+<https://github.com/Open-Cascade-SAS/OCCT>.
 
-## Was schon geht
-
-- `.inp`-Netze lesen: Knoten, Elemente (C3D4/6/8/10/15/20 inkl. R/I-Varianten, S3/4/6/8, M3D, CPS/CPE/CAX, B31/B32, T3D2/T3D3), `*NSET`, `*ELSET` (auch `GENERATE`), `*SURFACE`, `*INCLUDE`. Alle anderen Keywords werden übersprungen und in der Ausgabe aufgezählt.
-- Parts entstehen aus dem `ELSET=` der `*ELEMENT`-Blöcke und lassen sich im Modellbaum ein- und ausblenden.
-- Darstellung der Außenhaut mit Feature-Kanten und optionalen Netzkanten, auch für quadratische Elemente.
-- `.frd`-Ergebnisse lesen (ASCII und binär): Netz, Materialien als Parts, alle Steps und Inkremente inklusive Eigenformen. Komponenten heißen wie in PrePoMax (`U1`, `S11`, …); ergänzt werden Verschiebungsbetrag `ALL`, `MISES`, `TRESCA`, Hauptspannungen und Vergleichsdehnung.
-- Ergebnisanzeige wie in PrePoMax: Konturplot in 9 Farbstufen (Regenbogen, einstellbar), Legende, Min/Max mit Knoten, verformte Darstellung mit automatischem, echtem oder eigenem Faktor.
-- Schnittansicht (*Ansicht → Schnittansicht …*): Schnittebene als Grundebene XY/YZ/XZ an einer Koordinate oder als Punkt und Normale, beides auch per Klick ins Modell (Normale aus zwei Punkten). Im 3D-Fenster lässt sich die Ebene am Pfeil verschieben und an den Bögen kippen. Volumenelemente zeigen ihre Schnittfläche mit Netzkanten und Ergebnisfarben.
-
-- Geometrie importieren (STEP, IGES, BREP) und mit Tetraedern 1. oder 2. Ordnung vernetzen, ein Part pro Volumenkörper. Wie in PrePoMax wird jedes Part einzeln vernetzt (Kontextmenü des Parts: *Netz erzeugen*). Der Mesh Setup nimmt Meshing Parameters pro Part, lokale Netzgrößen auf Flächen und Kanten (Local Mesh Size) und die Gmsh-Algorithmen pro Part (Tetrahedral Gmsh) auf. Die Geometrie wird samt Mesh Setup im Projekt gespeichert.
-
-Beispielmodelle liegen in [testdata/](testdata/), erzeugt von `testdata/erzeugen.py`; die STEP-Dateien stammen aus Gmsh. Die Modelle mit Step lassen sich direkt mit `ccx` rechnen; zwei Ergebnisdateien (`*.frd`) liegen bei.
-
-## Aufbau
-
-| Crate | Inhalt |
-|---|---|
-| `plx-core` | Einheiten, Formeln, Selektions-Rezepte, gemeinsame Typen |
-| `plx-mesh` | FE-Netz: Knoten, Elemente, Sets, Surfaces, Geometrie-Topologie |
-| `plx-model` | FE-Modell: Materialien, Sections, Steps, Randbedingungen, Lasten, Commands |
-| `plx-io` | Dateiformate: CalculiX `.inp`/`.frd`/`.dat` und weitere |
-| `plx-results` | Ergebnis-Datenmodell und abgeleitete Größen |
-| `plx-mesher` | Geometrie-Import und Vernetzung mit Gmsh (zur Laufzeit geladen) |
-| `plx-job` | Start und Überwachung von CalculiX |
-| `plx-render` | wgpu-Renderer und Kamera |
-| `plx-app` | Oberfläche (egui), ausführbares Programm `prepolix` |
-
-Die unteren Crates kennen keine Oberfläche und lassen sich einzeln testen (`cargo test`).
-
-## Lizenz
-
-GPL-3.0-or-later, siehe [LICENSE](LICENSE).
-
-Gmsh steht unter der GPL-2.0-or-later mit einer Ausnahme für OpenCASCADE, Netgen und METIS, OpenCASCADE unter der LGPL-2.1 mit Ausnahme; beides ist mit der GPL-3.0 verträglich. Wer prepolix mit der Gmsh-Bibliothek weitergibt, legt `GMSH-LICENSE.txt` bei und verweist auf die Quellen: Gmsh unter <https://gitlab.onelab.info/gmsh/gmsh> (Tag `gmsh_4_15_2`), OpenCASCADE unter <https://github.com/Open-Cascade-SAS/OCCT>.
-
-Die mitgelieferte Schrift Noto Sans (`crates/plx-app/assets/fonts`, auf Latein, Griechisch und
-gängige Symbole reduziert) steht unter der SIL Open Font License 1.1, siehe
+The bundled font Noto Sans (`crates/plx-app/assets/fonts`, reduced to Latin, Greek and common
+symbols) is licensed under the SIL Open Font License 1.1, see
 [OFL.txt](crates/plx-app/assets/fonts/OFL.txt).
