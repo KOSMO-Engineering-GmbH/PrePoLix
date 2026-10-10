@@ -1,8 +1,9 @@
 name: Release
 
-# Baut den Windows-Installer auf Linux (MinGW + NSIS) und das Benutzerhandbuch (Typst, PDF),
-# getrennt von der schnellen PR-CI. Läuft bei einem Versions-Tag (v0.1.0 usw.) und hängt beides
-# an das GitHub-Release, oder per Hand über "Run workflow", dann nur als Artefakte.
+# Baut den Windows-Installer auf Linux (MinGW + NSIS), das Linux-AppImage und das
+# Benutzerhandbuch (Typst, PDF), getrennt von der schnellen PR-CI. Läuft bei einem Versions-Tag
+# (v0.1.0 usw.) und hängt alles an das GitHub-Release, oder per Hand über "Run workflow", dann nur
+# als Artefakte.
 on:
   push:
     tags: ["v*"]
@@ -46,11 +47,49 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Beide Jobs legen das Release bei Bedarf an; wer zweiter ist, findet es schon vor.
+          # Alle Jobs legen das Release bei Bedarf an; wer zweiter ist, findet es schon vor.
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
             || gh release view "$GITHUB_REF_NAME" >/dev/null
           gh release upload "$GITHUB_REF_NAME" target/windows-installer/prepolix-*-setup.exe --clobber
+
+  linux-appimage:
+    # Das älteste unterstützte Ubuntu: das AppImage läuft nur mit einer glibc, die mindestens so
+    # neu ist wie die des Build-Systems.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-appimage
+      - uses: actions/cache@v4
+        with:
+          path: |
+            target/gmsh
+            target/appimage/tools
+          key: appimage-${{ hashFiles('scripts/fetch_gmsh.py', 'scripts/build_appimage.sh') }}
+      - name: Systembibliotheken
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends libasound2-dev libglu1-mesa \
+            libxft2 libxcursor1 libxinerama1 libgomp1 file
+      - run: scripts/build_appimage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prepolix-linux-appimage
+          path: target/appimage/prepolix-*-x86_64.AppImage
+          if-no-files-found: error
+      - name: An das Release hängen
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
+            || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
+            || gh release view "$GITHUB_REF_NAME" >/dev/null
+          gh release upload "$GITHUB_REF_NAME" target/appimage/prepolix-*-x86_64.AppImage --clobber
 
   user-guide:
     runs-on: ubuntu-latest

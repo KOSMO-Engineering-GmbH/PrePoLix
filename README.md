@@ -48,7 +48,7 @@ Projects are saved as `.plx` files.
 ## Installation
 
 PrePoLix needs two other programs: the solver CalculiX (not bundled on any platform) and, for
-geometry import and meshing, Gmsh (bundled by the Windows installer only). See the sections below.
+geometry import and meshing, Gmsh (bundled by the Windows installer and the Linux AppImage). See the sections below.
 
 ### Windows
 
@@ -58,8 +58,24 @@ PrePoLix with a Start menu entry, bundles Gmsh and can associate `.plx` project 
 
 ### Linux
 
-There is no binary package yet, but you can install straight from the Git repository with one
-command. You do not need to clone it. You need a current stable Rust toolchain ([rustup](https://rustup.rs/)):
+Download `prepolix-<version>-x86_64.AppImage` from the
+[latest release](https://github.com/KwentiN-ui/prepolix/releases/latest), make it executable and
+start it:
+
+```sh
+chmod +x prepolix-*-x86_64.AppImage
+./prepolix-*-x86_64.AppImage
+```
+
+The AppImage bundles Gmsh and runs on x86_64 distributions with glibc 2.35 or newer (Ubuntu 22.04,
+Debian 12, Fedora 36 and later). To get a menu entry and open `.plx` files by double-click, integrate
+it with a tool such as [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever) or
+[AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher).
+
+#### Alternative: install with cargo
+
+Any distribution works with one command, straight from the Git repository, without cloning. You
+need a current stable Rust toolchain ([rustup](https://rustup.rs/)):
 
 ```sh
 cargo install --git https://github.com/KwentiN-ui/PrePoLix plx-app
@@ -70,16 +86,16 @@ minutes. Building needs the ALSA development files (Debian/Ubuntu: `sudo apt ins
 Fedora: `sudo dnf install alsa-lib-devel`). At run time Linux needs `libxkbcommon-x11` (X11) or
 `libxkbcommon` (Wayland) and a Vulkan or OpenGL driver, which most desktops already have.
 
-PrePoLix also needs the Gmsh library, which `cargo install` does not provide, see [Gmsh](#gmsh) below.
+Unlike the AppImage, this does not include Gmsh, see [Gmsh](#gmsh-for-cargo-install-and-source-builds) below.
 To update later, run the same command again with `--force`. To build from a clone instead, see
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
-### Gmsh
+### Gmsh for cargo install and source builds
 
 PrePoLix imports STEP, IGES and BREP geometry and meshes it with [Gmsh](https://gmsh.info/). Gmsh is
-not part of PrePoLix and is loaded as a library at run time. The Windows installer bundles it. On
-Linux you provide it yourself until a bundled package exists. **Without Gmsh** PrePoLix starts and
-works normally, but geometry import and meshing are not available. Opening `.inp` meshes and `.frd`
+not part of PrePoLix and is loaded as a library at run time. The Windows installer and the Linux
+AppImage bundle it, so this section only applies if you installed with cargo or built from source.
+**Without Gmsh** PrePoLix starts and works normally, but geometry import and meshing are not available. Opening `.inp` meshes and `.frd`
 results, model setup, running CalculiX and post-processing do not need it.
 
 On Linux, the simplest way is to take the official library (Gmsh 4.15, the tested version) from its

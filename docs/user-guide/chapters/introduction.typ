@@ -45,11 +45,13 @@ The project, including geometry, mesh and model, is saved as a PrePoLix project 
 - *CalculiX* (`ccx`) is needed to run analyses. It is not part of PrePoLix. Set its path under
   #menu("Tools", "Settings ...", "CalculiX") and press #ui("Test CalculiX") to check it
   (@settings).
-- *Gmsh* is needed to import and mesh CAD geometry. The Windows installer includes it. Without
+- *Gmsh* is needed to import and mesh CAD geometry. The Windows installer and the Linux AppImage
+  include it. Without
   Gmsh PrePoLix still starts; only geometry import and meshing are unavailable. Its library path
   can be set under #menu("Tools", "Settings ...", "Gmsh").
 - On Linux, PrePoLix needs a Vulkan or OpenGL driver and `libxkbcommon`, which most desktop
-  installations provide. The Gmsh library additionally needs `libGLU` and `libXft`.
+  installations provide. A Gmsh library installed separately additionally needs `libGLU` and
+  `libXft`; the AppImage brings them along.
 
 == Installation
 
@@ -59,8 +61,12 @@ can associate `.plx` project files with PrePoLix. Uninstall it under _Apps_ in t
 settings. Because programs may not write to `C:\Program Files`, the CalculiX work directory then
 defaults to `%TEMP%\prepolix`.
 
-*Linux.* Build PrePoLix from source with a current stable Rust toolchain (`cargo run --release`),
-see the README of the repository.
+*Linux.* Download `prepolix-<version>-x86_64.AppImage` from the release page, make it executable
+(`chmod +x prepolix-*-x86_64.AppImage`) and start it. It includes Gmsh and runs on x86_64
+distributions with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later). A tool
+such as Gear Lever or AppImageLauncher adds a menu entry and associates `.plx` files. The CalculiX
+work directory defaults to `/tmp/prepolix`. Alternatively build PrePoLix from source with a
+current stable Rust toolchain (`cargo run --release`), see the README of the repository.
 
 == Starting PrePoLix
 
