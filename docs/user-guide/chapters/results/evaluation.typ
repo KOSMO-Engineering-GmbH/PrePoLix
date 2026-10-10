@@ -144,7 +144,7 @@ node for the displayed increment, with the maximum in bold.
 == Query <query>
 
 #menu("Tools", "Query ...") or the #ui("Query") button of the toolbar (the pipette) reads values from the model by clicking: #ui("Vertex/Node"),
-#ui("Facet/Element"), #ui("Part"), #ui("Assembly"), #ui("Bounding box size"), #ui("Distance")
+#ui("Facet/Element"), #ui("Edge") (length), #ui("Surface") (area), #ui("Part"), #ui("Assembly"), #ui("Bounding box size"), #ui("Distance")
 (two nodes), #ui("Angle") (three nodes) and #ui("Circle") (centre and radius through three
 nodes). The values appear in the output pane and as labels in the 3D view. On results, node
 queries also show the deformed position, the displacement and the value of the displayed
@@ -158,6 +158,13 @@ result file. Meshing again removes those of the FE model, since they refer to no
 ids.
 
 #screenshot("query.png", [Querying nodes on a result])
+
+#ui("Edge") and #ui("Surface") pick like the geometry based selection (@selection): an edge runs
+from corner to corner, on the Geometry tab and on meshes generated from CAD geometry it is the CAD
+edge; a surface is the CAD face or the smooth patch bounded by feature edges. Hovering shows what a
+click would pick. On results the output pane also has the deformed length or area and the change.
+
+#screenshot("query-geometry.png", [Edge and surface queries on the Geometry tab])
 
 #screenshot("query-annotation-menu.png", [Query labels after closing the window, with the
   context menu of a label])

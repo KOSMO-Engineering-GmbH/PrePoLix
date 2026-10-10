@@ -1,22 +1,28 @@
 //! PrePoMax's Query tool (Tools > Query): clicks in the 3D view write what was hit to the
 //! output pane, as aligned lines like PrePoMax does, and leave an annotation in the view.
-//! Nodes, elements and parts are queried with one click; distances, angles and circles
-//! need two or three nodes. As in PrePoMax the annotations stay when the window is closed;
+//! Nodes, elements, edges, surfaces and parts are queried with one click, edges and
+//! surfaces picked as the geometry based selection picks them; distances, angles and
+//! circles need two or three nodes. As in PrePoMax the annotations stay when the window is closed;
 //! a right click on one deletes it, Remove Annotations deletes them all.
 
+use std::collections::HashMap;
+
 use glam::{DVec3, Vec3};
-use plx_mesh::NodeId;
+use plx_mesh::{CadEntity, NodeId};
 use plx_model::Quantity;
 
 use crate::model::{Hit, Model};
 use crate::overlay::Marker;
 use crate::results::{field_unit, format_value};
+use crate::selection::{Items, Picker, Target};
 use crate::viewport::Preview;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QueryKind {
     Node,
     Element,
+    Edge,
+    Surface,
     Part,
     Assembly,
     BoundingBox,
@@ -25,9 +31,11 @@ pub enum QueryKind {
     Circle,
 }
 
-const KINDS: [(QueryKind, &str); 8] = [
+const KINDS: [(QueryKind, &str); 10] = [
     (QueryKind::Node, "Vertex/Node"),
     (QueryKind::Element, "Facet/Element"),
+    (QueryKind::Edge, "Edge"),
+    (QueryKind::Surface, "Surface"),
     (QueryKind::Part, "Part"),
     (QueryKind::Assembly, "Assembly"),
     (QueryKind::BoundingBox, "Bounding box size"),
@@ -55,6 +63,16 @@ impl QueryKind {
 pub enum Annotation {
     Node(NodeId),
     Element(usize),
+    /// The segments along an edge of a part.
+    Edge {
+        part: usize,
+        segments: Vec<[NodeId; 2]>,
+    },
+    /// The faces of a surface of a part by their corner nodes.
+    Surface {
+        part: usize,
+        faces: Vec<Vec<NodeId>>,
+    },
     Part(usize),
     Distance([NodeId; 2]),
     Angle([NodeId; 3]),
@@ -148,7 +166,11 @@ impl QueryWindow {
                 }
                 ui.add_space(4.0);
                 let hint = match self.kind.nodes_needed() {
-                    0 if matches!(self.kind, QueryKind::Element | QueryKind::Part) => {
+                    0 if matches!(
+                        self.kind,
+                        QueryKind::Element | QueryKind::Edge | QueryKind::Surface | QueryKind::Part
+                    ) =>
+                    {
                         "Click an item in the 3D view.".to_string()
                     }
                     0 => "The values are written to the output pane.".to_string(),
@@ -180,10 +202,12 @@ impl QueryWindow {
     }
 
     /// A click in the 3D view: writes the queried values and returns the annotation.
+    /// `precision` is the pick tolerance at the hit in render units.
     pub fn click(
         &mut self,
         model: &Model,
         hit: Option<&Hit>,
+        precision: f32,
         output: &mut Vec<String>,
     ) -> QueryClick {
         let Some(hit) = hit else {
@@ -196,6 +220,28 @@ impl QueryWindow {
                 };
                 output.extend(element_lines(model, element));
                 QueryClick::Added(Annotation::Element(element))
+            }
+            QueryKind::Edge => {
+                let segments = pick_edge(model, hit, precision);
+                if segments.is_empty() {
+                    return QueryClick::Nothing;
+                }
+                output.extend(edge_lines(model, hit.part, &segments));
+                QueryClick::Added(Annotation::Edge {
+                    part: hit.part,
+                    segments,
+                })
+            }
+            QueryKind::Surface => {
+                let faces = pick_surface(model, hit, precision);
+                if faces.is_empty() {
+                    return QueryClick::Nothing;
+                }
+                output.extend(surface_lines(model, hit.part, &faces));
+                QueryClick::Added(Annotation::Surface {
+                    part: hit.part,
+                    faces,
+                })
             }
             QueryKind::Part => {
                 output.extend(part_lines(model, hit.part));
@@ -234,10 +280,20 @@ impl QueryWindow {
         }
     }
 
-    /// What a click would query: the nearest node, or the edges of the hit face.
-    pub fn preview(&self, model: &Model, hit: &Hit) -> Preview {
+    /// What a click would query: the nearest node, the edge or surface the geometry based
+    /// selection picks, or the edges of the hit face.
+    pub fn preview(&self, model: &Model, hit: &Hit, precision: f32) -> Preview {
+        let lines = |segments: &[[NodeId; 2]]| render_segments(model, segments);
         match self.kind {
             QueryKind::Assembly | QueryKind::BoundingBox => Preview::default(),
+            QueryKind::Edge => Preview {
+                lines: lines(&pick_edge(model, hit, precision)),
+                points: Vec::new(),
+            },
+            QueryKind::Surface => Preview {
+                lines: lines(&outline(&pick_surface(model, hit, precision))),
+                points: Vec::new(),
+            },
             QueryKind::Element | QueryKind::Part => Preview {
                 lines: model.hit_outline(hit),
                 points: Vec::new(),
@@ -267,8 +323,14 @@ pub fn marks(model: &Model, picked: &[NodeId]) -> QueryMarks {
     let mut marks = QueryMarks::default();
     let position = |id: NodeId| model.node_position(model.mesh.node_index(id)?);
     let shown = |id: NodeId| Some(DVec3::from(model.shown_node(id)?));
+    // Lengths and areas in true scale, as the output pane has them.
+    let true_position = |id: NodeId| {
+        let (base, deformed) = base_and_deformed(model, id)?;
+        Some(deformed.unwrap_or(base))
+    };
     let units = model.units();
     let length = units.unit(Quantity::Length);
+    let (length_unit, area_unit) = (length, units.unit(Quantity::Area));
     marks.points = picked.iter().filter_map(|&id| position(id)).collect();
     for (owner, annotation) in model.query_annotations.iter().enumerate() {
         match annotation {
@@ -293,6 +355,30 @@ pub fn marks(model: &Model, picked: &[NodeId]) -> QueryMarks {
                 marks.markers.push(Marker {
                     position: center,
                     text: format!("Element id: {}\n{}", element.id, element.type_name),
+                });
+            }
+            Annotation::Edge { segments, .. } => {
+                let lines = render_segments(model, segments);
+                let Some(&[a, b]) = lines.get(lines.len() / 2) else {
+                    continue;
+                };
+                marks.lines.extend(lines.iter().map(|&[a, b]| vec![a, b]));
+                let length = edge_length(segments, true_position);
+                marks.markers.push(Marker {
+                    position: (a + b) * 0.5,
+                    text: format!("Length: {} {length_unit}", number(length)),
+                });
+            }
+            Annotation::Surface { faces, .. } => {
+                let Some(center) = surface_center(model, faces) else {
+                    continue;
+                };
+                let lines = render_segments(model, &outline(faces));
+                marks.lines.extend(lines.iter().map(|&[a, b]| vec![a, b]));
+                let area = surface_area(faces, true_position);
+                marks.markers.push(Marker {
+                    position: center,
+                    text: format!("Area: {} {area_unit}", number(area)),
                 });
             }
             Annotation::Part(index) => {
@@ -734,6 +820,190 @@ fn circle_polyline(model: &Model, center: DVec3, radius: f64, axis: DVec3) -> Ve
         .collect()
 }
 
+/// The segments of the edge a click picks, as the geometry based selection does: the CAD
+/// edge on a mesh generated from geometry, the CAD edge drawn as lines on the Geometry tab
+/// (the nearest one to a click on a face), the lines of a beam part, else the outline edge
+/// of the part from corner to corner.
+fn pick_edge(model: &Model, hit: &Hit, precision: f32) -> Vec<[NodeId; 2]> {
+    if model.has_cad()
+        && let Some(CadEntity::Edge(tag)) =
+            crate::cad_selection::pick(model, hit, Target::Edges, precision)
+    {
+        return model
+            .mesh
+            .cad
+            .segments
+            .get(&tag)
+            .cloned()
+            .unwrap_or_default();
+    }
+    let skin = model.skin(hit.part);
+    let segment = if hit.line {
+        Some(hit.face)
+    } else if model.is_geometry() {
+        let distance = |&[a, b]: &[usize; 2]| {
+            let (Some(a), Some(b)) = (model.node_position(a), model.node_position(b)) else {
+                return f32::INFINITY;
+            };
+            let ab = b - a;
+            let t = ((hit.point - a).dot(ab) / ab.length_squared().max(f32::MIN_POSITIVE))
+                .clamp(0.0, 1.0);
+            (a + ab * t).distance(hit.point)
+        };
+        (0..skin.lines.len())
+            .min_by(|&i, &j| distance(&skin.lines[i]).total_cmp(&distance(&skin.lines[j])))
+    } else {
+        None
+    };
+    let Some(segment) = segment else {
+        return crate::selection::edge_segments(model, hit.part, hit.point);
+    };
+    // A CAD edge is drawn as the line elements of one entity; a beam part as a whole.
+    let entity_of = |segment: usize| {
+        let element = model.mesh.elements().get(skin.line_elements[segment])?;
+        model.cad_entity(element.id)
+    };
+    let entity = entity_of(segment);
+    let ids = model.mesh.node_ids();
+    (0..skin.lines.len())
+        .filter(|&i| entity.is_none() || entity_of(i) == entity)
+        .map(|i| skin.lines[i].map(|n| ids[n]))
+        .collect()
+}
+
+/// The faces of the surface a click picks, as the geometry based selection does: the CAD
+/// face, or the patch bounded by feature edges, by their corner nodes.
+fn pick_surface(model: &Model, hit: &Hit, precision: f32) -> Vec<Vec<NodeId>> {
+    if hit.line {
+        return Vec::new();
+    }
+    let picked = Picker::default()
+        .pick(model, hit, Target::Faces, precision)
+        .resolved(&model.mesh, Target::Faces);
+    let Items::Faces(picked) = picked else {
+        return Vec::new();
+    };
+    let ids = model.mesh.node_ids();
+    let elements = model.mesh.elements();
+    (model.skin(hit.part).faces.iter())
+        .filter(|face| picked.contains(&(elements[face.element].id, face.face as u8 + 1)))
+        .map(|face| face.corners.iter().map(|&n| ids[n]).collect())
+        .collect()
+}
+
+/// The edges of a surface that only one of its faces has: its outline.
+fn outline(faces: &[Vec<NodeId>]) -> Vec<[NodeId; 2]> {
+    let edges = |face: &Vec<NodeId>| {
+        let face = face.clone();
+        (0..face.len()).map(move |i| [face[i], face[(i + 1) % face.len()]])
+    };
+    let key = |[a, b]: [NodeId; 2]| (a.min(b), a.max(b));
+    let mut count: HashMap<(NodeId, NodeId), usize> = HashMap::new();
+    for edge in faces.iter().flat_map(edges) {
+        *count.entry(key(edge)).or_default() += 1;
+    }
+    (faces.iter().flat_map(edges))
+        .filter(|&edge| count[&key(edge)] == 1)
+        .collect()
+}
+
+fn render_segments(model: &Model, segments: &[[NodeId; 2]]) -> Vec<[Vec3; 2]> {
+    let position = |id: NodeId| model.node_position(model.mesh.node_index(id)?);
+    (segments.iter())
+        .filter_map(|&[a, b]| Some([position(a)?, position(b)?]))
+        .collect()
+}
+
+fn edge_length(segments: &[[NodeId; 2]], position: impl Fn(NodeId) -> Option<DVec3>) -> f64 {
+    (segments.iter())
+        .filter_map(|&[a, b]| Some(position(a)?.distance(position(b)?)))
+        .sum()
+}
+
+/// The area of the faces, each split into triangles from its first corner.
+fn surface_area(faces: &[Vec<NodeId>], position: impl Fn(NodeId) -> Option<DVec3>) -> f64 {
+    let mut area = 0.0;
+    for face in faces {
+        let Some(corners) = face
+            .iter()
+            .map(|&n| position(n))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        for i in 1..corners.len().saturating_sub(1) {
+            let (u, v) = (corners[i] - corners[0], corners[i + 1] - corners[0]);
+            area += 0.5 * u.cross(v).length();
+        }
+    }
+    area
+}
+
+/// Where the label of a surface goes: the centre of the face nearest to the middle of the
+/// surface, so that it lies on the surface also where it is curved.
+fn surface_center(model: &Model, faces: &[Vec<NodeId>]) -> Option<Vec3> {
+    let centers: Vec<Vec3> = (faces.iter())
+        .filter_map(|face| {
+            let corners = (face.iter())
+                .map(|&n| model.node_position(model.mesh.node_index(n)?))
+                .collect::<Option<Vec<_>>>()?;
+            Some(corners.iter().sum::<Vec3>() / corners.len().max(1) as f32)
+        })
+        .collect();
+    let middle = centers.iter().sum::<Vec3>() / centers.len().max(1) as f32;
+    (centers.into_iter()).min_by(|a, b| a.distance(middle).total_cmp(&b.distance(middle)))
+}
+
+fn base_position(model: &Model, node: NodeId) -> Option<DVec3> {
+    Some(base_and_deformed(model, node)?.0)
+}
+
+fn deformed_position(model: &Model, node: NodeId) -> Option<DVec3> {
+    base_and_deformed(model, node)?.1
+}
+
+fn edge_lines(model: &Model, part: usize, segments: &[[NodeId; 2]]) -> Vec<String> {
+    let length = model.units().unit(Quantity::Length);
+    let base = edge_length(segments, |n| base_position(model, n));
+    let name = model.parts.get(part).map_or("", |p| p.name.as_str());
+    let mut lines = vec![
+        String::new(),
+        format!("Edge on part: {name}"),
+        row("Base", length, "L:", &[number(base)]),
+    ];
+    if model.results.is_some() {
+        let deformed = edge_length(segments, |n| deformed_position(model, n));
+        lines.push(row("Deformed", length, "L:", &[number(deformed)]));
+        lines.push(row("Delta", length, "L:", &[number(deformed - base)]));
+    }
+    lines.push(String::new());
+    lines
+}
+
+fn surface_lines(model: &Model, part: usize, faces: &[Vec<NodeId>]) -> Vec<String> {
+    let unit = model.units().unit(Quantity::Area);
+    let base = surface_area(faces, |n| base_position(model, n));
+    let name = model.parts.get(part).map_or("", |p| p.name.as_str());
+    let mut lines = vec![
+        String::new(),
+        format!("Surface on part: {name}"),
+        row("Base", unit, "A:", &[number(base)]),
+    ];
+    if model.results.is_some() {
+        let deformed = surface_area(faces, |n| deformed_position(model, n));
+        lines.push(row("Deformed", unit, "A:", &[number(deformed)]));
+        lines.push(row("Delta", unit, "A:", &[number(deformed - base)]));
+    }
+    let facets = if model.is_geometry() {
+        "Facets"
+    } else {
+        "Element faces"
+    };
+    lines.push(row(facets, "", "#:", &[faces.len().to_string()]));
+    lines.push(String::new());
+    lines
+}
+
 fn centroid(lines: &[[Vec3; 2]]) -> Option<Vec3> {
     if lines.is_empty() {
         return None;
@@ -760,6 +1030,21 @@ mod tests {
         assert!(circle_through(DVec3::ZERO, DVec3::X, 2.0 * DVec3::X).is_none());
         let angle = angle_between(DVec3::X, DVec3::ZERO, DVec3::Y);
         assert!((angle - 90.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn surface_area_and_outline() {
+        // Two unit squares side by side: area 2, the shared edge is not on the outline.
+        let faces = vec![vec![1, 2, 5, 4], vec![2, 3, 6, 5]];
+        let position = |n: NodeId| {
+            let n = n as f64 - 1.0;
+            Some(DVec3::new(n % 3.0, (n / 3.0).floor(), 0.0))
+        };
+        assert!((surface_area(&faces, position) - 2.0).abs() < 1e-12);
+        let edges = outline(&faces);
+        assert_eq!(edges.len(), 6);
+        assert!(!edges.iter().any(|e| matches!(e, [2, 5] | [5, 2])));
+        assert!((edge_length(&edges, position) - 6.0).abs() < 1e-12);
     }
 
     #[test]

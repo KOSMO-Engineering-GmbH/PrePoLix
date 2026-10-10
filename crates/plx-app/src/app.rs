@@ -3051,7 +3051,8 @@ impl Workbench {
             };
             if let Some(model) = model {
                 let hit = model.pick_click(&click);
-                match query.click(model, hit.as_ref(), &mut self.output) {
+                let precision = hit.as_ref().map_or(0.0, |h| click.precision_at(h.point));
+                match query.click(model, hit.as_ref(), precision, &mut self.output) {
                     QueryClick::Nothing => {}
                     QueryClick::Picked => self.update_contour(),
                     QueryClick::Added(annotation) => {
@@ -3260,7 +3261,7 @@ impl Workbench {
             self.viewport.preview = match (hover, self.shown()) {
                 (Some(click), Some(model)) => model
                     .pick_click(&click)
-                    .map(|hit| query.preview(model, &hit))
+                    .map(|hit| query.preview(model, &hit, click.precision_at(hit.point)))
                     .unwrap_or_default(),
                 _ => Default::default(),
             };
