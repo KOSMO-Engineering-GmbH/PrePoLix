@@ -14,8 +14,9 @@ pub struct SkinFace {
     pub corners: Vec<usize>,
     /// Midside nodes of quadratic faces, `mids[i]` between `corners[i]` and `corners[i + 1]`.
     pub mids: Vec<usize>,
-    /// Smooth surface patch the face belongs to, numbered from 0 per part. Patches are
-    /// bounded by feature edges, like the faces of the CAD geometry the mesh came from.
+    /// Smooth surface patch the face belongs to, numbered from 0 per part. On a mesh
+    /// generated from CAD geometry the patches are its faces, split faces included; otherwise
+    /// they are bounded by feature edges, like the faces of the CAD geometry would be.
     pub region: usize,
 }
 
@@ -25,8 +26,8 @@ pub struct SkinEdge {
     pub a: usize,
     pub b: usize,
     pub mid: Option<usize>,
-    /// Edge on the outline: a free boundary, a junction of more than two faces, or a sharp
-    /// crease between two different surface patches.
+    /// Edge on the outline: a free boundary, a junction of more than two faces, a sharp
+    /// crease between two different surface patches, or the border of two CAD faces.
     pub feature: bool,
 }
 
@@ -43,6 +44,11 @@ pub struct PartSkin {
 
 /// Extracts the visible surface of one part: faces of solid elements that no other solid
 /// element of the part shares, every surface element, and all line elements.
+///
+/// Where the mesh was generated from CAD geometry ([`FeMesh::cad`]) the faces of the CAD
+/// geometry are the surface patches and their borders the feature edges, as PrePoMax shows
+/// them: faces split in the CAD program to pick them for loads keep their outline although
+/// they meet their neighbours without a crease.
 ///
 /// Elements that reference undefined nodes are skipped.
 pub fn extract_part_skin(mesh: &FeMesh, part: &Part, feature_angle_deg: f64) -> PartSkin {
@@ -113,8 +119,29 @@ pub fn extract_part_skin(mesh: &FeMesh, part: &Part, feature_angle_deg: f64) -> 
         skin.faces
             .push(skin_face(element_index, face_index, element.shape, &nodes));
     }
-    skin.edges = collect_edges(mesh.coords(), &mut skin.faces, feature_angle_deg);
+    let tags = cad_faces(mesh, &skin.faces);
+    skin.edges = collect_edges(mesh.coords(), &mut skin.faces, &tags, feature_angle_deg);
     skin
+}
+
+/// The CAD face each skin face lies on, `None` where the mesh does not know one.
+fn cad_faces(mesh: &FeMesh, faces: &[SkinFace]) -> Vec<Option<i32>> {
+    if mesh.cad.faces.is_empty() {
+        return vec![None; faces.len()];
+    }
+    let elements = mesh.elements();
+    let wanted: FastMap<(crate::ElementId, u8), usize> = (faces.iter().enumerate())
+        .map(|(index, f)| ((elements[f.element].id, f.face as u8 + 1), index))
+        .collect();
+    let mut tags = vec![None; faces.len()];
+    for (&tag, on_face) in &mesh.cad.faces {
+        for key in on_face {
+            if let Some(&index) = wanted.get(key) {
+                tags[index] = Some(tag);
+            }
+        }
+    }
+    tags
 }
 
 /// Node indices of the element's nodes; false if one is undefined.
@@ -165,13 +192,15 @@ struct EdgeAccumulator {
 
 /// Collects the skin edges and splits the faces into smooth patches.
 ///
-/// Faces are joined into one patch across every edge they share at less than the feature
-/// angle. A sharp edge only counts as a feature when it separates two patches: on coarse
-/// meshes of curved surfaces single edges often exceed the angle, but such creases end
-/// inside a patch and are mesh noise rather than geometry.
+/// Faces on a CAD face (`tags`) form one patch per CAD face. The others are joined into one
+/// patch across every edge they share at less than the feature angle. A sharp edge only
+/// counts as a feature when it separates two patches: on coarse meshes of curved surfaces
+/// single edges often exceed the angle, but such creases end inside a patch and are mesh
+/// noise rather than geometry.
 fn collect_edges(
     coords: &[[f64; 3]],
     faces: &mut [SkinFace],
+    tags: &[Option<i32>],
     feature_angle_deg: f64,
 ) -> Vec<SkinEdge> {
     let cos_limit = feature_angle_deg.to_radians().cos();
@@ -207,11 +236,19 @@ fn collect_edges(
         &[f0, f1] => dot(normals[f0], normals[f1]) >= cos_limit,
         _ => false,
     };
+    // Faces of one CAD face join whatever their angle, faces of different ones never.
+    let joined = |edge: &EdgeAccumulator| match edge.faces.as_slice() {
+        &[f0, f1] => match (tags[f0], tags[f1]) {
+            (None, None) => smooth(edge),
+            (a, b) => a == b,
+        },
+        _ => false,
+    };
     let mut patches = UnionFind::new(faces.len());
-    for edge in edges.values().filter(|e| smooth(e)) {
+    for edge in edges.values().filter(|e| joined(e)) {
         patches.union(edge.faces[0], edge.faces[1]);
     }
-    merge_tiny_patches(coords, &edges, &normals, &mut patches);
+    merge_tiny_patches(coords, &edges, &normals, tags, &mut patches);
     let mut region_of_root = HashMap::new();
     for (index, face) in faces.iter_mut().enumerate() {
         let next = region_of_root.len();
@@ -223,7 +260,10 @@ fn collect_edges(
         .map(|key| {
             let edge = &edges[&key];
             let feature = match edge.faces.as_slice() {
-                &[f0, f1] => !smooth(edge) && faces[f0].region != faces[f1].region,
+                &[f0, f1] => {
+                    let cad = tags[f0].is_some() || tags[f1].is_some();
+                    (cad || !smooth(edge)) && faces[f0].region != faces[f1].region
+                }
                 _ => true,
             };
             SkinEdge {
@@ -245,10 +285,12 @@ const MAX_NOISE_FOLD_DEG: f64 = 60.0;
 
 /// Joins tiny patches to the neighbour they share the longest gently folded border with. Coarse
 /// meshes of curved surfaces otherwise break into small patches whose outlines clutter the view.
+/// CAD faces are geometry however small and stay as they are.
 fn merge_tiny_patches(
     coords: &[[f64; 3]],
     edges: &FastMap<(usize, usize), EdgeAccumulator>,
     normals: &[[f64; 3]],
+    tags: &[Option<i32>],
     patches: &mut UnionFind,
 ) {
     let face_count = patches.parent.len();
@@ -260,6 +302,9 @@ fn merge_tiny_patches(
     let mut borders: HashMap<(usize, usize), (f64, f64)> = HashMap::new();
     for edge in edges.values() {
         if let &[f0, f1] = edge.faces.as_slice() {
+            if tags[f0].is_some() || tags[f1].is_some() {
+                continue;
+            }
             let (r0, r1) = (patches.find(f0), patches.find(f1));
             if r0 != r1 {
                 let (p, q) = (coords[edge.a], coords[edge.b]);
@@ -276,6 +321,7 @@ fn merge_tiny_patches(
     borders.retain(|_, &mut (length, weighted_fold)| weighted_fold < max_fold * length);
     let mut tiny: Vec<usize> = (0..face_count)
         .filter(|&root| size[root] > 0 && size[root] <= MAX_NOISE_PATCH_FACES)
+        .filter(|&root| tags[root].is_none())
         .collect();
     tiny.sort_by_key(|&root| size[root]);
     for root in tiny {

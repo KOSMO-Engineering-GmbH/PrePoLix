@@ -30,6 +30,16 @@ The context menu of a geometry part has #ui("Create Mesh"), #ui("Properties ..."
 #ui("Hide")/#ui("Show") and #ui("Delete"). Deleting a geometry part keeps a mesh that was already
 created from it.
 
+=== Split faces
+
+It is common to split faces in the CAD program, for example a ring on a shaft where a bearing
+sits, so that a boundary condition can be applied to exactly that area. PrePoLix keeps such
+faces: the mesh follows their borders, and on the #ui("FE Model") tab their outline is drawn
+like any other edge although the surface does not bend there. Pick them with the geometry based
+selection (@selection) like any other face.
+
+#screenshot("split-face.png", [A ring split off the shaft in the CAD program, outlined and picked on the mesh])
+
 === Geometry for 2D models
 
 In a 2D model the geometry must consist of faces only and lie in the plane z = 0. For an

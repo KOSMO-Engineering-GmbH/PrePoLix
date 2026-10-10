@@ -1,6 +1,8 @@
-<img src="assets/icon/prepolix.svg" alt="PrePoLix icon" width="128" align="right">
+<p align="center">
+  <img src="assets/icon/prepolix.svg" alt="PrePoLix icon" width="160">
+</p>
 
-# PrePoLix
+<h1 align="center">PrePoLix</h1>
 
 PrePoLix is a graphical pre- and post-processor for the finite element solver
 [CalculiX](http://www.calculix.de/). It is a rebuild of [PrePoMax](https://prepomax.fs.um.si/) in

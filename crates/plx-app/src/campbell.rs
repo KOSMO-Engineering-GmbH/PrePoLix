@@ -377,11 +377,15 @@ fn run_speed(
 /// The Campbell diagram window: the setup of the sweep, its progress and the diagram.
 pub struct CampbellWindow {
     pub setup: Setup,
+    /// False while the window is closed; its last sweep stays for when it is opened again.
+    pub visible: bool,
     sweep: Option<Sweep>,
     points: Vec<SpeedPoint>,
     log: Vec<String>,
     /// Orders the shown diagram was made with.
     orders: Vec<f64>,
+    /// A sweep was started, so an empty diagram is a failure rather than nothing yet.
+    swept: bool,
 }
 
 impl CampbellWindow {
@@ -393,10 +397,12 @@ impl CampbellWindow {
                 steps: DEFAULT_STEPS,
                 orders: "1".into(),
             },
+            visible: true,
             sweep: None,
             points: Vec::new(),
             log: Vec::new(),
             orders: vec![1.0],
+            swept: false,
         }
     }
 
@@ -447,6 +453,7 @@ impl CampbellWindow {
             .map_err(|e| format!("Sweep not started: {e}"))?;
         self.orders = self.setup.order_values();
         self.points.clear();
+        self.swept = true;
         self.log = vec![format!(
             "Sweep started: {total} speeds up to {} rpm in {}",
             numeric::format_physical(rpm(self.setup.max_speed)),
@@ -552,6 +559,15 @@ impl CampbellWindow {
                 ui.separator();
                 if self.points.len() >= 2 {
                     self.diagram_and_table(ui);
+                } else if self.swept && !running {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!(
+                            "No diagram: {} of the speeds gave complex frequencies, at least \
+                             2 are needed. The messages below say why the others failed.",
+                            self.points.len()
+                        ),
+                    );
                 } else {
                     ui.weak(
                         "The sweep runs the analysis once per speed, with the centrifugal \
@@ -603,7 +619,7 @@ impl CampbellWindow {
                     ));
                     ui.end_row();
                     ui.label("Speed steps");
-                    ui.add(numeric::drag_value(&mut self.setup.steps).range(1..=200));
+                    ui.add(numeric::drag_value(&mut self.setup.steps).range(2..=200));
                     ui.weak("CalculiX runs once per speed.");
                     ui.end_row();
                     ui.label("Engine orders");

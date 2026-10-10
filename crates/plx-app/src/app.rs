@@ -52,7 +52,7 @@ struct Workbench {
     settings: Settings,
     /// Open settings window with its unsaved draft.
     settings_window: Option<SettingsWindow>,
-    /// Open Campbell diagram window with its speed sweep.
+    /// Campbell diagram window with its speed sweep; kept with its results while hidden.
     campbell: Option<crate::campbell::CampbellWindow>,
     /// Open dialog of the model space and unit system, for a new or the open model.
     model_dialog: Option<ModelPropertiesDialog>,
@@ -2398,10 +2398,13 @@ impl Workbench {
                 "Needs an active Centrifugal load and a Complex Frequency step.",
             )
             .clicked()
-            && self.campbell.is_none()
-            && let Some(model) = self.setup_model()
         {
-            self.campbell = Some(crate::campbell::CampbellWindow::new(&model.fe));
+            // A closed window comes back with the diagram of its last sweep.
+            if let Some(window) = &mut self.campbell {
+                window.visible = true;
+            } else if let Some(model) = self.setup_model() {
+                self.campbell = Some(crate::campbell::CampbellWindow::new(&model.fe));
+            }
         }
     }
 
@@ -2410,6 +2413,10 @@ impl Workbench {
         let Some(mut window) = self.campbell.take() else {
             return;
         };
+        if !window.visible {
+            self.campbell = Some(window);
+            return;
+        }
         let can_start = self
             .setup_model()
             .is_some_and(|m| crate::campbell::applies(&m.fe) && m.mesh.element_count() > 0);
@@ -2421,9 +2428,8 @@ impl Workbench {
                 .ok_or_else(|| "No model is open.".to_string())?;
             window.start(&self.settings.solver, model, default_solver)
         });
-        if open || window.is_running() {
-            self.campbell = Some(window);
-        }
+        window.visible = open || window.is_running();
+        self.campbell = Some(window);
     }
 
     /// An entry of the analysis' context menu in the tree.
@@ -4423,6 +4429,7 @@ impl Workbench {
             self.output.push(format!("{} closed", model.file_name()));
         }
         self.geometry = None;
+        self.campbell = None;
         self.mesh_setup = None;
         self.mesh_item_editor = None;
         self.meshing = None;
@@ -4803,14 +4810,38 @@ fn results_tool_bar(
         changed |= view.deformation != before;
         ui.label("Factor");
         let user = view.deformation == Deformation::UserDefined;
-        let mut factor = if user { view.user_scale } else { view.scale() };
-        let response = ui.add_enabled(
-            user,
-            numeric::drag_value(&mut factor).speed(0.1).max_decimals(4),
-        );
-        if user && response.changed() {
-            view.user_scale = factor;
-            changed = true;
+        let factor = if user {
+            view.user_scale
+        } else {
+            f64::from(view.scale())
+        };
+        // A text field of fixed width: a long factor is cut off inside the frame instead of
+        // widening the field and pushing the items on its right around.
+        let id = ui.id().with("deformation factor");
+        let focused = ui.memory(|m| m.has_focus(id));
+        let mut text = focused
+            .then(|| ui.data_mut(|d| d.get_temp::<String>(id)))
+            .flatten()
+            .unwrap_or_else(|| numeric::format_physical(factor));
+        let response = ui
+            .add_enabled(
+                user,
+                egui::TextEdit::singleline(&mut text)
+                    .id(id)
+                    .desired_width(80.0),
+            )
+            .on_hover_text(numeric::format_physical(factor));
+        if response.has_focus() {
+            ui.data_mut(|d| d.insert_temp(id, text.clone()));
+        }
+        if user && response.lost_focus() {
+            ui.data_mut(|d| d.remove_temp::<String>(id));
+            if let Some(value) = numeric::parse_number(&text).filter(|v| v.is_finite())
+                && value != view.user_scale
+            {
+                view.user_scale = value;
+                changed = true;
+            }
         }
         changed |= ui
             .checkbox(&mut view.show_undeformed, "Show Undeformed")
@@ -4852,13 +4883,13 @@ fn results_tool_bar(
             (Icon::Next, "Next Increment", (current + 1).min(last)),
             (Icon::Last, "Last Increment", last),
         ] {
-            let enabled = target != current && view.animation.is_none();
+            let enabled = target != current;
             if icons::button(ui, icon, tooltip, enabled, false).clicked() {
                 increment = target;
             }
         }
-        if increment != view.increment && view.animation.is_none() {
-            view.select_increment(increment);
+        if increment != view.increment {
+            view.switch_increment(increment);
             changed = true;
         }
         ui.add_space(4.0);
