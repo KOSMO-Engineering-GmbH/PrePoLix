@@ -1,19 +1,19 @@
 // PrePoLix program icon: a meshed 3D part from a CalculiX input file, coloured with its
 // CalculiX result like a PrePoMax contour plot.
 //
-// The parts come from make_parts.py: parts/<design>.inp holds the mesh (C3D8/C3D8I,
-// only the corner nodes are used), parts/<design>.val one "node value" line per node
-// with the result scaled to [0, 1].
+// The part comes from make_part.py: part/gear.inp holds the mesh (C3D8/C3D8I, only the
+// corner nodes are used), part/gear.val one "node value" line per node with the result
+// scaled to [0, 1]. Any hexahedral .inp works the same way.
 //
 // Inputs (typst --input key=value):
-//   design  gear | impeller          which part
-//   variant color | mono | light     mono: dark grey faces with light lines, light: light grey
-//                                    faces with dark lines; both on a transparent background
-//   detail  full | small             small: no mesh lines, larger part, for 16-32 px
+//   variant color | mono | light     color: on the raised tile, cut by its edge;
+//                                    mono: dark grey faces with light lines, light: light
+//                                    grey faces with dark lines; both whole, on a
+//                                    transparent background
+//   detail  full | small             small: no mesh lines, for 16-32 px
 //
-// The page is 256 pt square; export with --ppi 72 for 256 px.
+// The page is 256 pt square. scripts/make_icon.py exports all files the program uses.
 
-#let design = sys.inputs.at("design", default: "gear")
 #let variant = sys.inputs.at("variant", default: "color")
 #let detail = sys.inputs.at("detail", default: "full")
 #let small = detail == "small"
@@ -35,12 +35,11 @@
   rgb("#b4e02c"), rgb("#f5dc1e"), rgb("#ffa21c"), rgb("#f8601a"), rgb("#e0201e"),
 )
 
-// Per part: view angles, how the result maps onto the legend, and the frame.
-#let views = (
-  gear: (azimuth: -62deg, tilt: 42deg, gamma: 1.0, fill: 0.86),
-  impeller: (azimuth: -20deg, tilt: 50deg, gamma: 1.0, fill: 0.88),
-)
-#let view = views.at(design)
+// View angles, how the result maps onto the legend, and how large the part sits on the
+// page: on the tile it is enlarged and moved to the lower right so the tile edge cuts it.
+#let view = (azimuth: -62deg, tilt: 42deg, gamma: 1.0)
+#let fill-frac = if mono { 0.94 } else { 1.25 }
+#let shift = if mono { (0.0, 0.0) } else { (34.0, 30.0) }  // pt, x right, y down
 
 // ---------------------------------------------------------------- read the part
 
@@ -80,8 +79,8 @@
   values
 }
 
-#let (nodes, elements) = read-inp(read("parts/" + design + ".inp"))
-#let values = read-values(read("parts/" + design + ".val"), nodes.len())
+#let (nodes, elements) = read-inp(read("part/gear.inp"))
+#let values = read-values(read("part/gear.val"), nodes.len())
 
 // ---------------------------------------------------------------- outer faces
 
@@ -120,17 +119,17 @@
 #let xs = used.map(n => projected.at(n).at(0))
 #let ys = used.map(n => projected.at(n).at(1))
 #let (x0, x1, y0, y1) = (calc.min(..xs), calc.max(..xs), calc.min(..ys), calc.max(..ys))
-#let fill-frac = if "fill" in sys.inputs { float(sys.inputs.fill) } else if small { calc.min(view.fill + 0.08, 0.97) } else { view.fill }
 #let zoom = fill-frac * S / calc.max(x1 - x0, y1 - y0)
-// Offset of the part on the tile in pt (x right, y down).
-#let shift = sys.inputs.at("shift", default: "0,0").split(",").map(float)
 #let screen(n) = {
   let p = projected.at(n)
   (((p.at(0) - (x0 + x1) / 2) * zoom + S / 2 + shift.at(0)) * 1pt,
    (S / 2 - (p.at(1) - (y0 + y1) / 2) * zoom + shift.at(1)) * 1pt)
 }
 
-// Visible faces, far ones first (painter's algorithm), with their normal for shading.
+#let R = 56.0  // tile corner radius
+#let bevel = 7.0
+
+// Visible faces on the tile face, far ones first (painter's algorithm), with their normal for shading.
 #let visible = {
   let out = ()
   for f in outer-faces {
@@ -141,7 +140,8 @@
     let ny = d1.at(2) * d2.at(0) - d1.at(0) * d2.at(2)
     let nz = d1.at(0) * d2.at(1) - d1.at(1) * d2.at(0)
     let len = calc.sqrt(nx * nx + ny * ny + nz * nz)
-    if len > 0 and nz / len > 0.01 {
+    let on-page = f.map(screen).any(((x, y)) => x > bevel * 1pt and x < (S - bevel) * 1pt and y > bevel * 1pt and y < (S - bevel) * 1pt)
+    if len > 0 and nz / len > 0.01 and (mono or on-page) {
       let depth = p.map(q => q.at(2)).sum() / 4
       out.push((f, depth, (nx / len, ny / len, nz / len)))
     }
@@ -153,8 +153,6 @@
 
 // Raised tile: a bevel lit from the upper left around a slightly sunken face, a glow
 // behind the part and its shadow on the face.
-#let R = 56.0
-#let bevel = 7.0
 #let background() = {
   if mono { return }
   place(rect(width: 100%, height: 100%, radius: R * 1pt,
@@ -225,14 +223,18 @@
         else { (paint: white.transparentize(30%), thickness: 0.5pt, join: "round") }
       place(polygon(fill: col, stroke: edge, ..corners.map(pt2)))
     } else {
-      for (k, poly) in bands(corners) {
-        let col = legend.at(k).darken((1 - light) * 50%)
-        // A hairline in the fill colour closes the seams between neighbouring pieces.
-        place(polygon(fill: col, stroke: 0.35pt + col, ..poly.map(pt2)))
-      }
-      if not small {
-        place(polygon(stroke: (paint: rgb(0, 0, 0, 80), thickness: 0.4pt, join: "round"),
-          ..corners.map(pt2)))
+      let edge = if small { none } else { (paint: rgb(0, 0, 0, 80), thickness: 0.4pt, join: "round") }
+      let pieces = bands(corners)
+      if pieces.len() == 1 {
+        let col = legend.at(pieces.at(0).at(0)).darken((1 - light) * 50%)
+        place(polygon(fill: col, stroke: if edge == none { 0.35pt + col } else { edge }, ..corners.map(pt2)))
+      } else {
+        for (k, poly) in pieces {
+          let col = legend.at(k).darken((1 - light) * 50%)
+          // A hairline in the fill colour closes the seams between neighbouring pieces.
+          place(polygon(fill: col, stroke: 0.35pt + col, ..poly.map(pt2)))
+        }
+        if edge != none { place(polygon(stroke: edge, ..corners.map(pt2))) }
       }
     }
   }

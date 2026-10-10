@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""Builds the 3D parts the program icon is drawn from and solves them with CalculiX.
+"""Builds the gear the program icon is drawn from and solves it with CalculiX.
 
-For every part this writes, next to this script:
-  parts/<name>.inp   hexahedral mesh (C3D8I) with a static load step, a normal CalculiX input
-  parts/<name>.val   one line "node value" per node, the result the icon is coloured with
+Writes, next to this script:
+  part/gear.inp   hexahedral mesh (C3D8I) with a static torque step, a normal CalculiX input
+  part/gear.val   one line "node value" per node, the result the icon is coloured with
+                  (displacement magnitude, scaled to [0, 1])
 
-prepolix-icon.typ reads both. Only needed when the parts change, the outputs are checked in.
+prepolix-icon.typ reads both. Only needed when the part changes, the outputs are checked in.
 
-    python3 assets/icon/make_parts.py          # needs ccx on PATH
+    python3 assets/icon/make_part.py          # needs ccx on PATH
 """
 
 import math
@@ -16,7 +17,7 @@ import subprocess
 import tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
-PARTS = HERE / "parts"
+PART = HERE / "part"
 
 
 class Mesh:
@@ -126,17 +127,15 @@ def gear():
 
     mesh = Mesh()
     width, web, hub = 14.0, 4.0, 3.0  # face width, web thickness, hub overhang per side
-    levels = lambda z0, z1, n: [z0 + (z1 - z0) * k / n for k in range(n + 1)]
     def stack(quads, zs):
         for k in range(len(zs) - 1):
             extrude(mesh, quads, 1, zs[k], zs[k + 1], "g")
-    rim_z = levels(0, width, 4)
     mid0, mid1 = (width - web) / 2, (width + web) / 2
-    assert mid0 in rim_z or True
-    rim_z = sorted(set([round(z, 6) for z in rim_z + [mid0, mid1]]))
+    # Layers line up with the web faces so rim, web and hub share their nodes.
+    rim_z = [0.0, mid0, mid1, width]
     stack(cells["rim"], rim_z)
     stack(cells["web"], [mid0, mid1])
-    stack(cells["hub"], sorted(set(rim_z + [-hub, width + hub])))
+    stack(cells["hub"], [-hub] + rim_z + [width + hub])
 
     nodes = mesh.by_id()
     fixed = [n for n, (x, y, z) in nodes.items() if math.hypot(x, y) < r_bore + 1e-6]
@@ -149,37 +148,6 @@ def gear():
         f = -6000.0 / len(flank)
         loads += [(n, 1, -f * math.sin(a)), (n, 2, f * math.cos(a))]
     return mesh, fixed, loads, None, "displacement"
-
-
-# ------------------------------------------------------------------ impeller
-
-
-def impeller():
-    blades, r_hole, r_out, disc, height = 7, 9.0, 44.0, 4.0, 11.0
-    nr, per_blade, blade_cells = 12, 8, 3
-    na = blades * per_blade
-    sweep = math.radians(70)
-
-    def grid(i, j):
-        s = i / nr
-        r = r_hole + (r_out - r_hole) * s
-        a = 2 * math.pi * j / na + sweep * s**1.3
-        return (("d", i, j % na), polar(r, a, 0)[:2])
-
-    disc_cells, blade_cells_list = [], []
-    for i in range(nr):
-        for j in range(na):
-            quad = [grid(i, j), grid(i + 1, j), grid(i + 1, j + 1), grid(i, j + 1)]
-            disc_cells.append(quad)
-            if i >= 3 and j % per_blade < blade_cells:
-                blade_cells_list.append(quad)
-    mesh = Mesh()
-    extrude(mesh, disc_cells, 2, 0.0, disc, "g")
-    # Blades start on the top face of the disc: same keys at z = disc, so they share nodes.
-    extrude(mesh, blade_cells_list, 3, disc, disc + height, "g")
-    nodes = mesh.by_id()
-    fixed = [n for n, (x, y, z) in nodes.items() if math.hypot(x, y) < r_hole + 1e-6]
-    return mesh, fixed, [], 2000.0, "displacement"
 
 
 # ------------------------------------------------------------------ CalculiX
@@ -237,21 +205,18 @@ def read_frd(path):
 
 
 def main():
-    PARTS.mkdir(exist_ok=True)
-    for name, build in (("gear", gear), ("impeller", impeller)):
-        mesh, fixed, loads, omega, field = build()
-        inp = PARTS / f"{name}.inp"
-        write_inp(inp, mesh, fixed, loads, omega)
-        with tempfile.TemporaryDirectory() as tmp:
-            job = pathlib.Path(tmp) / name
-            job.with_suffix(".inp").write_text(inp.read_text())
-            subprocess.run(["ccx", "-i", str(job)], cwd=tmp, check=True, capture_output=True)
-            values = read_frd(job.with_suffix(".frd"))[field]
-        top = max(values.values())
-        (PARTS / f"{name}.val").write_text(
-            "".join(f"{n} {v / top:.4f}\n" for n, v in sorted(values.items()))
-        )
-        print(f"{name}: {len(mesh.nodes)} nodes, {len(mesh.elements)} elements, max {field} {top:.4g}")
+    PART.mkdir(exist_ok=True)
+    mesh, fixed, loads, omega, field = gear()
+    inp = PART / "gear.inp"
+    write_inp(inp, mesh, fixed, loads, omega)
+    with tempfile.TemporaryDirectory() as tmp:
+        job = pathlib.Path(tmp) / "gear"
+        job.with_suffix(".inp").write_text(inp.read_text())
+        subprocess.run(["ccx", "-i", str(job)], cwd=tmp, check=True, capture_output=True)
+        values = read_frd(job.with_suffix(".frd"))[field]
+    top = max(values.values())
+    (PART / "gear.val").write_text("".join(f"{n} {v / top:.4f}\n" for n, v in sorted(values.items())))
+    print(f"gear: {len(mesh.nodes)} nodes, {len(mesh.elements)} elements, max {field} {top:.4g}")
 
 
 if __name__ == "__main__":
