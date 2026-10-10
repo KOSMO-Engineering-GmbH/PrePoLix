@@ -462,7 +462,7 @@ impl PrepolixApp {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
-            ui.menu_button("Edit", not_implemented);
+            ui.menu_button("Edit", |ui| self.workbench.edit_menu(ui));
             ui.menu_button("View", |ui| {
                 if ui.button("Zoom to Fit").clicked() {
                     self.workbench.view_command = Some(ViewCommand::Fit);
@@ -716,10 +716,6 @@ impl PrepolixApp {
     }
 }
 
-fn not_implemented(ui: &mut egui::Ui) {
-    ui.label("Not implemented yet");
-}
-
 /// Moves the parts of a model between two scales of an exploded view: through the levels of a
 /// sequential disassembly one after the other, else in one animation.
 fn animate_explosion(
@@ -859,6 +855,16 @@ impl eframe::App for PrepolixApp {
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
             self.workbench.new_model(false);
+        }
+        // A focused text field undoes its own typing.
+        if !ctx.egui_wants_keyboard_input() {
+            // Ctrl+Z matches with Shift held too, so Redo is checked first.
+            if ctx.input_mut(|i| i.consume_key(shift_command, egui::Key::Z)) {
+                self.workbench.redo();
+            }
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
+                self.workbench.undo();
+            }
         }
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             (i.raw.dropped_files.iter())
@@ -1011,6 +1017,10 @@ impl eframe::App for PrepolixApp {
         if let Some(command) = self.workbench.view_command.take() {
             let bounds = self.workbench.shown().and_then(Model::visible_bounds);
             self.workbench.viewport.apply(command, bounds);
+        }
+        // Last, after everything the user changed in this frame.
+        if let Some(model) = &mut self.workbench.model {
+            crate::undo::record(model);
         }
     }
 }
@@ -4037,6 +4047,82 @@ impl Workbench {
         self.output
             .push(format!("Parts {} merged into {kept}", gone.join(", ")));
         self.after_parts_changed();
+    }
+
+    /// PrePoMax's Edit menu.
+    fn edit_menu(&mut self, ui: &mut egui::Ui) {
+        let blocked = self.undo_blocked();
+        let history = self.model.as_ref().map(|m| &m.history);
+        let can_undo = blocked.is_none() && history.is_some_and(|h| h.can_undo());
+        let can_redo = blocked.is_none() && history.is_some_and(|h| h.can_redo());
+        let reason = blocked.unwrap_or("Nothing to undo.");
+        let undo = egui::Button::new("Undo").shortcut_text("Ctrl+Z");
+        if ui
+            .add_enabled(can_undo, undo)
+            .on_disabled_hover_text(reason)
+            .clicked()
+        {
+            self.undo();
+        }
+        let reason = blocked.unwrap_or("Nothing to redo.");
+        let redo = egui::Button::new("Redo").shortcut_text("Ctrl+Shift+Z");
+        if ui
+            .add_enabled(can_redo, redo)
+            .on_disabled_hover_text(reason)
+            .clicked()
+        {
+            self.redo();
+        }
+    }
+
+    /// Why the changes of the FE model cannot be undone or redone right now, if so: an open
+    /// dialog may refer to what an undo takes away.
+    fn undo_blocked(&self) -> Option<&'static str> {
+        if self.tree_view == TreeView::Results {
+            return Some("Undo and Redo work on the Geometry and FE Model tabs.");
+        }
+        if self.meshing.is_some() {
+            return Some("Wait until meshing has finished.");
+        }
+        let dialog_open = self.dialog.is_some()
+            || self.editor.is_some()
+            || self.model_dialog.is_some()
+            || self.mesh_setup.is_some()
+            || self.mesh_item_editor.is_some()
+            || self.confirm_delete.is_some()
+            || self.keyword_editor.is_some()
+            || self.contact_search.is_some()
+            || self.mesh_tool.is_some()
+            || self.material_library.is_some()
+            || self.feature_dialog.is_some();
+        dialog_open.then_some("Close the open dialog first.")
+    }
+
+    /// Edit > Undo: reverts the last change of the FE model. The tree selection and what is
+    /// drawn may refer to items it takes away, so they are built anew.
+    fn undo(&mut self) {
+        if self.undo_blocked().is_some() {
+            return;
+        }
+        if let Some(model) = &mut self.model
+            && crate::undo::undo(model)
+        {
+            self.output.push("Undo".into());
+            self.after_parts_changed();
+        }
+    }
+
+    /// Edit > Redo: makes the last undone change of the FE model again.
+    fn redo(&mut self) {
+        if self.undo_blocked().is_some() {
+            return;
+        }
+        if let Some(model) = &mut self.model
+            && crate::undo::redo(model)
+        {
+            self.output.push("Redo".into());
+            self.after_parts_changed();
+        }
     }
 
     fn after_parts_changed(&mut self) {

@@ -23,7 +23,8 @@
   [Exit], [Closes PrePoLix. There is no prompt for unsaved changes.],
 )
 
-#note[PrePoLix has no undo and does not ask about unsaved changes. Save regularly.]
+#note[PrePoLix does not ask about unsaved changes. Save regularly. Changes of the model can be
+  undone (@undo).]
 
 === What each file type does
 

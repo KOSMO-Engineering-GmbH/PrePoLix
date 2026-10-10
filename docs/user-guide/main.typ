@@ -14,6 +14,7 @@
 
 #include "chapters/interface/main-window.typ"
 #include "chapters/interface/files.typ"
+#include "chapters/interface/undo.typ"
 #include "chapters/interface/view.typ"
 #include "chapters/interface/selection.typ"
 #include "chapters/interface/input.typ"
