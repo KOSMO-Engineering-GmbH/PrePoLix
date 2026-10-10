@@ -16,6 +16,20 @@ workspace `Cargo.toml`, so the title page always shows the current version.
 everywhere. The release workflow builds the PDF for every tag `v*` and attaches it to the GitHub
 release.
 
+The same source also compiles to a single HTML page, which the Windows installer and the AppImage
+ship for Help > User Guide:
+
+```sh
+scripts/build_user_guide.sh html   # target/user-guide/user-guide.html
+scripts/build_user_guide.sh pdf    # target/user-guide/prepolix-<version>-user-guide.pdf
+```
+
+The script downloads the pinned Typst version (0.14, needed for HTML export) to `target/typst`.
+HTML export is still experimental in Typst, so `template.typ` checks `target()` and emits plain
+HTML elements there; `guide.css` styles the page. Check a new helper in both formats. Layout
+functions such as `grid`, `place` or `v` are dropped in HTML; `#screenshot` and plain `grid`s of
+images already work.
+
 ## Layout
 
 - `main.typ` only includes the chapters. Add a line here for a new chapter file.

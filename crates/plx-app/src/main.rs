@@ -14,6 +14,7 @@ mod exploded;
 mod features;
 mod field_output_dialog;
 mod gizmo;
+mod help;
 mod history_output_dialog;
 mod history_table;
 mod hot_spot_dialog;

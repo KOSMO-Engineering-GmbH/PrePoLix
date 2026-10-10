@@ -1,0 +1,96 @@
+/* Style sheet of the offline HTML user guide, embedded by template.typ. */
+:root {
+  --accent: #2b5797;
+  --text: #1f2328;
+  --muted: #59636e;
+  --line: #d0d7de;
+  --note: #eef3fa;
+  --code: #f3f4f6;
+}
+* { box-sizing: border-box; }
+html { scroll-padding-top: 1em; }
+body {
+  margin: 0;
+  color: var(--text);
+  background: #fff;
+  font: 16px/1.55 "Noto Sans", "Segoe UI", system-ui, sans-serif;
+}
+header {
+  display: flex;
+  align-items: center;
+  gap: 1em;
+  padding: 0.8em 1.5em;
+  border-bottom: 1px solid var(--line);
+  background: #f6f8fa;
+}
+header img { width: 56px; height: 56px; }
+header h1 { margin: 0; font-size: 1.6em; color: var(--accent); }
+header p { margin: 0; color: var(--muted); }
+.layout { display: flex; align-items: flex-start; }
+aside {
+  position: sticky;
+  top: 0;
+  flex: 0 0 19em;
+  max-height: 100vh;
+  overflow-y: auto;
+  padding: 1em 1em 2em 1.5em;
+  border-right: 1px solid var(--line);
+  font-size: 0.9em;
+}
+aside h2 { font-size: 1.1em; margin: 0 0 0.5em; }
+aside ol { padding-left: 0; margin: 0; }
+aside ol ol { padding-left: 1.2em; }
+aside li { margin: 0.15em 0; }
+aside a { color: var(--text); text-decoration: none; }
+aside a:hover { color: var(--accent); text-decoration: underline; }
+aside .prefix { color: var(--muted); margin-right: 0.3em; }
+main { flex: 1; min-width: 0; max-width: 60em; padding: 1em 2.5em 4em; }
+main h2 {
+  color: var(--accent);
+  font-size: 1.8em;
+  margin: 2em 0 0.6em;
+  padding-bottom: 0.2em;
+  border-bottom: 2px solid var(--line);
+}
+main h2:first-child { margin-top: 0.5em; }
+main h3 { color: var(--accent); font-size: 1.35em; margin: 1.6em 0 0.5em; }
+main h4 { font-size: 1.1em; margin: 1.3em 0 0.4em; }
+a { color: var(--accent); }
+code { background: var(--code); padding: 0.05em 0.3em; border-radius: 3px; font-size: 0.9em; }
+pre { background: var(--code); padding: 0.7em 1em; border-radius: 4px; overflow-x: auto; }
+pre code { background: none; padding: 0; }
+kbd {
+  font: 0.85em "DejaVu Sans Mono", Consolas, monospace;
+  padding: 0.05em 0.35em;
+  border: 1px solid #999;
+  border-radius: 3px;
+  background: #f5f5f5;
+}
+figure { margin: 1.2em 0; text-align: center; }
+figure img { max-width: 100%; height: auto; border: 1px solid var(--line); }
+figcaption { color: var(--muted); font-size: 0.9em; margin-top: 0.4em; }
+.grid { display: flex; gap: 8px; justify-content: center; align-items: flex-start; }
+.grid img { min-width: 0; flex: 1 1 auto; }
+table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+th, td { text-align: left; vertical-align: top; padding: 0.35em 0.6em; border-bottom: 1px solid var(--line); }
+th { border-bottom: 2px solid var(--text); }
+dt { font-weight: bold; margin-top: 0.5em; }
+dd { margin-left: 1.5em; }
+.note {
+  margin: 1em 0;
+  padding: 0.6em 0.9em;
+  background: var(--note);
+  border-left: 3px solid var(--accent);
+  border-radius: 3px;
+}
+.note strong:first-child { color: var(--accent); margin-right: 0.3em; }
+svg.typst-frame, .typst-frame { vertical-align: middle; }
+@media (max-width: 800px) {
+  .layout { display: block; }
+  aside { position: static; max-height: none; border-right: none; border-bottom: 1px solid var(--line); }
+  main { padding: 1em; }
+}
+@media print {
+  aside, header img { display: none; }
+  main { max-width: none; }
+}
