@@ -87,6 +87,9 @@ Section "${APPNAME} (required)" SecApp
   File "${STAGE}\SOURCE.txt"
   SetOutPath "$INSTDIR\licenses"
   File "${STAGE}\licenses\*.txt"
+  ; The offline user guide that Help > User Guide opens.
+  SetOutPath "$INSTDIR\doc"
+  File "${STAGE}\doc\user-guide.html"
   SetOutPath "$INSTDIR"
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -163,6 +166,7 @@ Section "Uninstall"
   Delete "$INSTDIR\THIRD-PARTY.txt"
   Delete "$INSTDIR\SOURCE.txt"
   RMDir /r "$INSTDIR\licenses"
+  RMDir /r "$INSTDIR\doc"
   ; The work directory prepolix creates next to itself when it may write there.
   RMDir /r "$INSTDIR\Temp"
   Delete "$INSTDIR\uninstall.exe"

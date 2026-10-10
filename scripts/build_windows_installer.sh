@@ -4,7 +4,7 @@
 #
 #     scripts/build_windows_installer.sh
 #
-# Needs (Debian/Ubuntu): sudo apt install gcc-mingw-w64-x86-64 nsis python3
+# Needs (Debian/Ubuntu): sudo apt install gcc-mingw-w64-x86-64 nsis python3 curl xz-utils
 # and the Rust target:   rustup target add x86_64-pc-windows-gnu
 #
 # The installer ends up in target/windows-installer/prepolix-<version>-setup.exe.
@@ -17,7 +17,7 @@ out=target/windows-installer
 stage="$out/stage"
 gmsh=target/gmsh-windows
 
-for tool in makensis x86_64-w64-mingw32-gcc python3; do
+for tool in makensis x86_64-w64-mingw32-gcc python3 curl; do
     command -v "$tool" >/dev/null || {
         echo "$tool fehlt, siehe Kopf von $0" >&2
         exit 1
@@ -30,14 +30,16 @@ version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Car
 
 cargo build --release --locked -p plx-app --target "$target"
 [ -f "$gmsh/gmsh-4.15.dll" ] || python3 scripts/fetch_gmsh.py --platform windows --dest "$gmsh"
+scripts/build_user_guide.sh html
 
 rm -rf "$stage"
-mkdir -p "$stage/licenses"
+mkdir -p "$stage/licenses" "$stage/doc"
 cp "target/$target/release/prepolix.exe" "$stage/"
 cp "$gmsh/gmsh-4.15.dll" crates/plx-app/assets/icon/prepolix.ico installer/windows/THIRD-PARTY.txt "$stage/"
 cp LICENSE "$stage/LICENSE.txt"
 cp "$gmsh/GMSH-LICENSE.txt" "$gmsh/GMSH-CREDITS.txt" installer/windows/licenses/*.txt "$stage/licenses/"
 cp crates/plx-app/assets/fonts/OFL.txt "$stage/licenses/NotoSans-OFL.txt"
+cp target/user-guide/user-guide.html "$stage/doc/"
 commit="$(git rev-parse HEAD 2>/dev/null || echo unbekannt)"
 dirty="$(git status --porcelain --untracked-files=no 2>/dev/null | head -1)"
 {

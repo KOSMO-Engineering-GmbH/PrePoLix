@@ -1,0 +1,54 @@
+name: User Guide (Pages)
+
+# Veröffentlicht das HTML-Benutzerhandbuch auf GitHub Pages, sobald sich auf master etwas daran
+# ändert, oder per Hand über "Run workflow". Voraussetzung: Settings > Pages > Source:
+# "GitHub Actions".
+on:
+  push:
+    branches: [master]
+    paths:
+      - "docs/user-guide/**"
+      - "assets/icon/**"
+      - "Cargo.toml"
+      - "scripts/build_user_guide.sh"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Nur ein Deployment gleichzeitig; ein laufendes wird nicht abgebrochen.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: target/typst
+          key: typst-${{ hashFiles('scripts/build_user_guide.sh') }}
+      - name: Handbuch bauen
+        run: |
+          scripts/build_user_guide.sh html
+          mkdir -p target/pages
+          cp target/user-guide/user-guide.html target/pages/index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/pages
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

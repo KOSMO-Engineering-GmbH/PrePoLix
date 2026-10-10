@@ -82,3 +82,13 @@ prepolix bracket.plx bracket.frd
 Several CAD files given together are combined into one geometry. Without command line arguments,
 PrePoLix reopens the project that was open when it was last closed, provided it was saved as a
 `.plx` file and still exists.
+
+== This guide offline <offline-guide>
+
+The Windows installer and the Linux AppImage contain this guide as a web page.
+#menu("Help", "User Guide") opens it in the default web browser; no internet connection is
+needed. On Linux PrePoLix hands the page to the browser through a small web server on your
+computer (address `http://127.0.0.1:<port>/`), because browsers installed as Snap or Flatpak
+cannot read the files of a mounted AppImage. A PrePoLix built from source without the guide opens
+the release page on GitHub instead, which offers the guide as PDF. The latest guide is also online
+at #link("https://kwentin-ui.github.io/PrePoLix/").

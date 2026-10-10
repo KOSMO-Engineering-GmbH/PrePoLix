@@ -13,7 +13,8 @@ From top to bottom the window contains:
 
 / Menu bar: #ui("File"), #ui("Edit"), #ui("View"), #ui("Geometry"), #ui("Mesh"),
   #ui("Model"), #ui("Interaction"), #ui("Analysis"), #ui("Results"), #ui("Tools"),
-  #ui("Help"). #ui("Edit") and #ui("Help") have no entries yet.
+  #ui("Help"). #ui("Edit") has no entries yet. #menu("Help", "User Guide") opens this guide
+  in the web browser (@offline-guide).
 / Toolbar: two rows. The first row holds the file, view and display buttons, the second row the
   result controls (@results-toolbar). The result row is always there but greyed out outside the
   #ui("Results") tab, so the 3D view does not jump when you switch tabs.

@@ -87,6 +87,11 @@ The guide (English, Typst) is in [user-guide/](user-guide/). Build it with
 `typst compile --root . --ignore-system-fonts docs/user-guide/main.typ`. New features are documented
 there in the same PR, see [user-guide/README.md](user-guide/README.md).
 
+The Windows installer and the AppImage ship the guide as one HTML file (pictures embedded), which
+Help > User Guide opens in the browser. `scripts/build_user_guide.sh html` builds it with a pinned
+Typst (0.14, downloaded to `target/typst`) into `target/user-guide/user-guide.html`; a `cargo run`
+build finds it there too.
+
 ## Program icon
 
 The icon is drawn in Typst: [assets/icon/prepolix-icon.typ](../assets/icon/prepolix-icon.typ) reads a
