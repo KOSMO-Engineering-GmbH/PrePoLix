@@ -1067,6 +1067,16 @@ impl<'a> MeshPicker<'a> {
     /// than the angle.
     fn edge_chain(&self, start: usize, angle: Option<f64>) -> BTreeSet<NodeId> {
         let edges = &self.model.skin(self.part).edges;
+        let nodes = self.chain_edges(start, angle).into_iter().flat_map(|e| {
+            let edge = &edges[e];
+            [Some(edge.a), Some(edge.b), edge.mid].into_iter().flatten()
+        });
+        self.node_ids(nodes.collect::<Vec<_>>())
+    }
+
+    /// The feature edges of the chain through `start`, see [`MeshPicker::edge_chain`].
+    fn chain_edges(&self, start: usize, angle: Option<f64>) -> BTreeSet<usize> {
+        let edges = &self.model.skin(self.part).edges;
         let mut at_node: HashMap<usize, Vec<usize>> = HashMap::new();
         for (index, edge) in self.feature_edges() {
             at_node.entry(edge.a).or_default().push(index);
@@ -1097,12 +1107,28 @@ impl<'a> MeshPicker<'a> {
                 }
             }
         }
-        let nodes = seen.iter().flat_map(|&e| {
-            let edge = &edges[e];
-            [Some(edge.a), Some(edge.b), edge.mid].into_iter().flatten()
-        });
-        self.node_ids(nodes.collect::<Vec<_>>())
+        seen
     }
+}
+
+/// The segments of the outline edge nearest to `point` on a part, from corner to corner as
+/// the geometry based selection picks an edge; split at midside nodes.
+pub fn edge_segments(model: &Model, part: usize, point: Vec3) -> Vec<[NodeId; 2]> {
+    let picker = MeshPicker::new(model, part);
+    let Some(start) = picker.nearest_edge(point) else {
+        return Vec::new();
+    };
+    let ids = model.mesh.node_ids();
+    let edges = &model.skin(part).edges;
+    (picker.chain_edges(start, None).into_iter())
+        .flat_map(|e| {
+            let edge = &edges[e];
+            match edge.mid {
+                Some(m) => vec![[ids[edge.a], ids[m]], [ids[m], ids[edge.b]]],
+                None => vec![[ids[edge.a], ids[edge.b]]],
+            }
+        })
+        .collect()
 }
 
 fn corner_edges(corners: &[usize]) -> impl Iterator<Item = (usize, usize)> + '_ {
