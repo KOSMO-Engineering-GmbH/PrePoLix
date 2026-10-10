@@ -47,6 +47,9 @@ Projects are saved as `.plx` files.
 
 ## Installation
 
+PrePoLix needs two other programs: the solver CalculiX (not bundled on any platform) and, for
+geometry import and meshing, Gmsh (bundled by the Windows installer and the Linux AppImage). See the sections below.
+
 ### Windows
 
 Download `prepolix-<version>-setup.exe` from the
@@ -67,8 +70,51 @@ chmod +x prepolix-*-x86_64.AppImage
 The AppImage bundles Gmsh and runs on x86_64 distributions with glibc 2.35 or newer (Ubuntu 22.04,
 Debian 12, Fedora 36 and later). To get a menu entry and open `.plx` files by double-click, integrate
 it with a tool such as [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever) or
-[AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher). To build from source instead,
-see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+[AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher).
+
+#### Alternative: install with cargo
+
+Any distribution works with one command, straight from the Git repository, without cloning. You
+need a current stable Rust toolchain ([rustup](https://rustup.rs/)):
+
+```sh
+cargo install --git https://github.com/KwentiN-ui/PrePoLix plx-app
+```
+
+This builds the `prepolix` program and puts it in `~/.cargo/bin`. The first build takes a few
+minutes. Building needs the ALSA development files (Debian/Ubuntu: `sudo apt install libasound2-dev pkg-config`,
+Fedora: `sudo dnf install alsa-lib-devel`). At run time Linux needs `libxkbcommon-x11` (X11) or
+`libxkbcommon` (Wayland) and a Vulkan or OpenGL driver, which most desktops already have.
+
+Unlike the AppImage, this does not include Gmsh, see [Gmsh](#gmsh-for-cargo-install-and-source-builds) below.
+To update later, run the same command again with `--force`. To build from a clone instead, see
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
+### Gmsh for cargo install and source builds
+
+PrePoLix imports STEP, IGES and BREP geometry and meshes it with [Gmsh](https://gmsh.info/). Gmsh is
+not part of PrePoLix and is loaded as a library at run time. The Windows installer and the Linux
+AppImage bundle it, so this section only applies if you installed with cargo or built from source.
+**Without Gmsh** PrePoLix starts and works normally, but geometry import and meshing are not available. Opening `.inp` meshes and `.frd`
+results, model setup, running CalculiX and post-processing do not need it.
+
+On Linux, the simplest way is to take the official library (Gmsh 4.15, the tested version) from its
+PyPI package and put it next to the program. No clone and no Python packages are needed beyond `pip`:
+
+```sh
+pip download gmsh==4.15.2 --no-deps --only-binary=:all: --platform manylinux_2_24_x86_64 -d /tmp/gmsh
+mkdir -p ~/.cargo/bin/gmsh
+unzip -j /tmp/gmsh/gmsh-4.15.2-*.whl '*/lib/libgmsh.so.4.15' '*/doc/gmsh/LICENSE.txt' -d ~/.cargo/bin/gmsh
+mv ~/.cargo/bin/gmsh/LICENSE.txt ~/.cargo/bin/gmsh/GMSH-LICENSE.txt
+```
+
+The library also needs `libGLU` and `libXft` (Debian/Ubuntu: `sudo apt install libglu1-mesa libxft2`).
+PrePoLix looks for the library, in this order, at the path set in *Tools > Settings > Gmsh*, in the
+environment variable `PREPOLIX_GMSH`, next to the program and in its `gmsh` subfolder, and finally in
+the system library path. If you already have Gmsh installed (for example `libgmsh` from your
+distribution), point the setting or `PREPOLIX_GMSH` to it; other Gmsh 4 versions may work but are
+not tested. The *Test Gmsh* button in the settings loads the library and meshes a cube. From a clone,
+`python3 scripts/fetch_gmsh.py` does the same, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md#gmsh).
 
 ### CalculiX
 
