@@ -28,7 +28,9 @@ again with its diagram until another model is opened.
 
 #ui("Start sweep") scales the centrifugal loads of the model to every speed, runs CalculiX in
 the folder `Campbell` of the work directory (@settings) and reads the complex frequencies of the
-last Complex Frequency step and the whirl direction of every mode from the `.dat` file. The
+last Complex Frequency step and the whirl direction of every mode from the `.dat` file. When the
+`.dat` file of a CalculiX version has no readable complex frequencies, they come from the `.frd`
+file, without whirl directions. The
 progress and the messages of the runs appear below the diagram; #ui("Cancel") stops the sweep. When
 fewer than two speeds give complex frequencies, the window says so in place of the diagram; the
 messages below name the CalculiX error of each failed speed.
