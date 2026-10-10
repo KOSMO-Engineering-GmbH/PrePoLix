@@ -95,6 +95,22 @@ change its height; #ui("Show in Box") puts it back into its box.
 
 #screenshot("path-plot-on-path.png", [The same plot drawn onto its path])
 
+#ui("Edit...") in the context menu, or a double-click on the plot, opens #ui("Edit Annotation").
+Changes show at once; #ui("Cancel") restores the plot.
+
+#screenshot("path-plot-edit.png", [Editing a path plot])
+
+#fields(
+  [Display], [#ui("In Box") or #ui("On Path").],
+  [Height on path], [Distance of the largest value from the path, in screen pixels.],
+  [Title], [Empty for the path's name and the displayed component.],
+  [Distance axis label, Value axis label], [Labels of the box's axes; the value axis label is
+    written above the axis, empty for none.],
+  [Value range], [#ui("Automatic") fits the axis to the values; otherwise #ui("Minimum") and
+    #ui("Maximum") fix it, e.g. to compare increments. On the path, the larger end is drawn at
+    the height.],
+)
+
 == Plane results
 
 #ui("Create ...") on #ui("Plane Results") evaluates the displayed component on a plane defined

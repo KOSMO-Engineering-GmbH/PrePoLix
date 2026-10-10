@@ -26,7 +26,7 @@ use crate::model::{self, Highlight, LoadedModel, Model};
 use crate::model_properties::{DialogResult, ModelPropertiesDialog, geometry_check};
 use crate::numeric;
 use crate::overlay::{Marker, Overlay};
-use crate::path_plot::{PathPlot, PlotEvent};
+use crate::path_plot::{self, PathPlot, PlotEvent};
 use crate::properties;
 use crate::query::{QueryAction, QueryWindow};
 use crate::results::{Deformation, ResultsView, format_legend_value};
@@ -154,6 +154,8 @@ struct Workbench {
     last_exploded: crate::exploded::Parameters,
     /// Open dialog of a feature or of results on one.
     feature_dialog: Option<FeatureDialog>,
+    /// The Edit Annotation dialog of a path plot in the 3D view.
+    plot_editor: Option<path_plot::EditDialog>,
     /// The shown values on the plane of the shown plane result, in model coordinates: where
     /// the plane cuts the parts as shown, and where it cuts the undeformed mesh.
     section_values: Option<plx_render::SectionValues>,
@@ -243,6 +245,7 @@ impl PrepolixApp {
                 section_dialog: None,
                 transformation_dialog: None,
                 feature_dialog: None,
+                plot_editor: None,
                 section_values: None,
                 plane_values: None,
                 section_shown: None,
@@ -907,6 +910,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.history_table_window(&ctx);
         self.workbench.transformation_window(&ctx);
         self.workbench.feature_window(&ctx);
+        self.workbench.plot_editor_window(&ctx);
         self.workbench.sync_result_features();
         self.workbench.run_analysis(&ctx);
         self.workbench.campbell_window(&ctx);
@@ -4115,12 +4119,52 @@ impl Workbench {
                         plot.placement = placement;
                     }
                 }
+                PlotEvent::Edit(index) => {
+                    let extremes = (self.viewport.path_plots.iter())
+                        .find(|b| b.index == index)
+                        .and_then(path_plot::PlotBox::extremes);
+                    if let (Some(plot), Some(extremes)) = (model.path_plots.get(index), extremes) {
+                        self.plot_editor = Some(path_plot::EditDialog::new(
+                            self.current_result,
+                            index,
+                            &plot.placement,
+                            extremes,
+                        ));
+                    }
+                }
                 PlotEvent::Delete(index) => {
                     if index < model.path_plots.len() {
                         model.path_plots.remove(index);
                     }
                 }
             }
+        }
+    }
+
+    /// The Edit Annotation dialog of a path plot; its changes show at once.
+    fn plot_editor_window(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.plot_editor.take() else {
+            return;
+        };
+        if self.tree_view != TreeView::Results || dialog.result != self.current_result {
+            return;
+        }
+        let Some(plot) = (self.results.get_mut(dialog.result))
+            .and_then(|model| model.path_plots.get_mut(dialog.index))
+        else {
+            return;
+        };
+        // Moving and resizing with the mouse goes on while the dialog is open.
+        dialog.draft.offset = plot.placement.offset;
+        dialog.draft.size = plot.placement.size;
+        dialog.draft.height = plot.placement.height;
+        match dialog.show(ctx) {
+            path_plot::EditResult::Open => {
+                plot.placement = dialog.draft.clone();
+                self.plot_editor = Some(dialog);
+            }
+            path_plot::EditResult::Ok => plot.placement = dialog.draft.clone(),
+            path_plot::EditResult::Cancel => plot.placement = dialog.original().clone(),
         }
     }
 

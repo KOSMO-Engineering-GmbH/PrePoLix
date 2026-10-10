@@ -1402,7 +1402,22 @@ pub(crate) fn plot(
     let (rect, response) = ui.allocate_exact_size(vec2(width, height), egui::Sense::hover());
     let painter = ui.painter_at(rect);
     let hover = response.hover_pos();
-    draw_plot(&painter, rect, hover, distances, values, x_label, markers);
+    let axes = Axes {
+        x_label,
+        ..Axes::default()
+    };
+    draw_plot(&painter, rect, hover, distances, values, &axes, markers);
+}
+
+/// Labels and value range of a plot's axes.
+#[derive(Default)]
+pub(crate) struct Axes<'a> {
+    /// Written under the distance axis.
+    pub x_label: &'a str,
+    /// Written above the value axis; empty for none.
+    pub y_label: &'a str,
+    /// Values shown, lowest and highest; `None` fits them to the values.
+    pub y_range: Option<[f64; 2]>,
 }
 
 /// Draws the plot of [`plot`] into `rect`; `hover` is the pointer when it is over the plot.
@@ -1412,11 +1427,12 @@ pub(crate) fn draw_plot(
     hover: Option<Pos2>,
     distances: &[f64],
     values: &[f64],
-    x_label: &str,
+    axes: &Axes,
     markers: bool,
 ) {
     painter.rect_filled(rect, 0.0, Color32::WHITE);
-    let area = Rect::from_min_max(rect.min + vec2(64.0, 10.0), rect.max - vec2(12.0, 28.0));
+    let top = if axes.y_label.is_empty() { 10.0 } else { 24.0 };
+    let area = Rect::from_min_max(rect.min + vec2(64.0, top), rect.max - vec2(12.0, 28.0));
     let axis_stroke = Stroke::new(1.0, Color32::from_gray(80));
     let grid = Stroke::new(1.0, Color32::from_gray(225));
     let (mut x0, mut x1) = (
@@ -1434,6 +1450,9 @@ pub(crate) fn draw_plot(
         });
     if !(y0.is_finite() && y1.is_finite()) {
         return;
+    }
+    if let Some([low, high]) = axes.y_range.filter(|[l, h]| l.is_finite() && h.is_finite()) {
+        (y0, y1) = (low.min(high), low.max(high));
     }
     if y1 - y0 <= 1e-12 * y0.abs().max(y1.abs()).max(1e-30) {
         let pad = y0.abs().max(1.0) * 0.05;
@@ -1471,6 +1490,18 @@ pub(crate) fn draw_plot(
         );
     }
     painter.rect_stroke(area, 0.0, axis_stroke, egui::StrokeKind::Inside);
+    if !axes.y_label.is_empty() {
+        painter.text(
+            pos2(area.left() - 6.0, rect.top() + 4.0),
+            egui::Align2::LEFT_TOP,
+            axes.y_label,
+            font.clone(),
+            text,
+        );
+    }
+    let outer = painter;
+    // Values outside a fixed range are cut off at the frame.
+    let painter = &painter.with_clip_rect(area.expand(1.0).intersect(painter.clip_rect()));
     let color = Color32::from_rgb(200, 0, 160);
     let mut segment: Vec<Pos2> = Vec::new();
     let flush = |segment: &mut Vec<Pos2>| {
@@ -1511,7 +1542,7 @@ pub(crate) fn draw_plot(
         if let Some((&x, &y)) = nearest {
             let p = to_screen(x, y);
             painter.circle_stroke(p, 4.0, Stroke::new(1.5, Color32::BLACK));
-            painter.text(
+            outer.text(
                 p + vec2(6.0, -6.0),
                 egui::Align2::LEFT_BOTTOM,
                 format!("{}: {}", format_value(x as f32), format_value(y as f32)),
@@ -1520,10 +1551,10 @@ pub(crate) fn draw_plot(
             );
         }
     }
-    painter.text(
+    outer.text(
         pos2(rect.left() + 4.0, rect.bottom() - 2.0),
         egui::Align2::LEFT_BOTTOM,
-        x_label,
+        axes.x_label,
         egui::FontId::proportional(12.0),
         text,
     );

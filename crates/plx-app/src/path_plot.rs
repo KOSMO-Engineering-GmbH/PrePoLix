@@ -26,8 +26,8 @@ const GRAB: f32 = 6.0;
 const CURVE: Color32 = Color32::from_rgb(200, 0, 160);
 const FILL: Color32 = Color32::from_rgba_premultiplied(25, 0, 20, 32);
 
-/// Where and how a plot is drawn.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Where and how a plot is drawn, as set by dragging it and in its edit dialog.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Placement {
     /// Top left corner of the box relative to that of the view; `None` until it is moved.
     pub offset: Option<Vec2>,
@@ -36,6 +36,13 @@ pub struct Placement {
     pub on_path: bool,
     /// On the path: distance in points of the largest value from the path.
     pub height: f32,
+    /// Title; empty for the path's name and the shown component.
+    pub title: String,
+    pub x_label: String,
+    /// Written above the value axis; empty for none.
+    pub y_label: String,
+    /// Values shown, lowest and highest; `None` fits them to the values.
+    pub y_range: Option<[f64; 2]>,
 }
 
 impl Default for Placement {
@@ -45,6 +52,10 @@ impl Default for Placement {
             size: vec2(400.0, 240.0),
             on_path: false,
             height: 80.0,
+            title: String::new(),
+            x_label: "Distance".into(),
+            y_label: String::new(),
+            y_range: None,
         }
     }
 }
@@ -90,7 +101,7 @@ impl PathPlot {
             distances: points.iter().map(|p| p.distance).collect(),
             values,
             ends,
-            placement: self.placement,
+            placement: self.placement.clone(),
         })
     }
 }
@@ -114,7 +125,27 @@ pub enum PlotEvent {
         index: usize,
         placement: Placement,
     },
+    /// The edit dialog is to be opened.
+    Edit(usize),
     Delete(usize),
+}
+
+impl PlotBox {
+    /// The title the user entered, or the path's name and the shown component.
+    fn shown_title(&self) -> &str {
+        match self.placement.title.trim() {
+            "" => &self.title,
+            title => title,
+        }
+    }
+
+    /// Smallest and largest finite value.
+    pub fn extremes(&self) -> Option<[f64; 2]> {
+        let finite = self.values.iter().copied().filter(|v| v.is_finite());
+        let low = finite.clone().min_by(f64::total_cmp)?;
+        let high = finite.max_by(f64::total_cmp)?;
+        Some([low, high])
+    }
 }
 
 /// Draws the plots over the view `rect`. Dragging a box moves it, dragging its bottom right
@@ -125,7 +156,7 @@ pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, boxes: &mut [PlotBox]) -> Vec<
     let mut events = Vec::new();
     let mut stacked = 0;
     for plot in boxes.iter_mut() {
-        let before = plot.placement;
+        let before = plot.placement.clone();
         let id = ui.id().with(("path plot", plot.index));
         let response = if plot.placement.on_path {
             draw_on_path(ui, &painter, rect, camera, plot, id)
@@ -136,7 +167,14 @@ pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, boxes: &mut [PlotBox]) -> Vec<
         let Some(response) = response else {
             continue;
         };
+        if response.double_clicked() {
+            events.push(PlotEvent::Edit(plot.index));
+        }
         response.context_menu(|ui| {
+            if ui.button("Edit...").clicked() {
+                events.push(PlotEvent::Edit(plot.index));
+                ui.close();
+            }
             let (label, on_path) = if plot.placement.on_path {
                 ("Show in Box", false)
             } else {
@@ -154,7 +192,7 @@ pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, boxes: &mut [PlotBox]) -> Vec<
         if plot.placement != before {
             events.push(PlotEvent::Changed {
                 index: plot.index,
-                placement: plot.placement,
+                placement: plot.placement.clone(),
             });
         }
     }
@@ -211,7 +249,7 @@ fn draw_box(
     painter.text(
         frame.min + vec2(6.0, 3.0),
         egui::Align2::LEFT_TOP,
-        &plot.title,
+        plot.shown_title(),
         egui::FontId::proportional(13.0),
         Color32::BLACK,
     );
@@ -223,7 +261,11 @@ fn draw_box(
         hover,
         &plot.distances,
         &plot.values,
-        "Distance",
+        &crate::features::Axes {
+            x_label: &plot.placement.x_label,
+            y_label: &plot.placement.y_label,
+            y_range: plot.placement.y_range,
+        },
         false,
     );
     painter.rect_stroke(
@@ -264,8 +306,12 @@ fn draw_on_path(
     let extreme = (plot.values.iter().copied())
         .filter(|v| v.is_finite())
         .max_by(|x, y| x.abs().total_cmp(&y.abs()))?;
-    let scale = if extreme.abs() > 0.0 {
-        plot.placement.height / extreme.abs() as f32
+    let reach = match plot.placement.y_range {
+        Some([low, high]) => low.abs().max(high.abs()),
+        None => extreme.abs(),
+    };
+    let scale = if reach > 0.0 {
+        plot.placement.height / reach as f32
     } else {
         0.0
     };
@@ -326,8 +372,14 @@ fn draw_on_path(
         label(i, v);
     }
     let title_side = if extreme >= 0.0 { normal } else { -normal };
-    let title_at = a + title_side * (plot.placement.height + 22.0);
-    painter.text(title_at, anchor(title_side), &plot.title, font, CURVE);
+    let title_at = a + title_side * (extreme.abs() as f32 * scale + 22.0);
+    painter.text(
+        title_at,
+        anchor(title_side),
+        plot.shown_title(),
+        font,
+        CURVE,
+    );
     // Grabbed where the pointer is near the curve or the path, or while dragged or its menu
     // is open, so that the rest of the view keeps its clicks.
     let pointer = ui.input(|i| i.pointer.hover_pos());
@@ -390,6 +442,137 @@ fn distance_to_segment(p: Pos2, a: Pos2, b: Pos2) -> f32 {
     let ab = b - a;
     let t = ((p - a).dot(ab) / ab.length_sq().max(1e-12)).clamp(0.0, 1.0);
     p.distance(a + ab * t)
+}
+
+/// The Edit Annotation dialog of a path plot: display, height on the path, title, axis
+/// labels and value range. Changes show at once; Cancel restores the plot.
+pub struct EditDialog {
+    /// The results file and the plot in its list.
+    pub result: usize,
+    pub index: usize,
+    original: Placement,
+    pub draft: Placement,
+    /// Range entered for a fixed value axis, kept while it is automatic.
+    range: [f64; 2],
+}
+
+pub enum EditResult {
+    Open,
+    Ok,
+    Cancel,
+}
+
+impl EditDialog {
+    /// `extremes` are the plot's current values, the start of a fixed range.
+    pub fn new(result: usize, index: usize, placement: &Placement, extremes: [f64; 2]) -> Self {
+        Self {
+            result,
+            index,
+            original: placement.clone(),
+            draft: placement.clone(),
+            // Rounded as the plot labels them, a tidy start for the user's own range.
+            range: placement
+                .y_range
+                .unwrap_or(extremes.map(|v| format_value(v as f32).parse().unwrap_or(v))),
+        }
+    }
+
+    pub fn original(&self) -> &Placement {
+        &self.original
+    }
+
+    pub fn show(&mut self, ctx: &egui::Context) -> EditResult {
+        let mut result = EditResult::Open;
+        let mut open = true;
+        let draft = &mut self.draft;
+        egui::Window::new("Edit Annotation")
+            .id(egui::Id::new("path plot edit"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::LEFT_TOP)
+            .default_pos(ctx.content_rect().left_top() + vec2(300.0, 90.0))
+            .show(ctx, |ui| {
+                egui::Grid::new("path plot edit grid")
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Display");
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut draft.on_path, false, "In Box");
+                            ui.radio_value(&mut draft.on_path, true, "On Path");
+                        });
+                        ui.end_row();
+                        ui.label("Height on path");
+                        ui.add_enabled(
+                            draft.on_path,
+                            egui::DragValue::new(&mut draft.height)
+                                .range(10.0..=2000.0)
+                                .suffix(" px"),
+                        );
+                        ui.end_row();
+                        ui.label("Title");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut draft.title)
+                                .hint_text("Path and component")
+                                .desired_width(220.0),
+                        );
+                        ui.end_row();
+                        ui.label("Distance axis label");
+                        ui.add_enabled(
+                            !draft.on_path,
+                            egui::TextEdit::singleline(&mut draft.x_label).desired_width(220.0),
+                        );
+                        ui.end_row();
+                        ui.label("Value axis label");
+                        ui.add_enabled(
+                            !draft.on_path,
+                            egui::TextEdit::singleline(&mut draft.y_label)
+                                .hint_text("None")
+                                .desired_width(220.0),
+                        );
+                        ui.end_row();
+                        ui.label("Value range");
+                        let mut automatic = draft.y_range.is_none();
+                        if ui.checkbox(&mut automatic, "Automatic").changed() {
+                            draft.y_range = (!automatic).then_some(self.range);
+                        }
+                        ui.end_row();
+                        for (label, k) in [("Minimum", 0), ("Maximum", 1)] {
+                            ui.label(label);
+                            let changed = ui
+                                .add_enabled(
+                                    !automatic,
+                                    crate::numeric::drag_value(&mut self.range[k]),
+                                )
+                                .changed();
+                            if changed && !automatic {
+                                draft.y_range = Some(self.range);
+                            }
+                            ui.end_row();
+                        }
+                    });
+                if draft.on_path {
+                    ui.weak(
+                        "On the path, the larger end of the value range is drawn at the \
+                         height.",
+                    );
+                }
+                ui.separator();
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                    if ui.button("Cancel").clicked() {
+                        result = EditResult::Cancel;
+                    }
+                    if ui.button("OK").clicked() {
+                        result = EditResult::Ok;
+                    }
+                });
+            });
+        if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            result = EditResult::Cancel;
+        }
+        result
+    }
 }
 
 #[cfg(test)]
