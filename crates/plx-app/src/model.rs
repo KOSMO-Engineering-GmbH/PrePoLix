@@ -345,6 +345,10 @@ impl Model {
             planes: self.fe.planes.clone(),
             result_paths: self.fe.result_paths.clone(),
             result_planes: self.fe.result_planes.clone(),
+            plain_parts: (self.parts.iter().enumerate())
+                .filter(|(_, part)| !part.contours)
+                .map(|(index, _)| index)
+                .collect(),
             ..view.settings()
         })
     }
@@ -360,6 +364,7 @@ impl Model {
         self.fe.result_paths = settings.result_paths.clone();
         self.fe.result_planes = settings.result_planes.clone();
         self.hot_spots.definitions = settings.hot_spots.clone();
+        self.set_contours(&settings.plain_parts, false);
         match &mut self.results {
             Some(view) => view.restore(settings, &self.mesh),
             None => Vec::new(),
@@ -1728,6 +1733,7 @@ mod tests {
             hot_spots: vec![plx_results::hot_spot::HotSpot::new("Hot_Spot-1")],
             reference_points: vec![plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])],
             result_paths: vec![plx_model::ResultPath::new("Path-1")],
+            plain_parts: vec![0],
             increment: 0,
             shown: Some(("SCALED".into(), "VALUE".into())),
             ..Default::default()
@@ -1739,6 +1745,7 @@ mod tests {
             model.restore_results_settings(&settings),
             Vec::<String>::new()
         );
+        assert!(!model.parts[0].contours);
         let view = model.results.as_ref().unwrap();
         let (field, component) = view.current().unwrap();
         assert_eq!(

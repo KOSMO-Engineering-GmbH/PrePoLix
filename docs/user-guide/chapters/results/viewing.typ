@@ -65,7 +65,8 @@ A stiff or irrelevant part can dominate the colour scale. Right-click a part und
 part turns plain grey and no longer counts for the legend range, the minimum and maximum labels
 or the animation limits; the colours of the other parts then use the full scale.
 #ui("Color Contours On") brings the contours back. With several parts selected, the command
-applies to all of them. Nodes that a grey part shares with a part that still has contours keep
+applies to all of them. Results bound to a project (@bind-result) remember which parts have
+contours off. Nodes that a grey part shares with a part that still has contours keep
 their colour.
 
 #screenshot("color-contours-off.png", [The left part without colour contours])
