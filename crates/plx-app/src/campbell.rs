@@ -171,6 +171,23 @@ pub fn modes_of(dat: &str, step: u32) -> Vec<Mode> {
         .collect()
 }
 
+/// The complex frequencies of step `step` from the `.frd` file, for when the `.dat` file has
+/// none CalculiX versions print it differently. The `.frd` file has no whirl directions.
+pub fn modes_of_frd(frd: &plx_io::frd::FrdImport, step: u32) -> Vec<Mode> {
+    let mut modes: Vec<(u32, f64)> = (frd.increments.iter())
+        .filter(|i| i.step == step && i.kind == plx_results::AnalysisKind::ComplexFrequency)
+        .map(|i| (i.increment, i.value))
+        .collect();
+    modes.sort_by_key(|&(mode, _)| mode);
+    modes.dedup_by_key(|&mut (mode, _)| mode);
+    (modes.into_iter())
+        .map(|(_, frequency)| Mode {
+            frequency,
+            whirl: Whirl::Unknown,
+        })
+        .collect()
+}
+
 /// The speeds of a sweep: `steps` equal steps up to `max_speed`. Standstill is left out:
 /// without rotation CalculiX merges the coinciding modes of a pair into one, which would
 /// shift every curve of the diagram at its start.
@@ -302,6 +319,8 @@ struct Sweep {
     cancel: Arc<AtomicBool>,
     total: usize,
     points: Vec<SpeedPoint>,
+    /// Speeds run so far, the failed ones included.
+    done: usize,
     log: Vec<String>,
     finished: bool,
 }
@@ -359,7 +378,12 @@ fn run_speed(
         std::thread::sleep(Duration::from_millis(50));
     };
     let dat = std::fs::read_to_string(job.file("dat")).unwrap_or_default();
-    let modes = modes_of(&dat, input.step);
+    let mut modes = modes_of(&dat, input.step);
+    if modes.is_empty()
+        && let Ok(frd) = plx_io::frd::read_frd(&job.file("frd"))
+    {
+        modes = modes_of_frd(&frd, input.step);
+    }
     if modes.is_empty() {
         let output = job.new_output();
         let error = output
@@ -367,7 +391,11 @@ fn run_speed(
             .find(|l| l.contains("*ERROR"))
             .cloned()
             .unwrap_or_else(|| {
-                format!("CalculiX {status:?}, no complex frequencies in {name}.dat")
+                format!(
+                    "CalculiX {status:?}, no complex frequencies of step {} in {name}.dat \
+                     or {name}.frd",
+                    input.step
+                )
             });
         return Err(format!("{label}: {error}"));
     }
@@ -464,6 +492,7 @@ impl CampbellWindow {
             cancel,
             total,
             points: Vec::new(),
+            done: 0,
             log: Vec::new(),
             finished: false,
         });
@@ -484,6 +513,7 @@ impl CampbellWindow {
         while let Ok(message) = sweep.receiver.try_recv() {
             match message {
                 Message::Done(Ok(point)) => {
+                    sweep.done += 1;
                     sweep.log.push(format!(
                         "{} rpm: {} modes, first {} Hz",
                         numeric::format_physical(rpm(point.speed)),
@@ -495,7 +525,10 @@ impl CampbellWindow {
                     ));
                     sweep.points.push(point);
                 }
-                Message::Done(Err(error)) => sweep.log.push(error),
+                Message::Done(Err(error)) => {
+                    sweep.done += 1;
+                    sweep.log.push(error);
+                }
                 Message::Finished => sweep.finished = true,
             }
         }
@@ -546,8 +579,9 @@ impl CampbellWindow {
                     }
                     if running {
                         ui.spinner();
-                        let total = self.sweep.as_ref().map_or(0, |s| s.total);
-                        ui.label(format!("{} of {total} speeds done", self.points.len()));
+                        let (done, total) =
+                            self.sweep.as_ref().map_or((0, 0), |s| (s.done, s.total));
+                        ui.label(format!("{done} of {total} speeds done"));
                     }
                     if ui
                         .add_enabled(!self.points.is_empty(), egui::Button::new("Copy table"))
@@ -862,8 +896,23 @@ mod tests {
         let points: Vec<SpeedPoint> = (input.speeds.iter().enumerate())
             .map(|(i, &speed)| run_speed(&input, speed, i, &cancel).unwrap())
             .collect();
+        // The .frd file has the same frequencies, for CalculiX versions whose .dat differs.
+        let frd = plx_io::frd::read_frd(&work_dir.join("Campbell-2.frd")).unwrap();
+        let from_frd: Vec<f64> = modes_of_frd(&frd, 3).iter().map(|m| m.frequency).collect();
         let _ = std::fs::remove_dir_all(&work_dir);
         assert_eq!(points.len(), 3);
+        let from_dat: Vec<f64> = points[2].modes.iter().map(|m| m.frequency).collect();
+        assert_eq!(
+            from_frd.len(),
+            from_dat.len(),
+            "{from_frd:?} vs {from_dat:?}"
+        );
+        for (a, b) in from_frd.iter().zip(&from_dat) {
+            assert!(
+                (a - b).abs() < 1e-3 * b.abs().max(1.0),
+                "{from_frd:?} vs {from_dat:?}"
+            );
+        }
         // In the rotating frame the pair splits by twice the speed: 2 x 200 rad/s = 63.7 Hz
         // at the top speed, a third of it at the first.
         let split = |p: &SpeedPoint| p.modes[1].frequency - p.modes[0].frequency;
