@@ -1517,6 +1517,7 @@ mod tests {
         step.boundary_conditions.push(BoundaryCondition {
             name: "Fix".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(fixed),
             kind: BoundaryKind::Fixed,
             amplitude: None,
@@ -1524,6 +1525,7 @@ mod tests {
         step.boundary_conditions.push(BoundaryCondition {
             name: "Pull".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(pulled),
             kind: BoundaryKind::Displacement([Some(0.1), None, None, None, None, None]),
             amplitude: None,

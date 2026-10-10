@@ -288,6 +288,7 @@ fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
     step.boundary_conditions.push(BoundaryCondition {
         name: "Fixed-1".into(),
         active: true,
+        visible: true,
         region: Region::Nodes(nodes_where(mesh, |p| p[0] == 0.0)),
         kind: BoundaryKind::Fixed,
         amplitude: None,
@@ -295,6 +296,7 @@ fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
     step.loads.push(Load {
         name: "Load-1".into(),
         active: true,
+        visible: true,
         region,
         kind: load,
         amplitude: None,

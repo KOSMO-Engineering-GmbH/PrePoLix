@@ -360,6 +360,7 @@ mod tests {
         step.boundary_conditions.push(BoundaryCondition {
             name: "Fixed-1".into(),
             active: true,
+            visible: true,
             region: Region::NodeSet("FIX".into()),
             kind: BoundaryKind::Fixed,
             amplitude: None,

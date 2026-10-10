@@ -1195,6 +1195,9 @@ pub struct BoundaryCondition {
     /// A deactivated boundary condition is left out of the input file and the 3D view.
     #[serde(default = "active")]
     pub active: bool,
+    /// Hidden ones have no symbol in the 3D view unless selected, as in PrePoMax.
+    #[serde(default = "active")]
+    pub visible: bool,
     pub region: Region,
     pub kind: BoundaryKind,
     /// Amplitude the values follow over time; `None` is CalculiX's default ramp or step.
@@ -1237,6 +1240,9 @@ pub struct Load {
     /// A deactivated load is left out of the input file and the 3D view.
     #[serde(default = "active")]
     pub active: bool,
+    /// Hidden ones have no symbol in the 3D view unless selected, as in PrePoMax.
+    #[serde(default = "active")]
+    pub visible: bool,
     pub region: Region,
     pub kind: LoadKind,
     /// Amplitude the value follows over time, of a film or radiation its sink temperature;
@@ -1580,6 +1586,7 @@ mod tests {
         step.boundary_conditions.push(BoundaryCondition {
             name: "Fixed-1".into(),
             active: true,
+            visible: true,
             region: Region::ElementSet("A".into()),
             kind: BoundaryKind::Fixed,
             amplitude: None,
@@ -1587,6 +1594,7 @@ mod tests {
         step.loads.push(Load {
             name: "Pressure-1".into(),
             active: true,
+            visible: true,
             region: Region::Surface("A".into()),
             kind: LoadKind::Pressure(1.0),
             amplitude: None,

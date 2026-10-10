@@ -809,6 +809,7 @@ mod tests {
         let fixed = plx_model::BoundaryCondition {
             name: "Fixed-1".into(),
             active: true,
+            visible: true,
             region: plx_model::Region::NodeSet("FIX".into()),
             kind: plx_model::BoundaryKind::Fixed,
             amplitude: None,
@@ -818,6 +819,7 @@ mod tests {
         spin.loads.push(plx_model::Load {
             name: "Centrifugal-1".into(),
             active: true,
+            visible: true,
             region: plx_model::Region::Parts(vec!["EALL".into()]),
             kind: LoadKind::Centrifugal {
                 point: [0.0, 5.0, 5.0],
