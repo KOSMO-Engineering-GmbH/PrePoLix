@@ -746,6 +746,7 @@ mod tests {
         model.fe.reference_points.push(plx_model::ReferencePoint {
             name: "RP-1".into(),
             position: [130.0, 5.0, 5.0],
+            definition: Default::default(),
         });
         let item = |reference_point: &str| Item {
             kind: Kind::RigidBody {

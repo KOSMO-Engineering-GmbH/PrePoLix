@@ -119,6 +119,11 @@ mod tests {
                 start: plx_model::PointRef::ReferencePoint("RP-1".into()),
                 ..plx_model::ResultPath::new("Path-1")
             }],
+            mesh_sets: vec![plx_model::MeshSet::new(
+                "Corner",
+                plx_model::SetKind::Nodes,
+                Region::Nodes(vec![1]),
+            )],
             constraints: Vec::new(),
             ties: vec![Tie {
                 master: Region::Faces(vec![(1, 2)]),
