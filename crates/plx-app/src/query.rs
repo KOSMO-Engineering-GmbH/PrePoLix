@@ -62,6 +62,36 @@ pub enum Annotation {
     BoundingBox,
 }
 
+impl From<&Annotation> for plx_results::saved_view::SavedAnnotation {
+    fn from(annotation: &Annotation) -> Self {
+        use plx_results::saved_view::SavedAnnotation as Saved;
+        match *annotation {
+            Annotation::Node(node) => Saved::Node(node),
+            Annotation::Element(element) => Saved::Element(element),
+            Annotation::Part(part) => Saved::Part(part),
+            Annotation::Distance(nodes) => Saved::Distance(nodes),
+            Annotation::Angle(nodes) => Saved::Angle(nodes),
+            Annotation::Circle(nodes) => Saved::Circle(nodes),
+            Annotation::BoundingBox => Saved::BoundingBox,
+        }
+    }
+}
+
+impl From<plx_results::saved_view::SavedAnnotation> for Annotation {
+    fn from(saved: plx_results::saved_view::SavedAnnotation) -> Self {
+        use plx_results::saved_view::SavedAnnotation as Saved;
+        match saved {
+            Saved::Node(node) => Annotation::Node(node),
+            Saved::Element(element) => Annotation::Element(element),
+            Saved::Part(part) => Annotation::Part(part),
+            Saved::Distance(nodes) => Annotation::Distance(nodes),
+            Saved::Angle(nodes) => Annotation::Angle(nodes),
+            Saved::Circle(nodes) => Annotation::Circle(nodes),
+            Saved::BoundingBox => Annotation::BoundingBox,
+        }
+    }
+}
+
 /// What the annotations draw: labelled points, lines and highlighted points.
 #[derive(Default)]
 pub struct QueryMarks {

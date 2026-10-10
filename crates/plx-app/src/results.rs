@@ -20,6 +20,29 @@ pub enum Deformation {
     UserDefined,
 }
 
+impl From<Deformation> for plx_results::saved_view::SavedDeformation {
+    fn from(deformation: Deformation) -> Self {
+        match deformation {
+            Deformation::Undeformed => Self::Undeformed,
+            Deformation::TrueScale => Self::TrueScale,
+            Deformation::Automatic(factor) => Self::Automatic(factor),
+            Deformation::UserDefined => Self::UserDefined,
+        }
+    }
+}
+
+impl From<plx_results::saved_view::SavedDeformation> for Deformation {
+    fn from(saved: plx_results::saved_view::SavedDeformation) -> Self {
+        use plx_results::saved_view::SavedDeformation as Saved;
+        match saved {
+            Saved::Undeformed => Self::Undeformed,
+            Saved::TrueScale => Self::TrueScale,
+            Saved::Automatic(factor) => Self::Automatic(factor),
+            Saved::UserDefined => Self::UserDefined,
+        }
+    }
+}
+
 impl Deformation {
     pub const CHOICES: [Deformation; 8] = [
         Deformation::Undeformed,
@@ -234,6 +257,13 @@ impl ResultsView {
             transformations: self.transformations.clone(),
             increment: self.increment,
             shown: self.shown_names(),
+            view: plx_results::saved_view::SavedView {
+                deformation: self.deformation_chosen.then_some(self.deformation.into()),
+                user_scale: Some(self.user_scale),
+                show_undeformed: Some(self.show_undeformed),
+                levels: Some(self.levels),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -255,7 +285,15 @@ impl ResultsView {
             self.increment = settings.increment;
         }
         self.restore_selection(settings.shown.clone());
+        let view = &settings.view;
+        if let Some(deformation) = view.deformation {
+            self.deformation = deformation.into();
+            self.deformation_chosen = true;
+        }
         self.follow_default_deformation();
+        self.user_scale = view.user_scale.unwrap_or(self.user_scale);
+        self.show_undeformed = view.show_undeformed.unwrap_or(self.show_undeformed);
+        self.levels = view.levels.unwrap_or(self.levels);
         warnings
     }
 
