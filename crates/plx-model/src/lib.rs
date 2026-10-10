@@ -11,6 +11,7 @@ mod constraint;
 mod contact;
 pub mod convert;
 mod features;
+mod field;
 mod geometry;
 mod history;
 pub mod library;
@@ -34,6 +35,7 @@ pub use features::{
     CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource,
     PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane,
 };
+pub use field::{FieldOutput, OutputDimension, OutputKind, output_variable_description};
 pub use geometry::{
     Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters,
 };
@@ -1490,82 +1492,6 @@ impl FeModel {
         files.sort_unstable();
         files.dedup();
         files
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FieldOutput {
-    pub name: String,
-    pub kind: OutputKind,
-    pub variables: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OutputKind {
-    /// `*NODE FILE`
-    Node,
-    /// `*EL FILE`
-    Element,
-}
-
-impl FieldOutput {
-    /// Field outputs PrePoMax adds to a new static step. `NOE` is added when writing.
-    pub fn defaults() -> Vec<Self> {
-        vec![
-            Self {
-                name: "NF-Output-1".into(),
-                kind: OutputKind::Node,
-                variables: vec!["RF".into(), "U".into()],
-            },
-            Self {
-                name: "EF-Output-1".into(),
-                kind: OutputKind::Element,
-                variables: vec!["S".into(), "E".into()],
-            },
-        ]
-    }
-}
-
-impl FieldOutput {
-    /// Field outputs PrePoMax adds to a new frequency step: no reaction forces, as the
-    /// mode shapes are scaled arbitrarily.
-    pub fn frequency_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = vec!["U".into()];
-        outputs
-    }
-
-    /// Field outputs PrePoMax adds to a new complex frequency step: the displacements with
-    /// their magnitudes and phases (`PU`), so the whirling of a mode can be shown.
-    pub fn complex_frequency_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = vec!["U".into(), "PU".into()];
-        outputs
-    }
-
-    /// Field outputs PrePoMax adds to a new heat transfer step: temperatures, reaction heat
-    /// flows and heat fluxes.
-    pub fn heat_transfer_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = vec!["NT".into(), "RFL".into()];
-        outputs[1].variables = vec!["HFL".into()];
-        outputs
-    }
-
-    /// Field outputs PrePoMax adds to a new dynamic step: velocities and energies too.
-    pub fn dynamic_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = ["RF", "U", "V"].map(String::from).to_vec();
-        outputs[1].variables = ["S", "E", "ENER"].map(String::from).to_vec();
-        outputs
-    }
-
-    /// Field outputs PrePoMax adds to a new coupled temperature-displacement step.
-    pub fn coupled_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = ["RF", "U", "NT", "RFL"].map(String::from).to_vec();
-        outputs[1].variables = ["S", "E", "HFL"].map(String::from).to_vec();
-        outputs
     }
 }
 

@@ -15,9 +15,9 @@ use plx_model::{
     DynamicProcedure, DynamicStep, Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep,
     Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
     InitialConditionKind, Load, LoadKind, Material, MeshSet, ModalDamping, ModalDynamicsStep,
-    ModeDamping, ModelSpace, NodeTie, OutputKind, PlasticPoint, Quantity, Region, Section,
-    SectionKind, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction,
-    Tie, UnitSystem, next_name,
+    ModeDamping, ModelSpace, NodeTie, OutputDimension, OutputKind, PlasticPoint, Quantity, Region,
+    Section, SectionKind, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
+    SurfaceInteraction, Tie, UnitSystem, next_name,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row};
@@ -38,6 +38,8 @@ pub enum NewItem {
     Step,
     BoundaryCondition(usize),
     Load(usize),
+    /// A field output of a step, written into the `.frd` file.
+    FieldOutput(usize),
     /// A history output of a step, printed into the `.dat` file.
     HistoryOutput(usize),
     /// A defined temperature of a step.
@@ -1057,6 +1059,16 @@ impl Editor {
                     load_region(&kind, None, fe, &FeMesh::default()),
                 )
             }
+            NewItem::FieldOutput(step) => {
+                let target = fe.steps.get(step)?;
+                let kind = OutputKind::Node;
+                let output = FieldOutput::new(
+                    next_name(kind.prefix(), names(&target.field_outputs, |f| &f.name)),
+                    kind,
+                    kind.default_variables(),
+                );
+                Draft::FieldOutput(step, output)
+            }
             NewItem::HistoryOutput(step) => {
                 let target = fe.steps.get(step)?;
                 let output = HistoryOutput::node(
@@ -1961,28 +1973,7 @@ impl Editor {
                 ui.end_row();
             }
             Draft::FieldOutput(_, output) => {
-                name_row(ui, &mut output.name);
-                let choices: &[&str] = match output.kind {
-                    OutputKind::Node => &["RF", "U", "V", "NT", "RFL"],
-                    OutputKind::Element => &["S", "E", "ME", "PEEQ", "ENER", "HFL"],
-                };
-                ui.label("Variables");
-                ui.horizontal(|ui| {
-                    for &variable in choices {
-                        let mut on = output.variables.iter().any(|v| v == variable);
-                        if ui.checkbox(&mut on, variable).changed() {
-                            output.variables.retain(|v| v != variable);
-                            if on {
-                                // Keep PrePoMax's order of the variables.
-                                output.variables.push(variable.to_string());
-                                output.variables.sort_by_key(|v| {
-                                    choices.iter().position(|c| c == v).unwrap_or(usize::MAX)
-                                });
-                            }
-                        }
-                    }
-                });
-                ui.end_row();
+                field_output_form(ui, output, &taken, self.index.is_none());
             }
             Draft::HistoryOutput(_, output, region) => {
                 history_output_form(ui, model, output, region, &taken);
@@ -2121,6 +2112,7 @@ impl Editor {
                 contacts::validate_interaction(interaction)?;
             }
             Draft::Amplitude(amplitude, _) => amplitude_dialog::validate(amplitude)?,
+            Draft::FieldOutput(_, output) => output.check_variables()?,
             Draft::HistoryOutput(_, output, region) => {
                 validate_history_output(output, region, fe)?;
             }
@@ -2294,7 +2286,14 @@ impl Editor {
                 }
                 put(&mut fe.initial_conditions, index, condition);
             }
-            Draft::FieldOutput(s, output) => put(&mut fe.steps[s].field_outputs, index, output),
+            Draft::FieldOutput(s, mut output) => {
+                output.normalize_variables();
+                let list = &mut fe.steps[s].field_outputs;
+                if let Some(existing) = index.and_then(|i| list.get(i)) {
+                    output.active = existing.active;
+                }
+                put(list, index, output);
+            }
             Draft::DefinedField(s, mut field, region) => {
                 if field.kind.takes_region() {
                     field.region = region.region();
@@ -2463,6 +2462,9 @@ pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::Load(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.loads.get_mut(i))
             .map(|l| &mut l.active),
+        TreeItem::FieldOutput(s, i) => (fe.steps.get_mut(s))
+            .and_then(|st| st.field_outputs.get_mut(i))
+            .map(|f| &mut f.active),
         TreeItem::HistoryOutput(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.history_outputs.get_mut(i))
             .map(|h| &mut h.active),
@@ -2675,7 +2677,10 @@ fn history_output_form(
         ui.set_max_width(320.0);
         for &variable in choices {
             let mut on = output.variables.iter().any(|v| v == variable);
-            if ui.checkbox(&mut on, variable).changed() {
+            let checkbox = ui
+                .checkbox(&mut on, variable)
+                .on_hover_text(plx_model::output_variable_description(variable));
+            if checkbox.changed() {
                 output.variables.retain(|v| v != variable);
                 if on {
                     output.variables.push(variable.to_string());
@@ -2716,6 +2721,108 @@ fn history_output_form(
             ui.end_row();
         }
         _ => region.ui(ui, model),
+    }
+}
+
+/// PrePoMax's field output dialog: the kind, chosen only for a new output, the variables
+/// and the options of `*NODE FILE`, `*EL FILE` and `*CONTACT FILE`.
+fn field_output_form(ui: &mut Ui, output: &mut FieldOutput, taken: &[&str], new: bool) {
+    name_row(ui, &mut output.name);
+    ui.label("Type");
+    ui.horizontal(|ui| {
+        for kind in OutputKind::ALL {
+            let selected = kind == output.kind;
+            let radio = ui.add_enabled(
+                new || selected,
+                egui::RadioButton::new(selected, kind.label()),
+            );
+            if radio.clicked() && !selected {
+                rename_default(&mut output.name, output.kind.prefix(), kind.prefix(), taken);
+                output.variables = (kind.default_variables().iter())
+                    .map(|v| v.to_string())
+                    .collect();
+                output.kind = kind;
+            }
+        }
+    });
+    ui.end_row();
+    ui.label("Variables");
+    // Fixed rows: wrapping inside the grid overlaps the next row.
+    ui.vertical(|ui| {
+        for row in output.kind.choices().chunks(7) {
+            ui.horizontal(|ui| {
+                for &variable in row {
+                    let mut on = output.variables.iter().any(|v| v == variable);
+                    let checkbox = ui
+                        .checkbox(&mut on, variable)
+                        .on_hover_text(plx_model::output_variable_description(variable));
+                    if checkbox.changed() {
+                        output.variables.retain(|v| v != variable);
+                        if on {
+                            output.variables.push(variable.to_string());
+                        }
+                        output.normalize_variables();
+                    }
+                }
+            });
+        }
+    });
+    ui.end_row();
+    let on_off = |ui: &mut Ui, value: &mut bool, id: &str, labels: [&str; 2], hint: &str| {
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(if *value { labels[0] } else { labels[1] })
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(value, true, labels[0]);
+                ui.selectable_value(value, false, labels[1]);
+            })
+            .response
+            .on_hover_text(hint);
+        ui.end_row();
+    };
+    ui.label("Last iterations");
+    on_off(
+        ui,
+        &mut output.last_iterations,
+        "field last iterations",
+        ["On", "Off"],
+        "Writes every iteration of the last increment; useful for finding out why a \
+         solution diverges.",
+    );
+    ui.label("Contact elements");
+    on_off(
+        ui,
+        &mut output.contact_elements,
+        "field contact elements",
+        ["On", "Off"],
+        "Writes the contact elements into a file with the .cel extension.",
+    );
+    if output.kind == OutputKind::Element {
+        ui.label("Output (2D/3D)");
+        egui::ComboBox::from_id_salt("field output dimension")
+            .selected_text(output.dimension.label())
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                for dimension in OutputDimension::ALL {
+                    ui.selectable_value(&mut output.dimension, dimension, dimension.label());
+                }
+            })
+            .response
+            .on_hover_text(
+                "With 3D, 1D and 2D elements are written in their expanded 3D form. Default \
+                 writes shell and plane models in 2D.",
+            );
+        ui.end_row();
+    }
+    if output.kind != OutputKind::Contact {
+        ui.label("Global");
+        on_off(
+            ui,
+            &mut output.global,
+            "field global",
+            ["Yes", "No"],
+            "Whether the results are written in the global or in the local coordinate systems.",
+        );
     }
 }
 
@@ -3724,6 +3831,37 @@ mod tests {
             ("Fixed-1", &Region::Nodes(vec![1, 4]))
         );
         assert!(Editor::create(NewItem::Load(3), &fe).is_none());
+    }
+
+    #[test]
+    fn field_outputs_are_created_deactivated_and_deleted_like_in_prepomax() {
+        let mut fe = FeModel::default();
+        Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        let mut editor = Editor::create(NewItem::FieldOutput(0), &fe).unwrap();
+        if let Draft::FieldOutput(_, output) = &mut editor.draft {
+            assert_eq!(output.name, "NF_Output-1");
+            output.kind = OutputKind::Element;
+            output.variables = vec!["ZZS".into(), "S".into(), "ERR".into()];
+        }
+        assert!(
+            editor.validate(&fe).is_err(),
+            "ERR and ZZS exclude each other"
+        );
+        if let Draft::FieldOutput(_, output) = &mut editor.draft {
+            output.variables.pop();
+        }
+        assert_eq!(editor.validate(&fe), Ok(()));
+        editor.apply(&mut fe);
+        let added = TreeItem::FieldOutput(0, 2);
+        assert_eq!(fe.steps[0].field_outputs[2].variables, ["S", "ZZS"]);
+        assert!(toggle_active(&mut fe, &added));
+        assert!(!fe.steps[0].field_outputs[2].active);
+        // Editing keeps the output deactivated.
+        let editor = Editor::edit(&added, &fe, &FeMesh::default()).unwrap();
+        editor.apply(&mut fe);
+        assert!(!fe.steps[0].field_outputs[2].active);
+        assert!(delete(&mut fe, &added));
+        assert_eq!(fe.steps[0].field_outputs.len(), 2);
     }
 
     #[test]
