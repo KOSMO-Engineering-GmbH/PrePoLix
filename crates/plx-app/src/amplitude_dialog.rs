@@ -152,7 +152,7 @@ pub fn amplitude_form(
     }
     let (times, factors): (Vec<f64>, Vec<f64>) =
         amplitude.points.iter().map(|[t, a]| (*t, *a)).unzip();
-    crate::features::plot(ui, &times, &factors, &time_header, true);
+    crate::features::plot(ui, &times, &factors, &time_header, true, 220.0);
     ui.weak(
         "Linear between the points, constant before the first and after the last.\n\
          Without an amplitude a load ramps up linearly in a static step.",

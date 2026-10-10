@@ -26,6 +26,7 @@ use crate::model::{self, Highlight, LoadedModel, Model};
 use crate::model_properties::{DialogResult, ModelPropertiesDialog, geometry_check};
 use crate::numeric;
 use crate::overlay::{Marker, Overlay};
+use crate::path_plot::{self, PathPlot, PlotEvent};
 use crate::properties;
 use crate::query::{QueryAction, QueryWindow};
 use crate::results::{Deformation, ResultsView, format_legend_value};
@@ -155,6 +156,8 @@ struct Workbench {
     last_exploded: crate::exploded::Parameters,
     /// Open dialog of a feature or of results on one.
     feature_dialog: Option<FeatureDialog>,
+    /// The Edit Annotation dialog of a path plot in the 3D view.
+    plot_editor: Option<path_plot::EditDialog>,
     /// The shown values on the plane of the shown plane result, in model coordinates: where
     /// the plane cuts the parts as shown, and where it cuts the undeformed mesh.
     section_values: Option<plx_render::SectionValues>,
@@ -245,6 +248,7 @@ impl PrepolixApp {
                 section_dialog: None,
                 transformation_dialog: None,
                 feature_dialog: None,
+                plot_editor: None,
                 section_values: None,
                 plane_values: None,
                 section_shown: None,
@@ -881,6 +885,7 @@ impl eframe::App for PrepolixApp {
             {
                 dialog.drag(drag);
             }
+            self.workbench.path_plot_events(response.path_plots);
             if let Some(command) = response.command {
                 self.workbench.view_command = Some(command);
             }
@@ -923,6 +928,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.history_table_window(&ctx);
         self.workbench.transformation_window(&ctx);
         self.workbench.feature_window(&ctx);
+        self.workbench.plot_editor_window(&ctx);
         self.workbench.sync_result_features();
         self.workbench.run_analysis(&ctx);
         self.workbench.poll_bound_results(&ctx);
@@ -944,6 +950,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.rebuild_if_results_changed();
         self.workbench.update_section();
         self.workbench.update_feature_overlay();
+        self.workbench.update_path_plots();
 
         if let Some(command) = self.workbench.view_command.take() {
             let bounds = self.workbench.shown().and_then(Model::visible_bounds);
@@ -4255,13 +4262,40 @@ impl Workbench {
             return;
         };
         let cut = self.plane_values.as_ref();
-        match dialog.show(ctx, model, cut) {
+        let result = dialog.show(ctx, model, cut);
+        let plot_name = dialog.plot_name(&model.fe);
+        if dialog.take_plot_toggle()
+            && let Some(name) = plot_name.clone()
+        {
+            match model.path_plots.iter().position(|p| p.path == name) {
+                Some(index) => {
+                    model.path_plots.remove(index);
+                }
+                None => {
+                    model.path_plots.push(PathPlot::new(name.clone()));
+                    dialog.set_plot_key(name);
+                }
+            }
+        }
+        match result {
             FeatureResult::Open => self.feature_dialog = Some(dialog),
             FeatureResult::Ok => {
+                // The plot follows a renamed path.
+                if let (Some(old), Some(path)) = (plot_name, dialog.path_draft()) {
+                    for plot in model.path_plots.iter_mut().filter(|p| p.path == old) {
+                        plot.path = path.name.clone();
+                    }
+                }
                 dialog.apply(&mut model.fe, &model.mesh);
                 self.viewport.preview = Default::default();
             }
-            FeatureResult::Cancel => self.viewport.preview = Default::default(),
+            FeatureResult::Cancel => {
+                // The plot of a path that was not created goes with it.
+                if let Some(old) = plot_name.filter(|_| dialog.creates()) {
+                    model.path_plots.retain(|p| p.path != old);
+                }
+                self.viewport.preview = Default::default();
+            }
         }
     }
 
@@ -4278,6 +4312,101 @@ impl Workbench {
             let warnings = view.set_coordinate_systems(systems, &model.mesh);
             self.output.extend(warnings);
             self.results_changed = true;
+        }
+    }
+
+    /// The plots of result paths in the 3D view, for the shown increment. Plots of deleted
+    /// paths are dropped; that of the path in the open dialog follows its edits.
+    fn update_path_plots(&mut self) {
+        let dialog = self
+            .feature_dialog
+            .as_ref()
+            .filter(|_| self.feature_dialog_shown());
+        let Some(model) = (match self.tree_view {
+            TreeView::Results => self.results.get_mut(self.current_result),
+            _ => None,
+        }) else {
+            self.viewport.path_plots.clear();
+            return;
+        };
+        let edited = dialog.and_then(|d| Some((d.plot_name(&model.fe)?, d.path_draft()?.clone())));
+        let path = |fe: &plx_model::FeModel, name: &str| match &edited {
+            Some((edited, draft)) if edited == name => Some(draft.clone()),
+            _ => fe.result_paths.iter().find(|p| p.name == name).cloned(),
+        };
+        let mut plots = std::mem::take(&mut model.path_plots);
+        plots.retain(|plot| path(&model.fe, &plot.path).is_some());
+        let boxes = (plots.iter_mut().enumerate())
+            .filter_map(|(index, plot)| {
+                let path = path(&model.fe, &plot.path)?;
+                plot.plot_box(index, model, &path)
+            })
+            .collect();
+        model.path_plots = plots;
+        self.viewport.path_plots = boxes;
+    }
+
+    /// Applies what the user did to the path plots in the 3D view.
+    fn path_plot_events(&mut self, events: Vec<PlotEvent>) {
+        let Some(model) = (match self.tree_view {
+            TreeView::Results => self.results.get_mut(self.current_result),
+            _ => None,
+        }) else {
+            return;
+        };
+        for event in events {
+            match event {
+                PlotEvent::Changed { index, placement } => {
+                    if let Some(plot) = model.path_plots.get_mut(index) {
+                        plot.placement = placement;
+                    }
+                }
+                PlotEvent::Edit(index) => {
+                    let extremes = (self.viewport.path_plots.iter())
+                        .find(|b| b.index == index)
+                        .and_then(path_plot::PlotBox::extremes);
+                    if let (Some(plot), Some(extremes)) = (model.path_plots.get(index), extremes) {
+                        self.plot_editor = Some(path_plot::EditDialog::new(
+                            self.current_result,
+                            index,
+                            &plot.placement,
+                            extremes,
+                        ));
+                    }
+                }
+                PlotEvent::Delete(index) => {
+                    if index < model.path_plots.len() {
+                        model.path_plots.remove(index);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The Edit Annotation dialog of a path plot; its changes show at once.
+    fn plot_editor_window(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.plot_editor.take() else {
+            return;
+        };
+        if self.tree_view != TreeView::Results || dialog.result != self.current_result {
+            return;
+        }
+        let Some(plot) = (self.results.get_mut(dialog.result))
+            .and_then(|model| model.path_plots.get_mut(dialog.index))
+        else {
+            return;
+        };
+        // Moving and resizing with the mouse goes on while the dialog is open.
+        dialog.draft.offset = plot.placement.offset;
+        dialog.draft.size = plot.placement.size;
+        dialog.draft.height = plot.placement.height;
+        match dialog.show(ctx) {
+            path_plot::EditResult::Open => {
+                plot.placement = dialog.draft.clone();
+                self.plot_editor = Some(dialog);
+            }
+            path_plot::EditResult::Ok => plot.placement = dialog.draft.clone(),
+            path_plot::EditResult::Cancel => plot.placement = dialog.original().clone(),
         }
     }
 

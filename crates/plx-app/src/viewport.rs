@@ -25,6 +25,8 @@ pub struct Viewport {
     pub symbols: Vec<crate::symbols::Symbol>,
     /// Where the user dragged the labels.
     pub labels: LabelOffsets,
+    /// Plots of result paths drawn as boxes over the scene.
+    pub path_plots: Vec<crate::path_plot::PlotBox>,
     /// A dialog picks in the 3D view: the left button selects and draws selection boxes.
     pub selecting: bool,
     /// What a click at the resting mouse would select, drawn in PrePoMax's orange.
@@ -119,6 +121,8 @@ pub struct ViewportResponse {
     pub response: Option<egui::Response>,
     /// The section plane manipulator was dragged.
     pub gizmo: Option<GizmoDrag>,
+    /// Path plots were moved, resized or deleted.
+    pub path_plots: Vec<crate::path_plot::PlotEvent>,
 }
 
 /// The view entries of the 3D view's context menu.
@@ -204,6 +208,7 @@ impl Viewport {
             overlay: Overlay::default(),
             symbols: Vec::new(),
             labels: LabelOffsets::default(),
+            path_plots: Vec::new(),
             selecting: false,
             preview: Preview::default(),
             box_start: None,
@@ -402,6 +407,7 @@ impl Viewport {
             self.camera.set_axis_view(axis);
             ui.ctx().request_repaint();
         }
+        result.path_plots = crate::path_plot::draw(ui, rect, &self.camera, &mut self.path_plots);
         if let Some(gizmo) = &self.gizmo {
             self.gizmo_state.draw(&painter, gizmo, &self.camera, rect);
         }

@@ -97,7 +97,20 @@ pub struct FeatureDialog {
     /// The selection of a reference point at the centre of faces; clicks in the 3D view
     /// fill it while no point is picked.
     region: RegionDraft,
+    /// The button to show or remove the path's plot in the 3D view was clicked.
+    plot_toggled: bool,
+    /// Name of the path when its plot was put into the 3D view, by which the plot refers
+    /// to it while the dialog is open.
+    plot_key: Option<String>,
+    /// Height of the dialog's rows other than the path plot in the last frame.
+    rows_height: Option<f32>,
+    /// The path plot was drawn in the last frame.
+    plotted: bool,
 }
+
+/// Height of the path plot until the dialog is resized, and the least it shrinks to.
+const PLOT_HEIGHT: f32 = 220.0;
+const MIN_PLOT_HEIGHT: f32 = 150.0;
 
 impl FeatureDialog {
     pub fn create(kind: FeatureKind, results: Option<usize>, model: &Model) -> Self {
@@ -198,6 +211,10 @@ impl FeatureDialog {
             speed: (size * 0.005).max(1e-9),
             located: None,
             region,
+            plot_toggled: false,
+            plot_key: None,
+            rows_height: None,
+            plotted: false,
         }
     }
 
@@ -222,6 +239,40 @@ impl FeatureDialog {
                 _ => {}
             }
         }
+    }
+
+    /// The path being edited.
+    pub fn path_draft(&self) -> Option<&ResultPath> {
+        match &self.draft {
+            Draft::Path(path) => Some(path),
+            _ => None,
+        }
+    }
+
+    /// The name by which a plot in the 3D view refers to the edited path: its name when the
+    /// plot was added, else its stored name, or for a new path the one entered.
+    pub fn plot_name(&self, fe: &FeModel) -> Option<String> {
+        let path = self.path_draft()?;
+        let stored = self.index.and_then(|i| fe.result_paths.get(i));
+        Some(
+            (self.plot_key.clone())
+                .or_else(|| stored.map(|p| p.name.clone()))
+                .unwrap_or_else(|| path.name.clone()),
+        )
+    }
+
+    /// Whether the path's plot is to be shown or removed in the 3D view; resets the request.
+    pub fn take_plot_toggle(&mut self) -> bool {
+        std::mem::take(&mut self.plot_toggled)
+    }
+
+    pub fn set_plot_key(&mut self, name: String) {
+        self.plot_key = Some(name);
+    }
+
+    /// Whether the dialog creates a new item rather than editing one.
+    pub fn creates(&self) -> bool {
+        self.index.is_none()
     }
 
     pub fn kind(&self) -> FeatureKind {
@@ -385,13 +436,18 @@ impl FeatureDialog {
             .pivot(egui::Align2::LEFT_TOP)
             .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
             .show(ctx, |ui| {
+                // The plot takes the height the window is resized to beyond its other rows.
+                let plot_height = match self.rows_height {
+                    Some(rows) => (ui.max_rect().height() - rows).max(MIN_PLOT_HEIGHT),
+                    None => PLOT_HEIGHT,
+                };
                 egui::Grid::new("feature form")
                     .num_columns(2)
                     .spacing([12.0, 4.0])
                     .show(ui, |ui| self.form(ui, model));
                 if is_path {
                     ui.separator();
-                    self.path_results(ui, model);
+                    self.path_results(ui, model, plot_height);
                 }
                 if is_plane_result {
                     ui.separator();
@@ -412,6 +468,9 @@ impl FeatureDialog {
                         }
                     }
                 });
+                // Only a drawn plot tells the height of the rest.
+                self.rows_height =
+                    (is_path && self.plotted).then(|| ui.min_rect().height() - plot_height);
             });
         if let Some(window) = &window
             && self.picking.is_none()
@@ -636,7 +695,8 @@ impl FeatureDialog {
     }
 
     /// The plot and table of the shown result along the path.
-    fn path_results(&mut self, ui: &mut Ui, model: &Model) {
+    fn path_results(&mut self, ui: &mut Ui, model: &Model, plot_height: f32) {
+        self.plotted = false;
         let Draft::Path(path) = &self.draft else {
             return;
         };
@@ -699,8 +759,27 @@ impl FeatureDialog {
             values.len()
         ));
         let distances: Vec<f64> = points.iter().map(|p| p.distance).collect();
-        plot(ui, &distances, &values, "Distance", false);
+        plot(ui, &distances, &values, "Distance", false, plot_height);
+        self.plotted = true;
+        let shown = (self.plot_name(&model.fe))
+            .is_some_and(|name| model.path_plots.iter().any(|p| p.path == name));
         ui.horizontal(|ui| {
+            let label = if shown {
+                "Remove from View"
+            } else {
+                "Show in View"
+            };
+            if ui
+                .button(label)
+                .on_hover_text(
+                    "Shows the plot as an annotation in the 3D view, where it stays after \
+                     the dialog is closed. Drag it to move it, drag its corner to resize it; \
+                     right-click it to delete it.",
+                )
+                .clicked()
+            {
+                self.plot_toggled = true;
+            }
             if ui.button("Copy to Clipboard").clicked() {
                 ui.ctx()
                     .copy_text(path::to_csv(points, &values, &header, '\t'));
@@ -1311,12 +1390,49 @@ fn point_ref_rows(
 /// Values over the distance along a path or over time, with `x_label` under the axis; gaps
 /// where values are not finite, e.g. where a path leaves the mesh. `markers` draws a dot at
 /// every point. Hovering shows the value at the nearest point.
-pub(crate) fn plot(ui: &mut Ui, distances: &[f64], values: &[f64], x_label: &str, markers: bool) {
+pub(crate) fn plot(
+    ui: &mut Ui,
+    distances: &[f64],
+    values: &[f64],
+    x_label: &str,
+    markers: bool,
+    height: f32,
+) {
     let width = ui.available_width().max(360.0);
-    let (rect, response) = ui.allocate_exact_size(vec2(width, 220.0), egui::Sense::hover());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, height), egui::Sense::hover());
     let painter = ui.painter_at(rect);
+    let hover = response.hover_pos();
+    let axes = Axes {
+        x_label,
+        ..Axes::default()
+    };
+    draw_plot(&painter, rect, hover, distances, values, &axes, markers);
+}
+
+/// Labels and value range of a plot's axes.
+#[derive(Default)]
+pub(crate) struct Axes<'a> {
+    /// Written under the distance axis.
+    pub x_label: &'a str,
+    /// Written above the value axis; empty for none.
+    pub y_label: &'a str,
+    /// Values shown, lowest and highest; `None` fits them to the values.
+    pub y_range: Option<[f64; 2]>,
+}
+
+/// Draws the plot of [`plot`] into `rect`; `hover` is the pointer when it is over the plot.
+pub(crate) fn draw_plot(
+    painter: &egui::Painter,
+    rect: Rect,
+    hover: Option<Pos2>,
+    distances: &[f64],
+    values: &[f64],
+    axes: &Axes,
+    markers: bool,
+) {
     painter.rect_filled(rect, 0.0, Color32::WHITE);
-    let area = Rect::from_min_max(rect.min + vec2(64.0, 10.0), rect.max - vec2(12.0, 28.0));
+    let top = if axes.y_label.is_empty() { 10.0 } else { 24.0 };
+    let area = Rect::from_min_max(rect.min + vec2(64.0, top), rect.max - vec2(12.0, 28.0));
     let axis_stroke = Stroke::new(1.0, Color32::from_gray(80));
     let grid = Stroke::new(1.0, Color32::from_gray(225));
     let (mut x0, mut x1) = (
@@ -1334,6 +1450,9 @@ pub(crate) fn plot(ui: &mut Ui, distances: &[f64], values: &[f64], x_label: &str
         });
     if !(y0.is_finite() && y1.is_finite()) {
         return;
+    }
+    if let Some([low, high]) = axes.y_range.filter(|[l, h]| l.is_finite() && h.is_finite()) {
+        (y0, y1) = (low.min(high), low.max(high));
     }
     if y1 - y0 <= 1e-12 * y0.abs().max(y1.abs()).max(1e-30) {
         let pad = y0.abs().max(1.0) * 0.05;
@@ -1371,6 +1490,18 @@ pub(crate) fn plot(ui: &mut Ui, distances: &[f64], values: &[f64], x_label: &str
         );
     }
     painter.rect_stroke(area, 0.0, axis_stroke, egui::StrokeKind::Inside);
+    if !axes.y_label.is_empty() {
+        painter.text(
+            pos2(area.left() - 6.0, rect.top() + 4.0),
+            egui::Align2::LEFT_TOP,
+            axes.y_label,
+            font.clone(),
+            text,
+        );
+    }
+    let outer = painter;
+    // Values outside a fixed range are cut off at the frame.
+    let painter = &painter.with_clip_rect(area.expand(1.0).intersect(painter.clip_rect()));
     let color = Color32::from_rgb(200, 0, 160);
     let mut segment: Vec<Pos2> = Vec::new();
     let flush = |segment: &mut Vec<Pos2>| {
@@ -1401,7 +1532,7 @@ pub(crate) fn plot(ui: &mut Ui, distances: &[f64], values: &[f64], x_label: &str
             painter.circle_filled(to_screen(x, y), 3.0, color);
         }
     }
-    if let Some(hover) = response.hover_pos().filter(|p| area.contains(*p)) {
+    if let Some(hover) = hover.filter(|p| area.contains(*p)) {
         let nearest = (distances.iter().zip(values))
             .filter(|(_, y)| y.is_finite())
             .min_by(|a, b| {
@@ -1411,7 +1542,7 @@ pub(crate) fn plot(ui: &mut Ui, distances: &[f64], values: &[f64], x_label: &str
         if let Some((&x, &y)) = nearest {
             let p = to_screen(x, y);
             painter.circle_stroke(p, 4.0, Stroke::new(1.5, Color32::BLACK));
-            painter.text(
+            outer.text(
                 p + vec2(6.0, -6.0),
                 egui::Align2::LEFT_BOTTOM,
                 format!("{}: {}", format_value(x as f32), format_value(y as f32)),
@@ -1420,10 +1551,10 @@ pub(crate) fn plot(ui: &mut Ui, distances: &[f64], values: &[f64], x_label: &str
             );
         }
     }
-    painter.text(
+    outer.text(
         pos2(rect.left() + 4.0, rect.bottom() - 2.0),
         egui::Align2::LEFT_BOTTOM,
-        x_label,
+        axes.x_label,
         egui::FontId::proportional(12.0),
         text,
     );
