@@ -4811,11 +4811,11 @@ fn results_tool_bar(
         }
         if user && response.lost_focus() {
             ui.data_mut(|d| d.remove_temp::<String>(id));
-            if let Some(value) = numeric::parse_number(&text).filter(|v| v.is_finite()) {
-                if value != view.user_scale {
-                    view.user_scale = value;
-                    changed = true;
-                }
+            if let Some(value) = numeric::parse_number(&text).filter(|v| v.is_finite())
+                && value != view.user_scale
+            {
+                view.user_scale = value;
+                changed = true;
             }
         }
         changed |= ui
