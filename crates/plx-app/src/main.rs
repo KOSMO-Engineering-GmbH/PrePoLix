@@ -27,6 +27,7 @@ mod model_properties;
 mod motion_preview;
 mod numeric;
 mod overlay;
+mod path_plot;
 mod properties;
 mod query;
 mod results;

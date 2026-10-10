@@ -107,7 +107,8 @@ them by name.
 === Properties dialogs
 
 A double-click on a part opens its properties: name, number of elements and nodes, element types,
-colour and visibility. On the #ui("Results") tab, a double-click on #ui("Model") shows file,
+colour and visibility. On the #ui("FE Model") tab the element types can be changed
+(@element-type). On the #ui("Results") tab, a double-click on #ui("Model") shows file,
 load time, node and element counts, element types, the dimensions of the model and its sets and
 surfaces. A double-click on a result component shows its maximum and minimum with the node where
 they occur.
