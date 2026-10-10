@@ -125,7 +125,7 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
     match target {
         Target::Faces => Some(CadEntity::Face(face)),
         Target::Edges => nearest_edge().map(|(edge, _)| CadEntity::Edge(edge)),
-        Target::Nodes => {
+        Target::Nodes | Target::Point => {
             let vertices: BTreeSet<i32> = (edges.iter())
                 .filter_map(|e| index.edge_vertices.get(e))
                 .flatten()
@@ -148,6 +148,37 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
             }
         }
     }
+}
+
+/// The CAD vertex nearest to a click, whatever its distance: of the edge for a line part,
+/// else of the edges bounding the face under the click. `None` where they have none.
+pub fn nearest_corner(model: &Model, hit: &Hit) -> Option<i32> {
+    let index = model.cad_index();
+    let edges: Vec<i32> = if hit.line {
+        let element = *model.skin(hit.part).line_elements.get(hit.face)?;
+        match model.cad_entity(model.mesh.elements()[element].id)? {
+            CadEntity::Edge(edge) => vec![edge],
+            _ => return None,
+        }
+    } else {
+        let skin_face = model.skin(hit.part).faces.get(hit.face)?;
+        let element = model.mesh.elements()[skin_face.element].id;
+        let face = index.face(&model.mesh, (element, skin_face.face as u8 + 1))?;
+        index.face_edges.get(&face)?.clone()
+    };
+    let vertices: BTreeSet<i32> = (edges.iter())
+        .filter_map(|e| index.edge_vertices.get(e))
+        .flatten()
+        .copied()
+        .collect();
+    (vertices.into_iter())
+        .filter_map(|v| {
+            let node = *model.mesh.cad.nodes.get(&CadEntity::Vertex(v))?.first()?;
+            let position = model.render_position(model.mesh.node_index(node)?);
+            Some((v, position.distance(hit.point)))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(v, _)| v)
 }
 
 /// Distance of a point to the mesh segments along a CAD edge, in render coordinates.
@@ -352,6 +383,22 @@ mod tests {
             coords(&model.mesh, &corner.nodes(&model.mesh)),
             [[0.0, 0.0, 10.0]]
         );
+
+        // A point is the vertex nearest to the click, also in the middle of the end face.
+        let hit = model
+            .pick(model.to_render([-50.0, 2.0, 7.0]), Vec3::X)
+            .unwrap();
+        let point = Picker::default().pick(&model, &hit, Target::Point, 0.1);
+        assert!(
+            matches!(&point, crate::selection::Items::Geometry(e) if matches!(e.first(), Some(CadEntity::Vertex(_)))),
+            "{point:?}"
+        );
+        let crate::selection::Items::Nodes(point) = point.resolved(&model.mesh, Target::Point)
+        else {
+            panic!("a point resolves to nodes");
+        };
+        let point: Vec<NodeId> = point.into_iter().collect();
+        assert_eq!(coords(&model.mesh, &point), [[0.0, 0.0, 10.0]]);
 
         // Mixed with picked nodes the geometry turns into nodes; undo goes back to it.
         let mut draft = RegionDraft::from_region(&fixed, NODE_SOURCES, Target::Nodes, &model.mesh);

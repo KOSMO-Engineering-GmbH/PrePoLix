@@ -99,6 +99,9 @@ pub enum Target {
     Faces,
     /// In 2D models they act on the outline: the edges of the 2D elements, stored as faces.
     Edges,
+    /// A single point, e.g. an end of a path: picked as nodes, but the geometry mode takes
+    /// only corner points, as an edge or a face does not define a point.
+    Point,
 }
 
 /// What a click selects, PrePoMax's radio buttons in the dialog.
@@ -142,6 +145,7 @@ impl SelectBy {
         match self {
             SelectBy::Geometry if target == Target::Faces => "Faces",
             SelectBy::Geometry if target == Target::Edges => "Edges",
+            SelectBy::Geometry if target == Target::Point => "Points",
             SelectBy::Geometry => "Faces, edges and points",
             SelectBy::GeometryPart | SelectBy::Part => "Part",
             SelectBy::GeometryEdgeAngle | SelectBy::EdgeAngle => "Edge angle",
@@ -162,7 +166,7 @@ impl SelectBy {
     /// Edges and points only make sense for regions of nodes, faces not for edges.
     fn allowed(self, target: Target) -> bool {
         match target {
-            Target::Nodes => true,
+            Target::Nodes | Target::Point => true,
             Target::Faces => !matches!(
                 self,
                 SelectBy::Node | SelectBy::Edge | SelectBy::EdgeAngle | SelectBy::GeometryEdgeAngle
@@ -204,7 +208,9 @@ impl Items {
             Items::Geometry(entities) => {
                 let entities: Vec<CadEntity> = entities.into_iter().collect();
                 match target {
-                    Target::Nodes => Items::Nodes(mesh.cad_nodes(&entities).into_iter().collect()),
+                    Target::Nodes | Target::Point => {
+                        Items::Nodes(mesh.cad_nodes(&entities).into_iter().collect())
+                    }
                     Target::Faces | Target::Edges => {
                         Items::Faces(mesh.cad_faces(&entities).into_iter().collect())
                     }
@@ -350,7 +356,7 @@ impl Picker {
                                             }
                                         }
                                     });
-                                    if target != Target::Nodes {
+                                    if matches!(target, Target::Faces | Target::Edges) {
                                         ui.weak("IDs of elements");
                                     }
                                 });
@@ -432,6 +438,9 @@ impl Picker {
     /// What a click on `hit` selects. `precision` is the pick tolerance in render units at
     /// the hit, for edges and points.
     pub fn pick(&self, model: &Model, hit: &Hit, target: Target, precision: f32) -> Items {
+        if target == Target::Point {
+            return self.pick_point(model, hit, precision);
+        }
         // On a mesh generated from geometry the geometry mode picks CAD entities, which stay
         // valid when the part is remeshed.
         if self.select_by == SelectBy::Geometry
@@ -503,7 +512,7 @@ impl Picker {
             Target::Faces | Target::Edges => {
                 Items::Faces(faces.iter().map(|&f| picker.face_id(f)).collect())
             }
-            Target::Nodes => Items::Nodes(
+            Target::Nodes | Target::Point => Items::Nodes(
                 picker.node_ids(
                     faces
                         .iter()
@@ -516,6 +525,29 @@ impl Picker {
 }
 
 impl Picker {
+    /// What a click picks as a point: in the geometry mode the corner point of the geometry
+    /// nearest to the click, wherever on the face or edge it is, else the nodes of the mode.
+    fn pick_point(&self, model: &Model, hit: &Hit, precision: f32) -> Items {
+        if self.select_by != SelectBy::Geometry {
+            return self.pick(model, hit, Target::Nodes, precision);
+        }
+        if model.has_cad()
+            && let Some(vertex) = crate::cad_selection::nearest_corner(model, hit)
+        {
+            return Items::Geometry(BTreeSet::from([CadEntity::Vertex(vertex)]));
+        }
+        let corner = if hit.line {
+            line_end_near(model, hit, f32::INFINITY)
+        } else {
+            let picker = MeshPicker::new(model, hit.part);
+            (picker.corner_of_patch(hit.face, hit.point)).map(|n| model.mesh.node_ids()[n])
+        };
+        // A part without corners, like a sphere, has no point but its nodes.
+        Items::Nodes(BTreeSet::from([
+            corner.unwrap_or_else(|| model.hit_node(hit))
+        ]))
+    }
+
     /// What a selection box selects: nodes in the node modes, otherwise element faces (whole
     /// elements in the element mode) inside the box, or crossing it when dragged from right
     /// to left. Only visible parts count.
@@ -634,7 +666,7 @@ impl Picker {
                     .map(|&(part, f)| MeshPicker::new(model, part).face_id(f))
                     .collect(),
             ),
-            Target::Nodes => {
+            Target::Nodes | Target::Point => {
                 let ids = mesh.node_ids();
                 Items::Nodes(
                     faces
@@ -905,7 +937,7 @@ impl<'a> MeshPicker<'a> {
 
     fn empty(&self, target: Target) -> Items {
         match target {
-            Target::Nodes => Items::Nodes(BTreeSet::new()),
+            Target::Nodes | Target::Point => Items::Nodes(BTreeSet::new()),
             Target::Faces | Target::Edges => Items::Faces(BTreeSet::new()),
         }
     }
@@ -994,22 +1026,41 @@ impl<'a> MeshPicker<'a> {
         degree
     }
 
-    /// A corner of the outline (where other than two feature edges meet, or in a 2D model
-    /// where the outline bends) near the point.
+    /// A corner of the outline near the point.
     fn corner_near(&self, point: Vec3, precision: f32) -> Option<usize> {
-        let plane = self.model.is_plane();
-        let bends = if plane {
-            self.outline_bends()
-        } else {
-            HashSet::new()
-        };
-        self.feature_degree()
-            .into_iter()
-            .filter(|&(node, degree)| degree != 2 || bends.contains(&node))
-            .map(|(node, _)| (node, self.position(node).distance(point)))
+        (self.corners().into_iter())
+            .map(|node| (node, self.position(node).distance(point)))
             .filter(|&(_, distance)| distance <= precision)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(node, _)| node)
+    }
+
+    /// The corner of the outline nearest to the point among those of the patch of `face`,
+    /// or of the whole part if the patch has none.
+    fn corner_of_patch(&self, face: usize, point: Vec3) -> Option<usize> {
+        let on_patch: HashSet<usize> = (self.patch(face).into_iter())
+            .flat_map(|f| self.faces()[f].corners.clone())
+            .collect();
+        let corners = self.corners();
+        let nearest = |nodes: &mut dyn Iterator<Item = usize>| {
+            nodes
+                .map(|node| (node, self.position(node).distance(point)))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(node, _)| node)
+        };
+        nearest(&mut corners.iter().copied().filter(|n| on_patch.contains(n)))
+            .or_else(|| nearest(&mut corners.iter().copied()))
+    }
+
+    /// The corners of the outline: where other than two feature edges meet, or where the
+    /// outline bends, like at the corners of a 2D model or of a shell.
+    fn corners(&self) -> Vec<usize> {
+        let bends = self.outline_bends();
+        self.feature_degree()
+            .into_iter()
+            .filter(|&(node, degree)| degree != 2 || bends.contains(&node))
+            .map(|(node, _)| node)
+            .collect()
     }
 
     /// Nodes where two feature edges meet at more than [`OUTLINE_ANGLE`], the corners of a
@@ -1437,5 +1488,53 @@ mod tests {
         assert_eq!(nodes(picked), BTreeSet::from([1]));
         let preview = preview(&model, &Items::Faces(BTreeSet::from([(1, 4), (5, 4)])));
         assert_eq!(preview.lines.len(), 2);
+    }
+
+    #[test]
+    fn points_snap_to_the_nearest_corner_in_the_geometry_mode() {
+        // Inside an element of the 2D plate, far from any corner of the outline: the point
+        // is the nearest corner, not the edge or the face.
+        let point = |x, y, mode| {
+            let (model, hit) = plate_hit(x, y);
+            nodes(picker(mode).pick(&model, &hit, Target::Point, 2.0))
+        };
+        assert_eq!(point(12.0, 8.0, SelectBy::Geometry), BTreeSet::from([1]));
+        assert_eq!(point(35.0, 15.0, SelectBy::Geometry), BTreeSet::from([15]));
+        assert_eq!(point(1.0, 8.0, SelectBy::Geometry), BTreeSet::from([1]));
+        // The mesh based modes keep picking nodes.
+        assert_eq!(point(12.0, 8.0, SelectBy::Node), BTreeSet::from([7]));
+        // On a line the nearer end.
+        let (model, hit) = line_hit(60.0);
+        let picked = picker(SelectBy::Geometry).pick(&model, &hit, Target::Point, 1.0);
+        assert_eq!(nodes(picked), BTreeSet::from([5]));
+    }
+
+    #[test]
+    fn points_on_a_solid_are_corners_of_the_hit_face() {
+        let (model, hit) = beam_hit(55.0, 5.0);
+        let picked = nodes(picker(SelectBy::Geometry).pick(&model, &hit, Target::Point, 0.5));
+        assert_eq!(picked.len(), 1);
+        let position = model.mesh.node(*picked.first().unwrap()).unwrap();
+        // A corner of the top face the click hit.
+        let top = (model.mesh.coords().iter())
+            .map(|p| p[2])
+            .fold(f64::MIN, f64::max);
+        assert_eq!((position[0], position[2]), (100.0, top), "{position:?}");
+    }
+
+    #[test]
+    fn points_on_a_shell_are_its_corners() {
+        // A 20 x 20 shell plate in the x-y plane with two beams below: all nodes of its
+        // outline join two edges, the corners are where it bends.
+        let model = crate::model::load(
+            &testdata("platte_mit_stuetzen.inp"),
+            plx_model::UnitSystem::MmTonSC,
+        )
+        .unwrap()
+        .model;
+        let origin = Vec3::new(13.0, 16.0, 50.0) + model.global_origin();
+        let hit = model.pick(origin, Vec3::NEG_Z).unwrap();
+        let picked = picker(SelectBy::Geometry).pick(&model, &hit, Target::Point, 0.5);
+        assert_eq!(nodes(picked), BTreeSet::from([25]));
     }
 }
