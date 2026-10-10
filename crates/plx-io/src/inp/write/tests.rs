@@ -4443,3 +4443,56 @@ fn calculix_holds_a_2d_model_in_a_skewed_symmetry_line_alike() {
         "{aligned} != {skewed}"
     );
 }
+
+/// The element types a part can be given instead of its own, see
+/// `plx_model::element_type_options`, are written and run in CalculiX.
+#[test]
+fn calculix_runs_the_element_types_chosen_for_a_part() {
+    let solid = |file: &str, load_node: NodeId| {
+        let (mesh, mut model) = analysis(file, tip_force());
+        model.steps[0].loads[0].region = Region::Nodes(vec![load_node]);
+        (mesh, model)
+    };
+    let mut cases = Vec::new();
+    for type_name in ["C3D8R", "C3D8I"] {
+        cases.push((solid("kragbalken_c3d8.inp", 99), "EALL", type_name));
+    }
+    cases.push((solid("kragbalken_c3d20r.inp", 99), "EALL", "C3D20"));
+    cases.push((solid("wuerfel_c3d10.inp", 336), "EALL", "C3D10T"));
+    cases.push((shell_plate(), "PLATE", "S8R"));
+    let plane = |space| {
+        let mesh = rectangle(0.0, 10.0, 2.0, 5, 2);
+        let fixed = vec![(nodes_at(&mesh, 0, 0.0), FIX_X), (vec![1], FIX_Y)];
+        let tip = Region::Faces(edges_at(&mesh, 0, 10.0));
+        let model = plane_model(
+            space,
+            1.0,
+            fixed,
+            LoadKind::SurfaceTraction([100.0, 0.0, 0.0]),
+            tip,
+        );
+        (mesh, model)
+    };
+    cases.push((plane(ModelSpace::PlaneStrain), "PLATE", "CPE8R"));
+    // Chosen in plane stress, written for the axisymmetric model the model became.
+    let (mesh, mut model) = plane(ModelSpace::PlaneStress);
+    model.set_element_type("PLATE", "CPS8R");
+    model.properties.space = ModelSpace::Axisymmetric;
+    cases.push(((mesh, model), "PLATE", "CAX8R"));
+    for ((mesh, mut model), part, type_name) in cases {
+        model.set_element_type(part, type_name);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        let block = format!("*Element, Type={type_name}, Elset={part}\n");
+        assert!(text.contains(&block), "{block:?} missing in\n{text}");
+        // The mesh itself is not changed by writing it.
+        assert!(mesh.elements().iter().all(|e| e.type_name != type_name));
+        let name = format!("elementtyp-{}", type_name.to_ascii_lowercase());
+        let Some(frd) = run_ccx(&name, &text) else {
+            return;
+        };
+        let increment = frd.increments.last().unwrap();
+        let values = &increment.field("DISP").unwrap().components[0].values;
+        assert!(values.iter().all(|v| v.is_finite()), "{type_name}");
+        assert!(values.iter().any(|v| *v != 0.0), "{type_name}");
+    }
+}

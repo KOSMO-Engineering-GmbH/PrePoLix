@@ -437,8 +437,10 @@ impl Model {
 
     /// Replaces the mesh, e.g. by a newly generated one; the FE model stays.
     pub fn set_mesh(&mut self, mut mesh: FeMesh) {
-        // The user's sets are found on the new mesh by their selections.
+        // The user's sets are found on the new mesh by their selections, and its parts get
+        // the element types chosen for them, also when they were meshed anew.
         self.fe.write_mesh_sets(&mut mesh);
+        self.fe.apply_element_types(&mut mesh);
         let mut fresh = Self::new(&self.path, mesh);
         std::mem::swap(&mut self.mesh, &mut fresh.mesh);
         self.parts = fresh.parts;
@@ -955,6 +957,18 @@ impl Model {
         Ok(())
     }
 
+    /// Gives the elements of the part that have the shape of `type_name` this type, as
+    /// PrePoMax's part properties do; the choice is kept for the part when it is meshed anew.
+    pub fn set_element_type(&mut self, index: usize, type_name: &str) -> Result<(), String> {
+        let part = self.parts.get(index).ok_or("The part no longer exists.")?;
+        let part = part.name.clone();
+        if !self.fe.set_element_type(&part, type_name) {
+            return Err(format!("{type_name} is not an element type of a part"));
+        }
+        self.edit_mesh(|_, _| {});
+        Ok(())
+    }
+
     /// The nearest visible face hit by a ray, both relative to the model origin.
     pub fn pick(&self, origin: Vec3, direction: Vec3) -> Option<Hit> {
         let coords = self.shown_coords();
@@ -1300,6 +1314,21 @@ mod tests {
             plx_model::Region::Parts(vec!["PLATTE-1".into()])
         );
         assert_eq!(model.rename_part(0, "platte-1"), Ok(()));
+    }
+
+    #[test]
+    fn chosen_element_types_survive_a_new_mesh() {
+        let mut model = load(&testdata("kragbalken_c3d8.inp"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
+        let original = model.mesh.clone();
+        assert!(model.set_element_type(0, "C3D10").is_ok());
+        assert!(model.set_element_type(0, "XYZ").is_err());
+        assert_eq!(model.set_element_type(0, "c3d8i"), Ok(()));
+        assert_eq!(model.parts[0].element_types, [("C3D8I".to_string(), 40)]);
+        // Meshed anew with the type the mesher gives, the part gets its choice again.
+        model.set_mesh(original);
+        assert_eq!(model.parts[0].element_types, [("C3D8I".to_string(), 40)]);
     }
 
     #[test]

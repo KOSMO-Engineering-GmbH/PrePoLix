@@ -10,6 +10,7 @@ mod checks;
 mod constraint;
 mod contact;
 pub mod convert;
+mod element_type;
 mod features;
 mod field;
 mod geometry;
@@ -32,6 +33,7 @@ pub use contact::{
     Constraint, ContactMethod, ContactPair, DEFAULT_SURFACE_COLOR, Friction, GapConductance,
     InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
 };
+pub use element_type::{PartElementType, element_type_options};
 pub use features::{
     CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource,
     PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane,
@@ -160,6 +162,9 @@ pub struct FeModel {
     /// are written into the mesh's sets.
     #[serde(default)]
     pub mesh_sets: Vec<MeshSet>,
+    /// Element types the user chose for parts instead of those the mesh came with.
+    #[serde(default)]
+    pub element_types: Vec<PartElementType>,
 }
 
 impl FeModel {
@@ -350,6 +355,7 @@ impl FeModel {
     /// Follows a renamed part: regions on the part, or on the element set an input file
     /// defines for it, keep pointing at it.
     pub fn rename_part(&mut self, old: &str, new: &str) {
+        self.rename_element_types(old, new);
         let regions = (self.sections.iter_mut().map(|s| &mut s.region))
             .chain(
                 self.constraints
