@@ -106,6 +106,8 @@ pub struct Model {
     cad_index: std::sync::OnceLock<crate::cad_selection::CadIndex>,
     /// The model checks of the last FE model checked, see [`Model::findings`].
     checks: std::sync::Mutex<Option<Checks>>,
+    /// What the user changed, to undo and redo it.
+    pub history: crate::undo::History,
 }
 
 /// Findings of the model checks with what they were computed for.
@@ -482,6 +484,7 @@ impl Model {
             part_nodes: Default::default(),
             checks: Default::default(),
             cad_index: Default::default(),
+            history: Default::default(),
         };
         let meshes = model.render_meshes();
         for (part, render) in model.parts.iter_mut().zip(&meshes) {
@@ -523,7 +526,12 @@ impl Model {
     /// Changes the mesh in place, e.g. by a mesh tool, and rebuilds what the GUI derives
     /// from it; the parts keep their colours and visibility.
     pub fn edit_mesh(&mut self, edit: impl FnOnce(&mut FeMesh, &mut FeModel)) {
-        let mut mesh = std::mem::take(&mut self.mesh);
+        // A copy if the history follows the model, so that it keeps the mesh as it was.
+        let mut mesh = if self.history.follows() {
+            self.mesh.clone()
+        } else {
+            std::mem::take(&mut self.mesh)
+        };
         edit(&mut mesh, &mut self.fe);
         let kept: Vec<([f32; 3], bool)> = self.parts.iter().map(|p| (p.color, p.visible)).collect();
         self.set_mesh(mesh);
@@ -541,6 +549,7 @@ impl Model {
         self.fe.apply_element_types(&mut mesh);
         let mut fresh = Self::new(&self.path, mesh);
         std::mem::swap(&mut self.mesh, &mut fresh.mesh);
+        self.history.mesh_replaced(std::mem::take(&mut fresh.mesh));
         self.parts = fresh.parts;
         self.skins = fresh.skins;
         self.origin = fresh.origin;
@@ -1090,6 +1099,9 @@ impl Model {
         }
         if self.mesh.name_in_use(&name) {
             return Err(format!("The name {name} is already used."));
+        }
+        if self.history.follows() {
+            self.history.mesh_replaced(self.mesh.clone());
         }
         if let Some(old) = self.mesh.rename_part(index, &name) {
             self.fe.rename_part(&old, &name);
