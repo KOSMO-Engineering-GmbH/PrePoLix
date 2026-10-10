@@ -46,6 +46,9 @@ pub struct PartInfo {
     /// Bounding box relative to [`Model::origin`].
     pub bounds: Option<(Vec3, Vec3)>,
     pub visible: bool,
+    /// Whether the part takes part in the colour scale of results (PrePoMax: colour
+    /// contours on); a part without them is plain grey and leaves the legend range alone.
+    pub contours: bool,
 }
 
 /// A loaded input file with everything the GUI shows about it.
@@ -357,6 +360,7 @@ impl Model {
                 element_types: types.into_iter().map(|(t, n)| (t.to_string(), n)).collect(),
                 bounds: None,
                 visible: true,
+                contours: true,
             });
         }
         let mut model = Self {
@@ -602,6 +606,48 @@ impl Model {
             ),
             _ => (coords, false),
         }
+    }
+
+    /// Turns the colour contours of parts on or off and refreshes the nodes the results leave
+    /// out of the legend: those used by plain parts only.
+    pub fn set_contours(&mut self, parts: &[usize], contours: bool) {
+        for &part in parts {
+            if let Some(info) = self.parts.get_mut(part) {
+                info.contours = contours;
+            }
+        }
+        self.update_plain_nodes();
+    }
+
+    fn update_plain_nodes(&mut self) {
+        let Some(view) = &mut self.results else {
+            return;
+        };
+        if self.parts.iter().all(|p| p.contours) {
+            view.plain_nodes.clear();
+            return;
+        }
+        let count = self.mesh.coords().len();
+        let mut plain = vec![false; count];
+        let mut coloured = vec![false; count];
+        for (index, info) in self.parts.iter().enumerate() {
+            let target = if info.contours {
+                &mut coloured
+            } else {
+                &mut plain
+            };
+            for id in self.mesh.part_nodes(&[index]) {
+                if let Some(node) = self.mesh.node_index(id) {
+                    target[node] = true;
+                }
+            }
+        }
+        // A node shared with a part that has contours keeps its colour.
+        view.plain_nodes = plain
+            .into_iter()
+            .zip(coloured)
+            .map(|(plain, coloured)| plain && !coloured)
+            .collect();
     }
 
     /// Node coordinates as drawn and the normalized contour values, if a result is shown;
