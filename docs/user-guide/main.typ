@@ -50,3 +50,4 @@
 #include "chapters/results/animation.typ"
 #include "chapters/results/evaluation.typ"
 #include "chapters/results/campbell.typ"
+#include "chapters/results/paraview.typ"

@@ -169,6 +169,8 @@ struct Workbench {
         crate::color_scale_dialog::ColorScaleDialog,
         plx_model::ColorScale,
     )>,
+    /// The Export VTU or Export VTK dialog of a results file.
+    vtk_export_dialog: Option<crate::vtk_export_dialog::VtkExportDialog>,
     /// The shown values on the plane of the shown plane result, in model coordinates: where
     /// the plane cuts the parts as shown, and where it cuts the undeformed mesh.
     section_values: Option<plx_render::SectionValues>,
@@ -263,6 +265,7 @@ impl PrepolixApp {
                 feature_dialog: None,
                 plot_editor: None,
                 color_scale_dialog: None,
+                vtk_export_dialog: None,
                 section_values: None,
                 plane_values: None,
                 section_shown: None,
@@ -456,6 +459,21 @@ impl PrepolixApp {
                     .clicked()
                 {
                     self.workbench.export_deformed_mesh();
+                }
+                let tip = "Writes the current results for ParaView and other VTK programs, \
+                           one increment or a time series of several.";
+                for (label, format) in [
+                    ("Export VTU …", plx_io::vtk::VtkFormat::Xml),
+                    ("Export VTK …", plx_io::vtk::VtkFormat::Legacy),
+                ] {
+                    if ui
+                        .add_enabled(deformed, egui::Button::new(label))
+                        .on_hover_text(tip)
+                        .on_disabled_hover_text("No results are open.")
+                        .clicked()
+                    {
+                        self.workbench.open_vtk_export(format);
+                    }
                 }
                 ui.separator();
                 if ui.button("Exit").clicked() {
@@ -985,6 +1003,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.feature_window(&ctx);
         self.workbench.plot_editor_window(&ctx);
         self.workbench.color_scale_window(&ctx);
+        self.workbench.vtk_export_window(&ctx);
         self.workbench.sync_result_features();
         self.workbench.run_analysis(&ctx);
         self.workbench.poll_bound_results(&ctx);
@@ -3175,6 +3194,100 @@ impl Workbench {
                     .output
                     .push(format!("Deformed mesh exported to {}", path.display())),
                 Err(error) => self.output.push(format!("{}: {error}", path.display())),
+            }
+        }
+    }
+
+    /// Opens the Export VTU or Export VTK dialog of the current results.
+    fn open_vtk_export(&mut self, format: plx_io::vtk::VtkFormat) {
+        if self.shown_results_view().is_some() {
+            self.vtk_export_dialog = Some(crate::vtk_export_dialog::VtkExportDialog::new(
+                self.current_result,
+                format,
+            ));
+        }
+    }
+
+    /// The Export VTU or Export VTK dialog; Export asks for the file and writes it.
+    fn vtk_export_window(&mut self, ctx: &egui::Context) {
+        use crate::vtk_export_dialog::DialogResult;
+        let Some(mut dialog) = self.vtk_export_dialog.take() else {
+            return;
+        };
+        let Some(model) = self.results.get(dialog.result) else {
+            return;
+        };
+        let Some(view) = &model.results else {
+            return;
+        };
+        match dialog.show(ctx, &view.increments, view.increment) {
+            DialogResult::Open => self.vtk_export_dialog = Some(dialog),
+            DialogResult::Cancel => {}
+            DialogResult::Export => {
+                let increments = dialog.scope.select(&view.increments, view.increment);
+                let format = dialog.format;
+                let several = increments.len() > 1;
+                let extension = if several {
+                    format.collection_extension()
+                } else {
+                    format.extension()
+                };
+                let stem = model
+                    .path
+                    .file_stem()
+                    .map_or("Results".into(), |s| s.to_string_lossy().into_owned());
+                let filter = match (several, format) {
+                    (false, _) => format!("VTK file (*.{extension})"),
+                    (true, plx_io::vtk::VtkFormat::Xml) => "ParaView Data (*.pvd)".into(),
+                    (true, plx_io::vtk::VtkFormat::Legacy) => {
+                        "VTK file series (*.vtk.series)".into()
+                    }
+                };
+                let filter_extension = extension.rsplit('.').next().unwrap_or(extension);
+                let picked = rfd::FileDialog::new()
+                    .set_title(dialog.title())
+                    .add_filter(filter, &[filter_extension])
+                    .set_file_name(format!("{stem}.{extension}"))
+                    .save_file();
+                let Some(mut path) = picked else {
+                    // Back to the dialog to choose again.
+                    self.vtk_export_dialog = Some(dialog);
+                    return;
+                };
+                let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase());
+                if !name.is_some_and(|n| n.ends_with(&format!(".{extension}"))) {
+                    let mut with = path.into_os_string();
+                    with.push(format!(".{extension}"));
+                    path = with.into();
+                }
+                let title = format!("PrePoLix results of {}", model.file_name());
+                let result = plx_io::vtk::export(
+                    &path,
+                    format,
+                    &model.mesh,
+                    &increments,
+                    dialog.binary,
+                    &title,
+                );
+                match result {
+                    Ok(summary) => {
+                        let mut line = format!("Results exported to {}", summary.main.display());
+                        if summary.files > 1 {
+                            line.push_str(&format!(" ({} increments", summary.files));
+                            if summary.physical_times == Some(false) {
+                                line.push_str(
+                                    "; their values do not increase, so the time series is \
+                                     numbered 0, 1, 2, ...",
+                                );
+                            }
+                            line.push(')');
+                        }
+                        self.output.push(line);
+                    }
+                    Err(error) => self
+                        .output
+                        .push(format!("Export not possible: {}: {error}", path.display())),
+                }
             }
         }
     }
