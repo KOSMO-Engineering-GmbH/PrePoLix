@@ -55,7 +55,23 @@ PrePoLix with a Start menu entry, bundles Gmsh and can associate `.plx` project 
 
 ### Linux
 
-There is no binary package yet. Build from source, see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+There is no binary package yet, but you can install straight from the Git repository with one
+command. You do not need to clone it. You need a current stable Rust toolchain ([rustup](https://rustup.rs/)):
+
+```sh
+cargo install --git https://github.com/KwentiN-ui/PrePoLix plx-app
+```
+
+This builds the `prepolix` program and puts it in `~/.cargo/bin`. The first build takes a few
+minutes. Building needs the ALSA development files (Debian/Ubuntu: `sudo apt install libasound2-dev pkg-config`,
+Fedora: `sudo dnf install alsa-lib-devel`). At run time Linux needs `libxkbcommon-x11` (X11) or
+`libxkbcommon` (Wayland) and a Vulkan or OpenGL driver, which most desktops already have.
+
+To import STEP, IGES or BREP geometry and to mesh, PrePoLix also needs the Gmsh library, which
+`cargo install` does not provide (see [Gmsh](docs/DEVELOPMENT.md#gmsh)). Without it the program
+starts normally, only geometry import and meshing are missing; opening `.inp` and `.frd` files works.
+To update later, run the same command again with `--force`. To build from a clone instead, see
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ### CalculiX
 
