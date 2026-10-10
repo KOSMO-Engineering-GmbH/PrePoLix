@@ -67,6 +67,44 @@ pub struct Project {
     pub mesh: plx_mesh::FeMesh,
     #[serde(default)]
     pub model: FeModel,
+    /// Results of a finished analysis the user bound to the project, restored when it is
+    /// opened; projects without them are only mesh and definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<BoundResults>,
+}
+
+/// The files of a finished analysis kept in the project file: the input file CalculiX ran,
+/// its results (`.frd`) and history output (`.dat`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundResults {
+    /// The analysis the results belong to.
+    pub analysis: String,
+    /// CalculiX reported errors but wrote results.
+    #[serde(default)]
+    pub with_errors: bool,
+    pub files: Vec<BoundFile>,
+}
+
+/// A file of [`BoundResults`]: its name and its content, deflated and base64 encoded so that
+/// it is a compact string in the project's RON.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundFile {
+    pub name: String,
+    /// Size of the file itself.
+    pub size: u64,
+    pub data: String,
+}
+
+impl BoundResults {
+    /// Size of the files as stored in the project.
+    pub fn stored_size(&self) -> u64 {
+        self.files.iter().map(|f| f.data.len() as u64).sum()
+    }
+
+    /// Size of the files themselves.
+    pub fn size(&self) -> u64 {
+        self.files.iter().map(|f| f.size).sum()
+    }
 }
 
 /// Everything besides the mesh that makes up an analysis.

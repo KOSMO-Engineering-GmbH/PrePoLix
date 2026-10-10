@@ -14,6 +14,8 @@
   [Save (#key("Ctrl+S"))], [Saves the project. A model that was not opened from a `.plx` file
     is saved with #ui("Save As").],
   [Save As ... (#key("Ctrl+Shift+S"))], [Saves the project under a new name.],
+  [Save Without Results ...], [Saves a copy without the result bound to the analysis
+    (@bind-result).],
   [Export CalculiX Input File ...], [Writes the input file exactly as #ui("Run Analysis")
     would (@export-inp).],
   [Export Deformed Mesh (.inp) ...], [Writes the displayed deformed mesh of the current result
@@ -25,7 +27,8 @@
 
 === What each file type does
 
-/ `.plx` (PrePoLix project): geometry, mesh setup, mesh and FE model in one file. Saving writes a
+/ `.plx` (PrePoLix project): geometry, mesh setup, mesh and FE model in one file, and the result
+  bound to the analysis, if any (@bind-result). Saving writes a
   temporary file first and then replaces the old one, so a crash during saving cannot destroy the
   project. A project written by a newer version of PrePoLix is refused.
 / `.inp` (CalculiX input): *only the mesh* is imported: nodes, elements, `*NSET`, `*ELSET`

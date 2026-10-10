@@ -120,6 +120,8 @@ struct Workbench {
     /// `None` until it is computed, so a dialog's highlight is cleared once it closes.
     highlighted: Option<TreeSelection>,
     analysis: Option<Analysis>,
+    /// Results being bound to or restored from the project file of the model at this path.
+    bound_work: Option<(PathBuf, std::sync::mpsc::Receiver<BoundWork>)>,
     /// Problems CalculiX reported when the last analysis failed, shown in the tree.
     solver_findings: Vec<plx_model::Finding>,
     /// The findings of a tree item whose warning sign was clicked, explained in a window.
@@ -229,6 +231,7 @@ impl PrepolixApp {
                 history_plot: None,
                 highlighted: None,
                 analysis: None,
+                bound_work: None,
                 campbell: None,
                 solver_findings: Vec::new(),
                 findings_window: None,
@@ -405,6 +408,20 @@ impl PrepolixApp {
                 let save_as = egui::Button::new("Save As …").shortcut_text("Ctrl+Shift+S");
                 if ui.add_enabled(setup, save_as).clicked() {
                     self.workbench.save_project(true);
+                }
+                let bound =
+                    (self.workbench.setup_model()).is_some_and(|m| m.bound_results.is_some());
+                let without = egui::Button::new("Save Without Results …");
+                if ui
+                    .add_enabled(bound, without)
+                    .on_hover_text(
+                        "Saves a copy with only the mesh and the model definition, without \
+                         the result bound to the analysis. The open project keeps its result.",
+                    )
+                    .on_disabled_hover_text("No result is bound to the analysis.")
+                    .clicked()
+                {
+                    self.workbench.save_without_results();
                 }
                 ui.separator();
                 let export = egui::Button::new("Export CalculiX Input File …");
@@ -907,6 +924,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.feature_window(&ctx);
         self.workbench.sync_result_features();
         self.workbench.run_analysis(&ctx);
+        self.workbench.poll_bound_results(&ctx);
         self.workbench.campbell_window(&ctx);
         if let Some(path) = self.workbench.open_results.take() {
             self.open_path(path, &ctx);
@@ -931,6 +949,43 @@ impl eframe::App for PrepolixApp {
             self.workbench.viewport.apply(command, bounds);
         }
     }
+}
+
+/// What a worker binding or restoring bound results sends back.
+enum BoundWork {
+    Bound(Result<plx_model::BoundResults, String>),
+    /// The analysis, the directory and the results file written there.
+    Restored(String, PathBuf, Result<PathBuf, String>),
+}
+
+/// A file size in kB or MB.
+fn file_size(bytes: u64) -> String {
+    let kb = bytes as f64 / 1024.0;
+    if kb < 1024.0 {
+        format!("{kb:.0} kB")
+    } else {
+        format!("{:.1} MB", kb / 1024.0)
+    }
+}
+
+/// Asks for a project file to save `model` to, proposing its name with `suffix`.
+fn pick_project_file(model: &Model, title: &str, suffix: &str) -> Option<PathBuf> {
+    let stem = model
+        .path
+        .file_stem()
+        .map_or_else(|| "Project".into(), |s| s.to_string_lossy().into_owned());
+    let mut dialog = rfd::FileDialog::new()
+        .set_title(title)
+        .add_filter("PrePoLix project (*.plx)", &[model::PROJECT_EXTENSION])
+        .set_file_name(format!("{stem}{suffix}.{}", model::PROJECT_EXTENSION));
+    if let Some(dir) = model.path.parent() {
+        dialog = dialog.set_directory(dir);
+    }
+    let mut path = dialog.save_file()?;
+    if path.extension().is_none() {
+        path.set_extension(model::PROJECT_EXTENSION);
+    }
+    Some(path)
 }
 
 impl Workbench {
@@ -1121,6 +1176,14 @@ impl Workbench {
                     self.model = Some(model);
                     self.symbols_shown = None;
                     self.geometry = geometry_view;
+                    // Results bound to the project open with it.
+                    if self
+                        .model
+                        .as_ref()
+                        .is_some_and(|m| m.bound_results.is_some())
+                    {
+                        self.open_bound_results();
+                    }
                 }
                 self.frame_cache.clear();
                 self.viewport.set_parts(&render_meshes);
@@ -1211,15 +1274,31 @@ impl Workbench {
             .and_then(|m| m.geometry.as_ref())
             .map(|g| g.mesh_items.iter().map(|i| i.name.clone()).collect())
             .unwrap_or_default();
+        let bound = (self.model.as_ref()).and_then(|m| m.bound_results.as_ref());
+        let job = match (&self.analysis, bound) {
+            (Some(a), _) => Some(tree::JobState {
+                status: a.status(),
+                results: a.results().is_some(),
+                bound: bound.is_some(),
+                ran: true,
+            }),
+            (None, Some(bound)) => Some(tree::JobState {
+                status: if bound.with_errors {
+                    plx_job::JobStatus::FailedWithResults
+                } else {
+                    plx_job::JobStatus::Completed
+                },
+                results: true,
+                bound: true,
+                ran: false,
+            }),
+            (None, None) => None,
+        };
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
             TreeView::FeModel => self.model.as_mut(),
         };
-        let job = self.analysis.as_ref().map(|a| tree::JobState {
-            status: a.status(),
-            results: a.results().is_some(),
-        });
         let response = tree::show(
             ui,
             view,
@@ -2441,14 +2520,139 @@ impl Workbench {
                     "The analysis has not been started yet (Analysis > Run Analysis).".into(),
                 ),
             },
-            AnalysisAction::Results => {
-                self.open_results = self.analysis.as_ref().and_then(Analysis::results);
+            AnalysisAction::Results => match self.analysis.as_ref().and_then(Analysis::results) {
+                Some(path) => self.open_results = Some(path),
+                None => self.open_bound_results(),
+            },
+            AnalysisAction::BindResult => self.bind_results(),
+            AnalysisAction::RemoveBoundResult => {
+                if let Some(model) = &mut self.model
+                    && model.bound_results.take().is_some()
+                {
+                    model.bound_results_file = None;
+                    self.output.push(
+                        "Bound result removed; saving the project leaves it out of the file."
+                            .into(),
+                    );
+                }
             }
             AnalysisAction::Kill => {
                 if let Some(analysis) = &mut self.analysis {
                     analysis.kill();
                 }
             }
+        }
+    }
+
+    /// Binds the results of the finished analysis to the project: its input, results and
+    /// history output files are saved with the project from now on.
+    fn bind_results(&mut self) {
+        if self.bound_work.is_some() {
+            return;
+        }
+        let Some(analysis) = self.analysis.as_ref().filter(|a| !a.is_running()) else {
+            return;
+        };
+        let Some(frd) = analysis.results() else {
+            self.output
+                .push("The analysis has no results to bind.".into());
+            return;
+        };
+        let with_errors = analysis.status() == plx_job::JobStatus::FailedWithResults;
+        let Some(model) = &self.model else {
+            return;
+        };
+        // Compressing large results takes seconds: done beside the GUI.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let files = ["inp", "frd", "dat"].map(|e| frd.with_extension(e));
+        std::thread::spawn(move || {
+            let bound = plx_io::project::bind_results(tree::ANALYSIS_NAME, &files, with_errors)
+                .map_err(|e| e.to_string());
+            let _ = sender.send(BoundWork::Bound(bound));
+        });
+        self.output
+            .push(format!("Binding the result of {} …", tree::ANALYSIS_NAME));
+        self.bound_work = Some((model.path.clone(), receiver));
+    }
+
+    /// Opens the results bound to the project, written into the work directory first.
+    fn open_bound_results(&mut self) {
+        if self.bound_work.is_some() {
+            return;
+        }
+        let work_dir = self.settings.solver.work_dir();
+        let Some(model) = &self.model else {
+            return;
+        };
+        let Some(bound) = &model.bound_results else {
+            return;
+        };
+        if let Some(path) = model.bound_results_file.as_ref().filter(|p| p.is_file()) {
+            self.open_results = Some(path.clone());
+            return;
+        }
+        let stem = model
+            .path
+            .file_stem()
+            .map_or_else(|| "Project".into(), |s| s.to_string_lossy().into_owned());
+        let dir = work_dir.join("Bound_Results").join(stem);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let bound = bound.clone();
+        std::thread::spawn(move || {
+            let restored =
+                plx_io::project::restore_results(&bound, &dir).map_err(|e| e.to_string());
+            let _ = sender.send(BoundWork::Restored(bound.analysis, dir, restored));
+        });
+        self.bound_work = Some((model.path.clone(), receiver));
+    }
+
+    /// Takes the result of binding or restoring bound results once the worker is done.
+    fn poll_bound_results(&mut self, ctx: &egui::Context) {
+        let Some((path, receiver)) = &self.bound_work else {
+            return;
+        };
+        let work = match receiver.try_recv() {
+            Ok(work) => work,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.bound_work = None;
+                return;
+            }
+        };
+        // The model may have been closed or replaced meanwhile.
+        let model = (self.model.as_mut()).filter(|m| m.path == *path);
+        self.bound_work = None;
+        match (work, model) {
+            (BoundWork::Bound(Ok(bound)), Some(model)) => {
+                self.output.push(format!(
+                    "Result bound to {}: {} of files, {} in the project file once it is saved",
+                    bound.analysis,
+                    file_size(bound.size()),
+                    file_size(bound.stored_size())
+                ));
+                model.bound_results = Some(bound);
+                // Written anew when opened: a next run overwrites the analysis' own files.
+                model.bound_results_file = None;
+            }
+            (BoundWork::Restored(analysis, dir, Ok(file)), Some(model)) => {
+                self.output.push(format!(
+                    "Result bound to {analysis} restored to {}",
+                    dir.display()
+                ));
+                model.bound_results_file = Some(file.clone());
+                self.open_results = Some(file);
+            }
+            (BoundWork::Bound(Err(error)), _) => {
+                self.output.push(format!("Result not bound: {error}"));
+            }
+            (BoundWork::Restored(_, _, Err(error)), _) => {
+                self.output
+                    .push(format!("Bound result not restored: {error}"));
+            }
+            (_, None) => {}
         }
     }
 
@@ -2557,31 +2761,37 @@ impl Workbench {
         let path = if model.is_project() && !save_as {
             model.path.clone()
         } else {
-            let stem = model
-                .path
-                .file_stem()
-                .map_or_else(|| "Project".into(), |s| s.to_string_lossy().into_owned());
-            let mut dialog = rfd::FileDialog::new()
-                .set_title("Save Project")
-                .add_filter("PrePoLix project (*.plx)", &[model::PROJECT_EXTENSION])
-                .set_file_name(format!("{stem}.{}", model::PROJECT_EXTENSION));
-            if let Some(dir) = model.path.parent() {
-                dialog = dialog.set_directory(dir);
-            }
-            let Some(mut path) = dialog.save_file() else {
+            let Some(path) = pick_project_file(model, "Save Project", "") else {
                 return;
             };
-            if path.extension().is_none() {
-                path.set_extension(model::PROJECT_EXTENSION);
-            }
             path
         };
         let geometry = model.geometry.as_ref();
-        match plx_io::project::save_project(&path, geometry, &model.mesh, &model.fe) {
+        let results = model.bound_results.as_ref();
+        match plx_io::project::save_project(&path, geometry, &model.mesh, &model.fe, results) {
             Ok(()) => {
                 self.output.push(format!("{} saved", path.display()));
                 model.path = path;
             }
+            Err(error) => self.output.push(format!("Not saved: {error}")),
+        }
+    }
+
+    /// Saves a copy of the project without the bound results, only mesh and definition, for
+    /// example to send it; the open project stays on its own file and keeps its results.
+    fn save_without_results(&mut self) {
+        let Some(model) = self.model.as_ref() else {
+            return;
+        };
+        let Some(path) = pick_project_file(model, "Save Without Results", "-without-results")
+        else {
+            return;
+        };
+        let geometry = model.geometry.as_ref();
+        match plx_io::project::save_project(&path, geometry, &model.mesh, &model.fe, None) {
+            Ok(()) => self
+                .output
+                .push(format!("{} saved without results", path.display())),
             Err(error) => self.output.push(format!("Not saved: {error}")),
         }
     }

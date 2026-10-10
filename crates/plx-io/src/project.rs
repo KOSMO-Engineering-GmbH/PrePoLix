@@ -1,9 +1,16 @@
-//! Project files (`.plx`): the mesh and the FE model in RON, written by serde.
+//! Project files (`.plx`): the mesh and the FE model in RON, written by serde, and the
+//! results the user bound to the analysis.
 
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use flate2::Compression;
+use flate2::read::DeflateDecoder;
+use flate2::write::DeflateEncoder;
 use plx_mesh::FeMesh;
-use plx_model::{FeModel, Geometry, PROJECT_FORMAT, Project};
+use plx_model::{BoundFile, BoundResults, FeModel, Geometry, PROJECT_FORMAT, Project};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
@@ -25,12 +32,14 @@ pub fn save_project(
     geometry: Option<&Geometry>,
     mesh: &FeMesh,
     model: &FeModel,
+    results: Option<&BoundResults>,
 ) -> Result<(), ProjectError> {
     let project = Project {
         format: PROJECT_FORMAT,
         geometry: geometry.cloned(),
         mesh: mesh.clone(),
         model: model.clone(),
+        results: results.cloned(),
     };
     let text = ron::to_string(&project).map_err(|e| ProjectError::Format {
         path: path.to_owned(),
@@ -62,6 +71,89 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
     }
     project.model.migrate();
     Ok(project)
+}
+
+/// Reads the files of a finished analysis into [`BoundResults`]; files that do not exist are
+/// left out, the results file has to be there.
+pub fn bind_results(
+    analysis: &str,
+    files: &[PathBuf],
+    with_errors: bool,
+) -> Result<BoundResults, ProjectError> {
+    let mut bound = BoundResults {
+        analysis: analysis.to_owned(),
+        with_errors,
+        files: Vec::new(),
+    };
+    for path in files {
+        let io = |source| ProjectError::Io {
+            path: path.to_owned(),
+            source,
+        };
+        let content = match std::fs::read(path) {
+            Ok(content) => content,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !is_results_file(path) => {
+                continue;
+            }
+            Err(e) => return Err(io(e)),
+        };
+        // Level 3: a third of the time of the default level for a few percent more.
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(3));
+        encoder.write_all(&content).map_err(io)?;
+        let compressed = encoder.finish().map_err(io)?;
+        bound.files.push(BoundFile {
+            name: file_name(path).unwrap_or_default(),
+            size: content.len() as u64,
+            data: BASE64.encode(compressed),
+        });
+    }
+    Ok(bound)
+}
+
+/// Writes the files of bound results into `dir`; returns the results file (`.frd`).
+pub fn restore_results(bound: &BoundResults, dir: &Path) -> Result<PathBuf, ProjectError> {
+    let format = |message: String| ProjectError::Format {
+        path: dir.to_owned(),
+        message,
+    };
+    let io = |path: &Path, source| ProjectError::Io {
+        path: path.to_owned(),
+        source,
+    };
+    std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
+    let mut results = None;
+    for file in &bound.files {
+        // Only a plain file name: a project cannot write elsewhere.
+        let name = Path::new(&file.name);
+        if file_name(name).as_deref() != Some(file.name.as_str()) {
+            return Err(format(format!(
+                "bound file name {:?} is not valid",
+                file.name
+            )));
+        }
+        let compressed = BASE64
+            .decode(&file.data)
+            .map_err(|e| format(format!("bound file {}: {e}", file.name)))?;
+        let mut content = Vec::with_capacity(file.size as usize);
+        DeflateDecoder::new(compressed.as_slice())
+            .read_to_end(&mut content)
+            .map_err(|e| format(format!("bound file {}: {e}", file.name)))?;
+        let path = dir.join(name);
+        std::fs::write(&path, content).map_err(|e| io(&path, e))?;
+        if is_results_file(&path) {
+            results = Some(path);
+        }
+    }
+    results.ok_or_else(|| format("the bound results have no results file (.frd)".into()))
+}
+
+fn is_results_file(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("frd"))
+}
+
+fn file_name(path: &Path) -> Option<String> {
+    path.file_name().map(|n| n.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
@@ -189,7 +281,7 @@ mod tests {
             ],
             part_names: vec!["SOLID-1".into()],
         };
-        save_project(&path, Some(&geometry), &mesh, &model).unwrap();
+        save_project(&path, Some(&geometry), &mesh, &model, None).unwrap();
         let project = read_project(&path).unwrap();
         assert_eq!(project.model, model);
         assert_eq!(project.geometry, Some(geometry));
@@ -251,5 +343,53 @@ mod tests {
         assert_ne!(older, text);
         let model: FeModel = ron::from_str(&older).unwrap();
         assert_eq!(model, FeModel::default());
+    }
+
+    #[test]
+    fn bound_results_are_restored_from_the_project() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mesh = read_inp(&root.join("testdata/block_c3d20r.inp"))
+            .unwrap()
+            .mesh;
+        let dir = std::env::temp_dir().join(format!("plx-bound-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let frd = dir.join("Analysis-1.frd");
+        let text = "    1C\n".repeat(1000) + " 9999\n";
+        std::fs::write(&frd, &text).unwrap();
+        // No history output: the missing .dat is left out.
+        let files = [frd.with_extension("dat"), frd.clone()];
+        let bound = bind_results("Analysis-1", &files, false).unwrap();
+        assert_eq!(bound.files.len(), 1);
+        assert_eq!(bound.size(), text.len() as u64);
+        assert!(
+            bound.stored_size() < bound.size() / 10,
+            "{}",
+            bound.stored_size()
+        );
+        assert!(bind_results("Analysis-1", &[dir.join("missing.frd")], false).is_err());
+
+        let path = dir.join("block.plx");
+        let model = FeModel::default();
+        save_project(&path, None, &mesh, &model, Some(&bound)).unwrap();
+        let project = read_project(&path).unwrap();
+        assert_eq!(project.results.as_ref(), Some(&bound));
+
+        let restored = restore_results(&bound, &dir.join("restored")).unwrap();
+        assert_eq!(restored, dir.join("restored/Analysis-1.frd"));
+        assert_eq!(std::fs::read_to_string(&restored).unwrap(), text);
+
+        // Without bound results the project file has no trace of them.
+        save_project(&path, None, &mesh, &model, None).unwrap();
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("Analysis-1")
+        );
+        assert_eq!(read_project(&path).unwrap().results, None);
+
+        let mut evil = bound.clone();
+        evil.files[0].name = "../evil.frd".into();
+        assert!(restore_results(&evil, &dir.join("restored")).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
