@@ -70,6 +70,37 @@ pub struct PathPlot {
 }
 
 impl PathPlot {
+    /// The plot as saved with results bound to a project.
+    pub fn saved(&self) -> plx_results::saved_view::SavedPathPlot {
+        let p = &self.placement;
+        plx_results::saved_view::SavedPathPlot {
+            path: self.path.clone(),
+            offset: p.offset.map(|o| [o.x, o.y]),
+            size: [p.size.x, p.size.y],
+            on_path: p.on_path,
+            height: p.height,
+            title: p.title.clone(),
+            x_label: p.x_label.clone(),
+            y_label: p.y_label.clone(),
+            y_range: p.y_range,
+        }
+    }
+
+    pub fn from_saved(saved: &plx_results::saved_view::SavedPathPlot) -> Self {
+        let mut plot = Self::new(saved.path.clone());
+        plot.placement = Placement {
+            offset: saved.offset.map(|[x, y]| vec2(x, y)),
+            size: vec2(saved.size[0], saved.size[1]),
+            on_path: saved.on_path,
+            height: saved.height,
+            title: saved.title.clone(),
+            x_label: saved.x_label.clone(),
+            y_label: saved.y_label.clone(),
+            y_range: saved.y_range,
+        };
+        plot
+    }
+
     pub fn new(path: String) -> Self {
         Self {
             path,

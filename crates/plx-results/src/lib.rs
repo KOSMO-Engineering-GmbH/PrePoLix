@@ -10,6 +10,7 @@ pub mod field_output;
 pub mod history_output;
 pub mod hot_spot;
 pub mod path;
+pub mod saved_view;
 pub mod transformation;
 
 pub use derived::{add_derived_components, principal_values};
@@ -40,6 +41,8 @@ pub struct ResultsSettings {
     pub increment: usize,
     /// The field and component shown, by name.
     pub shown: Option<(String, String)>,
+    /// Camera, annotations and display settings of the 3D view.
+    pub view: saved_view::SavedView,
 }
 
 /// Kind of analysis an increment belongs to, as CalculiX reports it.

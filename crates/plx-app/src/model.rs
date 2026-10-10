@@ -351,6 +351,16 @@ impl Model {
                 .collect(),
             ..view.settings()
         })
+        .map(|mut settings| {
+            let saved = &mut settings.view;
+            saved.hidden_parts = (self.parts.iter())
+                .filter(|p| !p.visible)
+                .map(|p| p.name.clone())
+                .collect();
+            saved.annotations = self.query_annotations.iter().map(Into::into).collect();
+            saved.path_plots = self.path_plots.iter().map(|p| p.saved()).collect();
+            settings
+        })
     }
 
     /// Takes saved settings of bound results; returns the outputs that failed.
@@ -364,6 +374,14 @@ impl Model {
         self.fe.result_paths = settings.result_paths.clone();
         self.fe.result_planes = settings.result_planes.clone();
         self.hot_spots.definitions = settings.hot_spots.clone();
+        let view = &settings.view;
+        for part in &mut self.parts {
+            part.visible = !view.hidden_parts.contains(&part.name);
+        }
+        self.query_annotations = view.annotations.iter().cloned().map(Into::into).collect();
+        self.path_plots = (view.path_plots.iter())
+            .map(crate::path_plot::PathPlot::from_saved)
+            .collect();
         self.set_contours(&settings.plain_parts, false);
         match &mut self.results {
             Some(view) => view.restore(settings, &self.mesh),
@@ -1719,6 +1737,9 @@ mod tests {
 
     #[test]
     fn bound_results_open_with_what_was_defined_on_them() {
+        let mut model = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         let settings = plx_results::ResultsSettings {
             field_outputs: vec![plx_results::FieldOutput {
                 name: "SCALED".into(),
@@ -1736,11 +1757,23 @@ mod tests {
             plain_parts: vec![0],
             increment: 0,
             shown: Some(("SCALED".into(), "VALUE".into())),
+            view: plx_results::saved_view::SavedView {
+                deformation: Some(plx_results::saved_view::SavedDeformation::TrueScale),
+                user_scale: Some(2.5),
+                show_undeformed: Some(false),
+                levels: Some(12),
+                hidden_parts: vec![model.parts[0].name.clone()],
+                annotations: vec![
+                    plx_results::saved_view::SavedAnnotation::Node(99),
+                    plx_results::saved_view::SavedAnnotation::Distance([1, 99]),
+                ],
+                path_plots: vec![crate::path_plot::PathPlot::new("Path-1".into()).saved()],
+                // Camera and mesh edges belong to the 3D view, not to the results.
+                camera: None,
+                mesh_edges: None,
+            },
             ..Default::default()
         };
-        let mut model = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC)
-            .unwrap()
-            .model;
         assert_eq!(
             model.restore_results_settings(&settings),
             Vec::<String>::new()

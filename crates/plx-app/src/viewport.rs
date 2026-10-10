@@ -266,6 +266,10 @@ impl Viewport {
     }
 
     /// Exchanges the camera, so the FE model and the results each keep their own view.
+    pub fn set_camera(&mut self, camera: Camera) {
+        self.camera = camera;
+    }
+
     pub fn swap_camera(&mut self, camera: &mut Camera) {
         std::mem::swap(&mut self.camera, camera);
     }

@@ -996,6 +996,15 @@ enum BoundWork {
     Restored(String, PathBuf, Result<PathBuf, String>),
 }
 
+fn saved_camera(saved: plx_results::saved_view::SavedCamera) -> plx_render::Camera {
+    plx_render::Camera {
+        target: glam::Vec3::from_array(saved.target),
+        distance: saved.distance,
+        rotation: glam::Quat::from_array(saved.rotation).normalize(),
+        scene_radius: saved.scene_radius,
+    }
+}
+
 /// A file size in kB or MB.
 fn file_size(bytes: u64) -> String {
     let kb = bytes as f64 / 1024.0;
@@ -1055,6 +1064,8 @@ impl Workbench {
                 }
                 // The scene built on the worker thread is reused unless the settings change it.
                 let mut rebuild = false;
+                // The camera of bound results as saved, replacing the fit to the model.
+                let mut camera = None;
                 if let Some(view) = &mut model.results {
                     let post = &self.settings.post;
                     if (view.levels, view.show_undeformed) != (post.levels, post.undeformed_outline)
@@ -1172,6 +1183,10 @@ impl Workbench {
                     {
                         let warnings = model.restore_results_settings(settings);
                         self.output.extend(warnings);
+                        camera = settings.view.camera.map(saved_camera);
+                        if let Some(edges) = settings.view.mesh_edges {
+                            self.viewport.options.mesh_edges = edges;
+                        }
                         if let Some(view) = &model.results {
                             self.tree.selected = Some((
                                 TreeView::Results,
@@ -1242,9 +1257,23 @@ impl Workbench {
                 }
                 self.frame_cache.clear();
                 self.viewport.set_parts(&render_meshes);
+                let hidden: Vec<usize> = (self.shown().into_iter())
+                    .flat_map(|m| m.parts.iter().enumerate())
+                    .filter(|(_, p)| !p.visible)
+                    .map(|(i, _)| i)
+                    .collect();
+                for part in hidden {
+                    self.viewport.set_part_visible(part, false);
+                }
                 self.results_changed = rebuild;
                 self.update_contour();
-                self.view_command = Some(ViewCommand::Fit);
+                match camera {
+                    Some(camera) => {
+                        self.viewport.set_camera(camera);
+                        self.view_command = None;
+                    }
+                    None => self.view_command = Some(ViewCommand::Fit),
+                }
             }
             Err(error) => self.output.push(format!("Error loading: {error}")),
         }
@@ -2902,7 +2931,21 @@ impl Workbench {
             && let Some(open) =
                 (self.results.iter()).find(|r| Some(&r.path) == model.bound_results_file.as_ref())
         {
-            bound.settings = open.results_settings();
+            bound.settings = open.results_settings().map(|mut settings| {
+                // The results workspace's camera, in use or parked while another is shown.
+                let camera = match self.tree_view {
+                    TreeView::Results => Some(self.viewport.camera()),
+                    _ => self.parked_camera.as_ref(),
+                };
+                settings.view.camera = camera.map(|c| plx_results::saved_view::SavedCamera {
+                    target: c.target.to_array(),
+                    distance: c.distance,
+                    rotation: c.rotation.to_array(),
+                    scene_radius: c.scene_radius,
+                });
+                settings.view.mesh_edges = Some(self.viewport.options.mesh_edges);
+                settings
+            });
         }
         let geometry = model.geometry.as_ref();
         let results = model.bound_results.as_ref();
