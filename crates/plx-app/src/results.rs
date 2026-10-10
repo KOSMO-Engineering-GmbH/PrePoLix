@@ -86,6 +86,9 @@ pub struct ResultsView {
     /// Range of the shown values on the section plane, which replaces the model's range in
     /// the legend while only the section is shown.
     pub section_range: Option<(f32, f32)>,
+    /// Nodes that belong to plain parts only (colour contours off): drawn grey, left out of
+    /// the legend range and the extremes. Empty while every part has contours.
+    pub plain_nodes: Vec<bool>,
     /// The plane result shown alone, by index in the features of the results.
     pub plane_result: Option<usize>,
     /// Unit system of the values, PrePoMax's results unit system: that of the FE model the
@@ -143,6 +146,7 @@ impl ResultsView {
             transformations: Vec::new(),
             coordinate_systems: Vec::new(),
             section_range: None,
+            plain_nodes: Vec::new(),
             plane_result: None,
             units: UnitSystem::default(),
             model_size: bounds.map_or(1.0, model_size),
@@ -630,11 +634,9 @@ impl ResultsView {
         }
         let magnitude = ["MAG1", "MAG2", "MAG3"].map(|n| &field.component(n).unwrap().values);
         let peak = |values: &[f32]| {
-            values
-                .iter()
-                .copied()
-                .filter(|v| v.is_finite())
-                .fold(0.0, f32::max)
+            (values.iter().copied().enumerate())
+                .filter(|&(node, v)| v.is_finite() && !self.is_plain(node))
+                .fold(0.0, |peak, (_, v)| f32::max(peak, v))
         };
         match component.name.as_str() {
             "U1" => Some((-peak(magnitude[0]), peak(magnitude[0]))),
@@ -642,6 +644,7 @@ impl ResultsView {
             "U3" => Some((-peak(magnitude[2]), peak(magnitude[2]))),
             "ALL" => {
                 let norm = (0..magnitude[0].len())
+                    .filter(|&i| !self.is_plain(i))
                     .map(|i| {
                         [0, 1, 2]
                             .iter()
@@ -720,6 +723,10 @@ impl ResultsView {
 
     /// Values of the shown component as drawn: overlaid, or scaled by the animation frame.
     pub fn shown_values(&self) -> Option<std::borrow::Cow<'_, [f32]>> {
+        self.without_plain(self.all_shown_values()?)
+    }
+
+    fn all_shown_values(&self) -> Option<std::borrow::Cow<'_, [f32]>> {
         let (_, component) = self.current()?;
         if let Some(superposition) = &self.superposition {
             return superposition
@@ -738,6 +745,31 @@ impl ResultsView {
         ))
     }
 
+    /// Values with those of the plain parts' nodes made missing, so that they are drawn grey
+    /// and counted nowhere.
+    fn without_plain<'a>(
+        &self,
+        values: std::borrow::Cow<'a, [f32]>,
+    ) -> Option<std::borrow::Cow<'a, [f32]>> {
+        if self.plain_nodes.iter().all(|&plain| !plain) {
+            return Some(values);
+        }
+        let mut values = values.into_owned();
+        for (value, _) in values
+            .iter_mut()
+            .zip(&self.plain_nodes)
+            .filter(|(_, p)| **p)
+        {
+            *value = f32::NAN;
+        }
+        Some(std::borrow::Cow::Owned(values))
+    }
+
+    /// Whether the node is drawn without contours.
+    fn is_plain(&self, node: usize) -> bool {
+        self.plain_nodes.get(node).copied().unwrap_or(false)
+    }
+
     /// Every drawn item: the results themselves first, then the transformed copies.
     pub fn instances(&self) -> Vec<DAffine3> {
         transformation::instances(&self.transformations)
@@ -753,16 +785,26 @@ impl ResultsView {
                 transformation::transformed_values(field, self.component, instance.matrix3)
         {
             let amplitude = self.value_amplitude();
-            return Some(std::borrow::Cow::Owned(
+            return self.without_plain(std::borrow::Cow::Owned(
                 values.iter().map(|v| v * amplitude).collect(),
             ));
         }
         self.shown_values()
     }
 
+    /// Smallest and largest finite value outside the plain parts.
+    fn range_of(&self, values: &[f32]) -> Option<(f32, f32)> {
+        let finite = (values.iter().copied().enumerate())
+            .filter(|&(node, v)| v.is_finite() && !self.is_plain(node));
+        finite.fold(None, |range, (_, v)| match range {
+            None => Some((v, v)),
+            Some((min, max)) => Some((min.min(v), max.max(v))),
+        })
+    }
+
     /// Range of a component over the results and all transformed copies.
     fn component_range(&self, field: &Field, component: usize) -> Option<(f32, f32)> {
-        let mut range = field.components.get(component)?.range();
+        let mut range = self.range_of(&field.components.get(component)?.values);
         let mut rotations: Vec<DMat3> = Vec::new();
         for instance in self.instances().iter().skip(1) {
             let q = instance.matrix3;
@@ -773,12 +815,7 @@ impl ResultsView {
             let Some(values) = transformation::transformed_values(field, component, q) else {
                 continue;
             };
-            let copy = Component {
-                name: String::new(),
-                values,
-                derived: false,
-            };
-            range = match (range, copy.range()) {
+            range = match (range, self.range_of(&values)) {
                 (Some((a, b)), Some((c, d))) => Some((a.min(c), b.max(d))),
                 (a, b) => a.or(b),
             };
@@ -1173,6 +1210,22 @@ mod tests {
             ],
         });
         increment
+    }
+
+    #[test]
+    fn plain_parts_stay_out_of_the_legend_range_and_the_extremes() {
+        let disp = [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [9.0, 0.0, 0.0]];
+        let mut view = ResultsView::new(
+            vec![increment(1, 1, AnalysisKind::Static, &disp)],
+            Some(([0.0; 3], [10.0; 3])),
+        );
+        view.component = 0; // U1
+        let range = |v: &ResultsView| v.legend().map(|l| (l.min, l.max));
+        assert_eq!(range(&view), Some((1.0, 9.0)));
+        view.plain_nodes = vec![false, false, true];
+        assert_eq!(range(&view), Some((1.0, 2.0)));
+        assert_eq!(view.maximum().map(|m| m.1), Some(2.0));
+        assert!(view.shown_values().unwrap()[2].is_nan(), "drawn grey");
     }
 
     #[test]

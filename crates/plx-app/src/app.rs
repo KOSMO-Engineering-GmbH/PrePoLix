@@ -1374,6 +1374,14 @@ impl Workbench {
             }
             self.viewport.set_part_visible(index, visible);
         }
+        if !response.contours.is_empty() {
+            for (index, contours) in response.contours {
+                if let Some(model) = self.shown_mut() {
+                    model.set_contours(&[index], contours);
+                }
+            }
+            self.results_changed = true;
+        }
         if let (Some((field, component)), Some(results)) =
             (response.component, self.shown_results_mut())
         {
@@ -3192,16 +3200,26 @@ impl Workbench {
                 self.select_part(part);
             }
         }
-        let part = (self.menu_part)
-            .and_then(|index| Some((index, self.shown()?.parts.get(index)?.visible)));
+        let part = (self.menu_part).and_then(|index| {
+            let info = self.shown()?.parts.get(index)?;
+            Some((index, info.visible, info.contours))
+        });
         let mut tree_response = TreeResponse::default();
         let mut command = None;
         let selected = self.tree.selected_parts(self.tree_view);
         response.context_menu(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            if let Some((index, visible)) = part {
+            if let Some((index, visible, contours)) = part {
                 let view = self.tree_view;
-                tree::part_menu(ui, index, visible, view, &selected, &mut tree_response);
+                tree::part_menu(
+                    ui,
+                    index,
+                    visible,
+                    contours,
+                    view,
+                    &selected,
+                    &mut tree_response,
+                );
                 ui.separator();
             }
             command = crate::viewport::view_menu(ui);
