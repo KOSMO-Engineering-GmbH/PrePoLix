@@ -70,7 +70,8 @@ chmod +x prepolix-*-x86_64.AppImage
 The AppImage bundles Gmsh and runs on x86_64 distributions with glibc 2.35 or newer (Ubuntu 22.04,
 Debian 12, Fedora 36 and later). To get a menu entry and open `.plx` files by double-click, integrate
 it with a tool such as [Gear Lever](https://flathub.org/apps/it.mijorus.gearlever) or
-[AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher).
+[AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher). The AppImage carries update
+information, so these tools can also update it to the latest release.
 
 #### Alternative: install with cargo
 

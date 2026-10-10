@@ -6,11 +6,12 @@
 #     scripts/build_appimage.sh
 #
 # Needs (Debian/Ubuntu): sudo apt install libasound2-dev libglu1-mesa libxft2 libxcursor1 \
-#                            libxinerama1 libgomp1 python3 curl file
+#                            libxinerama1 libgomp1 python3 curl file zsync
 # The AppImage runs on systems with a glibc at least as new as the build system's, so releases
 # are built on the oldest supported Ubuntu runner.
 #
-# The AppImage ends up in target/appimage/prepolix-<version>-x86_64.AppImage.
+# The AppImage ends up in target/appimage/prepolix-<version>-x86_64.AppImage, next to its .zsync
+# file for updates.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,11 +46,6 @@ for entry in "linuxdeploy $linuxdeploy_url" "appimagetool $appimagetool_url"; do
 done
 
 rm -rf "$appdir"
-# The icon file names give the icon's name, which must match Icon= in the desktop entry.
-icons="$out/icons"
-mkdir -p "$icons"
-cp crates/plx-app/assets/icon/prepolix.png "$icons/prepolix.png"
-cp assets/icon/prepolix.svg "$icons/prepolix.svg"
 # Gmsh is loaded at run time, so linuxdeploy only finds it when named; it bundles the
 # libraries Gmsh links against except those every desktop system has (libGL, X11, glibc ...)
 # and points the executable's RUNPATH at usr/lib, where the loader then finds libgmsh. It also
@@ -58,7 +54,14 @@ cp assets/icon/prepolix.svg "$icons/prepolix.svg"
     --executable target/release/prepolix \
     --library "$gmsh/libgmsh.so.4.15" \
     --desktop-file installer/linux/prepolix.desktop \
-    --icon-file "$icons/prepolix.png" --icon-file "$icons/prepolix.svg"
+    --icon-file crates/plx-app/assets/icon/prepolix.png
+
+# The program icon (the file name gives the icon's name, which must match Icon= in the desktop
+# entry). linuxdeploy only links .DirIcon, which file managers, AppImageLauncher and Gear Lever
+# show for the AppImage; the AppImage spec asks for a real PNG file there.
+install -Dm644 assets/icon/prepolix.svg "$appdir/usr/share/icons/hicolor/scalable/apps/prepolix.svg"
+rm -f "$appdir/.DirIcon"
+cp crates/plx-app/assets/icon/prepolix.png "$appdir/.DirIcon"
 
 install -Dm644 installer/linux/prepolix-mime.xml "$appdir/usr/share/mime/packages/prepolix.xml"
 
@@ -77,6 +80,15 @@ dirty="$(git status --porcelain --untracked-files=no 2>/dev/null | head -1)"
 } >"$doc/SOURCE.txt"
 
 appimage="$out/prepolix-$version-x86_64.AppImage"
-rm -f "$appimage"
-ARCH=x86_64 VERSION="$version" "$tools/appimagetool" --no-appstream "$appdir" "$appimage"
+rm -f "$appimage" "$appimage.zsync"
+# Update information for AppImageUpdate, Gear Lever and similar tools: they look for the newest
+# .zsync file in the latest GitHub release and download only the changed blocks. appimagetool
+# writes the .zsync file into the current directory if zsyncmake is installed; it is moved next
+# to the AppImage, and both go to the release.
+update_info="gh-releases-zsync|KwentiN-ui|PrePoLix|latest|prepolix-*-x86_64.AppImage.zsync"
+command -v zsyncmake >/dev/null || echo "Warnung: zsyncmake fehlt (apt install zsync), keine .zsync-Datei" >&2
+ARCH=x86_64 VERSION="$version" "$tools/appimagetool" --no-appstream \
+    --updateinformation "$update_info" "$appdir" "$appimage"
+zsync="$(basename "$appimage").zsync"
+[ ! -f "$zsync" ] || mv "$zsync" "$out/"
 echo "AppImage: $appimage ($(du -h "$appimage" | cut -f1))"
