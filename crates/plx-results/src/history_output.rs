@@ -7,6 +7,7 @@
 
 use plx_mesh::{ElementId, FeMesh};
 use plx_model::Region;
+use serde::{Deserialize, Serialize};
 
 use crate::equation::Equation;
 use crate::{Increment, field_output};
@@ -18,7 +19,7 @@ pub const VOLUME: &str = "VOLUME";
 pub const AREA: &str = "AREA";
 
 /// What the element size measures.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SizeKind {
     /// Volume of solid elements.
     Volume,
@@ -26,7 +27,7 @@ pub enum SizeKind {
     Area,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum HistoryOutputKind {
     /// The components of a field at the nodes of a region.
     FromField {
@@ -40,7 +41,7 @@ pub enum HistoryOutputKind {
     ElementSize { region: Region, kind: SizeKind },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistoryOutput {
     pub name: String,
     pub kind: HistoryOutputKind,

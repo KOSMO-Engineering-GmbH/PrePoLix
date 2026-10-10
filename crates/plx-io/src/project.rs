@@ -10,7 +10,63 @@ use flate2::Compression;
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
 use plx_mesh::FeMesh;
-use plx_model::{BoundFile, BoundResults, FeModel, Geometry, PROJECT_FORMAT, Project};
+use plx_model::{FeModel, Geometry, PROJECT_FORMAT};
+use plx_results::ResultsSettings;
+use serde::{Deserialize, Serialize};
+
+/// A prepolix project as saved in a `.plx` file: the mesh and the analysis set up on it.
+/// Like PrePoMax's `.pmx` it stores what the user defined, not the CalculiX input file.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Project {
+    pub format: u32,
+    /// CAD geometry the mesh is generated from; projects made from an input file have none.
+    #[serde(default)]
+    pub geometry: Option<Geometry>,
+    pub mesh: FeMesh,
+    #[serde(default)]
+    pub model: FeModel,
+    /// Results of a finished analysis the user bound to the project, restored when it is
+    /// opened; projects without them are only mesh and definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<BoundResults>,
+}
+
+/// The files of a finished analysis kept in the project file: the input file CalculiX ran,
+/// its results (`.frd`) and history output (`.dat`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BoundResults {
+    /// The analysis the results belong to.
+    pub analysis: String,
+    /// CalculiX reported errors but wrote results.
+    #[serde(default)]
+    pub with_errors: bool,
+    pub files: Vec<BoundFile>,
+    /// What the user defined on the results, restored with them; as of the last save.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<ResultsSettings>,
+}
+
+/// A file of [`BoundResults`]: its name and its content, deflated and base64 encoded so that
+/// it is a compact string in the project's RON.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundFile {
+    pub name: String,
+    /// Size of the file itself.
+    pub size: u64,
+    pub data: String,
+}
+
+impl BoundResults {
+    /// Size of the files as stored in the project.
+    pub fn stored_size(&self) -> u64 {
+        self.files.iter().map(|f| f.data.len() as u64).sum()
+    }
+
+    /// Size of the files themselves.
+    pub fn size(&self) -> u64 {
+        self.files.iter().map(|f| f.size).sum()
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectError {
@@ -84,6 +140,7 @@ pub fn bind_results(
         analysis: analysis.to_owned(),
         with_errors,
         files: Vec::new(),
+        settings: None,
     };
     for path in files {
         let io = |source| ProjectError::Io {
@@ -370,6 +427,15 @@ mod tests {
 
         let path = dir.join("block.plx");
         let model = FeModel::default();
+        let mut bound = bound;
+        bound.settings = Some(ResultsSettings {
+            result_paths: vec![plx_model::ResultPath::new("Path-1")],
+            transformations: vec![plx_results::Transformation::symmetry(
+                plx_results::transformation::SymmetryPlane::Y,
+            )],
+            shown: Some(("STRESS".into(), "MISES".into())),
+            ..Default::default()
+        });
         save_project(&path, None, &mesh, &model, Some(&bound)).unwrap();
         let project = read_project(&path).unwrap();
         assert_eq!(project.results.as_ref(), Some(&bound));

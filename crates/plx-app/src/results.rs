@@ -225,6 +225,40 @@ impl ResultsView {
         self.follow_default_deformation();
     }
 
+    /// What the user defined on these results and what is shown, to be saved with results
+    /// bound to a project; the model's features, paths and hot spots are added by the caller.
+    pub fn settings(&self) -> plx_results::ResultsSettings {
+        plx_results::ResultsSettings {
+            field_outputs: self.field_outputs.clone(),
+            history_outputs: self.history_outputs.clone(),
+            transformations: self.transformations.clone(),
+            increment: self.increment,
+            shown: self.shown_names(),
+            ..Default::default()
+        }
+    }
+
+    /// Takes the derived outputs, transformations and shown field of saved settings and
+    /// computes the outputs; returns their failures.
+    pub fn restore(
+        &mut self,
+        settings: &plx_results::ResultsSettings,
+        mesh: &FeMesh,
+    ) -> Vec<String> {
+        self.coordinate_systems = settings.coordinate_systems.clone();
+        self.field_outputs = settings.field_outputs.clone();
+        self.history_outputs = settings.history_outputs.clone();
+        self.transformations = settings.transformations.clone();
+        let mut warnings = self.recompute_from(0, mesh);
+        warnings.extend(self.recompute_history(mesh));
+        if settings.increment < self.increments.len() {
+            self.increment = settings.increment;
+        }
+        self.restore_selection(settings.shown.clone());
+        self.follow_default_deformation();
+        warnings
+    }
+
     /// Index of the derived field output that computes the given field.
     pub fn field_output_index(&self, field: usize) -> Option<usize> {
         let name = &self.current_increment()?.fields.get(field)?.name;
