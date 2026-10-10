@@ -240,6 +240,10 @@ pub enum AnalysisAction {
     Monitor,
     Results,
     Kill,
+    /// Keep the results of the finished analysis in the project file.
+    BindResult,
+    /// Drop the results bound to the project, to share only mesh and definition.
+    RemoveBoundResult,
 }
 
 /// What the tree shows of the analysis job.
@@ -248,6 +252,10 @@ pub struct JobState {
     pub status: JobStatus,
     /// A results file is there to be opened.
     pub results: bool,
+    /// Results are bound to the project.
+    pub bound: bool,
+    /// The analysis ran since the program started; its results can be bound.
+    pub ran: bool,
 }
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
@@ -805,6 +813,11 @@ impl Tree<'_> {
                     | TreeItem::MeshItem(_)
             );
         if item == TreeItem::Analysis {
+            if self.job.is_some_and(|j| j.bound) {
+                response = response.on_hover_text(
+                    "A result is bound to this analysis: it is saved with the project.",
+                );
+            }
             response.context_menu(|ui| self.analysis_menu(ui));
         }
         if creates.is_some() || editable {
@@ -943,9 +956,30 @@ impl Tree<'_> {
         ui.separator();
         action(ui, !running, "Run", AnalysisAction::Run);
         action(ui, !running, "Check Model", AnalysisAction::CheckModel);
-        action(ui, self.job.is_some(), "Monitor", AnalysisAction::Monitor);
+        action(
+            ui,
+            self.job.is_some_and(|j| j.ran),
+            "Monitor",
+            AnalysisAction::Monitor,
+        );
         action(ui, results, "Results", AnalysisAction::Results);
         action(ui, running, "Kill", AnalysisAction::Kill);
+        ui.separator();
+        // Not in PrePoMax, which saves results with the project as a whole.
+        let bound = self.job.is_some_and(|j| j.bound);
+        let finished = self.job.is_some_and(|j| j.ran && j.results);
+        action(
+            ui,
+            finished && !running,
+            "Bind Result",
+            AnalysisAction::BindResult,
+        );
+        action(
+            ui,
+            bound,
+            "Remove Bound Result",
+            AnalysisAction::RemoveBoundResult,
+        );
         ui.separator();
         // An analysis has no children, as in PrePoMax the entries are there all the same.
         ui.add_enabled(false, egui::Button::new("Expand All"));
