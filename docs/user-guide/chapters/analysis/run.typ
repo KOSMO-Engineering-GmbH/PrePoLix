@@ -58,6 +58,17 @@ When a project with a bound result is opened, PrePoLix writes the files to
 tab. #ui("Analysis-1") then shows the status of the bound run, its tooltip says that a result is
 bound, and #ui("Results") in its context menu opens the bound result again.
 
+What you defined on the bound result is saved with it and comes back as you left it: derived
+field and history outputs, transformations, hot spots, the reference points, coordinate systems
+and planes of the results, result paths and plane results, and the increment, field and component
+shown. The view comes back too: the camera of the #ui("Results") tab, #menu("View", "Mesh Edges"),
+the deformation and its factor, #ui("Show Undeformed"), the color levels, hidden parts, the
+annotations of the query tool and the plots of result paths. PrePoLix takes all of this from the
+open result each time the project is saved.
+
+#screenshot("bound-result-restored.png", [A bound result reopened with its symmetry
+  transformation and the component shown when the project was saved])
+
 #screenshot("bind-result.png", [Context menu of an analysis with a bound result])
 
 #ui("Remove Bound Result") in the context menu of #ui("Analysis-1") removes the bound result;

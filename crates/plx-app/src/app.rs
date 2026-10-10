@@ -25,10 +25,11 @@ use crate::meshing::{
 use crate::model::{self, Highlight, LoadedModel, Model};
 use crate::model_properties::{DialogResult, ModelPropertiesDialog, geometry_check};
 use crate::numeric;
+use crate::overlay::AnnotationCommand;
 use crate::overlay::{Marker, Overlay};
 use crate::path_plot::{self, PathPlot, PlotEvent};
 use crate::properties;
-use crate::query::{QueryAction, QueryWindow};
+use crate::query::{QueryAction, QueryClick, QueryWindow};
 use crate::results::{Deformation, ResultsView, format_legend_value};
 use crate::screenshot::{self, Screenshot};
 use crate::section::{PlaneDefinition, SectionDialog, SectionResult, SectionView};
@@ -533,7 +534,14 @@ impl PrepolixApp {
             ui.menu_button("Results", |ui| self.workbench.results_menu(ui));
             ui.menu_button("Tools", |ui| {
                 if ui.button("Query …").clicked() {
-                    self.workbench.query = Some(QueryWindow::default());
+                    self.workbench.open_query();
+                }
+                let annotated = self.workbench.has_annotations();
+                if ui
+                    .add_enabled(annotated, egui::Button::new("Remove Annotations"))
+                    .clicked()
+                {
+                    self.workbench.annotations(AnnotationCommand::DeleteAll);
                 }
                 ui.separator();
                 if ui.button("Settings …").clicked() {
@@ -614,6 +622,21 @@ impl PrepolixApp {
             }
             if button.secondary_clicked() {
                 self.workbench.open_exploded_dialog();
+            }
+            ui.separator();
+            // PrePoMax: Query, then Remove annotations.
+            let querying = self.workbench.query.is_some();
+            if icons::button(ui, Icon::Query, "Query", shown, querying).clicked() {
+                if querying {
+                    self.workbench.close_query();
+                } else {
+                    self.workbench.open_query();
+                }
+            }
+            let annotated = self.workbench.has_annotations();
+            let tooltip = "Remove Annotations";
+            if icons::button(ui, Icon::RemoveAnnotations, tooltip, annotated, false).clicked() {
+                self.workbench.annotations(AnnotationCommand::DeleteAll);
             }
         });
     }
@@ -907,6 +930,9 @@ impl eframe::App for PrepolixApp {
             if let Some(view) = &response.response {
                 self.workbench.viewport_menu(view, response.secondary_click);
             }
+            if let Some(command) = response.annotation {
+                self.workbench.annotations(command);
+            }
             if let Some(area) = response.box_select {
                 self.workbench.box_select(&area);
             }
@@ -974,9 +1000,19 @@ impl eframe::App for PrepolixApp {
 
 /// What a worker binding or restoring bound results sends back.
 enum BoundWork {
-    Bound(Result<plx_model::BoundResults, String>),
+    /// The results file and the files bound.
+    Bound(PathBuf, Result<Box<plx_io::project::BoundResults>, String>),
     /// The analysis, the directory and the results file written there.
     Restored(String, PathBuf, Result<PathBuf, String>),
+}
+
+fn saved_camera(saved: plx_results::saved_view::SavedCamera) -> plx_render::Camera {
+    plx_render::Camera {
+        target: glam::Vec3::from_array(saved.target),
+        distance: saved.distance,
+        rotation: glam::Quat::from_array(saved.rotation).normalize(),
+        scene_radius: saved.scene_radius,
+    }
 }
 
 /// A file size in kB or MB.
@@ -1038,6 +1074,8 @@ impl Workbench {
                 }
                 // The scene built on the worker thread is reused unless the settings change it.
                 let mut rebuild = false;
+                // The camera of bound results as saved, replacing the fit to the model.
+                let mut camera = None;
                 if let Some(view) = &mut model.results {
                     let post = &self.settings.post;
                     let levels = view.color_scale.levels;
@@ -1146,20 +1184,36 @@ impl Workbench {
                         model.fe.result_paths = old.result_paths.clone();
                         model.fe.result_planes = old.result_planes.clone();
                     }
+                    // Results bound to the project come back as they were saved.
+                    let settings = (self.model.as_ref())
+                        .filter(|p| p.bound_results_file.as_ref() == Some(&model.path))
+                        .and_then(|p| p.bound_results.as_ref()?.settings.as_ref());
+                    if previous.is_none()
+                        && let Some(settings) = settings
+                    {
+                        let warnings = model.restore_results_settings(settings);
+                        self.output.extend(warnings);
+                        camera = settings.view.camera.map(saved_camera);
+                        if let Some(edges) = settings.view.mesh_edges {
+                            self.viewport.options.mesh_edges = edges;
+                        }
+                        if let Some(view) = &model.results {
+                            self.tree.selected = Some((
+                                TreeView::Results,
+                                TreeItem::Component(view.field, view.component),
+                            ));
+                        }
+                        rebuild = true;
+                    }
                     if let Some(project) = &self.model {
                         model.fe.add_missing_features(&project.fe);
                     }
-                    // Results read again keep their colour scale; bound results take the
-                    // one saved with the project.
+                    // Results read again, e.g. after the analysis ran once more, keep their
+                    // colour scale.
                     let previous_scale = previous
                         .and_then(|i| self.results[i].results.as_ref())
                         .map(|v| v.color_scale.clone());
-                    let bound_scale = (self.model.as_ref())
-                        .filter(|p| p.bound_results_file.as_ref() == Some(&model.path))
-                        .and_then(|p| p.bound_results.as_ref()?.color_scale.clone());
-                    if let (Some(view), Some(scale)) =
-                        (model.results.as_mut(), previous_scale.or(bound_scale))
-                    {
+                    if let (Some(view), Some(scale)) = (model.results.as_mut(), previous_scale) {
                         view.color_scale = scale;
                     }
                     match previous {
@@ -1221,9 +1275,23 @@ impl Workbench {
                 }
                 self.frame_cache.clear();
                 self.viewport.set_parts(&render_meshes);
+                let hidden: Vec<usize> = (self.shown().into_iter())
+                    .flat_map(|m| m.parts.iter().enumerate())
+                    .filter(|(_, p)| !p.visible)
+                    .map(|(i, _)| i)
+                    .collect();
+                for part in hidden {
+                    self.viewport.set_part_visible(part, false);
+                }
                 self.results_changed = rebuild;
                 self.update_contour();
-                self.view_command = Some(ViewCommand::Fit);
+                match camera {
+                    Some(camera) => {
+                        self.viewport.set_camera(camera);
+                        self.view_command = None;
+                    }
+                    None => self.view_command = Some(ViewCommand::Fit),
+                }
             }
             Err(error) => self.output.push(format!("Error loading: {error}")),
         }
@@ -1352,6 +1420,14 @@ impl Workbench {
                 part.visible = visible;
             }
             self.viewport.set_part_visible(index, visible);
+        }
+        if !response.contours.is_empty() {
+            for (index, contours) in response.contours {
+                if let Some(model) = self.shown_mut() {
+                    model.set_contours(&[index], contours);
+                }
+            }
+            self.results_changed = true;
         }
         if let (Some((field, component)), Some(results)) =
             (response.component, self.shown_results_mut())
@@ -2149,12 +2225,61 @@ impl Workbench {
         match query.show(ctx, model, &mut self.output) {
             QueryAction::Open => {}
             QueryAction::Changed => self.update_contour(),
-            QueryAction::Close => {
-                self.query = None;
-                self.viewport.preview = Default::default();
+            QueryAction::Add(annotation) => {
+                if let Some(model) = self.shown_mut() {
+                    model.query_annotations.push(annotation);
+                }
                 self.update_contour();
             }
+            QueryAction::RemoveAll => self.annotations(AnnotationCommand::DeleteAll),
+            QueryAction::Close => self.close_query(),
         }
+    }
+
+    fn open_query(&mut self) {
+        self.query = Some(QueryWindow::default());
+    }
+
+    /// Closes the Query window; its annotations stay in the view, as in PrePoMax.
+    fn close_query(&mut self) {
+        self.query = None;
+        self.viewport.preview = Default::default();
+        self.update_contour();
+    }
+
+    fn has_annotations(&self) -> bool {
+        self.shown()
+            .is_some_and(|model| !model.query_annotations.is_empty())
+    }
+
+    /// Deletes query annotations of the shown model, from their context menu or with Remove
+    /// Annotations.
+    fn annotations(&mut self, command: AnnotationCommand) {
+        // The label of an annotation dragged elsewhere keeps its place when one before it
+        // goes.
+        let labels = &mut self.viewport.labels.annotations;
+        match command {
+            AnnotationCommand::Delete(index) => {
+                let owners = &self.viewport.overlay.annotation_owners;
+                if let Some(marker) = owners.iter().position(|&owner| owner == index)
+                    && marker < labels.len()
+                {
+                    labels.remove(marker);
+                }
+            }
+            AnnotationCommand::DeleteAll => labels.clear(),
+        }
+        let Some(model) = self.shown_mut() else {
+            return;
+        };
+        match command {
+            AnnotationCommand::Delete(index) if index < model.query_annotations.len() => {
+                model.query_annotations.remove(index);
+            }
+            AnnotationCommand::Delete(_) => {}
+            AnnotationCommand::DeleteAll => model.query_annotations.clear(),
+        }
+        self.update_contour();
     }
 
     fn open_mesh_setup(&mut self) {
@@ -2631,8 +2756,9 @@ impl Workbench {
         let files = ["inp", "frd", "dat"].map(|e| frd.with_extension(e));
         std::thread::spawn(move || {
             let bound = plx_io::project::bind_results(tree::ANALYSIS_NAME, &files, with_errors)
+                .map(Box::new)
                 .map_err(|e| e.to_string());
-            let _ = sender.send(BoundWork::Bound(bound));
+            let _ = sender.send(BoundWork::Bound(frd, bound));
         });
         self.output
             .push(format!("Binding the result of {} …", tree::ANALYSIS_NAME));
@@ -2690,16 +2816,16 @@ impl Workbench {
         let model = (self.model.as_mut()).filter(|m| m.path == *path);
         self.bound_work = None;
         match (work, model) {
-            (BoundWork::Bound(Ok(bound)), Some(model)) => {
+            (BoundWork::Bound(frd, Ok(bound)), Some(model)) => {
                 self.output.push(format!(
                     "Result bound to {}: {} of files, {} in the project file once it is saved",
                     bound.analysis,
                     file_size(bound.size()),
                     file_size(bound.stored_size())
                 ));
-                model.bound_results = Some(bound);
-                // Written anew when opened: a next run overwrites the analysis' own files.
-                model.bound_results_file = None;
+                model.bound_results = Some(*bound);
+                // The open results whose settings are saved with them.
+                model.bound_results_file = Some(frd);
             }
             (BoundWork::Restored(analysis, dir, Ok(file)), Some(model)) => {
                 self.output.push(format!(
@@ -2709,7 +2835,7 @@ impl Workbench {
                 model.bound_results_file = Some(file.clone());
                 self.open_results = Some(file);
             }
-            (BoundWork::Bound(Err(error)), _) => {
+            (BoundWork::Bound(_, Err(error)), _) => {
                 self.output.push(format!("Result not bound: {error}"));
             }
             (BoundWork::Restored(_, _, Err(error)), _) => {
@@ -2819,13 +2945,9 @@ impl Workbench {
     /// Saves mesh and FE model as a project, to the project file it came from, or to a file
     /// the user picks for a model opened from an input file or with `save_as`.
     fn save_project(&mut self, save_as: bool) {
-        let scale = self.bound_color_scale();
         let Some(model) = self.model.as_mut() else {
             return;
         };
-        if let (Some(bound), Some(scale)) = (&mut model.bound_results, scale) {
-            bound.color_scale = (scale != plx_model::ColorScale::default()).then_some(scale);
-        }
         let path = if model.is_project() && !save_as {
             model.path.clone()
         } else {
@@ -2834,6 +2956,27 @@ impl Workbench {
             };
             path
         };
+        // The bound results keep what the user defined on them, if they are open.
+        if let Some(bound) = &mut model.bound_results
+            && let Some(open) =
+                (self.results.iter()).find(|r| Some(&r.path) == model.bound_results_file.as_ref())
+        {
+            bound.settings = open.results_settings().map(|mut settings| {
+                // The results workspace's camera, in use or parked while another is shown.
+                let camera = match self.tree_view {
+                    TreeView::Results => Some(self.viewport.camera()),
+                    _ => self.parked_camera.as_ref(),
+                };
+                settings.view.camera = camera.map(|c| plx_results::saved_view::SavedCamera {
+                    target: c.target.to_array(),
+                    distance: c.distance,
+                    rotation: c.rotation.to_array(),
+                    scene_radius: c.scene_radius,
+                });
+                settings.view.mesh_edges = Some(self.viewport.options.mesh_edges);
+                settings
+            });
+        }
         let geometry = model.geometry.as_ref();
         let results = model.bound_results.as_ref();
         match plx_io::project::save_project(&path, geometry, &model.mesh, &model.fe, results) {
@@ -2843,17 +2986,6 @@ impl Workbench {
             }
             Err(error) => self.output.push(format!("Not saved: {error}")),
         }
-    }
-
-    /// The colour scale of the open results bound to the project, if they are open.
-    fn bound_color_scale(&self) -> Option<plx_model::ColorScale> {
-        let model = self.model.as_ref()?;
-        model.bound_results.as_ref()?;
-        // Restored from the project, or still those of the analysis that was bound.
-        let path = (model.bound_results_file.clone())
-            .or_else(|| self.analysis.as_ref().and_then(Analysis::results))?;
-        let results = self.results.iter().find(|r| r.path == path)?;
-        Some(results.results.as_ref()?.color_scale.clone())
     }
 
     /// Saves a copy of the project without the bound results, only mesh and definition, for
@@ -3000,8 +3132,16 @@ impl Workbench {
             };
             if let Some(model) = model {
                 let hit = model.pick_click(&click);
-                if query.click(model, hit.as_ref(), &mut self.output) {
-                    self.update_contour();
+                let precision = hit.as_ref().map_or(0.0, |h| click.precision_at(h.point));
+                match query.click(model, hit.as_ref(), precision, &mut self.output) {
+                    QueryClick::Nothing => {}
+                    QueryClick::Picked => self.update_contour(),
+                    QueryClick::Added(annotation) => {
+                        if let Some(model) = self.shown_mut() {
+                            model.query_annotations.push(annotation);
+                        }
+                        self.update_contour();
+                    }
                 }
             }
             return;
@@ -3133,16 +3273,26 @@ impl Workbench {
                 self.select_part(part);
             }
         }
-        let part = (self.menu_part)
-            .and_then(|index| Some((index, self.shown()?.parts.get(index)?.visible)));
+        let part = (self.menu_part).and_then(|index| {
+            let info = self.shown()?.parts.get(index)?;
+            Some((index, info.visible, info.contours))
+        });
         let mut tree_response = TreeResponse::default();
         let mut command = None;
         let selected = self.tree.selected_parts(self.tree_view);
         response.context_menu(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            if let Some((index, visible)) = part {
+            if let Some((index, visible, contours)) = part {
                 let view = self.tree_view;
-                tree::part_menu(ui, index, visible, view, &selected, &mut tree_response);
+                tree::part_menu(
+                    ui,
+                    index,
+                    visible,
+                    contours,
+                    view,
+                    &selected,
+                    &mut tree_response,
+                );
                 ui.separator();
             }
             command = crate::viewport::view_menu(ui);
@@ -3202,7 +3352,7 @@ impl Workbench {
             self.viewport.preview = match (hover, self.shown()) {
                 (Some(click), Some(model)) => model
                     .pick_click(&click)
-                    .map(|hit| query.preview(model, &hit))
+                    .map(|hit| query.preview(model, &hit, click.precision_at(hit.point)))
                     .unwrap_or_default(),
                 _ => Default::default(),
             };
@@ -5224,14 +5374,12 @@ impl Workbench {
                 text: format!("{label}: {}\nSection plane", format_legend_value(value)),
             })
         };
-        let query = self
-            .query
-            .as_ref()
-            .map(|q| q.marks(model))
-            .unwrap_or_default();
+        let picked = self.query.as_ref().map_or(&[][..], QueryWindow::picked);
+        let query = crate::query::marks(model, picked);
         self.viewport.overlay = Overlay {
             legend,
             annotations: query.markers,
+            annotation_owners: query.owners,
             status: view
                 .filter(|_| post.status_block)
                 .map_or_else(Vec::new, |v| v.status_lines(&model.file_name())),

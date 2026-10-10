@@ -8,8 +8,9 @@
 //! of the FE model and nothing of it goes into the input file.
 
 use plx_model::{Quantity, Region, UnitSystem};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HotSpot {
     pub name: String,
     /// Nodes on the weld toe or at the notch; a path starts at each of them.
@@ -64,7 +65,7 @@ impl HotSpot {
 }
 
 /// Read-out points and extrapolation, IIW's surface stress extrapolation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Extrapolation {
     /// Type a, fine mesh: linear through 0.4 t and 1.0 t.
     IiwFineLinear,
@@ -151,7 +152,7 @@ pub fn extrapolation_weights(distances: &[f64]) -> Vec<f64> {
 }
 
 /// Which stress is extrapolated.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HotSpotComponent {
     /// Normal stress perpendicular to the weld toe, along the path (IIW's default).
     #[default]

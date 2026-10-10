@@ -325,7 +325,8 @@ impl FeatureDialog {
         let Some((hit, precision)) = pick else {
             return;
         };
-        if let Items::Nodes(nodes) = self.picker.pick(model, hit, Target::Nodes, precision) {
+        let picked = self.picker.pick(model, hit, Target::Point, precision);
+        if let Items::Nodes(nodes) = picked.resolved(&model.mesh, Target::Point) {
             self.take(model, nodes);
         }
     }
@@ -341,7 +342,7 @@ impl FeatureDialog {
         if self.picking.is_none() && self.selects_region() {
             return self.region.preview(model, &self.picker, hit, precision);
         }
-        let items = self.picker.pick(model, hit, Target::Nodes, precision);
+        let items = self.picker.pick(model, hit, Target::Point, precision);
         crate::selection::preview(model, &items)
     }
 
@@ -487,7 +488,7 @@ impl FeatureDialog {
             let can_undo = !self.marked.is_empty();
             if let Some(picked) =
                 self.picker
-                    .window(ctx, window.response.rect, Target::Nodes, can_undo)
+                    .window(ctx, window.response.rect, Target::Point, can_undo)
             {
                 self.action(model, picked);
             }

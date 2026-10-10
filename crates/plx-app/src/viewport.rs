@@ -121,6 +121,8 @@ pub struct ViewportResponse {
     pub response: Option<egui::Response>,
     /// The section plane manipulator was dragged.
     pub gizmo: Option<GizmoDrag>,
+    /// The context menu of a query annotation was used.
+    pub annotation: Option<overlay::AnnotationCommand>,
     /// Path plots were moved, resized or deleted.
     pub path_plots: Vec<crate::path_plot::PlotEvent>,
     /// The legend asked for the colour scale dialog.
@@ -266,6 +268,10 @@ impl Viewport {
     }
 
     /// Exchanges the camera, so the FE model and the results each keep their own view.
+    pub fn set_camera(&mut self, camera: Camera) {
+        self.camera = camera;
+    }
+
     pub fn swap_camera(&mut self, camera: &mut Camera) {
         std::mem::swap(&mut self.camera, camera);
     }
@@ -405,12 +411,13 @@ impl Viewport {
             Color32::WHITE,
         );
         crate::symbols::draw(&painter, rect, &self.camera, &self.symbols);
-        let clicks = overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels);
-        if let Some(axis) = clicks.axis {
+        let clicked = overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels);
+        if let Some(axis) = clicked.axis {
             self.camera.set_axis_view(axis);
             ui.ctx().request_repaint();
         }
-        result.edit_legend = clicks.edit_legend;
+        result.annotation = clicked.annotation;
+        result.edit_legend = clicked.edit_legend;
         result.path_plots = crate::path_plot::draw(ui, rect, &self.camera, &mut self.path_plots);
         if let Some(gizmo) = &self.gizmo {
             self.gizmo_state.draw(&painter, gizmo, &self.camera, rect);

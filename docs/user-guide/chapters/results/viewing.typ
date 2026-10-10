@@ -91,4 +91,17 @@ automatic limits])
 
 #screenshot("results-mode.png", [First mode shape of a frequency step])
 
+=== Parts without colour contours <color-contours>
+
+A stiff or irrelevant part can dominate the colour scale. Right-click a part under
+#ui("Model") in the results tree, or in the 3D view, and choose #ui("Color Contours Off"). The
+part turns plain grey and no longer counts for the legend range, the minimum and maximum labels
+or the animation limits; the colours of the other parts then use the full scale.
+#ui("Color Contours On") brings the contours back. With several parts selected, the command
+applies to all of them. Results bound to a project (@bind-result) remember which parts have
+contours off. Nodes that a grey part shares with a part that still has contours keep
+their colour.
+
+#screenshot("color-contours-off.png", [The left part without colour contours])
+
 Increment 0 of a buckle step is the reference state; the modes follow as increments 1, 2, ...

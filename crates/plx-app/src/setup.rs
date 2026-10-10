@@ -163,7 +163,7 @@ impl RegionDraft {
                 draft.parts = PartPicks::from_names(parts.iter().cloned());
             }
             Region::Nodes(nodes) => draft.nodes = History::from_items(nodes.iter().copied()),
-            Region::Faces(faces) if target != Target::Nodes => {
+            Region::Faces(faces) if matches!(target, Target::Faces | Target::Edges) => {
                 draft.faces = History::from_items(faces.iter().copied());
             }
             Region::Faces(_) => draft.nodes = History::from_items(region.nodes(mesh)),
@@ -192,7 +192,9 @@ impl RegionDraft {
                 Region::Geometry(self.geometry.items().into_iter().collect())
             }
             Source::Selection => match self.target {
-                Target::Nodes => Region::Nodes(self.nodes.items().into_iter().collect()),
+                Target::Nodes | Target::Point => {
+                    Region::Nodes(self.nodes.items().into_iter().collect())
+                }
                 Target::Faces | Target::Edges => {
                     Region::Faces(self.faces.items().into_iter().collect())
                 }
@@ -209,7 +211,7 @@ impl RegionDraft {
         match self.source {
             Source::Selection if self.geometry.can_undo() => self.geometry.items().is_empty(),
             Source::Selection => match self.target {
-                Target::Nodes => self.nodes.items().is_empty(),
+                Target::Nodes | Target::Point => self.nodes.items().is_empty(),
                 Target::Faces | Target::Edges => self.faces.items().is_empty(),
             },
             Source::Parts => self.parts.is_empty(),
@@ -219,7 +221,7 @@ impl RegionDraft {
 
     pub(crate) fn count(&self) -> usize {
         match self.target {
-            Target::Nodes => self.nodes.items().len(),
+            Target::Nodes | Target::Point => self.nodes.items().len(),
             Target::Faces | Target::Edges => self.faces.items().len(),
         }
     }
@@ -289,7 +291,9 @@ impl RegionDraft {
         let entities: Vec<CadEntity> = self.geometry.items().into_iter().collect();
         self.geometry.clear();
         match self.target {
-            Target::Nodes => self.nodes = History::from_items(mesh.cad_nodes(&entities)),
+            Target::Nodes | Target::Point => {
+                self.nodes = History::from_items(mesh.cad_nodes(&entities))
+            }
             Target::Faces | Target::Edges => {
                 self.faces = History::from_items(mesh.cad_faces(&entities));
             }
@@ -298,7 +302,7 @@ impl RegionDraft {
 
     fn ids_can_undo(&self) -> bool {
         match self.target {
-            Target::Nodes => self.nodes.can_undo(),
+            Target::Nodes | Target::Point => self.nodes.can_undo(),
             Target::Faces | Target::Edges => self.faces.can_undo(),
         }
     }
@@ -347,16 +351,16 @@ impl RegionDraft {
             _ => self.geometry_to_ids(&model.mesh),
         }
         match (action, self.target) {
-            (PickerAction::Undo, Target::Nodes) => self.nodes.undo(),
+            (PickerAction::Undo, Target::Nodes | Target::Point) => self.nodes.undo(),
             (PickerAction::Undo, Target::Faces | Target::Edges) => self.faces.undo(),
             (PickerAction::Clear, _) => self.clear(),
-            (PickerAction::All, Target::Nodes) => {
+            (PickerAction::All, Target::Nodes | Target::Point) => {
                 self.nodes.push(Operation::Replace, model.visible_nodes());
             }
             (PickerAction::All, Target::Faces) => {
                 self.faces.push(Operation::Replace, model.visible_faces());
             }
-            (PickerAction::Invert, Target::Nodes) => {
+            (PickerAction::Invert, Target::Nodes | Target::Point) => {
                 let selected = self.nodes.items();
                 let mut all = model.visible_nodes();
                 all.retain(|n| !selected.contains(n));
@@ -384,7 +388,7 @@ impl RegionDraft {
                 all.retain(|f| !selected.contains(f));
                 self.faces.push(Operation::Replace, all);
             }
-            (PickerAction::Ids(operation, ids), Target::Nodes) => {
+            (PickerAction::Ids(operation, ids), Target::Nodes | Target::Point) => {
                 let ids = ids
                     .into_iter()
                     .filter(|&id| model.mesh.node_index(id).is_some())
@@ -451,7 +455,7 @@ impl RegionDraft {
                         let count = self.count();
                         let geometry = self.geometry.items();
                         let what = match self.target {
-                            Target::Nodes => "Nodes",
+                            Target::Nodes | Target::Point => "Nodes",
                             Target::Faces => "Element faces",
                             Target::Edges => "Element edges",
                         };

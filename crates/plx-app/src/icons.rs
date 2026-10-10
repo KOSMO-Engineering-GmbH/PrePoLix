@@ -50,6 +50,10 @@ pub enum Icon {
     Transformation,
     /// Cross of a remove button.
     Remove,
+    /// The query: a pipette, which picks values from the model.
+    Query,
+    /// A label of the query crossed out: remove all annotations.
+    RemoveAnnotations,
 }
 
 /// Flat toolbar button in the Windows style: frame only while hovered or checked.
@@ -408,6 +412,31 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
             line(shapes, &[p(3.5, 3.5), p(12.5, 12.5)], 2.2, color);
             line(shapes, &[p(12.5, 3.5), p(3.5, 12.5)], 2.2, color);
         }
+        Icon::Query => pipette(shapes, r),
+        Icon::RemoveAnnotations => {
+            // A query label: framed text with the arrow to its point.
+            line(shapes, &[p(3.0, 9.5), p(1.0, 14.5)], 1.0, OUTLINE);
+            polygon(
+                shapes,
+                vec![p(1.0, 14.8), p(0.6, 12.0), p(2.6, 12.8)],
+                OUTLINE,
+                OUTLINE,
+            );
+            let label = Rect::from_min_max(p(2.5, 1.5), p(14.5, 9.5));
+            shapes.push(Shape::rect_filled(label, 0.0, Color32::WHITE));
+            shapes.push(Shape::rect_stroke(
+                label,
+                0.0,
+                Stroke::new(1.0, OUTLINE),
+                egui::StrokeKind::Inside,
+            ));
+            for (y, end) in [(4.0, 12.0), (7.0, 9.5)] {
+                line(shapes, &[p(4.5, y), p(end, y)], 1.0, OUTLINE);
+            }
+            let red = Color32::from_rgb(210, 40, 40);
+            line(shapes, &[p(8.5, 8.5), p(14.5, 14.5)], 2.0, red);
+            line(shapes, &[p(14.5, 8.5), p(8.5, 14.5)], 2.0, red);
+        }
         Icon::First | Icon::Previous | Icon::Next | Icon::Last => {
             let forward = matches!(icon, Icon::Next | Icon::Last);
             let s = if forward { 1.0 } else { -1.0 };
@@ -433,6 +462,30 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
             }
         }
     }
+}
+
+/// The pipette of the query: a glass tube with blue liquid, a dark rubber bulb, its tip at
+/// the lower left.
+fn pipette(shapes: &mut Vec<Shape>, r: Rect) {
+    // Along the pipette from its tip (0) to the end of the bulb (about 17), and across it.
+    let tip = pos2(r.left() + 1.5, r.top() + 14.5);
+    let along = vec2(1.0, -1.0).normalized();
+    let across = along.rot90();
+    let at = |t: f32, n: f32| tip + along * t + across * n;
+    let quad =
+        |t0: f32, w0: f32, t1: f32, w1: f32| vec![at(t0, -w0), at(t1, -w1), at(t1, w1), at(t0, w0)];
+    let glass = Color32::from_rgb(225, 238, 250);
+    let rubber = Color32::from_rgb(70, 70, 75);
+    // The narrow tip, the tube, the liquid in its lower half, the collar and the bulb.
+    polygon(shapes, quad(0.0, 0.5, 3.5, 1.4), ACCENT, OUTLINE);
+    polygon(shapes, quad(3.5, 1.9, 11.0, 1.9), glass, OUTLINE);
+    shapes.push(Shape::convex_polygon(
+        quad(3.9, 1.4, 7.5, 1.4),
+        ACCENT,
+        Stroke::NONE,
+    ));
+    polygon(shapes, quad(11.0, 2.9, 12.5, 2.9), rubber, rubber);
+    shapes.push(Shape::circle_filled(at(14.8, 0.0), 2.6, rubber));
 }
 
 /// Isometric unit cube; x to the lower right, z to the lower left, y up.

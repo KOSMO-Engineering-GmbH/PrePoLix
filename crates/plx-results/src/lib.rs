@@ -10,12 +10,40 @@ pub mod field_output;
 pub mod history_output;
 pub mod hot_spot;
 pub mod path;
+pub mod saved_view;
 pub mod transformation;
 
 pub use derived::{add_derived_components, principal_values};
 pub use equation::Equation;
 pub use field_output::{FieldOutput, FieldOutputKind, LimitBasis};
 pub use transformation::{Transformation, TransformationKind};
+
+use serde::{Deserialize, Serialize};
+
+/// What the user defined on a results file, saved with results bound to a project so that
+/// they open as they were left: derived outputs, transformations, hot spots, the features
+/// and paths and planes of the results, and what was shown.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ResultsSettings {
+    pub field_outputs: Vec<FieldOutput>,
+    pub history_outputs: Vec<history_output::HistoryOutput>,
+    pub transformations: Vec<Transformation>,
+    pub hot_spots: Vec<hot_spot::HotSpot>,
+    pub reference_points: Vec<plx_model::ReferencePoint>,
+    pub coordinate_systems: Vec<plx_model::CoordinateSystem>,
+    pub planes: Vec<plx_model::Plane>,
+    pub result_paths: Vec<plx_model::ResultPath>,
+    pub result_planes: Vec<plx_model::ResultPlane>,
+    /// Parts shown without colour contours, by index.
+    pub plain_parts: Vec<usize>,
+    /// The increment shown, by index.
+    pub increment: usize,
+    /// The field and component shown, by name.
+    pub shown: Option<(String, String)>,
+    /// Camera, annotations and display settings of the 3D view.
+    pub view: saved_view::SavedView,
+}
 
 /// Kind of analysis an increment belongs to, as CalculiX reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
