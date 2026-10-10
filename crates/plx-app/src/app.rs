@@ -4834,13 +4834,13 @@ fn results_tool_bar(
             (Icon::Next, "Next Increment", (current + 1).min(last)),
             (Icon::Last, "Last Increment", last),
         ] {
-            let enabled = target != current && view.animation.is_none();
+            let enabled = target != current;
             if icons::button(ui, icon, tooltip, enabled, false).clicked() {
                 increment = target;
             }
         }
-        if increment != view.increment && view.animation.is_none() {
-            view.select_increment(increment);
+        if increment != view.increment {
+            view.switch_increment(increment);
             changed = true;
         }
         ui.add_space(4.0);
