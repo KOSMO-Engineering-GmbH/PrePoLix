@@ -11,6 +11,7 @@ mod constraint;
 mod contact;
 pub mod convert;
 mod features;
+mod field;
 mod geometry;
 mod history;
 pub mod library;
@@ -18,6 +19,7 @@ mod mesh_set;
 mod properties;
 mod region;
 mod section;
+mod symmetry;
 pub mod units;
 mod validity;
 
@@ -34,6 +36,7 @@ pub use features::{
     CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource,
     PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane,
 };
+pub use field::{FieldOutput, OutputDimension, OutputKind, output_variable_description};
 pub use geometry::{
     Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters,
 };
@@ -45,6 +48,7 @@ pub use region::{Region, describe_entities};
 pub use section::{
     BeamOrientation, BeamProfile, BeamSection, Section, SectionKind, line_tangent, unit_thickness,
 };
+pub use symmetry::{SymmetryError, SymmetryPlane, symmetry_dofs, symmetry_plane};
 pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, UnitSystem};
 pub use validity::{Invalid, ModelItem};
 
@@ -67,6 +71,44 @@ pub struct Project {
     pub mesh: plx_mesh::FeMesh,
     #[serde(default)]
     pub model: FeModel,
+    /// Results of a finished analysis the user bound to the project, restored when it is
+    /// opened; projects without them are only mesh and definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub results: Option<BoundResults>,
+}
+
+/// The files of a finished analysis kept in the project file: the input file CalculiX ran,
+/// its results (`.frd`) and history output (`.dat`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundResults {
+    /// The analysis the results belong to.
+    pub analysis: String,
+    /// CalculiX reported errors but wrote results.
+    #[serde(default)]
+    pub with_errors: bool,
+    pub files: Vec<BoundFile>,
+}
+
+/// A file of [`BoundResults`]: its name and its content, deflated and base64 encoded so that
+/// it is a compact string in the project's RON.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundFile {
+    pub name: String,
+    /// Size of the file itself.
+    pub size: u64,
+    pub data: String,
+}
+
+impl BoundResults {
+    /// Size of the files as stored in the project.
+    pub fn stored_size(&self) -> u64 {
+        self.files.iter().map(|f| f.data.len() as u64).sum()
+    }
+
+    /// Size of the files themselves.
+    pub fn size(&self) -> u64 {
+        self.files.iter().map(|f| f.size).sum()
+    }
 }
 
 /// Everything besides the mesh that makes up an analysis.
@@ -1221,12 +1263,22 @@ pub enum BoundaryKind {
         /// The degrees of freedom that follow the global model.
         dofs: [bool; 6],
     },
+    /// The region lies on a symmetry plane: the displacement normal to the plane and, for
+    /// beams and shells, the rotations about the two in-plane axes are zero. The plane is
+    /// fitted to the nodes of the region when it is needed, see [`symmetry_plane`].
+    Symmetry {
+        /// Normal of the plane as the user entered it; `None` takes it from the region.
+        normal: Option<[f64; 3]>,
+    },
 }
 
 impl BoundaryKind {
     /// Whether an amplitude can scale the boundary condition; fixed supports stay zero.
     pub fn takes_amplitude(&self) -> bool {
-        !matches!(self, BoundaryKind::Fixed | BoundaryKind::Submodel { .. })
+        !matches!(
+            self,
+            BoundaryKind::Fixed | BoundaryKind::Submodel { .. } | BoundaryKind::Symmetry { .. }
+        )
     }
 
     pub fn is_thermal(&self) -> bool {
@@ -1452,82 +1504,6 @@ impl FeModel {
         files.sort_unstable();
         files.dedup();
         files
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct FieldOutput {
-    pub name: String,
-    pub kind: OutputKind,
-    pub variables: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OutputKind {
-    /// `*NODE FILE`
-    Node,
-    /// `*EL FILE`
-    Element,
-}
-
-impl FieldOutput {
-    /// Field outputs PrePoMax adds to a new static step. `NOE` is added when writing.
-    pub fn defaults() -> Vec<Self> {
-        vec![
-            Self {
-                name: "NF-Output-1".into(),
-                kind: OutputKind::Node,
-                variables: vec!["RF".into(), "U".into()],
-            },
-            Self {
-                name: "EF-Output-1".into(),
-                kind: OutputKind::Element,
-                variables: vec!["S".into(), "E".into()],
-            },
-        ]
-    }
-}
-
-impl FieldOutput {
-    /// Field outputs PrePoMax adds to a new frequency step: no reaction forces, as the
-    /// mode shapes are scaled arbitrarily.
-    pub fn frequency_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = vec!["U".into()];
-        outputs
-    }
-
-    /// Field outputs PrePoMax adds to a new complex frequency step: the displacements with
-    /// their magnitudes and phases (`PU`), so the whirling of a mode can be shown.
-    pub fn complex_frequency_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = vec!["U".into(), "PU".into()];
-        outputs
-    }
-
-    /// Field outputs PrePoMax adds to a new heat transfer step: temperatures, reaction heat
-    /// flows and heat fluxes.
-    pub fn heat_transfer_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = vec!["NT".into(), "RFL".into()];
-        outputs[1].variables = vec!["HFL".into()];
-        outputs
-    }
-
-    /// Field outputs PrePoMax adds to a new dynamic step: velocities and energies too.
-    pub fn dynamic_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = ["RF", "U", "V"].map(String::from).to_vec();
-        outputs[1].variables = ["S", "E", "ENER"].map(String::from).to_vec();
-        outputs
-    }
-
-    /// Field outputs PrePoMax adds to a new coupled temperature-displacement step.
-    pub fn coupled_defaults() -> Vec<Self> {
-        let mut outputs = Self::defaults();
-        outputs[0].variables = ["RF", "U", "NT", "RFL"].map(String::from).to_vec();
-        outputs[1].variables = ["S", "E", "HFL"].map(String::from).to_vec();
-        outputs
     }
 }
 

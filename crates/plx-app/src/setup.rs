@@ -15,15 +15,17 @@ use plx_model::{
     DynamicProcedure, DynamicStep, Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep,
     Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
     InitialConditionKind, Load, LoadKind, Material, MeshSet, ModalDamping, ModalDynamicsStep,
-    ModeDamping, ModelSpace, NodeTie, OutputKind, PlasticPoint, Quantity, Region, Section,
-    SectionKind, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction,
-    Tie, UnitSystem, next_name,
+    ModeDamping, ModelSpace, NodeTie, OutputDimension, OutputKind, PlasticPoint, Quantity, Region,
+    Section, SectionKind, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
+    SurfaceInteraction, SymmetryError, Tie, UnitSystem, next_name, symmetry_plane,
 };
 
-use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row};
+use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
 use crate::constraint_dialog::ConstraintDraft;
 use crate::contacts::{self, MasterSlave};
+use crate::icons::{self, Icon};
 use crate::model::{Highlight, Hit, Model};
+use crate::motion_preview::MotionPreview;
 use crate::numeric;
 use crate::selection::{History, Items, Operation, PartPicks, Picker, PickerAction, Target};
 use crate::tree::TreeItem;
@@ -38,6 +40,8 @@ pub enum NewItem {
     Step,
     BoundaryCondition(usize),
     Load(usize),
+    /// A field output of a step, written into the `.frd` file.
+    FieldOutput(usize),
     /// A history output of a step, printed into the `.dat` file.
     HistoryOutput(usize),
     /// A defined temperature of a step.
@@ -697,6 +701,8 @@ pub struct Editor {
     error: Option<String>,
     /// The selection window shown while the region is picked in the 3D view.
     picker: Picker,
+    /// The playing preview of a displacement boundary condition's motion.
+    motion: Option<MotionPreview>,
 }
 
 pub enum EditorResult {
@@ -716,6 +722,7 @@ const DEFINED_TEMPERATURE: &str = "Defined_Temperature";
 const INITIAL_VELOCITY: &str = "Initial_Velocity";
 const INITIAL_ANGULAR_VELOCITY: &str = "Initial_Angular_Velocity";
 const SUBMODEL: &str = "Submodel";
+const SYMMETRY: &str = "Symmetry";
 const FORCE: &str = "Concentrated_Force";
 const MOMENT: &str = "Moment";
 const PRESSURE: &str = "Pressure";
@@ -729,8 +736,18 @@ const RADIATION: &str = "Radiation";
 const GRAVITY: &str = "Gravity";
 const CENTRIFUGAL: &str = "Centrifugal_Load";
 
+/// Whether the boundary condition dialog offers a preview of the motion: a prescribed
+/// displacement that follows an amplitude of the model.
+fn previews_motion(bc: &BoundaryCondition, fe: &FeModel) -> bool {
+    matches!(bc.kind, BoundaryKind::Displacement(_))
+        && bc
+            .amplitude
+            .as_deref()
+            .is_some_and(|a| fe.amplitude(a).is_some())
+}
+
 /// The boundary condition kinds of the dialog: label, default name and the kind.
-fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
+fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 5] {
     [
         ("Fixed", FIXED, BoundaryKind::Fixed),
         (
@@ -747,6 +764,11 @@ fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
                 dofs: [true, true, true, false, false, false],
             },
         ),
+        (
+            "Symmetry",
+            SYMMETRY,
+            BoundaryKind::Symmetry { normal: None },
+        ),
     ]
 }
 
@@ -756,7 +778,70 @@ fn boundary_kind_name(kind: &BoundaryKind) -> &'static str {
         BoundaryKind::Displacement(_) => DISPLACEMENT,
         BoundaryKind::Temperature(_) => TEMPERATURE,
         BoundaryKind::Submodel { .. } => SUBMODEL,
+        BoundaryKind::Symmetry { .. } => SYMMETRY,
     }
+}
+
+/// Rows of a symmetry boundary condition: where the normal of the plane comes from, the
+/// plane found for the region and a warning when the region is no plane.
+fn symmetry_rows(ui: &mut egui::Ui, normal: &mut Option<[f64; 3]>, region: &Region, model: &Model) {
+    let space = model.fe.properties.space;
+    let plane = symmetry_plane(&model.mesh, region, space, *normal);
+    ui.label("Plane normal");
+    ui.horizontal(|ui| {
+        if ui.radio(normal.is_none(), "From selection").clicked() {
+            *normal = None;
+        }
+        if ui.radio(normal.is_some(), "Entered").clicked() && normal.is_none() {
+            // Starts from the plane found so far.
+            *normal = Some(plane.map_or([1.0, 0.0, 0.0], |p| p.normal));
+        }
+    });
+    ui.end_row();
+    match normal {
+        Some(n) => {
+            let count = if space.is_2d() { 2 } else { 3 };
+            for (value, label) in n.iter_mut().zip(["N1", "N2", "N3"]).take(count) {
+                ui.label(label);
+                ui.add(numeric::drag_value(value).speed(0.01));
+                ui.end_row();
+            }
+        }
+        None => {
+            if let Ok(plane) = plane {
+                ui.label("Normal");
+                let [x, y, z] = plane.normal.map(|c| if c.abs() < 5e-7 { 0.0 } else { c });
+                ui.label(format!("({x:.6}, {y:.6}, {z:.6})"));
+                ui.end_row();
+            }
+        }
+    }
+    let warning = match plane {
+        Err(SymmetryError::NoNodes) => None,
+        Err(error) => Some(error.to_string()),
+        Ok(plane) => plane.warning(space),
+    };
+    if let Some(warning) = warning {
+        ui.label("");
+        let mut text = warning;
+        if let Some(first) = text.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        ui.add(
+            egui::Label::new(egui::RichText::new(text).color(egui::Color32::from_rgb(200, 0, 0)))
+                .wrap(),
+        );
+        ui.end_row();
+    }
+    ui.label("");
+    ui.weak("Holds the displacement normal to the plane and,");
+    ui.end_row();
+    ui.label("");
+    ui.weak("for beams and shells, the rotations about the");
+    ui.end_row();
+    ui.label("");
+    ui.weak("in-plane axes. Select the faces in the cut plane.");
+    ui.end_row();
 }
 
 /// Rows of a submodel boundary condition, PrePoMax's `ViewSubmodelBC`: the step of the
@@ -1057,6 +1142,16 @@ impl Editor {
                     load_region(&kind, None, fe, &FeMesh::default()),
                 )
             }
+            NewItem::FieldOutput(step) => {
+                let target = fe.steps.get(step)?;
+                let kind = OutputKind::Node;
+                let output = FieldOutput::new(
+                    next_name(kind.prefix(), names(&target.field_outputs, |f| &f.name)),
+                    kind,
+                    kind.default_variables(),
+                );
+                Draft::FieldOutput(step, output)
+            }
             NewItem::HistoryOutput(step) => {
                 let target = fe.steps.get(step)?;
                 let output = HistoryOutput::node(
@@ -1115,6 +1210,7 @@ impl Editor {
             index: None,
             error: None,
             picker: Picker::default(),
+            motion: None,
         })
     }
 
@@ -1132,6 +1228,7 @@ impl Editor {
             index: None,
             error: None,
             picker: Picker::default(),
+            motion: None,
         }
     }
 
@@ -1164,6 +1261,7 @@ impl Editor {
             index,
             error: None,
             picker: Picker::default(),
+            motion: None,
         })
     }
 
@@ -1260,6 +1358,7 @@ impl Editor {
             index: Some(index),
             error: None,
             picker: Picker::default(),
+            motion: None,
         })
     }
 
@@ -1317,6 +1416,21 @@ impl Editor {
             Draft::Constraint(c) => c.symbol(),
             _ => None,
         }
+    }
+
+    /// The drawn node offsets of the playing motion preview at `now` (seconds of the GUI
+    /// clock), if one plays.
+    pub fn motion_offsets(&mut self, now: f64, model: &Model) -> Option<Vec<(usize, [f64; 3])>> {
+        let Draft::BoundaryCondition(_, bc, region) = &self.draft else {
+            return None;
+        };
+        let preview = self.motion.as_mut()?;
+        let BoundaryKind::Displacement(values) = bc.kind else {
+            return None;
+        };
+        let amplitude = model.fe.amplitude(bc.amplitude.as_deref()?)?;
+        let values = [values[0], values[1], values[2]];
+        Some(preview.frame(now, model, region.region(), values, amplitude))
     }
 
     /// Whether clicks in the 3D view pick for this dialog.
@@ -1546,14 +1660,57 @@ impl Editor {
                 if let BoundaryKind::Submodel { step, dofs } = &mut bc.kind {
                     submodel_rows(ui, step, dofs, two_d, &model.fe);
                 }
+                if let BoundaryKind::Symmetry { normal } = &mut bc.kind {
+                    symmetry_rows(ui, normal, &region.region(), model);
+                }
                 if bc.kind.takes_amplitude() {
-                    amplitude_row(
+                    let playing = self.motion.is_some();
+                    let playable = previews_motion(bc, &model.fe);
+                    let mut toggle = false;
+                    amplitude_row_with(
                         ui,
                         "Amplitude",
                         "bc amplitude",
                         &mut bc.amplitude,
                         &model.fe,
+                        |ui| {
+                            if playable {
+                                let (icon, tooltip) = if playing {
+                                    (Icon::Stop, "Stop the preview")
+                                } else {
+                                    (
+                                        Icon::Animate,
+                                        "Preview the prescribed motion in the 3D view",
+                                    )
+                                };
+                                toggle = icons::dialog_button(ui, icon, tooltip, true).clicked();
+                            }
+                        },
                     );
+                    if !previews_motion(bc, &model.fe) {
+                        self.motion = None;
+                    } else if toggle {
+                        self.motion = match self.motion {
+                            Some(_) => None,
+                            None => Some(MotionPreview::new(ui.input(|i| i.time), model)),
+                        };
+                    }
+                    if let Some(frame) = self.motion.as_ref().and_then(|m| m.last.as_ref()) {
+                        ui.label("");
+                        ui.weak(format!(
+                            "Time {}, motion drawn {}x",
+                            crate::results::format_value(frame.time as f32),
+                            crate::results::format_value(frame.scale as f32),
+                        ));
+                        ui.end_row();
+                        if let BoundaryKind::Displacement(values) = &bc.kind
+                            && values[3..].iter().any(Option::is_some)
+                        {
+                            ui.label("");
+                            ui.weak("Rotations are not shown in the preview.");
+                            ui.end_row();
+                        }
+                    }
                 }
                 region.ui(ui, model);
             }
@@ -1961,28 +2118,7 @@ impl Editor {
                 ui.end_row();
             }
             Draft::FieldOutput(_, output) => {
-                name_row(ui, &mut output.name);
-                let choices: &[&str] = match output.kind {
-                    OutputKind::Node => &["RF", "U", "V", "NT", "RFL"],
-                    OutputKind::Element => &["S", "E", "ME", "PEEQ", "ENER", "HFL"],
-                };
-                ui.label("Variables");
-                ui.horizontal(|ui| {
-                    for &variable in choices {
-                        let mut on = output.variables.iter().any(|v| v == variable);
-                        if ui.checkbox(&mut on, variable).changed() {
-                            output.variables.retain(|v| v != variable);
-                            if on {
-                                // Keep PrePoMax's order of the variables.
-                                output.variables.push(variable.to_string());
-                                output.variables.sort_by_key(|v| {
-                                    choices.iter().position(|c| c == v).unwrap_or(usize::MAX)
-                                });
-                            }
-                        }
-                    }
-                });
-                ui.end_row();
+                field_output_form(ui, output, &taken, self.index.is_none());
             }
             Draft::HistoryOutput(_, output, region) => {
                 history_output_form(ui, model, output, region, &taken);
@@ -2121,6 +2257,7 @@ impl Editor {
                 contacts::validate_interaction(interaction)?;
             }
             Draft::Amplitude(amplitude, _) => amplitude_dialog::validate(amplitude)?,
+            Draft::FieldOutput(_, output) => output.check_variables()?,
             Draft::HistoryOutput(_, output, region) => {
                 validate_history_output(output, region, fe)?;
             }
@@ -2129,6 +2266,12 @@ impl Editor {
                     return Err("The region is empty.".into());
                 }
             }
+        }
+        if let Draft::BoundaryCondition(_, bc, _) = &self.draft
+            && let BoundaryKind::Symmetry { normal: Some(n) } = bc.kind
+            && n.iter().all(|v| *v == 0.0)
+        {
+            return Err("The normal must not be the zero vector.".into());
         }
         if let Draft::BoundaryCondition(_, bc, _) = &self.draft
             && let BoundaryKind::Submodel { dofs, .. } = bc.kind
@@ -2294,7 +2437,14 @@ impl Editor {
                 }
                 put(&mut fe.initial_conditions, index, condition);
             }
-            Draft::FieldOutput(s, output) => put(&mut fe.steps[s].field_outputs, index, output),
+            Draft::FieldOutput(s, mut output) => {
+                output.normalize_variables();
+                let list = &mut fe.steps[s].field_outputs;
+                if let Some(existing) = index.and_then(|i| list.get(i)) {
+                    output.active = existing.active;
+                }
+                put(list, index, output);
+            }
             Draft::DefinedField(s, mut field, region) => {
                 if field.kind.takes_region() {
                     field.region = region.region();
@@ -2463,6 +2613,9 @@ pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::Load(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.loads.get_mut(i))
             .map(|l| &mut l.active),
+        TreeItem::FieldOutput(s, i) => (fe.steps.get_mut(s))
+            .and_then(|st| st.field_outputs.get_mut(i))
+            .map(|f| &mut f.active),
         TreeItem::HistoryOutput(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.history_outputs.get_mut(i))
             .map(|h| &mut h.active),
@@ -2675,7 +2828,10 @@ fn history_output_form(
         ui.set_max_width(320.0);
         for &variable in choices {
             let mut on = output.variables.iter().any(|v| v == variable);
-            if ui.checkbox(&mut on, variable).changed() {
+            let checkbox = ui
+                .checkbox(&mut on, variable)
+                .on_hover_text(plx_model::output_variable_description(variable));
+            if checkbox.changed() {
                 output.variables.retain(|v| v != variable);
                 if on {
                     output.variables.push(variable.to_string());
@@ -2716,6 +2872,108 @@ fn history_output_form(
             ui.end_row();
         }
         _ => region.ui(ui, model),
+    }
+}
+
+/// PrePoMax's field output dialog: the kind, chosen only for a new output, the variables
+/// and the options of `*NODE FILE`, `*EL FILE` and `*CONTACT FILE`.
+fn field_output_form(ui: &mut Ui, output: &mut FieldOutput, taken: &[&str], new: bool) {
+    name_row(ui, &mut output.name);
+    ui.label("Type");
+    ui.horizontal(|ui| {
+        for kind in OutputKind::ALL {
+            let selected = kind == output.kind;
+            let radio = ui.add_enabled(
+                new || selected,
+                egui::RadioButton::new(selected, kind.label()),
+            );
+            if radio.clicked() && !selected {
+                rename_default(&mut output.name, output.kind.prefix(), kind.prefix(), taken);
+                output.variables = (kind.default_variables().iter())
+                    .map(|v| v.to_string())
+                    .collect();
+                output.kind = kind;
+            }
+        }
+    });
+    ui.end_row();
+    ui.label("Variables");
+    // Fixed rows: wrapping inside the grid overlaps the next row.
+    ui.vertical(|ui| {
+        for row in output.kind.choices().chunks(7) {
+            ui.horizontal(|ui| {
+                for &variable in row {
+                    let mut on = output.variables.iter().any(|v| v == variable);
+                    let checkbox = ui
+                        .checkbox(&mut on, variable)
+                        .on_hover_text(plx_model::output_variable_description(variable));
+                    if checkbox.changed() {
+                        output.variables.retain(|v| v != variable);
+                        if on {
+                            output.variables.push(variable.to_string());
+                        }
+                        output.normalize_variables();
+                    }
+                }
+            });
+        }
+    });
+    ui.end_row();
+    let on_off = |ui: &mut Ui, value: &mut bool, id: &str, labels: [&str; 2], hint: &str| {
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(if *value { labels[0] } else { labels[1] })
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(value, true, labels[0]);
+                ui.selectable_value(value, false, labels[1]);
+            })
+            .response
+            .on_hover_text(hint);
+        ui.end_row();
+    };
+    ui.label("Last iterations");
+    on_off(
+        ui,
+        &mut output.last_iterations,
+        "field last iterations",
+        ["On", "Off"],
+        "Writes every iteration of the last increment; useful for finding out why a \
+         solution diverges.",
+    );
+    ui.label("Contact elements");
+    on_off(
+        ui,
+        &mut output.contact_elements,
+        "field contact elements",
+        ["On", "Off"],
+        "Writes the contact elements into a file with the .cel extension.",
+    );
+    if output.kind == OutputKind::Element {
+        ui.label("Output (2D/3D)");
+        egui::ComboBox::from_id_salt("field output dimension")
+            .selected_text(output.dimension.label())
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                for dimension in OutputDimension::ALL {
+                    ui.selectable_value(&mut output.dimension, dimension, dimension.label());
+                }
+            })
+            .response
+            .on_hover_text(
+                "With 3D, 1D and 2D elements are written in their expanded 3D form. Default \
+                 writes shell and plane models in 2D.",
+            );
+        ui.end_row();
+    }
+    if output.kind != OutputKind::Contact {
+        ui.label("Global");
+        on_off(
+            ui,
+            &mut output.global,
+            "field global",
+            ["Yes", "No"],
+            "Whether the results are written in the global or in the local coordinate systems.",
+        );
     }
 }
 
@@ -3727,6 +3985,37 @@ mod tests {
     }
 
     #[test]
+    fn field_outputs_are_created_deactivated_and_deleted_like_in_prepomax() {
+        let mut fe = FeModel::default();
+        Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        let mut editor = Editor::create(NewItem::FieldOutput(0), &fe).unwrap();
+        if let Draft::FieldOutput(_, output) = &mut editor.draft {
+            assert_eq!(output.name, "NF_Output-1");
+            output.kind = OutputKind::Element;
+            output.variables = vec!["ZZS".into(), "S".into(), "ERR".into()];
+        }
+        assert!(
+            editor.validate(&fe).is_err(),
+            "ERR and ZZS exclude each other"
+        );
+        if let Draft::FieldOutput(_, output) = &mut editor.draft {
+            output.variables.pop();
+        }
+        assert_eq!(editor.validate(&fe), Ok(()));
+        editor.apply(&mut fe);
+        let added = TreeItem::FieldOutput(0, 2);
+        assert_eq!(fe.steps[0].field_outputs[2].variables, ["S", "ZZS"]);
+        assert!(toggle_active(&mut fe, &added));
+        assert!(!fe.steps[0].field_outputs[2].active);
+        // Editing keeps the output deactivated.
+        let editor = Editor::edit(&added, &fe, &FeMesh::default()).unwrap();
+        editor.apply(&mut fe);
+        assert!(!fe.steps[0].field_outputs[2].active);
+        assert!(delete(&mut fe, &added));
+        assert_eq!(fe.steps[0].field_outputs.len(), 2);
+    }
+
+    #[test]
     fn a_frequency_step_keeps_the_bcs_but_takes_no_loads() {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
@@ -4024,6 +4313,7 @@ mod tests {
             index: Some(0),
             error: None,
             picker: Picker::default(),
+            motion: None,
         }
         .apply(&mut fe);
         assert_eq!(fe.steps[0].loads[0].factor_amplitude, None);

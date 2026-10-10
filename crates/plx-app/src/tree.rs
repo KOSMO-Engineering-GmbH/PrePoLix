@@ -240,6 +240,8 @@ pub enum AnalysisAction {
     Monitor,
     Results,
     Kill,
+    /// Drop the results bound to the project, to share only mesh and definition.
+    RemoveBoundResult,
 }
 
 /// What the tree shows of the analysis job.
@@ -248,6 +250,10 @@ pub struct JobState {
     pub status: JobStatus,
     /// A results file is there to be opened.
     pub results: bool,
+    /// Results are bound to the project.
+    pub bound: bool,
+    /// The analysis ran since the program started; its monitor can be shown.
+    pub ran: bool,
 }
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
@@ -303,13 +309,15 @@ const INVALID: Color32 = Color32::from_rgb(255, 0, 0);
 const INACTIVE: Color32 = Color32::from_rgb(128, 128, 128);
 
 /// Items that can be deactivated, as far as prepolix has them; PrePoMax also deactivates
-/// materials, surface interactions and outputs.
+/// materials and surface interactions.
 fn can_deactivate(item: &TreeItem) -> bool {
     matches!(
         item,
         TreeItem::Step(_)
             | TreeItem::BoundaryCondition(..)
             | TreeItem::Load(..)
+            | TreeItem::FieldOutput(..)
+            | TreeItem::HistoryOutput(..)
             | TreeItem::DefinedField(..)
             | TreeItem::Constraint(_)
             | TreeItem::ContactPair(_)
@@ -421,6 +429,7 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Initial Conditions") => Some(NewItem::InitialCondition),
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
+        TreeItem::StepGroup(step, "Field Outputs") => Some(NewItem::FieldOutput(step)),
         TreeItem::StepGroup(step, "History Outputs") => Some(NewItem::HistoryOutput(step)),
         TreeItem::StepGroup(step, "Defined Fields") => Some(NewItem::DefinedField(step)),
         TreeItem::Group(HOT_SPOTS) => Some(NewItem::ResultHotSpot),
@@ -479,10 +488,9 @@ fn has_properties(item: &TreeItem) -> bool {
 }
 
 /// Items of the FE model that have an edit dialog.
-/// Items the context menu and the Delete key remove; a step's field outputs are not, nor
-/// the parts of results.
+/// Items the context menu and the Delete key remove; the parts of results are not.
 fn deletable(view: TreeView, item: &TreeItem) -> bool {
-    (is_fe_item(item) && !matches!(item, TreeItem::FieldOutput(..)))
+    is_fe_item(item)
         || (matches!(item, TreeItem::Part(_)) && view != TreeView::Results)
         || feature(item).is_some()
         || matches!(
@@ -805,6 +813,11 @@ impl Tree<'_> {
                     | TreeItem::MeshItem(_)
             );
         if item == TreeItem::Analysis {
+            if self.job.is_some_and(|j| j.bound) {
+                response = response.on_hover_text(
+                    "A result is bound to this analysis: it is saved with the project.",
+                );
+            }
             response.context_menu(|ui| self.analysis_menu(ui));
         }
         if creates.is_some() || editable {
@@ -943,9 +956,23 @@ impl Tree<'_> {
         ui.separator();
         action(ui, !running, "Run", AnalysisAction::Run);
         action(ui, !running, "Check Model", AnalysisAction::CheckModel);
-        action(ui, self.job.is_some(), "Monitor", AnalysisAction::Monitor);
+        action(
+            ui,
+            self.job.is_some_and(|j| j.ran),
+            "Monitor",
+            AnalysisAction::Monitor,
+        );
         action(ui, results, "Results", AnalysisAction::Results);
         action(ui, running, "Kill", AnalysisAction::Kill);
+        ui.separator();
+        // Results opened from the analysis are bound to the project and saved with it.
+        let bound = self.job.is_some_and(|j| j.bound);
+        action(
+            ui,
+            bound,
+            "Remove Bound Result",
+            AnalysisAction::RemoveBoundResult,
+        );
         ui.separator();
         // An analysis has no children, as in PrePoMax the entries are there all the same.
         ui.add_enabled(false, egui::Button::new("Expand All"));
@@ -1496,6 +1523,9 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 }
                 for (i, load) in step.loads.iter().enumerate() {
                     tree.symbols.insert(TreeItem::Load(s, i), load.visible);
+                }
+                for (i, _) in (step.field_outputs.iter().enumerate()).filter(|(_, f)| !f.active) {
+                    tree.inactive.insert(TreeItem::FieldOutput(s, i));
                 }
                 for (i, _) in (step.history_outputs.iter().enumerate()).filter(|(_, h)| !h.active) {
                     tree.inactive.insert(TreeItem::HistoryOutput(s, i));

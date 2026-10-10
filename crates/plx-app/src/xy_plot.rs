@@ -13,7 +13,14 @@ pub struct XyData {
     pub x_label: String,
     pub x: Vec<f64>,
     pub curves: Vec<(String, Vec<f64>)>,
+    /// Reference lines over the same x values, drawn dashed in grey and named at their end,
+    /// such as the engine order lines of a Campbell diagram.
+    pub guides: Vec<(String, Vec<f64>)>,
+    /// Upper end of the y axis; None fits the axis to the values.
+    pub y_max: Option<f64>,
 }
+
+const GUIDE: Color32 = Color32::from_gray(60);
 
 /// Distinct colours for the curves, in the order of the columns.
 const COLORS: [Color32; 8] = [
@@ -73,10 +80,14 @@ pub fn show(ui: &mut Ui, data: &XyData) {
     painter.rect_filled(rect, 0.0, Color32::WHITE);
     let font = egui::FontId::proportional(12.0);
     let text = Color32::from_gray(40);
-    let (Some((x0, x1)), Some((y0, y1))) = (
-        range(data.x.iter().copied()),
-        range(data.curves.iter().flat_map(|(_, y)| y.iter().copied())),
-    ) else {
+    let values = (data.curves.iter().chain(&data.guides)).flat_map(|(_, y)| y.iter().copied());
+    let y_range = match data.y_max {
+        Some(top) if top.is_finite() && top > 0.0 => {
+            range(values).map(|(min, _)| (min.min(0.0), top))
+        }
+        _ => range(values),
+    };
+    let (Some((x0, x1)), Some((y0, y1))) = (range(data.x.iter().copied()), y_range) else {
         painter.text(
             rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -131,14 +142,39 @@ pub fn show(ui: &mut Ui, data: &XyData) {
         font.clone(),
         text,
     );
+    // Curves leave the plot area when the y axis is limited.
+    let plot = painter.with_clip_rect(area);
     let markers = data.x.len() <= 60;
+    for (name, values) in &data.guides {
+        let points: Vec<Pos2> = (data.x.iter().zip(values))
+            .filter(|(x, y)| x.is_finite() && y.is_finite())
+            .map(|(&x, &y)| to_screen(x, y))
+            .collect();
+        plot.extend(egui::Shape::dashed_line(
+            &points,
+            Stroke::new(1.5, GUIDE),
+            8.0,
+            5.0,
+        ));
+        // The name sits on the line short of its visible end, clear of the legend in the
+        // upper right corner.
+        let first = points.iter().find(|p| area.contains(**p));
+        let last = points.iter().rev().find(|p| area.contains(**p));
+        if let (Some(&first), Some(&last)) = (first, last) {
+            let at = first.lerp(last, 0.8);
+            let galley = plot.layout_no_wrap(name.clone(), font.clone(), GUIDE);
+            let frame = Rect::from_min_size(at + vec2(2.0, -4.0 - galley.size().y), galley.size());
+            plot.rect_filled(frame.expand(1.0), 2.0, Color32::from_white_alpha(220));
+            plot.galley(frame.min, galley, GUIDE);
+        }
+    }
     for (index, (_, values)) in data.curves.iter().enumerate() {
         let color = color(index);
         // Rows without a value break the curve.
         let mut segment: Vec<Pos2> = Vec::new();
         let flush = |segment: &mut Vec<Pos2>| {
             if segment.len() > 1 {
-                painter.add(egui::Shape::line(
+                plot.add(egui::Shape::line(
                     std::mem::take(segment),
                     Stroke::new(2.0, color),
                 ));
@@ -150,7 +186,7 @@ pub fn show(ui: &mut Ui, data: &XyData) {
                 let p = to_screen(x, y);
                 segment.push(p);
                 if markers {
-                    painter.circle_filled(p, 2.5, color);
+                    plot.circle_filled(p, 2.5, color);
                 }
             } else {
                 flush(&mut segment);
@@ -160,12 +196,14 @@ pub fn show(ui: &mut Ui, data: &XyData) {
     }
     legend(&painter, area, data, &font);
     if let Some(hover) = response.hover_pos().filter(|p| area.contains(*p)) {
-        let nearest = (data.curves.iter().enumerate())
+        let lines: Vec<_> = data.curves.iter().chain(&data.guides).collect();
+        let nearest = (lines.iter().enumerate())
             .flat_map(|(c, (_, values))| {
                 (data.x.iter().zip(values))
                     .filter(|(x, y)| x.is_finite() && y.is_finite())
                     .map(move |(&x, &y)| (c, x, y))
             })
+            .filter(|&(_, x, y)| area.expand(1.0).contains(to_screen(x, y)))
             .min_by(|a, b| {
                 let d = |x: f64, y: f64| to_screen(x, y).distance_sq(hover);
                 d(a.1, a.2).total_cmp(&d(b.1, b.2))
@@ -175,7 +213,7 @@ pub fn show(ui: &mut Ui, data: &XyData) {
             painter.circle_stroke(p, 4.5, Stroke::new(1.5, Color32::BLACK));
             let label = format!(
                 "{}\n{}: {}\n{}",
-                data.curves[curve].0,
+                lines[curve].0,
                 data.x_label,
                 format_value(x as f32),
                 format_value(y as f32)
@@ -197,18 +235,21 @@ pub fn show(ui: &mut Ui, data: &XyData) {
     }
 }
 
-/// Names of the curves in the upper right corner of the plot area.
+/// Names of the guides and the curves in the upper right corner of the plot area.
 fn legend(painter: &egui::Painter, area: Rect, data: &XyData, font: &egui::FontId) {
-    let shown = data.curves.len().min(12);
+    let entries: Vec<(&String, Option<Color32>)> = (data.guides.iter().map(|(n, _)| (n, None)))
+        .chain((data.curves.iter().enumerate()).map(|(i, (n, _))| (n, Some(color(i)))))
+        .collect();
+    let shown = entries.len().min(12);
     if shown == 0 {
         return;
     }
-    let galleys: Vec<_> = (data.curves.iter().take(shown))
-        .map(|(name, _)| painter.layout_no_wrap(name.clone(), font.clone(), Color32::BLACK))
+    let galleys: Vec<_> = (entries.iter().take(shown))
+        .map(|(name, _)| painter.layout_no_wrap((*name).clone(), font.clone(), Color32::BLACK))
         .collect();
     let width = galleys.iter().map(|g| g.size().x).fold(0.0, f32::max) + 30.0;
     let line = 16.0;
-    let extra = (data.curves.len() > shown) as usize;
+    let extra = (entries.len() > shown) as usize;
     let height = line * (shown + extra) as f32 + 6.0;
     let frame = Rect::from_min_size(
         pos2(area.right() - width - 8.0, area.top() + 8.0),
@@ -221,12 +262,22 @@ fn legend(painter: &egui::Painter, area: Rect, data: &XyData, font: &egui::FontI
         Stroke::new(1.0, Color32::from_gray(160)),
         egui::StrokeKind::Inside,
     );
-    for (index, galley) in galleys.into_iter().enumerate() {
+    for (index, (galley, (_, color))) in galleys.into_iter().zip(&entries).enumerate() {
         let y = frame.top() + 3.0 + line * index as f32 + line / 2.0;
-        painter.line_segment(
-            [pos2(frame.left() + 5.0, y), pos2(frame.left() + 21.0, y)],
-            Stroke::new(2.0, color(index)),
-        );
+        let sample = [pos2(frame.left() + 5.0, y), pos2(frame.left() + 21.0, y)];
+        match color {
+            Some(color) => {
+                painter.line_segment(sample, Stroke::new(2.0, *color));
+            }
+            None => {
+                painter.extend(egui::Shape::dashed_line(
+                    &sample,
+                    Stroke::new(1.5, GUIDE),
+                    5.0,
+                    3.0,
+                ));
+            }
+        }
         painter.galley(
             pos2(frame.left() + 26.0, y - galley.size().y / 2.0),
             galley,
@@ -238,7 +289,7 @@ fn legend(painter: &egui::Painter, area: Rect, data: &XyData, font: &egui::FontI
         painter.text(
             pos2(frame.left() + 26.0, y),
             egui::Align2::LEFT_CENTER,
-            format!("… {} more", data.curves.len() - shown),
+            format!("… {} more", entries.len() - shown),
             font.clone(),
             Color32::from_gray(80),
         );

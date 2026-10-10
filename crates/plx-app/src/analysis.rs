@@ -17,15 +17,20 @@ const MAX_OUTPUT_LINES: usize = 5000;
 pub struct Analysis {
     job: Job,
     output: Vec<String>,
+    /// Text typed into the monitor's filter field; only output lines containing it are shown.
+    filter: String,
     started: Instant,
     finished: Option<f32>,
     status: JobStatus,
     pub monitor: bool,
+    /// The results of this run were bound to the project when they were opened.
+    pub bound: bool,
 }
 
 pub enum MonitorEvent {
     None,
-    OpenResults(PathBuf),
+    /// Open the results of the run.
+    OpenResults,
 }
 
 /// Copies the results file of a submodel's global model next to the input file `<name>.inp`
@@ -125,11 +130,13 @@ impl Analysis {
         output.extend(copied);
         Ok(Self {
             output,
+            filter: String::new(),
             job,
             started: Instant::now(),
             finished: None,
             status: JobStatus::Running,
             monitor: true,
+            bound: false,
         })
     }
 
@@ -220,15 +227,36 @@ impl Analysis {
                     }
                 });
                 ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Filter:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.filter)
+                            .hint_text("Show only lines containing ...")
+                            .desired_width(240.0),
+                    );
+                    if ui
+                        .add_enabled(!self.filter.is_empty(), egui::Button::new("Clear"))
+                        .clicked()
+                    {
+                        self.filter.clear();
+                    }
+                });
                 let height = ui.available_height() - 36.0;
-                crate::virtual_table::lines(
-                    ui,
-                    egui::ScrollArea::both()
-                        .max_height(height.max(80.0))
-                        .auto_shrink([false, false])
-                        .stick_to_bottom(true),
-                    &self.output,
-                );
+                let area = egui::ScrollArea::both()
+                    .max_height(height.max(80.0))
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true);
+                if self.filter.is_empty() {
+                    crate::virtual_table::lines(ui, area, &self.output);
+                } else {
+                    let needle = self.filter.to_lowercase();
+                    let shown: Vec<&String> = self
+                        .output
+                        .iter()
+                        .filter(|line| line.to_lowercase().contains(&needle))
+                        .collect();
+                    crate::virtual_table::lines(ui, area, &shown);
+                }
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui
@@ -241,9 +269,8 @@ impl Analysis {
                     if ui
                         .add_enabled(results.is_some(), egui::Button::new("Results"))
                         .clicked()
-                        && let Some(path) = results
                     {
-                        event = MonitorEvent::OpenResults(path);
+                        event = MonitorEvent::OpenResults;
                     }
                 });
             });

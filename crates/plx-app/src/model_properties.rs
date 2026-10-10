@@ -90,7 +90,8 @@ impl ModelPropertiesDialog {
                         .show(ui, |ui| {
                             for pair in ModelSpace::ALL.chunks(2) {
                                 for &space in pair {
-                                    ui.radio_value(&mut draft.space, space, space.label());
+                                    ui.radio_value(&mut draft.space, space, space.label())
+                                        .on_hover_text(space.tooltip());
                                 }
                                 ui.end_row();
                             }

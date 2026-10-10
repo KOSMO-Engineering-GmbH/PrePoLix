@@ -33,6 +33,8 @@ pub enum Icon {
     /// Play triangle; also opens the animation.
     Animate,
     Pause,
+    /// Square of a stop button.
+    Stop,
     /// Arrow of the material library's copy and move buttons, pointing in this direction
     /// (unit vector, y down).
     Arrow(Vec2),
@@ -311,6 +313,14 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
                     color,
                 ));
             }
+        }
+        Icon::Stop => {
+            let color = Color32::from_rgb(50, 50, 50);
+            shapes.push(Shape::rect_filled(
+                Rect::from_min_max(p(3.5, 3.5), p(12.5, 12.5)),
+                1.0,
+                color,
+            ));
         }
         Icon::Arrow(direction) => {
             // Drawn pointing right, then turned into the direction.

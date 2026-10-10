@@ -79,6 +79,8 @@ pub struct Setup {
     pub steps: u32,
     /// Engine orders drawn as lines, e.g. "1, 2".
     pub orders: String,
+    /// Upper end of the frequency axis in Hz; 0 fits the axis to the modes.
+    pub max_frequency: f64,
 }
 
 impl Setup {
@@ -208,17 +210,26 @@ pub fn from_rpm(rpm: f64) -> f64 {
     rpm * std::f64::consts::TAU / 60.0
 }
 
-/// The diagram: one curve per mode over the speed in rpm, then the engine order lines.
-/// Modes are matched between speeds by their order of frequency; curves of modes that cross
-/// swap at the crossing.
-pub fn diagram(points: &[SpeedPoint], orders: &[f64]) -> XyData {
-    let x: Vec<f64> = points.iter().map(|p| rpm(p.speed)).collect();
+/// The diagram: one curve per mode over the speed in rpm, and the engine order lines from
+/// standstill as dashed guides. Modes are matched between speeds by their order of frequency;
+/// curves of modes that cross swap at the crossing. `max_frequency` limits the frequency
+/// axis, 0 fits it to the modes.
+pub fn diagram(points: &[SpeedPoint], orders: &[f64], max_frequency: f64) -> XyData {
+    // The sweep leaves out standstill; the axis and the order lines still start there.
+    let standstill = points.first().is_some_and(|p| p.speed > 0.0);
+    let speeds: Vec<f64> = (standstill.then_some(0.0).into_iter())
+        .chain(points.iter().map(|p| p.speed))
+        .collect();
+    let x: Vec<f64> = speeds.iter().map(|&s| rpm(s)).collect();
     let count = points.iter().map(|p| p.modes.len()).max().unwrap_or(0);
     let mut curves = Vec::new();
     for mode in 0..count {
-        let values: Vec<f64> = points
-            .iter()
-            .map(|p| p.modes.get(mode).map_or(f64::NAN, |m| m.frequency))
+        let values: Vec<f64> = (standstill.then_some(f64::NAN).into_iter())
+            .chain(
+                points
+                    .iter()
+                    .map(|p| p.modes.get(mode).map_or(f64::NAN, |m| m.frequency)),
+            )
             .collect();
         let whirls: Vec<Whirl> = points
             .iter()
@@ -232,18 +243,23 @@ pub fn diagram(points: &[SpeedPoint], orders: &[f64]) -> XyData {
         };
         curves.push((name, values));
     }
-    for &order in orders {
-        let values = points
-            .iter()
-            .map(|p| order * p.speed / std::f64::consts::TAU)
-            .collect();
-        curves.push((format!("{}x", numeric::format_physical(order)), values));
-    }
+    let guides = orders
+        .iter()
+        .map(|&order| {
+            let values = speeds
+                .iter()
+                .map(|&s| order * s / std::f64::consts::TAU)
+                .collect();
+            (format!("{}x", numeric::format_physical(order)), values)
+        })
+        .collect();
     XyData {
         title: "Campbell diagram".into(),
         x_label: "Speed [rpm]".into(),
         x,
         curves,
+        guides,
+        y_max: (max_frequency > 0.0).then_some(max_frequency),
     }
 }
 
@@ -286,23 +302,43 @@ pub fn critical_speeds(points: &[SpeedPoint], orders: &[f64]) -> Vec<CriticalSpe
     found
 }
 
-/// The sweep as text with tabs, for a spreadsheet.
-pub fn table_text(points: &[SpeedPoint]) -> String {
+/// The sweep as a table for a spreadsheet, its cells separated by `separator`: the speed,
+/// the frequency and whirl of each mode and the frequency of each engine order line.
+pub fn table_text(points: &[SpeedPoint], orders: &[f64], separator: char) -> String {
     let count = points.iter().map(|p| p.modes.len()).max().unwrap_or(0);
-    let mut text = String::from("Speed [rad/s]\tSpeed [rpm]");
+    let mut cells = vec!["Speed [rad/s]".to_string(), "Speed [rpm]".to_string()];
     for mode in 1..=count {
-        text.push_str(&format!("\tMode {mode} [Hz]\tWhirl {mode}"));
+        cells.push(format!("Mode {mode} [Hz]"));
+        cells.push(format!("Whirl {mode}"));
     }
-    text.push('\n');
+    for &order in orders {
+        cells.push(format!("{}x [Hz]", numeric::format_physical(order)));
+    }
+    let mut text = String::new();
+    let mut row = |cells: &mut Vec<String>| {
+        text.push_str(&cells.join(&separator.to_string()));
+        text.push('\n');
+        cells.clear();
+    };
+    row(&mut cells);
     for point in points {
-        text.push_str(&format!("{}\t{}", point.speed, rpm(point.speed)));
+        cells.push(numeric::format_physical(point.speed));
+        cells.push(numeric::format_physical(rpm(point.speed)));
         for mode in 0..count {
             match point.modes.get(mode) {
-                Some(m) => text.push_str(&format!("\t{}\t{}", m.frequency, m.whirl.letter())),
-                None => text.push_str("\t\t"),
+                Some(m) => {
+                    cells.push(numeric::format_physical(m.frequency));
+                    cells.push(m.whirl.letter().to_string());
+                }
+                None => cells.extend([String::new(), String::new()]),
             }
         }
-        text.push('\n');
+        for &order in orders {
+            cells.push(numeric::format_physical(
+                order * point.speed / std::f64::consts::TAU,
+            ));
+        }
+        row(&mut cells);
     }
     text
 }
@@ -424,6 +460,7 @@ impl CampbellWindow {
                 max_speed: rotor_speed(fe).unwrap_or(0.0),
                 steps: DEFAULT_STEPS,
                 orders: "1".into(),
+                max_frequency: 0.0,
             },
             visible: true,
             sweep: None,
@@ -585,9 +622,17 @@ impl CampbellWindow {
                     }
                     if ui
                         .add_enabled(!self.points.is_empty(), egui::Button::new("Copy table"))
+                        .on_hover_text("Copies the sweep with tabs, for a spreadsheet.")
                         .clicked()
                     {
-                        ui.ctx().copy_text(table_text(&self.points));
+                        ui.ctx()
+                            .copy_text(table_text(&self.points, &self.shown_orders(), '\t'));
+                    }
+                    if ui
+                        .add_enabled(!self.points.is_empty(), egui::Button::new("Export CSV ..."))
+                        .clicked()
+                    {
+                        self.export_csv();
                     }
                 });
                 ui.separator();
@@ -630,48 +675,89 @@ impl CampbellWindow {
     }
 
     fn setup_row(&mut self, ui: &mut Ui, running: bool) {
-        ui.add_enabled_ui(!running, |ui| {
-            egui::Grid::new("campbell setup")
-                .num_columns(4)
-                .spacing([12.0, 4.0])
-                .show(ui, |ui| {
-                    ui.label("Highest speed [rpm]");
-                    let mut max_rpm = rpm(self.setup.max_speed);
-                    if ui
-                        .add(
-                            numeric::drag_value(&mut max_rpm)
-                                .range(0.0..=f64::MAX)
-                                .speed(10.0),
-                        )
-                        .changed()
-                    {
-                        self.setup.max_speed = from_rpm(max_rpm);
-                    }
-                    ui.label(format!(
-                        "= {} rad/s",
-                        numeric::format_physical(self.setup.max_speed)
-                    ));
-                    ui.end_row();
-                    ui.label("Speed steps");
-                    ui.add(numeric::drag_value(&mut self.setup.steps).range(2..=200));
-                    ui.weak("CalculiX runs once per speed.");
-                    ui.end_row();
-                    ui.label("Engine orders");
-                    ui.add(egui::TextEdit::singleline(&mut self.setup.orders).desired_width(120.0));
-                    ui.weak("Lines f = order x speed, e.g. 1, 2, 3");
-                    ui.end_row();
-                });
+        egui::Grid::new("campbell setup")
+            .num_columns(3)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                ui.label("Highest speed [rpm]");
+                let mut max_rpm = rpm(self.setup.max_speed);
+                if ui
+                    .add_enabled(
+                        !running,
+                        numeric::drag_value(&mut max_rpm)
+                            .range(0.0..=f64::MAX)
+                            .speed(10.0),
+                    )
+                    .changed()
+                {
+                    self.setup.max_speed = from_rpm(max_rpm);
+                }
+                ui.label(format!(
+                    "= {} rad/s",
+                    numeric::format_physical(self.setup.max_speed)
+                ));
+                ui.end_row();
+                ui.label("Speed steps");
+                ui.add_enabled(
+                    !running,
+                    numeric::drag_value(&mut self.setup.steps).range(2..=200),
+                );
+                ui.weak("CalculiX runs once per speed.");
+                ui.end_row();
+                ui.label("Engine orders");
+                ui.add_enabled(
+                    !running,
+                    egui::TextEdit::singleline(&mut self.setup.orders).desired_width(120.0),
+                );
+                ui.weak("Lines f = order x speed, e.g. 1, 2, 3");
+                ui.end_row();
+                // The axis can change any time, also while the sweep runs.
+                ui.label("Frequency axis up to [Hz]");
+                ui.add(
+                    numeric::drag_value(&mut self.setup.max_frequency)
+                        .range(0.0..=f64::MAX)
+                        .speed(10.0),
+                );
+                ui.weak("0 fits the axis to the modes");
+                ui.end_row();
+            });
+    }
+
+    /// The orders of the shown diagram: those of the running sweep, else the text field's,
+    /// which can change after the sweep.
+    fn shown_orders(&self) -> Vec<f64> {
+        if self.is_running() {
+            self.orders.clone()
+        } else {
+            self.setup.order_values()
+        }
+    }
+
+    /// Saves the sweep as a CSV file, to a path from a Save As dialog.
+    fn export_csv(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_title("Export Campbell Diagram")
+            .add_filter("CSV file", &["csv"])
+            .set_file_name("campbell.csv")
+            .save_file()
+        else {
+            return;
+        };
+        let path = if path.extension().is_none() {
+            path.with_extension("csv")
+        } else {
+            path
+        };
+        let text = table_text(&self.points, &self.shown_orders(), ',');
+        self.log.push(match std::fs::write(&path, text) {
+            Ok(()) => format!("Exported: {}", path.display()),
+            Err(err) => format!("Export failed ({}): {err}", path.display()),
         });
     }
 
     fn diagram_and_table(&mut self, ui: &mut Ui) {
-        // Orders can change after the sweep; the diagram follows the text field.
-        let orders = if self.is_running() {
-            self.orders.clone()
-        } else {
-            self.setup.order_values()
-        };
-        let data = diagram(&self.points, &orders);
+        let orders = self.shown_orders();
+        let data = diagram(&self.points, &orders, self.setup.max_frequency);
         let critical = critical_speeds(&self.points, &orders);
         let table_height = if critical.is_empty() {
             24.0
@@ -779,19 +865,58 @@ mod tests {
                 &[(80.0, Whirl::Backward), (120.0, Whirl::Forward)],
             ),
         ];
-        let data = diagram(&points, &[1.0, 2.0]);
+        let data = diagram(&points, &[1.0, 2.0], 0.0);
         for (x, expected) in data.x.iter().zip([0.0, 60.0, 120.0]) {
             assert!((x - expected).abs() < 1e-9, "{:?}", data.x);
         }
         let names: Vec<&str> = data.curves.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["Mode 1", "Mode 2", "1x", "2x"]);
-        assert_eq!(data.curves[2].1, [0.0, 1.0, 2.0]);
-        assert_eq!(data.curves[3].1, [0.0, 2.0, 4.0]);
+        assert_eq!(names, ["Mode 1", "Mode 2"]);
+        let guides: Vec<&str> = data.guides.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(guides, ["1x", "2x"]);
+        assert_eq!(data.guides[0].1, [0.0, 1.0, 2.0]);
+        assert_eq!(data.guides[1].1, [0.0, 2.0, 4.0]);
+        assert_eq!(data.y_max, None);
+        // A sweep without standstill still starts the axis and the order lines at 0 rpm.
         let steady = vec![
-            point(1.0, &[(10.0, Whirl::Forward)]),
-            point(2.0, &[(11.0, Whirl::Forward)]),
+            point(std::f64::consts::TAU, &[(10.0, Whirl::Forward)]),
+            point(2.0 * std::f64::consts::TAU, &[(11.0, Whirl::Forward)]),
         ];
-        assert_eq!(diagram(&steady, &[]).curves[0].0, "Mode 1 (F)");
+        let data = diagram(&steady, &[1.0], 5.0);
+        assert_eq!(data.curves[0].0, "Mode 1 (F)");
+        assert_eq!(data.x[0], 0.0);
+        assert!(data.curves[0].1[0].is_nan());
+        assert_eq!(data.curves[0].1[1..], [10.0, 11.0]);
+        assert_eq!(data.guides[0].1, [0.0, 1.0, 2.0]);
+        assert_eq!(data.y_max, Some(5.0));
+    }
+
+    #[test]
+    fn the_table_lists_speeds_modes_and_order_lines() {
+        let points = vec![
+            point(
+                std::f64::consts::TAU,
+                &[(90.0, Whirl::Backward), (110.0, Whirl::Forward)],
+            ),
+            point(2.0 * std::f64::consts::TAU, &[(80.0, Whirl::Backward)]),
+        ];
+        let csv = table_text(&points, &[1.0, 2.0], ',');
+        let rows: Vec<Vec<&str>> = csv.lines().map(|l| l.split(',').collect()).collect();
+        assert_eq!(
+            rows[0],
+            [
+                "Speed [rad/s]",
+                "Speed [rpm]",
+                "Mode 1 [Hz]",
+                "Whirl 1",
+                "Mode 2 [Hz]",
+                "Whirl 2",
+                "1x [Hz]",
+                "2x [Hz]"
+            ]
+        );
+        assert_eq!(rows[1][1..], ["60", "90", "B", "110", "F", "1", "2"]);
+        assert_eq!(rows[2][1..], ["120", "80", "B", "", "", "2", "4"]);
+        assert_eq!(rows.len(), 3);
     }
 
     #[test]
@@ -800,6 +925,7 @@ mod tests {
             max_speed: 100.0,
             steps: 4,
             orders: "2, 1; 1 x".into(),
+            max_frequency: 0.0,
         };
         assert_eq!(setup.order_values(), [1.0, 2.0]);
         assert_eq!(speeds(100.0, 4), [25.0, 50.0, 75.0, 100.0]);
@@ -924,8 +1050,8 @@ mod tests {
         assert!(whirls.contains(&Whirl::Forward) && whirls.contains(&Whirl::Backward));
         let critical = critical_speeds(&points, &[1.0]);
         assert!(critical.is_empty(), "{critical:?}");
-        assert_eq!(diagram(&points, &[1.0]).curves.len(), 5);
-        assert!(table_text(&points).lines().count() == 4);
+        assert_eq!(diagram(&points, &[1.0], 0.0).curves.len(), 4);
+        assert!(table_text(&points, &[1.0], ',').lines().count() == 4);
     }
 
     #[test]
