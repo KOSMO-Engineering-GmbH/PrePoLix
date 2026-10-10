@@ -125,6 +125,8 @@ pub struct ViewportResponse {
     pub annotation: Option<overlay::AnnotationCommand>,
     /// Path plots were moved, resized or deleted.
     pub path_plots: Vec<crate::path_plot::PlotEvent>,
+    /// The legend asked for the colour scale dialog.
+    pub edit_legend: bool,
 }
 
 /// The view entries of the 3D view's context menu.
@@ -266,6 +268,10 @@ impl Viewport {
     }
 
     /// Exchanges the camera, so the FE model and the results each keep their own view.
+    pub fn set_camera(&mut self, camera: Camera) {
+        self.camera = camera;
+    }
+
     pub fn swap_camera(&mut self, camera: &mut Camera) {
         std::mem::swap(&mut self.camera, camera);
     }
@@ -411,6 +417,7 @@ impl Viewport {
             ui.ctx().request_repaint();
         }
         result.annotation = clicked.annotation;
+        result.edit_legend = clicked.edit_legend;
         result.path_plots = crate::path_plot::draw(ui, rect, &self.camera, &mut self.path_plots);
         if let Some(gizmo) = &self.gizmo {
             self.gizmo_state.draw(&painter, gizmo, &self.camera, rect);

@@ -128,6 +128,31 @@ impl FeMesh {
         self.elements.len()
     }
 
+    /// A hash of the nodes and elements, the same for the same mesh in every program run,
+    /// to tell whether results of two runs share their mesh.
+    pub fn fingerprint(&self) -> u64 {
+        // FNV-1a, stable unlike the standard hasher.
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut add = |bytes: &[u8]| {
+            for &b in bytes {
+                hash = (hash ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        for (id, coords) in self.node_ids.iter().zip(&self.coords) {
+            add(&id.to_le_bytes());
+            for c in coords {
+                add(&c.to_le_bytes());
+            }
+        }
+        for element in &self.elements {
+            add(&element.id.to_le_bytes());
+            for node in &element.nodes {
+                add(&node.to_le_bytes());
+            }
+        }
+        hash
+    }
+
     pub fn node_ids(&self) -> &[NodeId] {
         &self.node_ids
     }
@@ -492,6 +517,17 @@ mod tests {
                 ("Wood", vec![5]),
             ]
         );
+    }
+
+    #[test]
+    fn the_fingerprint_changes_with_the_mesh() {
+        let mut mesh = FeMesh::default();
+        mesh.set_node(1, [0.0, 0.0, 0.0]);
+        mesh.set_node(2, [1.0, 0.0, 0.0]);
+        let same = mesh.clone();
+        assert_eq!(mesh.fingerprint(), same.fingerprint());
+        mesh.set_node(2, [1.0, 0.5, 0.0]);
+        assert_ne!(mesh.fingerprint(), same.fingerprint());
     }
 
     #[test]

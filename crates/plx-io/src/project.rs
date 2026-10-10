@@ -438,6 +438,15 @@ mod tests {
                 plx_results::transformation::SymmetryPlane::Y,
             )],
             shown: Some(("STRESS".into(), "MISES".into())),
+            // The colour scale the results were shown with.
+            view: plx_results::saved_view::SavedView {
+                color_scale: Some(plx_model::ColorScale {
+                    spectrum: plx_model::ColorSpectrum::Viridis,
+                    manual: Some([-1.5, 250.0]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
             ..Default::default()
         });
         save_project(&path, None, &mesh, &model, Some(&bound)).unwrap();

@@ -2,7 +2,7 @@ use bytemuck::{Pod, Zeroable};
 use wgpu::util::DeviceExt;
 
 use crate::camera::Camera;
-use crate::contour::{MAX_LEVELS, band_colors};
+use crate::contour::PALETTE_SLOTS;
 use crate::mesh::{RenderMesh, Vertex};
 use crate::section::ClipPlane;
 
@@ -36,7 +36,7 @@ struct Globals {
     clip: [f32; 4],
     /// x: 1 when the section view is on, y: how far behind the plane surfaces still show.
     clip_options: [f32; 4],
-    palette: [[f32; 4]; MAX_LEVELS as usize],
+    palette: [[f32; 4]; PALETTE_SLOTS as usize],
 }
 
 /// A vertex or index buffer with its element count; `None` when there is nothing to draw.
@@ -56,18 +56,40 @@ struct GpuMesh {
 }
 
 /// What the viewport draws besides the shaded surfaces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DisplayOptions {
     pub mesh_edges: bool,
-    /// Colour surfaces by their normalized vertex scalars in this many bands.
-    pub contour_levels: Option<u32>,
+    /// Colour surfaces by their normalized vertex scalars in these bands.
+    pub contour: Option<ContourPalette>,
+}
+
+/// Colours of the contour bands, minimum first, each covering an equal share of the
+/// normalized range; the out-of-range colours of a manual scale are bands of their own.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContourPalette {
+    colors: [[f32; 3]; PALETTE_SLOTS as usize],
+    count: u32,
+}
+
+impl ContourPalette {
+    /// The first [`PALETTE_SLOTS`] colours; at least two are needed.
+    pub fn new(colors: &[[f32; 3]]) -> Self {
+        let mut palette = Self {
+            colors: [[0.0; 3]; PALETTE_SLOTS as usize],
+            count: colors.len().clamp(2, PALETTE_SLOTS as usize) as u32,
+        };
+        for (slot, color) in palette.colors.iter_mut().zip(colors) {
+            *slot = *color;
+        }
+        palette
+    }
 }
 
 impl Default for DisplayOptions {
     fn default() -> Self {
         Self {
             mesh_edges: true,
-            contour_levels: None,
+            contour: None,
         }
     }
 }
@@ -337,9 +359,7 @@ impl ViewportRenderer {
                 WIDE_EDGE_PX,
             ],
             contour: [
-                options
-                    .contour_levels
-                    .map_or(0.0, |n| n.clamp(2, MAX_LEVELS) as f32),
+                options.contour.map_or(0.0, |p| p.count as f32),
                 0.0,
                 0.0,
                 0.0,
@@ -354,7 +374,7 @@ impl ViewportRenderer {
                 0.0,
                 0.0,
             ],
-            palette: palette(options.contour_levels),
+            palette: palette(options.contour),
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -494,10 +514,10 @@ fn upload(device: &wgpu::Device, mesh: &RenderMesh) -> GpuMesh {
     }
 }
 
-fn palette(levels: Option<u32>) -> [[f32; 4]; MAX_LEVELS as usize] {
-    let mut palette = [[0.0; 4]; MAX_LEVELS as usize];
-    if let Some(levels) = levels {
-        for (slot, [r, g, b]) in palette.iter_mut().zip(band_colors(levels)) {
+fn palette(contour: Option<ContourPalette>) -> [[f32; 4]; PALETTE_SLOTS as usize] {
+    let mut palette = [[0.0; 4]; PALETTE_SLOTS as usize];
+    if let Some(contour) = contour {
+        for (slot, [r, g, b]) in palette.iter_mut().zip(contour.colors) {
             *slot = [r, g, b, 1.0];
         }
     }

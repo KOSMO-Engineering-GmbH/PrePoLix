@@ -47,7 +47,8 @@ have it. A `.frd` file opened without its input file shows one part per material
     step.],
   [Factor], [The deformation scale factor; editable for #ui("User defined").],
   [Show Undeformed], [Draws the undeformed outline behind the deformed shape.],
-  [Color levels], [Number of colour bands (2 to 24).],
+  [Color levels], [Number of colour bands (2 to 24). The #ui("...") button next to it opens the
+    colour scale (@color-scale).],
   [Transformations], [Symmetries and patterns (@transformations).],
   [Step, Increment], [The displayed increment, with buttons for the first, previous, next and
     last increment.],
@@ -63,6 +64,38 @@ The legend shows the field, the unit and the range in nine colour bands from blu
 with its frequency or buckling factor, and the deformation scale factor. Labels mark the node with
 the maximum (and optionally the minimum) value. Legend, info block and labels can be dragged.
 Which of them appear is set under #menu("Tools", "Settings ...", "Post-processing").
+
+== Color scale <color-scale>
+
+Each result file has its own colour scale. Double-click the legend, choose #ui("Color Scale...")
+in its context menu, click #ui("...") next to #ui("Color levels") on the results toolbar, or use
+#menu("Results", "Color Scale ..."). Changes show at once; #ui("Cancel") restores the scale the
+dialog was opened with and #ui("Defaults") returns to PrePoMax's rainbow with automatic limits.
+
+#screenshot("color-scale-dialog.png", [Color Scale dialog with manual limits: values above 40 MPa
+and below 5 MPa are grey])
+
+#fields(
+  [Spectrum], [Cool-warm, Rainbow (default), Rainbow desaturated, Turbo, Jet, Warm, Cool,
+    Cividis, Viridis, Plasma, Black body, Inferno, Kindlmann or Grayscale, as in PrePoMax.],
+  [Brightness], [Lightens the colours towards white, from 0 to 1 (default 0.2).],
+  [Reverse colors], [Puts the maximum colour at the minimum and vice versa.],
+  [Number of colors], [The colour bands, the same as #ui("Color levels") on the toolbar.],
+  [Min/max limit type], [#ui("Automatic") spans the smallest to the largest shown value (over
+    all frames of an animation if it is set so). #ui("Manual") uses #ui("Minimum") and
+    #ui("Maximum"); the values are kept exactly as typed. The minimum must be smaller than the
+    maximum.],
+  [Above maximum, Below minimum], [Colour of the values beyond the manual limits (dark and light
+    grey by default). The legend shows them as an extra box labelled with the largest or
+    smallest value unless #ui("Show in legend") is cleared.],
+)
+
+The last line of the legend title says #ui("Automatic") or #ui("Manual"). When the result is
+bound to the project (@bind-result), its colour scale is saved in the project file and restored
+with it; a result file that is read again, for example after another run, keeps its scale.
+
+#screenshot("color-scale-cool-warm.png", [The same stress in the Cool-warm spectrum with
+automatic limits])
 
 #screenshot("results-mode.png", [First mode shape of a frequency step])
 

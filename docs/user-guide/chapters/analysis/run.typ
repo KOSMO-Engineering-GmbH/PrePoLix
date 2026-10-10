@@ -61,12 +61,25 @@ bound, and #ui("Results") in its context menu opens the bound result again.
 What you defined on the bound result is saved with it and comes back as you left it: derived
 field and history outputs, transformations, hot spots, the reference points, coordinate systems
 and planes of the results, result paths and plane results, and the increment, field and component
-shown. PrePoLix takes them from the open result each time the project is saved.
+shown. The view comes back too: the camera of the #ui("Results") tab, #menu("View", "Mesh Edges"),
+the deformation and its factor, #ui("Show Undeformed"), the color levels, hidden parts, the
+annotations of the query tool and the plots of result paths. PrePoLix takes all of this from the
+open result each time the project is saved.
 
 #screenshot("bound-result-restored.png", [A bound result reopened with its symmetry
   transformation and the component shown when the project was saved])
 
 #screenshot("bind-result.png", [Context menu of an analysis with a bound result])
+
+When the analysis runs again, its new results take over all of this from the results before,
+whether they were bound or only open, so the view, transformations, paths and plots stay as they
+were. Annotations of the query tool and hot spots on picked nodes or faces refer to nodes and
+elements of the mesh; they are kept only if the mesh did not change. After remeshing they are
+dropped, reference points placed on picked nodes or faces stay at their last position, and the
+output pane lists what was dropped.
+
+#screenshot("rerun-keeps-view.png", [The results of a new run, shown from the front without mesh
+  edges like the results before])
 
 #ui("Remove Bound Result") in the context menu of #ui("Analysis-1") removes the bound result;
 save the project to drop it from the file. Opening the results of the same run again does not bind

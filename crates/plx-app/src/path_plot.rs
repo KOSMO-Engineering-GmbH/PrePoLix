@@ -70,6 +70,37 @@ pub struct PathPlot {
 }
 
 impl PathPlot {
+    /// The plot as saved with results bound to a project.
+    pub fn saved(&self) -> plx_results::saved_view::SavedPathPlot {
+        let p = &self.placement;
+        plx_results::saved_view::SavedPathPlot {
+            path: self.path.clone(),
+            offset: p.offset.map(|o| [o.x, o.y]),
+            size: [p.size.x, p.size.y],
+            on_path: p.on_path,
+            height: p.height,
+            title: p.title.clone(),
+            x_label: p.x_label.clone(),
+            y_label: p.y_label.clone(),
+            y_range: p.y_range,
+        }
+    }
+
+    pub fn from_saved(saved: &plx_results::saved_view::SavedPathPlot) -> Self {
+        let mut plot = Self::new(saved.path.clone());
+        plot.placement = Placement {
+            offset: saved.offset.map(|[x, y]| vec2(x, y)),
+            size: vec2(saved.size[0], saved.size[1]),
+            on_path: saved.on_path,
+            height: saved.height,
+            title: saved.title.clone(),
+            x_label: saved.x_label.clone(),
+            y_label: saved.y_label.clone(),
+            y_range: saved.y_range,
+        };
+        plot
+    }
+
     pub fn new(path: String) -> Self {
         Self {
             path,
@@ -347,23 +378,37 @@ fn draw_on_path(
             None => curve.clear(),
         }
     }
-    // Labels at the smallest and largest value, and the title past the larger end.
+    // Labels at the smallest and largest value, and the title beside the middle of the path,
+    // beyond everything drawn on its side so that it never covers the curve or a label.
     let font = egui::FontId::proportional(13.0);
     let finite = || (plot.values.iter().enumerate()).filter(|(_, v)| v.is_finite());
     let min = finite().min_by(|x, y| x.1.total_cmp(y.1));
     let max = finite().max_by(|x, y| x.1.total_cmp(y.1));
-    let label = |index: usize, value: f64| {
+    let title_side = if extreme >= 0.0 { normal } else { -normal };
+    // How far a point lies from the path towards the title.
+    let reach = |p: Pos2| (p - a).dot(title_side);
+    let mut extent = (points.iter().flatten())
+        .map(|(_, p)| reach(*p))
+        .fold(0.0, f32::max);
+    let mut label = |index: usize, value: f64| {
         let Some((_, p)) = points[index] else {
             return;
         };
         let side = if value >= 0.0 { normal } else { -normal };
-        painter.text(
+        let rect = painter.text(
             p + side * 4.0,
             anchor(side),
             format_value(value as f32),
             font.clone(),
             Color32::BLACK,
         );
+        let corners = [
+            rect.left_top(),
+            rect.right_top(),
+            rect.left_bottom(),
+            rect.right_bottom(),
+        ];
+        extent = corners.into_iter().map(reach).fold(extent, f32::max);
     };
     if let Some((i, &v)) = max {
         label(i, v);
@@ -371,8 +416,7 @@ fn draw_on_path(
     if let Some((i, &v)) = min.filter(|(i, _)| Some(*i) != max.map(|m| m.0)) {
         label(i, v);
     }
-    let title_side = if extreme >= 0.0 { normal } else { -normal };
-    let title_at = a + title_side * (extreme.abs() as f32 * scale + 22.0);
+    let title_at = a + along * 0.5 + title_side * (extent + 8.0);
     painter.text(
         title_at,
         anchor(title_side),

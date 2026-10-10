@@ -10,7 +10,6 @@ use plx_mesher::{CadEntity, GeometryDisplay};
 #[cfg(test)]
 use plx_model::SectionKind;
 use plx_model::{FeModel, Finding, Geometry, MeshCheck, UnitSystem};
-use plx_render::contour::normalize;
 use plx_render::{
     ClipPlane, RenderMesh, SectionCells, SectionValues, Vertex, lighten, part_color,
     part_render_mesh, section_mesh, section_values, wireframe_edges,
@@ -382,7 +381,18 @@ impl Model {
                 .filter(|(_, part)| !part.contours)
                 .map(|(index, _)| index)
                 .collect(),
+            mesh: Some(self.mesh.fingerprint()),
             ..view.settings()
+        })
+        .map(|mut settings| {
+            let saved = &mut settings.view;
+            saved.hidden_parts = (self.parts.iter())
+                .filter(|p| !p.visible)
+                .map(|p| p.name.clone())
+                .collect();
+            saved.annotations = self.query_annotations.iter().map(Into::into).collect();
+            saved.path_plots = self.path_plots.iter().map(|p| p.saved()).collect();
+            settings
         })
     }
 
@@ -397,6 +407,14 @@ impl Model {
         self.fe.result_paths = settings.result_paths.clone();
         self.fe.result_planes = settings.result_planes.clone();
         self.hot_spots.definitions = settings.hot_spots.clone();
+        let view = &settings.view;
+        for part in &mut self.parts {
+            part.visible = !view.hidden_parts.contains(&part.name);
+        }
+        self.query_annotations = view.annotations.iter().cloned().map(Into::into).collect();
+        self.path_plots = (view.path_plots.iter())
+            .map(crate::path_plot::PathPlot::from_saved)
+            .collect();
         self.set_contours(&settings.plain_parts, false);
         match &mut self.results {
             Some(view) => view.restore(settings, &self.mesh),
@@ -737,7 +755,7 @@ impl Model {
                 deformed = view.show_undeformed;
             }
             if let (Some(values), Some(legend)) = (view.shown_values(), view.legend()) {
-                scalars = Some(normalize(&values, legend.min, legend.max));
+                scalars = Some(legend.normalize(&values));
             }
         }
         (coords, scalars, deformed)
@@ -754,7 +772,7 @@ impl Model {
             .map(|instance| {
                 let scalars = (view.shown_values_on(&instance))
                     .zip(legend.as_ref())
-                    .map(|(values, legend)| normalize(&values, legend.min, legend.max));
+                    .map(|(values, legend)| legend.normalize(&values));
                 (instance, scalars)
             })
             .collect()
@@ -1862,6 +1880,9 @@ mod tests {
 
     #[test]
     fn bound_results_open_with_what_was_defined_on_them() {
+        let mut model = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
         let settings = plx_results::ResultsSettings {
             field_outputs: vec![plx_results::FieldOutput {
                 name: "SCALED".into(),
@@ -1877,13 +1898,32 @@ mod tests {
             reference_points: vec![plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])],
             result_paths: vec![plx_model::ResultPath::new("Path-1")],
             plain_parts: vec![0],
+            mesh: Some(model.mesh.fingerprint()),
             increment: 0,
             shown: Some(("SCALED".into(), "VALUE".into())),
+            view: plx_results::saved_view::SavedView {
+                deformation: Some(plx_results::saved_view::SavedDeformation::TrueScale),
+                user_scale: Some(2.5),
+                show_undeformed: Some(false),
+                levels: Some(12),
+                color_scale: Some(plx_model::ColorScale {
+                    spectrum: plx_model::ColorSpectrum::CoolWarm,
+                    levels: 12,
+                    manual: Some([0.5, 3.0]),
+                    ..Default::default()
+                }),
+                hidden_parts: vec![model.parts[0].name.clone()],
+                annotations: vec![
+                    plx_results::saved_view::SavedAnnotation::Node(99),
+                    plx_results::saved_view::SavedAnnotation::Distance([1, 99]),
+                ],
+                path_plots: vec![crate::path_plot::PathPlot::new("Path-1".into()).saved()],
+                // Camera and mesh edges belong to the 3D view, not to the results.
+                camera: None,
+                mesh_edges: None,
+            },
             ..Default::default()
         };
-        let mut model = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC)
-            .unwrap()
-            .model;
         assert_eq!(
             model.restore_results_settings(&settings),
             Vec::<String>::new()
