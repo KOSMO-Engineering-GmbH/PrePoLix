@@ -4785,11 +4785,26 @@ fn results_tool_bar(
         changed |= view.deformation != before;
         ui.label("Factor");
         let user = view.deformation == Deformation::UserDefined;
-        let mut factor = if user { view.user_scale } else { view.scale() };
-        let response = ui.add_enabled(
-            user,
-            numeric::drag_value(&mut factor).speed(0.1).max_decimals(4),
-        );
+        let mut factor = if user {
+            view.user_scale
+        } else {
+            f64::from(view.scale())
+        };
+        // Fixed width: a long factor must not push the items on its right around.
+        let width = 80.0;
+        let height = ui.spacing().interact_size.y;
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        let mut field = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+        field.set_clip_rect(rect.intersect(ui.clip_rect()));
+        if !user {
+            field.disable();
+        }
+        let response = field
+            .add_sized(
+                [width, height],
+                numeric::drag_value(&mut factor).speed(0.1).max_decimals(4),
+            )
+            .on_hover_text(numeric::format_physical(factor));
         if user && response.changed() {
             view.user_scale = factor;
             changed = true;
