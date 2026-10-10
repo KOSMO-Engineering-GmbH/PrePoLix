@@ -85,6 +85,9 @@ pub struct Model {
     section_cells: std::sync::OnceLock<Vec<SectionCells>>,
     /// The exploded view: parts drawn and picked moved apart.
     pub explosion: Explosion,
+    /// What the query tool left in the view; they refer to the mesh by ids, so a new mesh
+    /// drops them.
+    pub query_annotations: Vec<crate::query::Annotation>,
     /// Node indices of each part and the part of each node, built when first needed.
     part_nodes: std::sync::OnceLock<PartNodes>,
     /// Lookups to the CAD entities of a mesh generated from geometry, built when first
@@ -368,6 +371,7 @@ impl Model {
             skins,
             section_cells: Default::default(),
             explosion: Explosion::default(),
+            query_annotations: Vec::new(),
             part_nodes: Default::default(),
             checks: Default::default(),
             cad_index: Default::default(),
@@ -436,6 +440,7 @@ impl Model {
         self.part_nodes = Default::default();
         self.checks = Default::default();
         self.cad_index = Default::default();
+        self.query_annotations.clear();
         // Reference points at the centre of a selection follow the new mesh.
         self.fe.update_reference_points(&self.mesh);
         // The exploded view stays on and is laid out anew for the new mesh.

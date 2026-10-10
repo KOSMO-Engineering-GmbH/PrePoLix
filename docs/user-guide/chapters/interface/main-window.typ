@@ -42,6 +42,9 @@ From top to bottom the window contains:
     active (@section-view).],
   [Exploded View], [A left click switches the exploded view on and off, a right click opens its
     settings (@exploded-view).],
+  [Query], [Opens and closes the query window (@query). The button stays pressed while it is
+    open.],
+  [Remove Annotations], [Deletes all query labels of the model shown.],
 )
 
 Buttons that cannot be used at the moment are greyed out, for example #ui("Save") without a

@@ -48,6 +48,10 @@ pub enum Icon {
     Transformation,
     /// Cross of a remove button.
     Remove,
+    /// PrePoMax's query: a mouse pointer with a question mark.
+    Query,
+    /// A label of the query crossed out: remove all annotations.
+    RemoveAnnotations,
 }
 
 /// Flat toolbar button in the Windows style: frame only while hovered or checked.
@@ -398,6 +402,34 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
             line(shapes, &[p(3.5, 3.5), p(12.5, 12.5)], 2.2, color);
             line(shapes, &[p(12.5, 3.5), p(3.5, 12.5)], 2.2, color);
         }
+        Icon::Query => {
+            pointer(shapes, r);
+            question_mark(shapes, r);
+        }
+        Icon::RemoveAnnotations => {
+            // A query label: framed text with the arrow to its point.
+            line(shapes, &[p(3.0, 9.5), p(1.0, 14.5)], 1.0, OUTLINE);
+            polygon(
+                shapes,
+                vec![p(1.0, 14.8), p(0.6, 12.0), p(2.6, 12.8)],
+                OUTLINE,
+                OUTLINE,
+            );
+            let label = Rect::from_min_max(p(2.5, 1.5), p(14.5, 9.5));
+            shapes.push(Shape::rect_filled(label, 0.0, Color32::WHITE));
+            shapes.push(Shape::rect_stroke(
+                label,
+                0.0,
+                Stroke::new(1.0, OUTLINE),
+                egui::StrokeKind::Inside,
+            ));
+            for (y, end) in [(4.0, 12.0), (7.0, 9.5)] {
+                line(shapes, &[p(4.5, y), p(end, y)], 1.0, OUTLINE);
+            }
+            let red = Color32::from_rgb(210, 40, 40);
+            line(shapes, &[p(8.5, 8.5), p(14.5, 14.5)], 2.0, red);
+            line(shapes, &[p(14.5, 8.5), p(8.5, 14.5)], 2.0, red);
+        }
         Icon::First | Icon::Previous | Icon::Next | Icon::Last => {
             let forward = matches!(icon, Icon::Next | Icon::Last);
             let s = if forward { 1.0 } else { -1.0 };
@@ -423,6 +455,50 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
             }
         }
     }
+}
+
+/// The mouse pointer of the query icon: white with a dark outline, its tip top left.
+fn pointer(shapes: &mut Vec<Shape>, r: Rect) {
+    let p = |x: f32, y: f32| pos2(r.left() + x, r.top() + y);
+    let outline = [
+        p(1.5, 1.0),
+        p(1.5, 13.0),
+        p(4.4, 10.3),
+        p(6.6, 15.0),
+        p(8.6, 14.1),
+        p(6.4, 9.6),
+        p(10.2, 9.6),
+    ];
+    // The outline is not convex, so the fill is a fan of triangles from the tip plus the
+    // tail as a quad.
+    let mut fill = egui::Mesh::default();
+    for point in outline {
+        fill.colored_vertex(point, Color32::WHITE);
+    }
+    for [a, b, c] in [[0, 1, 2], [0, 2, 5], [0, 5, 6], [2, 3, 4], [2, 4, 5]] {
+        fill.add_triangle(a, b, c);
+    }
+    shapes.push(Shape::mesh(fill));
+    let mut closed = outline.to_vec();
+    closed.push(outline[0]);
+    line(shapes, &closed, 1.0, Color32::BLACK);
+}
+
+/// The question mark of the query icon, top right, in the accent colour.
+fn question_mark(shapes: &mut Vec<Shape>, r: Rect) {
+    let p = |x: f32, y: f32| pos2(r.left() + x, r.top() + y);
+    let center = p(12.6, 3.6);
+    let radius = 2.4;
+    // From the left through the top to the lower right, then down the stem.
+    let mut hook: Vec<Pos2> = (0..=10)
+        .map(|i| {
+            let angle = std::f32::consts::PI * (1.0 + 0.135 * i as f32);
+            center + vec2(angle.cos(), angle.sin()) * radius
+        })
+        .collect();
+    hook.push(p(12.6, 7.2));
+    line(shapes, &hook, 1.6, ACCENT);
+    shapes.push(Shape::circle_filled(p(12.6, 9.4), 1.0, ACCENT));
 }
 
 /// Isometric unit cube; x to the lower right, z to the lower left, y up.

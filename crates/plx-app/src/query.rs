@@ -1,7 +1,8 @@
 //! PrePoMax's Query tool (Tools > Query): clicks in the 3D view write what was hit to the
 //! output pane, as aligned lines like PrePoMax does, and leave an annotation in the view.
 //! Nodes, elements and parts are queried with one click; distances, angles and circles
-//! need two or three nodes.
+//! need two or three nodes. As in PrePoMax the annotations stay when the window is closed;
+//! a right click on one deletes it, Remove Annotations deletes them all.
 
 use glam::{DVec3, Vec3};
 use plx_mesh::NodeId;
@@ -51,7 +52,7 @@ impl QueryKind {
 /// What a query left in the 3D view. Nodes are kept by id, so the annotation follows the
 /// shown deformation and stays where it belongs when another increment is shown.
 #[derive(Clone, Debug, PartialEq)]
-enum Annotation {
+pub enum Annotation {
     Node(NodeId),
     Element(usize),
     Part(usize),
@@ -65,22 +66,36 @@ enum Annotation {
 #[derive(Default)]
 pub struct QueryMarks {
     pub markers: Vec<Marker>,
+    /// The annotation each marker belongs to, as index into the annotations shown.
+    pub owners: Vec<usize>,
     pub lines: Vec<Vec<Vec3>>,
     pub points: Vec<Vec3>,
 }
 
 pub enum QueryAction {
     Open,
-    /// The annotations changed, so the overlay has to be rebuilt.
+    /// The overlay has to be rebuilt, e.g. for the nodes picked so far.
     Changed,
+    /// A query that needs no click left this annotation.
+    Add(Annotation),
+    /// Remove Annotations: all of the shown model.
+    RemoveAll,
     Close,
+}
+
+/// What a click in the 3D view did.
+pub enum QueryClick {
+    Nothing,
+    /// A node was picked for a query that needs more of them.
+    Picked,
+    /// The query is complete and left this annotation.
+    Added(Annotation),
 }
 
 pub struct QueryWindow {
     kind: QueryKind,
     /// Nodes picked so far for a distance, angle or circle.
     picked: Vec<NodeId>,
-    annotations: Vec<Annotation>,
 }
 
 impl Default for QueryWindow {
@@ -88,7 +103,6 @@ impl Default for QueryWindow {
         Self {
             kind: QueryKind::Node,
             picked: Vec::new(),
-            annotations: Vec::new(),
         }
     }
 }
@@ -126,8 +140,7 @@ impl QueryWindow {
                             }
                             QueryKind::BoundingBox => {
                                 output.extend(bounding_box_lines(model));
-                                self.annotations.push(Annotation::BoundingBox);
-                                action = QueryAction::Changed;
+                                action = QueryAction::Add(Annotation::BoundingBox);
                             }
                             _ => {}
                         }
@@ -151,10 +164,12 @@ impl QueryWindow {
                     if ui.button("Close").clicked() {
                         action = QueryAction::Close;
                     }
-                    if ui.button("Clear").clicked() {
-                        self.annotations.clear();
+                    let clear = egui::Button::new("Remove Annotations");
+                    let any = model.is_some_and(|m| !m.query_annotations.is_empty())
+                        || !self.picked.is_empty();
+                    if ui.add_enabled(any, clear).clicked() {
                         self.picked.clear();
-                        action = QueryAction::Changed;
+                        action = QueryAction::RemoveAll;
                     }
                 });
             });
@@ -164,56 +179,59 @@ impl QueryWindow {
         action
     }
 
-    /// A click in the 3D view: writes the queried values and adds the annotation. Returns
-    /// whether the overlay has to be rebuilt.
-    pub fn click(&mut self, model: &Model, hit: Option<&Hit>, output: &mut Vec<String>) -> bool {
+    /// A click in the 3D view: writes the queried values and returns the annotation.
+    pub fn click(
+        &mut self,
+        model: &Model,
+        hit: Option<&Hit>,
+        output: &mut Vec<String>,
+    ) -> QueryClick {
         let Some(hit) = hit else {
-            return false;
+            return QueryClick::Nothing;
         };
         match self.kind {
             QueryKind::Element => {
                 let Some(element) = model.hit_element(hit) else {
-                    return false;
+                    return QueryClick::Nothing;
                 };
                 output.extend(element_lines(model, element));
-                self.annotations.push(Annotation::Element(element));
+                QueryClick::Added(Annotation::Element(element))
             }
             QueryKind::Part => {
                 output.extend(part_lines(model, hit.part));
-                self.annotations.push(Annotation::Part(hit.part));
+                QueryClick::Added(Annotation::Part(hit.part))
             }
-            QueryKind::Assembly | QueryKind::BoundingBox => return false,
+            QueryKind::Assembly | QueryKind::BoundingBox => QueryClick::Nothing,
             QueryKind::Node | QueryKind::Distance | QueryKind::Angle | QueryKind::Circle => {
                 let node = model.hit_node(hit);
                 self.picked.push(node);
                 if self.picked.len() < self.kind.nodes_needed() {
-                    return true;
+                    return QueryClick::Picked;
                 }
                 let picked = std::mem::take(&mut self.picked);
-                match self.kind {
+                QueryClick::Added(match self.kind {
                     QueryKind::Node => {
                         output.extend(node_lines(model, node));
-                        self.annotations.push(Annotation::Node(node));
+                        Annotation::Node(node)
                     }
                     QueryKind::Distance => {
                         let nodes = [picked[0], picked[1]];
                         output.extend(distance_lines(model, nodes));
-                        self.annotations.push(Annotation::Distance(nodes));
+                        Annotation::Distance(nodes)
                     }
                     QueryKind::Angle => {
                         let nodes = [picked[0], picked[1], picked[2]];
                         output.extend(angle_lines(model, nodes));
-                        self.annotations.push(Annotation::Angle(nodes));
+                        Annotation::Angle(nodes)
                     }
                     _ => {
                         let nodes = [picked[0], picked[1], picked[2]];
                         output.extend(circle_lines(model, nodes));
-                        self.annotations.push(Annotation::Circle(nodes));
+                        Annotation::Circle(nodes)
                     }
-                }
+                })
             }
         }
-        true
     }
 
     /// What a click would query: the nearest node, or the edges of the hit face.
@@ -238,145 +256,150 @@ impl QueryWindow {
         }
     }
 
-    /// The annotations and the nodes picked so far, in render coordinates of the shown
-    /// model.
-    pub fn marks(&self, model: &Model) -> QueryMarks {
-        let mut marks = QueryMarks::default();
-        let position = |id: NodeId| model.node_position(model.mesh.node_index(id)?);
-        let shown = |id: NodeId| Some(DVec3::from(model.shown_node(id)?));
-        let units = model.units();
-        let length = units.unit(Quantity::Length);
-        marks.points = self.picked.iter().filter_map(|&id| position(id)).collect();
-        for annotation in &self.annotations {
-            match annotation {
-                Annotation::Node(id) => {
-                    let Some(p) = position(*id) else { continue };
-                    let mut text = format!("Node id: {id}");
-                    if let Some((value, unit)) = field_value(model, *id) {
-                        text.push_str(&format!("\nValue: {value} {unit}"));
-                    }
-                    marks.points.push(p);
-                    marks.markers.push(Marker { position: p, text });
+    /// The nodes picked so far.
+    pub fn picked(&self) -> &[NodeId] {
+        &self.picked
+    }
+}
+
+/// The annotations and the nodes picked so far, in render coordinates of the shown model.
+pub fn marks(model: &Model, picked: &[NodeId]) -> QueryMarks {
+    let mut marks = QueryMarks::default();
+    let position = |id: NodeId| model.node_position(model.mesh.node_index(id)?);
+    let shown = |id: NodeId| Some(DVec3::from(model.shown_node(id)?));
+    let units = model.units();
+    let length = units.unit(Quantity::Length);
+    marks.points = picked.iter().filter_map(|&id| position(id)).collect();
+    for (owner, annotation) in model.query_annotations.iter().enumerate() {
+        match annotation {
+            Annotation::Node(id) => {
+                let Some(p) = position(*id) else { continue };
+                let mut text = format!("Node id: {id}");
+                if let Some((value, unit)) = field_value(model, *id) {
+                    text.push_str(&format!("\nValue: {value} {unit}"));
                 }
-                Annotation::Element(index) => {
-                    let Some(element) = model.mesh.elements().get(*index) else {
-                        continue;
-                    };
-                    let outline = model.element_outline(*index);
-                    let Some(center) = centroid(&outline) else {
-                        continue;
-                    };
-                    marks.lines.extend(outline.iter().map(|&[a, b]| vec![a, b]));
-                    marks.markers.push(Marker {
-                        position: center,
-                        text: format!("Element id: {}\n{}", element.id, element.type_name),
-                    });
+                marks.points.push(p);
+                marks.markers.push(Marker { position: p, text });
+            }
+            Annotation::Element(index) => {
+                let Some(element) = model.mesh.elements().get(*index) else {
+                    continue;
+                };
+                let outline = model.element_outline(*index);
+                let Some(center) = centroid(&outline) else {
+                    continue;
+                };
+                marks.lines.extend(outline.iter().map(|&[a, b]| vec![a, b]));
+                marks.markers.push(Marker {
+                    position: center,
+                    text: format!("Element id: {}\n{}", element.id, element.type_name),
+                });
+            }
+            Annotation::Part(index) => {
+                let Some(part) = model.parts.get(*index) else {
+                    continue;
+                };
+                let Some((min, max)) = part.bounds else {
+                    continue;
+                };
+                marks.markers.push(Marker {
+                    position: (min + max) * 0.5,
+                    text: format!("Part: {}", part.name),
+                });
+            }
+            Annotation::Distance([a, b]) => {
+                let (Some(pa), Some(pb)) = (position(*a), position(*b)) else {
+                    continue;
+                };
+                let distance = match (shown(*a), shown(*b)) {
+                    (Some(a), Some(b)) => a.distance(b),
+                    _ => continue,
+                };
+                marks.points.extend([pa, pb]);
+                marks.lines.push(vec![pa, pb]);
+                marks.markers.push(Marker {
+                    position: (pa + pb) * 0.5,
+                    text: format!("Distance: {} {length}", number(distance)),
+                });
+            }
+            Annotation::Angle([a, b, c]) => {
+                let (Some(pa), Some(pb), Some(pc)) = (position(*a), position(*b), position(*c))
+                else {
+                    continue;
+                };
+                let angle = match (shown(*a), shown(*b), shown(*c)) {
+                    (Some(a), Some(b), Some(c)) => angle_between(a, b, c),
+                    _ => continue,
+                };
+                marks.points.extend([pa, pb, pc]);
+                marks.lines.push(vec![pa, pb, pc]);
+                marks.markers.push(Marker {
+                    position: pb,
+                    text: format!("Angle: {} °", number(angle)),
+                });
+            }
+            Annotation::Circle([a, b, c]) => {
+                let (Some(pa), Some(pb), Some(pc)) = (position(*a), position(*b), position(*c))
+                else {
+                    continue;
+                };
+                let Some((center, radius, axis)) = (match (shown(*a), shown(*b), shown(*c)) {
+                    (Some(a), Some(b), Some(c)) => circle_through(a, b, c),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                marks.points.extend([pa, pb, pc]);
+                marks
+                    .lines
+                    .push(circle_polyline(model, center, radius, axis));
+                marks.markers.push(Marker {
+                    position: model.to_render(center.to_array()),
+                    text: format!("Radius: {} {length}", number(radius)),
+                });
+            }
+            Annotation::BoundingBox => {
+                let Some((min, max)) = model.visible_bounds() else {
+                    continue;
+                };
+                let corner = |i: usize| {
+                    Vec3::new(
+                        if i & 1 == 0 { min.x } else { max.x },
+                        if i & 2 == 0 { min.y } else { max.y },
+                        if i & 4 == 0 { min.z } else { max.z },
+                    )
+                };
+                for (a, b) in [
+                    (0, 1),
+                    (1, 3),
+                    (3, 2),
+                    (2, 0),
+                    (4, 5),
+                    (5, 7),
+                    (7, 6),
+                    (6, 4),
+                    (0, 4),
+                    (1, 5),
+                    (2, 6),
+                    (3, 7),
+                ] {
+                    marks.lines.push(vec![corner(a), corner(b)]);
                 }
-                Annotation::Part(index) => {
-                    let Some(part) = model.parts.get(*index) else {
-                        continue;
-                    };
-                    let Some((min, max)) = part.bounds else {
-                        continue;
-                    };
-                    marks.markers.push(Marker {
-                        position: (min + max) * 0.5,
-                        text: format!("Part: {}", part.name),
-                    });
-                }
-                Annotation::Distance([a, b]) => {
-                    let (Some(pa), Some(pb)) = (position(*a), position(*b)) else {
-                        continue;
-                    };
-                    let distance = match (shown(*a), shown(*b)) {
-                        (Some(a), Some(b)) => a.distance(b),
-                        _ => continue,
-                    };
-                    marks.points.extend([pa, pb]);
-                    marks.lines.push(vec![pa, pb]);
-                    marks.markers.push(Marker {
-                        position: (pa + pb) * 0.5,
-                        text: format!("Distance: {} {length}", number(distance)),
-                    });
-                }
-                Annotation::Angle([a, b, c]) => {
-                    let (Some(pa), Some(pb), Some(pc)) = (position(*a), position(*b), position(*c))
-                    else {
-                        continue;
-                    };
-                    let angle = match (shown(*a), shown(*b), shown(*c)) {
-                        (Some(a), Some(b), Some(c)) => angle_between(a, b, c),
-                        _ => continue,
-                    };
-                    marks.points.extend([pa, pb, pc]);
-                    marks.lines.push(vec![pa, pb, pc]);
-                    marks.markers.push(Marker {
-                        position: pb,
-                        text: format!("Angle: {} °", number(angle)),
-                    });
-                }
-                Annotation::Circle([a, b, c]) => {
-                    let (Some(pa), Some(pb), Some(pc)) = (position(*a), position(*b), position(*c))
-                    else {
-                        continue;
-                    };
-                    let Some((center, radius, axis)) = (match (shown(*a), shown(*b), shown(*c)) {
-                        (Some(a), Some(b), Some(c)) => circle_through(a, b, c),
-                        _ => None,
-                    }) else {
-                        continue;
-                    };
-                    marks.points.extend([pa, pb, pc]);
-                    marks
-                        .lines
-                        .push(circle_polyline(model, center, radius, axis));
-                    marks.markers.push(Marker {
-                        position: model.to_render(center.to_array()),
-                        text: format!("Radius: {} {length}", number(radius)),
-                    });
-                }
-                Annotation::BoundingBox => {
-                    let Some((min, max)) = model.visible_bounds() else {
-                        continue;
-                    };
-                    let corner = |i: usize| {
-                        Vec3::new(
-                            if i & 1 == 0 { min.x } else { max.x },
-                            if i & 2 == 0 { min.y } else { max.y },
-                            if i & 4 == 0 { min.z } else { max.z },
-                        )
-                    };
-                    for (a, b) in [
-                        (0, 1),
-                        (1, 3),
-                        (3, 2),
-                        (2, 0),
-                        (4, 5),
-                        (5, 7),
-                        (7, 6),
-                        (6, 4),
-                        (0, 4),
-                        (1, 5),
-                        (2, 6),
-                        (3, 7),
-                    ] {
-                        marks.lines.push(vec![corner(a), corner(b)]);
-                    }
-                    let size = (max - min).as_dvec3();
-                    marks.markers.push(Marker {
-                        position: (min + max) * 0.5,
-                        text: format!(
-                            "Size: {} x {} x {} {length}",
-                            number(size.x),
-                            number(size.y),
-                            number(size.z)
-                        ),
-                    });
-                }
+                let size = (max - min).as_dvec3();
+                marks.markers.push(Marker {
+                    position: (min + max) * 0.5,
+                    text: format!(
+                        "Size: {} x {} x {} {length}",
+                        number(size.x),
+                        number(size.y),
+                        number(size.z)
+                    ),
+                });
             }
         }
-        marks
+        marks.owners.resize(marks.markers.len(), owner);
     }
+    marks
 }
 
 /// A value with six significant digits, PrePoMax's default number format of the query.

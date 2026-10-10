@@ -119,6 +119,8 @@ pub struct ViewportResponse {
     pub response: Option<egui::Response>,
     /// The section plane manipulator was dragged.
     pub gizmo: Option<GizmoDrag>,
+    /// The context menu of a query annotation was used.
+    pub annotation: Option<overlay::AnnotationCommand>,
 }
 
 /// The view entries of the 3D view's context menu.
@@ -398,10 +400,12 @@ impl Viewport {
             Color32::WHITE,
         );
         crate::symbols::draw(&painter, rect, &self.camera, &self.symbols);
-        if let Some(axis) = overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels) {
+        let clicked = overlay::draw(ui, rect, &self.camera, &self.overlay, &mut self.labels);
+        if let Some(axis) = clicked.axis {
             self.camera.set_axis_view(axis);
             ui.ctx().request_repaint();
         }
+        result.annotation = clicked.annotation;
         if let Some(gizmo) = &self.gizmo {
             self.gizmo_state.draw(&painter, gizmo, &self.camera, rect);
         }

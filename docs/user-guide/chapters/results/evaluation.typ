@@ -111,11 +111,22 @@ node for the displayed increment, with the maximum in bold.
 
 == Query <query>
 
-#menu("Tools", "Query ...") reads values from the model by clicking: #ui("Vertex/Node"),
+#menu("Tools", "Query ...") or the #ui("Query") button of the toolbar (the mouse pointer with
+the question mark) reads values from the model by clicking: #ui("Vertex/Node"),
 #ui("Facet/Element"), #ui("Part"), #ui("Assembly"), #ui("Bounding box size"), #ui("Distance")
 (two nodes), #ui("Angle") (three nodes) and #ui("Circle") (centre and radius through three
 nodes). The values appear in the output pane and as labels in the 3D view. On results, node
 queries also show the deformed position, the displacement and the value of the displayed
-component. #ui("Clear") removes the labels.
+component.
+
+The labels stay in the view when the query window is closed, as in PrePoMax, and can be dragged
+aside. A right click on a label offers #ui("Delete") for this label and #ui("Delete All
+Annotations"); #ui("Remove Annotations") in the query window, in the #ui("Tools") menu and on the
+toolbar deletes all of them. Each model keeps its own labels: the geometry, the FE model and every
+result file. Meshing again removes those of the FE model, since they refer to node and element
+ids.
 
 #screenshot("query.png", [Querying nodes on a result])
+
+#screenshot("query-annotation-menu.png", [Query labels after closing the window, with the
+  context menu of a label])
