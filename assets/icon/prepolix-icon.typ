@@ -7,7 +7,8 @@
 //
 // Inputs (typst --input key=value):
 //   design  gear | impeller          which part
-//   variant color | mono             mono: shades of one colour on a transparent background
+//   variant color | mono | light     mono: dark grey faces with light lines, light: light grey
+//                                    faces with dark lines; both on a transparent background
 //   detail  full | small             small: no mesh lines, larger part, for 16-32 px
 //
 // The page is 256 pt square; export with --ppi 72 for 256 px.
@@ -16,7 +17,8 @@
 #let variant = sys.inputs.at("variant", default: "color")
 #let detail = sys.inputs.at("detail", default: "full")
 #let small = detail == "small"
-#let mono = variant == "mono"
+#let light-mono = variant == "light"
+#let mono = variant == "mono" or light-mono
 
 #let S = 256.0
 #set page(width: S * 1pt, height: S * 1pt, margin: 0pt, fill: none)
@@ -25,6 +27,8 @@
 
 #let navy = rgb("#0e2448")
 #let mono-ink = rgb("#1b2a3a")
+#let light-face = rgb("#dfe3e8")
+#let light-line = rgb("#3a4350")
 // Contour colours like a CalculiX/PrePoMax result legend, blue (low) to red (high).
 #let legend = (
   rgb("#2a3fe0"), rgb("#1e7ff0"), rgb("#18b8e8"), rgb("#1fd6b0"), rgb("#4ad94a"),
@@ -157,8 +161,10 @@
     // Light from the upper left front.
     let light = calc.clamp(0.3 + 0.7 * (0.75 * n.at(2) - 0.35 * n.at(0) + 0.5 * n.at(1)), 0.0, 1.0)
     let v = calc.pow(f.map(k => values.at(k)).sum() / 4, view.gamma)
-    let col = if mono { mono-ink.lighten((1 - light) * 55%) } else { band(v).darken((1 - light) * 50%) }
+    let col = if light-mono { light-face.darken((1 - light) * if small { 70% } else { 40% }) }
+      else if mono { mono-ink.lighten((1 - light) * 55%) } else { band(v).darken((1 - light) * 50%) }
     let edge = if small { 0.35pt + col }
+      else if light-mono { (paint: light-line, thickness: 0.55pt, join: "round") }
       else if mono { (paint: white.transparentize(30%), thickness: 0.5pt, join: "round") }
       else { (paint: rgb(0, 0, 0, 90), thickness: 0.45pt, join: "round") }
     place(polygon(fill: col, stroke: edge, ..f.map(screen)))
