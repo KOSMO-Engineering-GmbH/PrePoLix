@@ -76,7 +76,7 @@ pub fn show(
 
 /// Monospace text lines in `area`, laid out only where they are visible. The solver output of a
 /// long run has many thousands of lines.
-pub fn lines(ui: &mut Ui, area: egui::ScrollArea, lines: &[String]) {
+pub fn lines<S: AsRef<str>>(ui: &mut Ui, area: egui::ScrollArea, lines: &[S]) {
     let font = TextStyle::Monospace.resolve(ui.style());
     let row_height = ui.fonts_mut(|f| f.row_height(&font));
     ui.scope(|ui| {
@@ -84,7 +84,10 @@ pub fn lines(ui: &mut Ui, area: egui::ScrollArea, lines: &[String]) {
         ui.spacing_mut().item_spacing.y = 0.0;
         area.show_rows(ui, row_height, lines.len(), |ui, rows| {
             for line in &lines[rows] {
-                ui.add(egui::Label::new(egui::RichText::new(line).font(font.clone())).extend());
+                ui.add(
+                    egui::Label::new(egui::RichText::new(line.as_ref()).font(font.clone()))
+                        .extend(),
+                );
             }
         });
     });

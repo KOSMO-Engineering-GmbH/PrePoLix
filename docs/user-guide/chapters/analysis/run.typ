@@ -30,6 +30,13 @@ is finished.
 
 #screenshot("monitor.png", [Monitor after a completed run])
 
+The #ui("Filter") field above the output shows only the lines that contain the text you type,
+ignoring upper and lower case. With "average force", for example, you see the average force of
+every increment one below the other. The filter applies while CalculiX is still running, and
+#ui("Clear") or an empty field shows all lines again.
+
+#screenshot("monitor-filter.png", [Monitor showing only the lines with "average force"])
+
 The status at the end is #ui("completed"), #ui("finished with errors, results available"),
 #ui("failed") or #ui("killed"). If CalculiX failed, PrePoLix looks for known error messages
 in the output and adds a line "Possible cause: ..." with a remedy, for example for distorted
