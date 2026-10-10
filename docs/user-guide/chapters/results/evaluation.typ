@@ -111,8 +111,7 @@ node for the displayed increment, with the maximum in bold.
 
 == Query <query>
 
-#menu("Tools", "Query ...") or the #ui("Query") button of the toolbar (the mouse pointer with
-the question mark) reads values from the model by clicking: #ui("Vertex/Node"),
+#menu("Tools", "Query ...") or the #ui("Query") button of the toolbar (the pipette) reads values from the model by clicking: #ui("Vertex/Node"),
 #ui("Facet/Element"), #ui("Part"), #ui("Assembly"), #ui("Bounding box size"), #ui("Distance")
 (two nodes), #ui("Angle") (three nodes) and #ui("Circle") (centre and radius through three
 nodes). The values appear in the output pane and as labels in the 3D view. On results, node

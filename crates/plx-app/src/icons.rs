@@ -48,7 +48,7 @@ pub enum Icon {
     Transformation,
     /// Cross of a remove button.
     Remove,
-    /// PrePoMax's query: a mouse pointer with a question mark.
+    /// The query: a pipette, which picks values from the model.
     Query,
     /// A label of the query crossed out: remove all annotations.
     RemoveAnnotations,
@@ -402,10 +402,7 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
             line(shapes, &[p(3.5, 3.5), p(12.5, 12.5)], 2.2, color);
             line(shapes, &[p(12.5, 3.5), p(3.5, 12.5)], 2.2, color);
         }
-        Icon::Query => {
-            pointer(shapes, r);
-            question_mark(shapes, r);
-        }
+        Icon::Query => pipette(shapes, r),
         Icon::RemoveAnnotations => {
             // A query label: framed text with the arrow to its point.
             line(shapes, &[p(3.0, 9.5), p(1.0, 14.5)], 1.0, OUTLINE);
@@ -457,48 +454,28 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
     }
 }
 
-/// The mouse pointer of the query icon: white with a dark outline, its tip top left.
-fn pointer(shapes: &mut Vec<Shape>, r: Rect) {
-    let p = |x: f32, y: f32| pos2(r.left() + x, r.top() + y);
-    let outline = [
-        p(1.5, 1.0),
-        p(1.5, 13.0),
-        p(4.4, 10.3),
-        p(6.6, 15.0),
-        p(8.6, 14.1),
-        p(6.4, 9.6),
-        p(10.2, 9.6),
-    ];
-    // The outline is not convex, so the fill is a fan of triangles from the tip plus the
-    // tail as a quad.
-    let mut fill = egui::Mesh::default();
-    for point in outline {
-        fill.colored_vertex(point, Color32::WHITE);
-    }
-    for [a, b, c] in [[0, 1, 2], [0, 2, 5], [0, 5, 6], [2, 3, 4], [2, 4, 5]] {
-        fill.add_triangle(a, b, c);
-    }
-    shapes.push(Shape::mesh(fill));
-    let mut closed = outline.to_vec();
-    closed.push(outline[0]);
-    line(shapes, &closed, 1.0, Color32::BLACK);
-}
-
-/// The question mark of the query icon, top right, in the accent colour.
-fn question_mark(shapes: &mut Vec<Shape>, r: Rect) {
-    let p = |x: f32, y: f32| pos2(r.left() + x, r.top() + y);
-    let center = p(12.6, 3.6);
-    let radius = 2.4;
-    // From the left through the top to the lower right, then down the stem.
-    let mut hook: Vec<Pos2> = (0..=10)
-        .map(|i| {
-            let angle = std::f32::consts::PI * (1.0 + 0.135 * i as f32);
-            center + vec2(angle.cos(), angle.sin()) * radius
-        })
-        .collect();
-    hook.push(p(12.6, 7.2));
-    line(shapes, &hook, 1.6, ACCENT);
-    shapes.push(Shape::circle_filled(p(12.6, 9.4), 1.0, ACCENT));
+/// The pipette of the query: a glass tube with blue liquid, a dark rubber bulb, its tip at
+/// the lower left.
+fn pipette(shapes: &mut Vec<Shape>, r: Rect) {
+    // Along the pipette from its tip (0) to the end of the bulb (about 17), and across it.
+    let tip = pos2(r.left() + 1.5, r.top() + 14.5);
+    let along = vec2(1.0, -1.0).normalized();
+    let across = along.rot90();
+    let at = |t: f32, n: f32| tip + along * t + across * n;
+    let quad =
+        |t0: f32, w0: f32, t1: f32, w1: f32| vec![at(t0, -w0), at(t1, -w1), at(t1, w1), at(t0, w0)];
+    let glass = Color32::from_rgb(225, 238, 250);
+    let rubber = Color32::from_rgb(70, 70, 75);
+    // The narrow tip, the tube, the liquid in its lower half, the collar and the bulb.
+    polygon(shapes, quad(0.0, 0.5, 3.5, 1.4), ACCENT, OUTLINE);
+    polygon(shapes, quad(3.5, 1.9, 11.0, 1.9), glass, OUTLINE);
+    shapes.push(Shape::convex_polygon(
+        quad(3.9, 1.4, 7.5, 1.4),
+        ACCENT,
+        Stroke::NONE,
+    ));
+    polygon(shapes, quad(11.0, 2.9, 12.5, 2.9), rubber, rubber);
+    shapes.push(Shape::circle_filled(at(14.8, 0.0), 2.6, rubber));
 }
 
 /// Isometric unit cube; x to the lower right, z to the lower left, y up.
