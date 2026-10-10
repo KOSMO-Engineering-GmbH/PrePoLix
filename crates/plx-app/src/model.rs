@@ -792,6 +792,7 @@ impl Model {
                     skin,
                     self.origin,
                     info.color,
+                    |_| None,
                     SMOOTH_ANGLE_DEG,
                     scalars.as_deref(),
                 );
@@ -827,10 +828,11 @@ impl Model {
                     skin,
                     self.origin,
                     info.color,
+                    self.face_highlight(index, skin),
                     SMOOTH_ANGLE_DEG,
                     scalars,
                 );
-                self.highlight_faces(index, skin, &mut mesh);
+                self.highlight_outline(index, &mut mesh);
                 if deformed {
                     mesh.wireframe_edges = wireframe_edges(&undeformed, skin, self.origin);
                 }
@@ -937,7 +939,7 @@ impl Model {
     }
 
     /// Recolours the vertices of highlighted faces; vertices are laid out face by face.
-    fn highlight_faces(&self, part: usize, skin: &PartSkin, mesh: &mut RenderMesh) {
+    fn highlight_outline(&self, part: usize, mesh: &mut RenderMesh) {
         if self.highlight.outlines.contains(&part) {
             mesh.wide_edges = (mesh.feature_edges.iter())
                 .map(|&vertex| Vertex {
@@ -946,29 +948,27 @@ impl Model {
                 })
                 .collect();
         }
-        if self.highlight.faces.is_empty()
-            && self.highlight.secondary_faces.is_empty()
-            && !self.highlight.parts.contains(&part)
-        {
-            return;
-        }
+    }
+
+    /// The colour of each highlighted skin face of a part, by its index in the skin.
+    fn face_highlight(&self, part: usize, skin: &PartSkin) -> impl Fn(usize) -> Option<[f32; 3]> {
         let whole = self.highlight.parts.contains(&part);
+        let none = self.highlight.faces.is_empty() && self.highlight.secondary_faces.is_empty();
         let elements = self.mesh.elements();
-        let mut start = 0;
-        for face in &skin.faces {
-            let count = face.corners.len() + face.mids.len();
+        move |index| {
+            if whole {
+                return Some(HIGHLIGHT_COLOR);
+            }
+            if none {
+                return None;
+            }
+            let face = &skin.faces[index];
             let key = (elements[face.element].id, face.face as u8 + 1);
-            let color = if whole || self.highlight.faces.contains(&key) {
+            if self.highlight.faces.contains(&key) {
                 Some(HIGHLIGHT_COLOR)
             } else {
                 (self.highlight.secondary_faces.contains(&key)).then_some(SECONDARY_HIGHLIGHT_COLOR)
-            };
-            if let Some(color) = color {
-                for vertex in &mut mesh.vertices[start..start + count] {
-                    vertex.color = color;
-                }
             }
-            start += count;
         }
     }
 

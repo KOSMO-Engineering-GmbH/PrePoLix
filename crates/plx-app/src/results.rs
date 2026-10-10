@@ -121,6 +121,9 @@ pub struct ResultsView {
     /// Characteristic model size for the automatic scale (PrePoMax: cube root of the bounding
     /// box volume, square root of the area for flat models).
     model_size: f64,
+    /// [`max_deformation`] of each increment, once asked for: the toolbar wants it every frame
+    /// and an increment animation for all its frames.
+    deformation_peaks: Vec<std::cell::OnceCell<Option<f32>>>,
 }
 
 /// Several mode shapes overlaid at one moment, each scaled by its level and swinging at its
@@ -218,7 +221,11 @@ impl ResultsView {
             plane_result: None,
             units: UnitSystem::default(),
             model_size: bounds.map_or(1.0, model_size),
+            deformation_peaks: Vec::new(),
         };
+        view.deformation_peaks = (view.increments.iter())
+            .map(|_| Default::default())
+            .collect();
         view.increment = view.default_increment();
         view.contact =
             (view.increments.iter()).any(|i| i.fields.iter().any(|f| f.name == "CONTACT"));
@@ -598,6 +605,15 @@ impl ResultsView {
     }
 
     /// Displacement scale factor for the current increment and deformation setting.
+    /// The largest displacement of an increment.
+    fn deformation_peak(&self, index: usize) -> Option<f32> {
+        let increment = self.increments.get(index)?;
+        match self.deformation_peaks.get(index) {
+            Some(peak) => *peak.get_or_init(|| max_deformation(increment)),
+            None => max_deformation(increment),
+        }
+    }
+
     pub fn scale(&self) -> f32 {
         match self.deformation {
             Deformation::Undeformed => 0.0,
@@ -617,9 +633,9 @@ impl ResultsView {
                     }
                     Some(indices) => indices
                         .iter()
-                        .filter_map(|&i| self.increments.get(i).and_then(max_deformation))
+                        .filter_map(|&i| self.deformation_peak(i))
                         .reduce(f32::max),
-                    None => self.current_increment().and_then(max_deformation),
+                    None => self.deformation_peak(self.increment),
                 };
                 let Some(max) = max else {
                     return 0.0;

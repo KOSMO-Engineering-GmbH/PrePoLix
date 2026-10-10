@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use glam::DVec3;
 use plx_mesh::{PartSkin, SkinFace, face_normal};
 
@@ -8,10 +6,13 @@ use crate::contour::NO_VALUE;
 use crate::mesh::{RenderMesh, Vertex};
 
 const EDGE_COLOR: [f32; 3] = [0.0, 0.0, 0.0];
-/// Opacities of PrePoMax's edge actors; line vertices carry them in [`Vertex::scalar`].
+/// Opacities of PrePoMax's edge actors; line vertices carry them in [`Vertex::scalar`], the
+/// shader draws mesh edges with [`MESH_EDGE_OPACITY`] (`viewport.wgsl` repeats it).
 pub const FEATURE_EDGE_OPACITY: f32 = 0.7;
 pub const MESH_EDGE_OPACITY: f32 = 0.4;
 pub const WIREFRAME_OPACITY: f32 = 0.5;
+/// How far the mid node of a straight edge may lie off its centre, relative to its length.
+const STRAIGHT_TOLERANCE: f64 = 1e-3;
 
 /// PrePoMax's default part colours (System.Drawing names), cycled by part index.
 const PART_COLORS_SRGB: [[u8; 3]; 10] = [
@@ -35,14 +36,19 @@ pub fn part_color(index: usize) -> [f32; 3] {
 /// Builds the GPU-ready geometry of one part from node coordinates (undeformed or deformed).
 /// Positions are shifted by `-origin`, so that large coordinates keep their precision in `f32`.
 /// `scalars` holds one normalized contour value per node (see [`crate::contour::normalize`]).
+/// `face_color` may give a skin face a colour of its own instead of `color`, e.g. to highlight
+/// it.
 ///
 /// Faces of the same surface patch that meet at less than `smooth_angle_deg` share averaged
 /// vertex normals, so curved surfaces look round; across feature edges the shading stays flat.
+/// Faces share the vertex of a node where its normal and colour agree, which keeps large meshes
+/// small on the GPU; the mesh edges index the same vertices.
 pub fn part_render_mesh(
     coords: &[[f64; 3]],
     skin: &PartSkin,
     origin: DVec3,
     color: [f32; 3],
+    face_color: impl Fn(usize) -> Option<[f32; 3]>,
     smooth_angle_deg: f64,
     scalars: Option<&[f32]>,
 ) -> RenderMesh {
@@ -51,19 +57,22 @@ pub fn part_render_mesh(
     let mut render = RenderMesh::default();
     let normals = smooth_vertex_normals(coords, skin, smooth_angle_deg);
 
-    for (face, face_normals) in skin.faces.iter().zip(normals) {
-        let base = render.vertices.len() as u32;
-        for (&node, normal) in face.corners.iter().chain(&face.mids).zip(face_normals) {
-            render.vertices.push(Vertex {
+    let mut shared = SharedVertices::new(coords.len());
+    let mut normals = normals.into_iter();
+    let mut local = Vec::with_capacity(8);
+    for (index, face) in skin.faces.iter().enumerate() {
+        let color = face_color(index).unwrap_or(color);
+        local.clear();
+        for (&node, normal) in face.corners.iter().chain(&face.mids).zip(&mut normals) {
+            let vertex = Vertex {
                 position: position(node),
                 normal,
                 color,
                 scalar: scalar(node),
-            });
+            };
+            local.push(shared.index(&mut render.vertices, node, vertex));
         }
-        render
-            .triangles
-            .extend(face_triangles(face).iter().map(|&local| base + local));
+        (render.triangles).extend(face_triangles(face).iter().map(|&k| local[k as usize]));
     }
 
     let line_vertex = |node: usize, color: [f32; 3], opacity: f32| Vertex {
@@ -73,25 +82,32 @@ pub fn part_render_mesh(
         scalar: opacity,
     };
     for edge in &skin.edges {
+        // A straight mesh edge of a quadratic element is one line: there are many of them.
+        let straight = |mid: usize| {
+            let [a, b, m] = [edge.a, edge.b, mid].map(|n| DVec3::from(coords[n]));
+            (m - (a + b) * 0.5).length() <= STRAIGHT_TOLERANCE * (b - a).length()
+        };
         let segments: &[[usize; 2]] = match edge.mid {
-            Some(mid) => &[[edge.a, mid], [mid, edge.b]],
-            None => &[[edge.a, edge.b]],
+            Some(mid) if edge.feature || !straight(mid) => &[[edge.a, mid], [mid, edge.b]],
+            _ => &[[edge.a, edge.b]],
         };
         for &[a, b] in segments {
-            let target = if edge.feature {
-                &mut render.feature_edges
+            if edge.feature {
+                render.feature_edges.extend([
+                    line_vertex(a, EDGE_COLOR, FEATURE_EDGE_OPACITY),
+                    line_vertex(b, EDGE_COLOR, FEATURE_EDGE_OPACITY),
+                ]);
             } else {
-                &mut render.mesh_edges
-            };
-            let opacity = if edge.feature {
-                FEATURE_EDGE_OPACITY
-            } else {
-                MESH_EDGE_OPACITY
-            };
-            target.extend([
-                line_vertex(a, EDGE_COLOR, opacity),
-                line_vertex(b, EDGE_COLOR, opacity),
-            ]);
+                // Any vertex of the node lies in the right place; mesh edges are drawn in
+                // their own colour. Edges of faces always have one.
+                for node in [a, b] {
+                    let index = shared.any(node).unwrap_or_else(|| {
+                        let vertex = line_vertex(node, EDGE_COLOR, MESH_EDGE_OPACITY);
+                        shared.index(&mut render.vertices, node, vertex)
+                    });
+                    render.mesh_edges.push(index);
+                }
+            }
         }
     }
     let line_color = color.map(|c| c * 0.5);
@@ -102,6 +118,45 @@ pub fn part_render_mesh(
         ]);
     }
     render
+}
+
+/// The vertices of each node as a linked list: the first one, and per vertex the next.
+struct SharedVertices {
+    first: Vec<u32>,
+    next: Vec<u32>,
+}
+
+impl SharedVertices {
+    const NONE: u32 = u32::MAX;
+
+    fn new(nodes: usize) -> Self {
+        Self {
+            first: vec![Self::NONE; nodes],
+            next: Vec::new(),
+        }
+    }
+
+    /// Index of a vertex of the node with the same normal and colour, added if there is none.
+    fn index(&mut self, vertices: &mut Vec<Vertex>, node: usize, vertex: Vertex) -> u32 {
+        let mut index = self.first[node];
+        while index != Self::NONE {
+            let other = &vertices[index as usize];
+            if other.normal == vertex.normal && other.color == vertex.color {
+                return index;
+            }
+            index = self.next[index as usize];
+        }
+        let index = vertices.len() as u32;
+        vertices.push(vertex);
+        self.next.push(self.first[node]);
+        self.first[node] = index;
+        index
+    }
+
+    /// Index of some vertex of the node.
+    fn any(&self, node: usize) -> Option<u32> {
+        Some(self.first[node]).filter(|&i| i != Self::NONE)
+    }
 }
 
 /// Feature edges of a part as translucent black lines, PrePoMax's wireframe of the undeformed
@@ -127,14 +182,14 @@ pub fn wireframe_edges(coords: &[[f64; 3]], skin: &PartSkin, origin: DVec3) -> V
     lines
 }
 
-/// Per face, one normal for each of its corner and mid nodes: the area-weighted average of the
-/// normals of all faces of the same patch at that node that deviate from this face by less
-/// than the angle.
+/// For each face in turn, one normal for each of its corner and mid nodes: the area-weighted
+/// average of the normals of all faces of the same patch at that node that deviate from this
+/// face by less than the angle.
 fn smooth_vertex_normals(
     coords: &[[f64; 3]],
     skin: &PartSkin,
     smooth_angle_deg: f64,
-) -> Vec<Vec<[f32; 3]>> {
+) -> Vec<[f32; 3]> {
     let cos_limit = smooth_angle_deg.to_radians().cos();
     let face_normals: Vec<DVec3> = skin
         .faces
@@ -146,33 +201,41 @@ fn smooth_vertex_normals(
         .iter()
         .map(|f| polygon_area(coords, &f.corners))
         .collect();
-    let mut faces_at_node: HashMap<usize, Vec<usize>> = HashMap::new();
+    // The faces at each node, as one list in node order: those of node n start at start[n].
+    let mut start = vec![0usize; coords.len() + 1];
+    for node in skin.faces.iter().flat_map(nodes) {
+        start[node + 1] += 1;
+    }
+    for n in 0..coords.len() {
+        start[n + 1] += start[n];
+    }
+    let mut filled = start.clone();
+    let mut faces_at_node = vec![0usize; start[coords.len()]];
     for (index, face) in skin.faces.iter().enumerate() {
-        for &node in face.corners.iter().chain(&face.mids) {
-            faces_at_node.entry(node).or_default().push(index);
+        for node in nodes(face) {
+            faces_at_node[filled[node]] = index;
+            filled[node] += 1;
         }
     }
-    skin.faces
-        .iter()
-        .zip(&face_normals)
-        .map(|(face, &own)| {
-            face.corners
+    let mut normals = Vec::with_capacity(faces_at_node.len());
+    for (face, &own) in skin.faces.iter().zip(&face_normals) {
+        for node in nodes(face) {
+            let sum: DVec3 = faces_at_node[start[node]..start[node + 1]]
                 .iter()
-                .chain(&face.mids)
-                .map(|node| {
-                    let sum: DVec3 = faces_at_node[node]
-                        .iter()
-                        .filter(|&&other| {
-                            skin.faces[other].region == face.region
-                                && own.dot(face_normals[other]) >= cos_limit
-                        })
-                        .map(|&other| face_normals[other] * weights[other])
-                        .sum();
-                    sum.try_normalize().unwrap_or(own).as_vec3().to_array()
+                .filter(|&&other| {
+                    skin.faces[other].region == face.region
+                        && own.dot(face_normals[other]) >= cos_limit
                 })
-                .collect()
-        })
-        .collect()
+                .map(|&other| face_normals[other] * weights[other])
+                .sum();
+            normals.push(sum.try_normalize().unwrap_or(own).as_vec3().to_array());
+        }
+    }
+    normals
+}
+
+fn nodes(face: &SkinFace) -> impl Iterator<Item = usize> + '_ {
+    face.corners.iter().chain(&face.mids).copied()
 }
 
 fn polygon_area(coords: &[[f64; 3]], corners: &[usize]) -> f64 {
@@ -252,7 +315,15 @@ mod tests {
         ];
         let mesh = single_element(ElementShape::Quad8, &coords);
         let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
-        let render = part_render_mesh(mesh.coords(), &skin, DVec3::ZERO, [1.0; 3], 30.0, None);
+        let render = part_render_mesh(
+            mesh.coords(),
+            &skin,
+            DVec3::ZERO,
+            [1.0; 3],
+            |_| None,
+            30.0,
+            None,
+        );
         assert_eq!(render.triangles.len(), 6 * 3);
         assert!((triangle_area_sum(&render) - 4.0).abs() < 1e-5);
         // Four curved boundary edges of two segments each, all on the outline.
@@ -280,7 +351,15 @@ mod tests {
         ]);
         let mesh = single_element(ElementShape::Tet10, &coords);
         let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
-        let render = part_render_mesh(mesh.coords(), &skin, DVec3::ZERO, [1.0; 3], 30.0, None);
+        let render = part_render_mesh(
+            mesh.coords(),
+            &skin,
+            DVec3::ZERO,
+            [1.0; 3],
+            |_| None,
+            30.0,
+            None,
+        );
         let expected = 3.0 * 0.5 + 3.0_f32.sqrt() / 2.0;
         assert!((triangle_area_sum(&render) - expected).abs() < 1e-5);
     }
@@ -295,6 +374,7 @@ mod tests {
             &skin,
             DVec3::new(1000.0, 0.0, 0.0),
             [1.0; 3],
+            |_| None,
             30.0,
             None,
         );
@@ -330,8 +410,19 @@ mod tests {
             elements: vec![1, 2, 3],
         });
         let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
-        let render = part_render_mesh(mesh.coords(), &skin, DVec3::ZERO, [1.0; 3], 30.0, None);
-        let normal_at_origin = |face: usize| glam::Vec3::from(render.vertices[face * 3].normal);
+        let render = part_render_mesh(
+            mesh.coords(),
+            &skin,
+            DVec3::ZERO,
+            [1.0; 3],
+            |_| None,
+            30.0,
+            None,
+        );
+        // Node 0 is the first corner of each face.
+        let vertex_at_origin = |face: usize| render.triangles[face * 3] as usize;
+        let normal_at_origin =
+            |face: usize| glam::Vec3::from(render.vertices[vertex_at_origin(face)].normal);
         // The flat face and the 20° face blend, the 90° face keeps its own normal.
         let blended = normal_at_origin(0);
         assert!(
@@ -340,6 +431,87 @@ mod tests {
         );
         assert!((normal_at_origin(1) - blended).length() < 1e-6);
         assert!((normal_at_origin(2) - glam::Vec3::X).length() < 1e-6);
+        // Faces with the same normal at a node share its vertex.
+        assert_eq!(vertex_at_origin(0), vertex_at_origin(1));
+        assert_ne!(vertex_at_origin(0), vertex_at_origin(2));
+    }
+
+    #[test]
+    fn faces_share_vertices_and_mesh_edges_index_them() {
+        // Two coplanar quadratic triangles sharing the edge from node 1 to 2 (mid node 4).
+        let coords = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.5, 0.5, 0.0],
+            [0.5, 0.0, 0.0],
+            [0.0, 0.5, 0.0],
+            [1.0, 0.5, 0.0],
+            [0.5, 1.0, 0.0],
+        ];
+        let mut mesh = FeMesh::default();
+        for (i, c) in coords.iter().enumerate() {
+            mesh.set_node(i as u32 + 1, *c);
+        }
+        for (id, nodes) in [(1, vec![1, 2, 3, 6, 5, 7]), (2, vec![2, 4, 3, 8, 9, 5])] {
+            mesh.add_element(Element {
+                id,
+                type_name: "S6".into(),
+                shape: ElementShape::Tri6,
+                nodes,
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "P".into(),
+            elements: vec![1, 2],
+        });
+        let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
+        let render = part_render_mesh(
+            mesh.coords(),
+            &skin,
+            DVec3::ZERO,
+            [1.0; 3],
+            |_| None,
+            30.0,
+            None,
+        );
+        assert_eq!(render.vertices.len(), coords.len());
+        assert!((triangle_area_sum(&render) - 1.0).abs() < 1e-5);
+        // The inner edge is the only mesh edge; it is straight, so one line.
+        assert_eq!(render.mesh_edges.len(), 2);
+        let on_diagonal = |&i: &u32| {
+            let [x, y, _] = render.vertices[i as usize].position;
+            (x + y - 1.0).abs() < 1e-6
+        };
+        assert!(render.mesh_edges.iter().all(on_diagonal));
+        // Bent, it is two.
+        let mut bent = mesh.coords().to_vec();
+        bent[4] = [0.55, 0.55, 0.0];
+        let render = part_render_mesh(&bent, &skin, DVec3::ZERO, [1.0; 3], |_| None, 30.0, None);
+        assert_eq!(render.mesh_edges.len(), 2 * 2);
+
+        // A highlighted face keeps vertices of its own, so its colour does not bleed.
+        let red = [1.0, 0.0, 0.0];
+        let render = part_render_mesh(
+            mesh.coords(),
+            &skin,
+            DVec3::ZERO,
+            [1.0; 3],
+            |face| (face == 1).then_some(red),
+            30.0,
+            None,
+        );
+        assert_eq!(render.vertices.len(), coords.len() + 3);
+        let colors = |face: usize| {
+            (render.triangles[face * 12..face * 12 + 12].iter())
+                .map(|&i| render.vertices[i as usize].color)
+                .collect::<Vec<_>>()
+        };
+        let (white, highlighted) = (colors(0), colors(1));
+        assert!(highlighted.iter().all(|c| *c == red));
+        assert!(white.iter().all(|c| *c == [1.0; 3]));
     }
 
     #[test]

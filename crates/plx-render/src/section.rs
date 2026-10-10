@@ -228,10 +228,13 @@ pub fn section_mesh(
                 line_vertex(b, FEATURE_EDGE_OPACITY),
             ]);
         } else {
-            render.mesh_edges.extend([
+            // Vertices of no triangle, only for the mesh edge.
+            let base = render.vertices.len() as u32;
+            render.vertices.extend([
                 line_vertex(a, MESH_EDGE_OPACITY),
                 line_vertex(b, MESH_EDGE_OPACITY),
             ]);
+            render.mesh_edges.extend([base, base + 1]);
         }
     }
     let shell_color = color.map(|c| c * 0.5);

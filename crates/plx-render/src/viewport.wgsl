@@ -129,15 +129,28 @@ struct EdgeOut {
 // Edges lie exactly on surface triangles; pulling them slightly towards the viewer keeps them from
 // flickering in and out of the depth test (polygon offset alone is too weak for a float depth buffer).
 // The offset is a fixed number of pixels, so it never reaches through thin walls.
+fn edge_vertex(position: vec3<f32>, color: vec4<f32>) -> EdgeOut {
+    var out: EdgeOut;
+    out.position = globals.view_proj * vec4<f32>(position, 1.0);
+    out.position.z -= globals.edge.x * out.position.w;
+    out.color = color;
+    out.world = position;
+    return out;
+}
+
 @vertex
 fn vs_edge(in: SurfaceIn) -> EdgeOut {
-    var out: EdgeOut;
-    out.position = globals.view_proj * vec4<f32>(in.position, 1.0);
-    out.position.z -= globals.edge.x * out.position.w;
     // Line vertices carry their opacity in the scalar slot.
-    out.color = vec4<f32>(in.color, in.scalar);
-    out.world = in.position;
-    return out;
+    return edge_vertex(in.position, vec4<f32>(in.color, in.scalar));
+}
+
+// MESH_EDGE_OPACITY of fe.rs.
+const MESH_EDGE_OPACITY: f32 = 0.4;
+
+// Mesh edges share the vertices of the surfaces, whose colours they do not take.
+@vertex
+fn vs_mesh_edge(in: SurfaceIn) -> EdgeOut {
+    return edge_vertex(in.position, vec4<f32>(0.0, 0.0, 0.0, MESH_EDGE_OPACITY));
 }
 
 // One corner of the quad of a wide line segment from `a` to `b`; corners 0 and 2 lie at `a`,

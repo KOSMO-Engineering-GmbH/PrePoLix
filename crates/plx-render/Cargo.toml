@@ -13,5 +13,10 @@ plx-mesh.workspace = true
 plx-model.workspace = true
 wgpu = { version = "30", default-features = false, features = ["wgsl"] }
 
+[dev-dependencies]
+plx-io.workspace = true
+pollster = "1"
+wgpu = "30"
+
 [lints]
 workspace = true
