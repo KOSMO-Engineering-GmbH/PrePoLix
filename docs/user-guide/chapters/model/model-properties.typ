@@ -24,6 +24,10 @@ the basic properties of the model. The same dialog opens for #menu("File", "New 
 / 2D axisymmetric: axisymmetric elements (`CAX`). The y axis is the axis of rotation, the model
   must lie at x ≥ 0.
 
+All 2D models must lie in the global X-Y plane. Hovering over a model space shows a short hint
+on when to use it: plane stress for thin parts loaded in their plane, plane strain for long
+prismatic parts without strain out of the plane, axisymmetric for bodies of revolution.
+
 A change of the model space is refused if the mesh or geometry does not fit (for example solid
 elements in a 2D model). 2D elements are retyped when the space changes between the 2D variants.
 

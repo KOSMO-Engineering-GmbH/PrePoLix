@@ -107,6 +107,25 @@ impl ModelSpace {
         }
     }
 
+    /// Short hint for the GUI on when to use this model space and how the model must lie.
+    pub fn tooltip(self) -> &'static str {
+        match self {
+            ModelSpace::ThreeD => "Solids, shells and lines in 3D space.",
+            ModelSpace::PlaneStress => {
+                "Thin parts loaded in their plane (the thickness is given in the section).\n\
+                 The model must lie in the global X-Y plane."
+            }
+            ModelSpace::PlaneStrain => {
+                "Long prismatic parts loaded across their length: no strain out of the plane.\n\
+                 The model must lie in the global X-Y plane."
+            }
+            ModelSpace::Axisymmetric => {
+                "Bodies of revolution. The Y axis is the axis of rotation; \
+                 the model lies in the X-Y plane at X >= 0 (X is the radius)."
+            }
+        }
+    }
+
     /// Whether the section of a 2D element has a thickness; an axisymmetric one spans the
     /// full revolution instead.
     pub fn has_thickness(self) -> bool {
