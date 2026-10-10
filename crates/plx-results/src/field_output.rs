@@ -2,6 +2,7 @@
 //! limit (utilisation and safety factor), the envelope over all increments, an equation of
 //! other components, or a field in another coordinate system.
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 use plx_mesh::FeMesh;
@@ -21,7 +22,7 @@ pub const AVERAGE: &str = "AVERAGE";
 pub const VALUE: &str = "VALUE";
 
 /// What the limit values of a [`FieldOutputKind::Limit`] are given for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LimitBasis {
     Parts,
     ElementSets,
@@ -45,7 +46,7 @@ impl LimitBasis {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum FieldOutputKind {
     /// RATIO = value / limit and SAFETY_FACTOR = limit / value; a node in several items takes
     /// the smallest limit.
@@ -68,7 +69,7 @@ pub enum FieldOutputKind {
 }
 
 /// A derived field output: its name becomes the name of the computed field.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FieldOutput {
     pub name: String,
     pub kind: FieldOutputKind,

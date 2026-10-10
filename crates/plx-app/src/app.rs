@@ -990,7 +990,8 @@ impl eframe::App for PrepolixApp {
 
 /// What a worker binding or restoring bound results sends back.
 enum BoundWork {
-    Bound(Result<plx_model::BoundResults, String>),
+    /// The results file and the files bound.
+    Bound(PathBuf, Result<Box<plx_io::project::BoundResults>, String>),
     /// The analysis, the directory and the results file written there.
     Restored(String, PathBuf, Result<PathBuf, String>),
 }
@@ -1161,6 +1162,23 @@ impl Workbench {
                         model.fe.add_missing_features(old);
                         model.fe.result_paths = old.result_paths.clone();
                         model.fe.result_planes = old.result_planes.clone();
+                    }
+                    // Results bound to the project come back as they were saved.
+                    let settings = (self.model.as_ref())
+                        .filter(|p| p.bound_results_file.as_ref() == Some(&model.path))
+                        .and_then(|p| p.bound_results.as_ref()?.settings.as_ref());
+                    if previous.is_none()
+                        && let Some(settings) = settings
+                    {
+                        let warnings = model.restore_results_settings(settings);
+                        self.output.extend(warnings);
+                        if let Some(view) = &model.results {
+                            self.tree.selected = Some((
+                                TreeView::Results,
+                                TreeItem::Component(view.field, view.component),
+                            ));
+                        }
+                        rebuild = true;
                     }
                     if let Some(project) = &self.model {
                         model.fe.add_missing_features(&project.fe);
@@ -2671,8 +2689,9 @@ impl Workbench {
         let files = ["inp", "frd", "dat"].map(|e| frd.with_extension(e));
         std::thread::spawn(move || {
             let bound = plx_io::project::bind_results(tree::ANALYSIS_NAME, &files, with_errors)
+                .map(Box::new)
                 .map_err(|e| e.to_string());
-            let _ = sender.send(BoundWork::Bound(bound));
+            let _ = sender.send(BoundWork::Bound(frd, bound));
         });
         self.output
             .push(format!("Binding the result of {} …", tree::ANALYSIS_NAME));
@@ -2730,16 +2749,16 @@ impl Workbench {
         let model = (self.model.as_mut()).filter(|m| m.path == *path);
         self.bound_work = None;
         match (work, model) {
-            (BoundWork::Bound(Ok(bound)), Some(model)) => {
+            (BoundWork::Bound(frd, Ok(bound)), Some(model)) => {
                 self.output.push(format!(
                     "Result bound to {}: {} of files, {} in the project file once it is saved",
                     bound.analysis,
                     file_size(bound.size()),
                     file_size(bound.stored_size())
                 ));
-                model.bound_results = Some(bound);
-                // Written anew when opened: a next run overwrites the analysis' own files.
-                model.bound_results_file = None;
+                model.bound_results = Some(*bound);
+                // The open results whose settings are saved with them.
+                model.bound_results_file = Some(frd);
             }
             (BoundWork::Restored(analysis, dir, Ok(file)), Some(model)) => {
                 self.output.push(format!(
@@ -2749,7 +2768,7 @@ impl Workbench {
                 model.bound_results_file = Some(file.clone());
                 self.open_results = Some(file);
             }
-            (BoundWork::Bound(Err(error)), _) => {
+            (BoundWork::Bound(_, Err(error)), _) => {
                 self.output.push(format!("Result not bound: {error}"));
             }
             (BoundWork::Restored(_, _, Err(error)), _) => {
@@ -2870,6 +2889,13 @@ impl Workbench {
             };
             path
         };
+        // The bound results keep what the user defined on them, if they are open.
+        if let Some(bound) = &mut model.bound_results
+            && let Some(open) =
+                (self.results.iter()).find(|r| Some(&r.path) == model.bound_results_file.as_ref())
+        {
+            bound.settings = open.results_settings();
+        }
         let geometry = model.geometry.as_ref();
         let results = model.bound_results.as_ref();
         match plx_io::project::save_project(&path, geometry, &model.mesh, &model.fe, results) {

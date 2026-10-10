@@ -66,7 +66,7 @@ pub struct Model {
     /// CAD geometry the mesh is generated from.
     pub geometry: Option<Geometry>,
     /// Results of the analysis bound to the project, saved with it.
-    pub bound_results: Option<plx_model::BoundResults>,
+    pub bound_results: Option<plx_io::project::BoundResults>,
     /// Where the bound results were written to be opened, once they were.
     pub bound_results_file: Option<PathBuf>,
     /// The display of CAD geometry rather than a mesh: element edges are not drawn.
@@ -332,6 +332,37 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
 }
 
 impl Model {
+    /// What the user defined on these results, for results bound to a project.
+    pub fn results_settings(&self) -> Option<plx_results::ResultsSettings> {
+        let view = self.results.as_ref()?;
+        Some(plx_results::ResultsSettings {
+            hot_spots: self.hot_spots.definitions.clone(),
+            reference_points: self.fe.reference_points.clone(),
+            coordinate_systems: self.fe.coordinate_systems.clone(),
+            planes: self.fe.planes.clone(),
+            result_paths: self.fe.result_paths.clone(),
+            result_planes: self.fe.result_planes.clone(),
+            ..view.settings()
+        })
+    }
+
+    /// Takes saved settings of bound results; returns the outputs that failed.
+    pub fn restore_results_settings(
+        &mut self,
+        settings: &plx_results::ResultsSettings,
+    ) -> Vec<String> {
+        self.fe.reference_points = settings.reference_points.clone();
+        self.fe.coordinate_systems = settings.coordinate_systems.clone();
+        self.fe.planes = settings.planes.clone();
+        self.fe.result_paths = settings.result_paths.clone();
+        self.fe.result_planes = settings.result_planes.clone();
+        self.hot_spots.definitions = settings.hot_spots.clone();
+        match &mut self.results {
+            Some(view) => view.restore(settings, &self.mesh),
+            None => Vec::new(),
+        }
+    }
+
     /// A model of the mesh with summaries and skins of its parts.
     pub fn new(path: &Path, mesh: FeMesh) -> Self {
         let skins = (mesh.parts.iter())
@@ -1633,5 +1664,41 @@ mod tests {
     #[test]
     fn file_without_elements_is_rejected() {
         assert!(load(&testdata("platte_knoten.inp"), UnitSystem::MmTonSC).is_err());
+    }
+
+    #[test]
+    fn bound_results_open_with_what_was_defined_on_them() {
+        let settings = plx_results::ResultsSettings {
+            field_outputs: vec![plx_results::FieldOutput {
+                name: "SCALED".into(),
+                kind: plx_results::FieldOutputKind::Equation {
+                    equation: "=DISP.ALL * 1000".into(),
+                    unit: "um".into(),
+                },
+            }],
+            transformations: vec![plx_results::Transformation::symmetry(
+                plx_results::transformation::SymmetryPlane::X,
+            )],
+            hot_spots: vec![plx_results::hot_spot::HotSpot::new("Hot_Spot-1")],
+            reference_points: vec![plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])],
+            result_paths: vec![plx_model::ResultPath::new("Path-1")],
+            increment: 0,
+            shown: Some(("SCALED".into(), "VALUE".into())),
+            ..Default::default()
+        };
+        let mut model = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
+        assert_eq!(
+            model.restore_results_settings(&settings),
+            Vec::<String>::new()
+        );
+        let view = model.results.as_ref().unwrap();
+        let (field, component) = view.current().unwrap();
+        assert_eq!(
+            (field.name.as_str(), component.name.as_str()),
+            ("SCALED", "VALUE")
+        );
+        assert_eq!(model.results_settings(), Some(settings));
     }
 }

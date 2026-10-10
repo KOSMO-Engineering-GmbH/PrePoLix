@@ -2597,6 +2597,7 @@ dependencies = [
  "plx-model",
  "plx-results",
  "ron",
+ "serde",
  "thiserror 2.0.21",
 ]
 
@@ -2657,6 +2658,7 @@ dependencies = [
  "plx-core",
  "plx-mesh",
  "plx-model",
+ "serde",
 ]
 
 [[package]]

@@ -6,6 +6,7 @@
 //! mirrored with the copy, so that a mirrored displacement component changes its sign.
 
 use glam::{DAffine3, DMat3, DVec3};
+use serde::{Deserialize, Serialize};
 
 use crate::Field;
 
@@ -15,7 +16,7 @@ const VECTOR_FIELDS: [&str; 5] = ["DISP", "VELO", "FORC", "FLUX", "NORM"];
 const TENSOR_FIELDS: [&str; 4] = ["STRESS", "ZZSTR", "TOSTRAIN", "MESTRAIN"];
 
 /// Plane of a symmetry, named by the axis normal to it as in PrePoMax.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SymmetryPlane {
     X,
     Y,
@@ -34,7 +35,7 @@ impl SymmetryPlane {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum TransformationKind {
     /// Mirror at the plane normal to the axis through the point: one copy.
     Symmetry {
@@ -57,7 +58,7 @@ pub enum TransformationKind {
     },
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Transformation {
     pub name: String,
     pub kind: TransformationKind,
