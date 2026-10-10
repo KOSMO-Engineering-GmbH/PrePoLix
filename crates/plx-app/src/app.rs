@@ -2462,7 +2462,7 @@ impl Workbench {
             )
             .clicked()
         {
-            self.open_results = results;
+            self.open_analysis_results();
         }
         ui.separator();
         let rotor = self
@@ -2527,10 +2527,9 @@ impl Workbench {
                 ),
             },
             AnalysisAction::Results => match self.analysis.as_ref().and_then(Analysis::results) {
-                Some(path) => self.open_results = Some(path),
+                Some(_) => self.open_analysis_results(),
                 None => self.open_bound_results(),
             },
-            AnalysisAction::BindResult => self.bind_results(),
             AnalysisAction::RemoveBoundResult => {
                 if let Some(model) = &mut self.model
                     && model.bound_results.take().is_some()
@@ -2550,20 +2549,30 @@ impl Workbench {
         }
     }
 
+    /// Opens the results of the last run and binds them to the project, once per run.
+    fn open_analysis_results(&mut self) {
+        let Some(path) = self.analysis.as_ref().and_then(Analysis::results) else {
+            return;
+        };
+        self.open_results = Some(path);
+        self.bind_results();
+    }
+
     /// Binds the results of the finished analysis to the project: its input, results and
     /// history output files are saved with the project from now on.
     fn bind_results(&mut self) {
         if self.bound_work.is_some() {
             return;
         }
-        let Some(analysis) = self.analysis.as_ref().filter(|a| !a.is_running()) else {
+        let Some(analysis) = (self.analysis.as_mut()).filter(|a| !a.is_running() && !a.bound)
+        else {
             return;
         };
         let Some(frd) = analysis.results() else {
-            self.output
-                .push("The analysis has no results to bind.".into());
             return;
         };
+        // A result removed from the project is not bound again until the next run.
+        analysis.bound = true;
         let with_errors = analysis.status() == plx_job::JobStatus::FailedWithResults;
         let Some(model) = &self.model else {
             return;
@@ -2743,9 +2752,9 @@ impl Workbench {
             }
         }
         if analysis.monitor
-            && let MonitorEvent::OpenResults(path) = analysis.window(ctx)
+            && let MonitorEvent::OpenResults = analysis.window(ctx)
         {
-            self.open_results = Some(path);
+            self.open_analysis_results();
         }
     }
 

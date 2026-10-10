@@ -14,7 +14,8 @@ A model has one analysis, #ui("Analysis-1"). It uses the CalculiX settings under
     it.],
   [Kill Analysis], [Stops a running analysis.],
   [Monitor], [Shows the monitor window.],
-  [Open Results], [Opens the result file of the last run.],
+  [Open Results], [Opens the result file of the last run and binds it to the project
+    (@bind-result).],
 )
 
 These commands are in the #ui("Analysis") menu and in the context menu of #ui("Analysis-1").
@@ -42,15 +43,15 @@ The status at the end is #ui("completed"), #ui("finished with errors, results av
 in the output and adds a line "Possible cause: ..." with a remedy, for example for distorted
 elements, missing material data, rigid body motion or missing convergence.
 
-== Binding the result to the project <bind-result>
+== Results saved with the project <bind-result>
 
-Normally a project file (`.plx`) holds only the mesh and the model definition; the results stay
-in the work directory and are overwritten by the next run. To keep a result with the project,
-right-click #ui("Analysis-1") after a finished run and choose #ui("Bind Result"). The input file,
-the result file (`.frd`) and the history output (`.dat`) of the run are then saved in the project
-file with the next #menu("File", "Save"). The output pane shows how much the files add to the
-project file; they are stored compressed, at about a third of their size (a 236 MB result file
-adds about 100 MB). Binding a large result takes a few seconds and runs in the background.
+When you open the results of a run (#ui("Results") in the monitor or in the context menu of
+#ui("Analysis-1"), or #menu("Analysis", "Open Results")), PrePoLix binds them to the project: the
+input file, the result file (`.frd`) and the history output (`.dat`) of the run are saved in the
+project file with the next #menu("File", "Save"). The output pane shows how much the files add to
+the project file; they are stored compressed, at about a third of their size (a 236 MB result file
+adds about 100 MB). Binding a large result takes a few seconds and runs in the background. A new
+run replaces the bound result as soon as you open its results.
 
 When a project with a bound result is opened, PrePoLix writes the files to
 `Bound_Results/<project name>` in the work directory and opens the result on the #ui("Results")
@@ -59,18 +60,14 @@ bound, and #ui("Results") in its context menu opens the bound result again.
 
 #screenshot("bind-result.png", [Context menu of an analysis with a bound result])
 
-#fields(
-  [Bind Result], [Binds the result of the last run to the project, replacing a result bound
-    before. Available after a run in this session that wrote a result file.],
-  [Remove Bound Result], [Removes the bound result. Save the project to drop it from the file.],
-)
+#ui("Remove Bound Result") in the context menu of #ui("Analysis-1") removes the bound result;
+save the project to drop it from the file. Opening the results of the same run again does not bind
+them again; the next run does.
 
 To send only the mesh and the model definition, use #menu("File", "Save Without Results ...").
 It saves a copy without the bound result under a new name (proposed as
 `<project name>-without-results.plx`); the open project stays on its own file and keeps its
 result. The entry is available while a result is bound.
-
-#note[Binding is a snapshot: a later run does not change the bound result until you bind again.]
 
 == Model check <model-check>
 
