@@ -9,7 +9,6 @@ use egui::{
 };
 use glam::Vec3;
 use plx_render::Camera;
-use plx_render::contour::band_color;
 
 use crate::model::SECONDARY_HIGHLIGHT_COLOR;
 use crate::results::{Legend, format_legend_value, format_value};
@@ -107,6 +106,8 @@ pub struct OverlayResponse {
     /// An axis direction clicked in the corner triad.
     pub axis: Option<Vec3>,
     pub annotation: Option<AnnotationCommand>,
+    /// The legend was double clicked or its context menu asked for the colour scale.
+    pub edit_legend: bool,
 }
 
 /// Where the user dragged the labels to, relative to their default places.
@@ -251,7 +252,14 @@ pub fn draw(
         });
     }
     if let Some(legend) = &overlay.legend {
-        draw_legend(ui, &painter, rect, legend, &mut offsets.legend);
+        let response = draw_legend(ui, &painter, rect, legend, &mut offsets.legend);
+        clicked.edit_legend = response.double_clicked();
+        response.context_menu(|ui| {
+            if ui.button("Color Scale...").clicked() {
+                clicked.edit_legend = true;
+                ui.close();
+            }
+        });
     }
     if !overlay.status.is_empty() {
         draw_status(ui, &painter, rect, &overlay.status, &mut offsets.status);
@@ -373,20 +381,36 @@ fn drag_label(
     (Rect::from_min_size(min, size), response)
 }
 
-/// Title lines, then one box per band with the band limits as labels, maximum on top.
-fn draw_legend(ui: &Ui, painter: &Painter, rect: Rect, legend: &Legend, offset: &mut Vec2) {
+/// Title lines, then one box per band with the band limits as labels, maximum on top; a
+/// manual scale adds boxes for the values beyond its limits, labelled with their extremes.
+/// Returns the legend's response, for its double click and context menu.
+fn draw_legend(
+    ui: &Ui,
+    painter: &Painter,
+    rect: Rect,
+    legend: &Legend,
+    offset: &mut Vec2,
+) -> egui::Response {
     let titles: Vec<_> = legend
         .title
         .lines()
         .map(|l| painter.layout_no_wrap(l.to_string(), font(), TEXT))
         .collect();
-    let levels = legend.levels;
-    let values: Vec<_> = (0..=levels)
-        .map(|i| {
-            let t = 1.0 - i as f32 / levels as f32;
-            let value = legend.min + t * (legend.max - legend.min);
-            painter.layout_no_wrap(format_legend_value(value), font(), TEXT)
-        })
+    let levels = legend.levels();
+    let above = legend.above.as_ref().filter(|o| o.shown);
+    let below = legend.below.as_ref().filter(|o| o.shown);
+    let mut boxes: Vec<[f32; 3]> = above.iter().map(|o| o.color).collect();
+    boxes.extend(legend.colors.iter().rev());
+    boxes.extend(below.iter().map(|o| o.color));
+    let mut labels: Vec<f32> = above.iter().map(|o| o.value).collect();
+    labels.extend((0..=levels).map(|i| {
+        let t = 1.0 - i as f32 / levels as f32;
+        legend.min + t * (legend.max - legend.min)
+    }));
+    labels.extend(below.iter().map(|o| o.value));
+    let values: Vec<_> = labels
+        .into_iter()
+        .map(|value| painter.layout_no_wrap(format_legend_value(value), font(), TEXT))
         .collect();
     let band = vec2(BAND_HEIGHT / 0.75, BAND_HEIGHT);
     let label_height = values.first().map_or(0.0, |g| g.size().y);
@@ -398,10 +422,11 @@ fn draw_legend(ui: &Ui, painter: &Painter, rect: Rect, legend: &Legend, offset: 
         .fold(0.0, f32::max);
     let size = vec2(
         width,
-        title_height + levels as f32 * band.y + label_height * 0.5,
+        title_height + boxes.len() as f32 * band.y + label_height * 0.5,
     );
     let default = rect.left_top() + vec2(MARGIN, MARGIN);
-    let (frame, _) = drag_label(ui, rect, "legend", default, size, offset, Sense::drag());
+    let sense = Sense::click_and_drag();
+    let (frame, response) = drag_label(ui, rect, "legend", default, size, offset, sense);
 
     let mut top = frame.top();
     for galley in titles {
@@ -410,8 +435,8 @@ fn draw_legend(ui: &Ui, painter: &Painter, rect: Rect, legend: &Legend, offset: 
         top += height + 2.0;
     }
     top += 6.0;
-    for i in 0..levels {
-        let [r, g, b] = band_color(levels - 1 - i, levels).map(|c| (c * 255.0).round() as u8);
+    for (i, color) in boxes.into_iter().enumerate() {
+        let [r, g, b] = color.map(|c| (c * 255.0).round() as u8);
         let cell = Rect::from_min_size(pos2(frame.left(), top + i as f32 * band.y), band);
         painter.rect(
             cell,
@@ -425,6 +450,7 @@ fn draw_legend(ui: &Ui, painter: &Painter, rect: Rect, legend: &Legend, offset: 
         let y = top + i as f32 * band.y - galley.size().y * 0.5;
         painter.galley(pos2(frame.left() + band.x + 8.0, y), galley, TEXT);
     }
+    response
 }
 
 /// Framed text block, by default in the top right corner.

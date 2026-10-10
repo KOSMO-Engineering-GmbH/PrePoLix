@@ -10,7 +10,6 @@ use plx_mesher::{CadEntity, GeometryDisplay};
 #[cfg(test)]
 use plx_model::SectionKind;
 use plx_model::{FeModel, Finding, Geometry, MeshCheck, UnitSystem};
-use plx_render::contour::normalize;
 use plx_render::{
     ClipPlane, RenderMesh, SectionCells, SectionValues, Vertex, lighten, part_color,
     part_render_mesh, section_mesh, section_values, wireframe_edges,
@@ -722,7 +721,7 @@ impl Model {
                 deformed = view.show_undeformed;
             }
             if let (Some(values), Some(legend)) = (view.shown_values(), view.legend()) {
-                scalars = Some(normalize(&values, legend.min, legend.max));
+                scalars = Some(legend.normalize(&values));
             }
         }
         (coords, scalars, deformed)
@@ -739,7 +738,7 @@ impl Model {
             .map(|instance| {
                 let scalars = (view.shown_values_on(&instance))
                     .zip(legend.as_ref())
-                    .map(|(values, legend)| normalize(&values, legend.min, legend.max));
+                    .map(|(values, legend)| legend.normalize(&values));
                 (instance, scalars)
             })
             .collect()
@@ -1762,6 +1761,12 @@ mod tests {
                 user_scale: Some(2.5),
                 show_undeformed: Some(false),
                 levels: Some(12),
+                color_scale: Some(plx_model::ColorScale {
+                    spectrum: plx_model::ColorSpectrum::CoolWarm,
+                    levels: 12,
+                    manual: Some([0.5, 3.0]),
+                    ..Default::default()
+                }),
                 hidden_parts: vec![model.parts[0].name.clone()],
                 annotations: vec![
                     plx_results::saved_view::SavedAnnotation::Node(99),

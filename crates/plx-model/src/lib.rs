@@ -7,6 +7,7 @@
 
 mod amplitude;
 mod checks;
+pub mod color_scale;
 mod constraint;
 mod contact;
 pub mod convert;
@@ -26,6 +27,7 @@ mod validity;
 
 pub use amplitude::{Amplitude, AmplitudeTime};
 pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
+pub use color_scale::{ColorScale, ColorSpectrum};
 pub use constraint::{
     CompressionOnly, NodeTie, PointSpring, RigidBody, SurfaceSpring, SurfaceToSurfaceSpring,
 };
