@@ -190,6 +190,8 @@ impl TreeState {
 #[derive(Default)]
 pub struct TreeResponse {
     pub visibility: Vec<(usize, bool)>,
+    /// Colour contours of results parts turned on (`true`) or off.
+    pub contours: Vec<(usize, bool)>,
     /// A result component was picked (field, component).
     pub component: Option<(usize, usize)>,
     /// An item was double-clicked: show its properties.
@@ -644,6 +646,7 @@ pub fn part_menu(
     ui: &mut Ui,
     index: usize,
     visible: bool,
+    contours: bool,
     view: TreeView,
     selected: &BTreeSet<usize>,
     response: &mut TreeResponse,
@@ -674,6 +677,21 @@ pub fn part_menu(
             (response.visibility).extend(selected.iter().map(|&i| (i, !visible)));
         } else {
             response.visibility.push((index, !visible));
+        }
+    }
+    if view == TreeView::Results {
+        // PrePoMax: a part without colour contours is grey and not part of the legend range.
+        let label = if contours {
+            "Color Contours Off"
+        } else {
+            "Color Contours On"
+        };
+        if ui.button(label).clicked() {
+            if selected.contains(&index) {
+                (response.contours).extend(selected.iter().map(|&i| (i, !contours)));
+            } else {
+                response.contours.push((index, !contours));
+            }
         }
     }
     if deletable(view, &TreeItem::Part(index)) {
@@ -1189,7 +1207,15 @@ impl Tree<'_> {
                 let view = tree.view;
                 let selected = tree.state.selected_parts(view);
                 response.context_menu(|ui| {
-                    part_menu(ui, index, part.visible, view, &selected, &mut tree.response);
+                    part_menu(
+                        ui,
+                        index,
+                        part.visible,
+                        part.contours,
+                        view,
+                        &selected,
+                        &mut tree.response,
+                    );
                 });
             }
         });

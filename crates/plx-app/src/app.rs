@@ -1403,6 +1403,14 @@ impl Workbench {
             }
             self.viewport.set_part_visible(index, visible);
         }
+        if !response.contours.is_empty() {
+            for (index, contours) in response.contours {
+                if let Some(model) = self.shown_mut() {
+                    model.set_contours(&[index], contours);
+                }
+            }
+            self.results_changed = true;
+        }
         if let (Some((field, component)), Some(results)) =
             (response.component, self.shown_results_mut())
         {
@@ -3094,7 +3102,8 @@ impl Workbench {
             };
             if let Some(model) = model {
                 let hit = model.pick_click(&click);
-                match query.click(model, hit.as_ref(), &mut self.output) {
+                let precision = hit.as_ref().map_or(0.0, |h| click.precision_at(h.point));
+                match query.click(model, hit.as_ref(), precision, &mut self.output) {
                     QueryClick::Nothing => {}
                     QueryClick::Picked => self.update_contour(),
                     QueryClick::Added(annotation) => {
@@ -3234,16 +3243,26 @@ impl Workbench {
                 self.select_part(part);
             }
         }
-        let part = (self.menu_part)
-            .and_then(|index| Some((index, self.shown()?.parts.get(index)?.visible)));
+        let part = (self.menu_part).and_then(|index| {
+            let info = self.shown()?.parts.get(index)?;
+            Some((index, info.visible, info.contours))
+        });
         let mut tree_response = TreeResponse::default();
         let mut command = None;
         let selected = self.tree.selected_parts(self.tree_view);
         response.context_menu(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            if let Some((index, visible)) = part {
+            if let Some((index, visible, contours)) = part {
                 let view = self.tree_view;
-                tree::part_menu(ui, index, visible, view, &selected, &mut tree_response);
+                tree::part_menu(
+                    ui,
+                    index,
+                    visible,
+                    contours,
+                    view,
+                    &selected,
+                    &mut tree_response,
+                );
                 ui.separator();
             }
             command = crate::viewport::view_menu(ui);
@@ -3303,7 +3322,7 @@ impl Workbench {
             self.viewport.preview = match (hover, self.shown()) {
                 (Some(click), Some(model)) => model
                     .pick_click(&click)
-                    .map(|hit| query.preview(model, &hit))
+                    .map(|hit| query.preview(model, &hit, click.precision_at(hit.point)))
                     .unwrap_or_default(),
                 _ => Default::default(),
             };
