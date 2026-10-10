@@ -4785,29 +4785,38 @@ fn results_tool_bar(
         changed |= view.deformation != before;
         ui.label("Factor");
         let user = view.deformation == Deformation::UserDefined;
-        let mut factor = if user {
+        let factor = if user {
             view.user_scale
         } else {
             f64::from(view.scale())
         };
-        // Fixed width: a long factor must not push the items on its right around.
-        let width = 80.0;
-        let height = ui.spacing().interact_size.y;
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-        let mut field = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-        field.set_clip_rect(rect.intersect(ui.clip_rect()));
-        if !user {
-            field.disable();
-        }
-        let response = field
-            .add_sized(
-                [width, height],
-                numeric::drag_value(&mut factor).speed(0.1).max_decimals(4),
+        // A text field of fixed width: a long factor is cut off inside the frame instead of
+        // widening the field and pushing the items on its right around.
+        let id = ui.id().with("deformation factor");
+        let focused = ui.memory(|m| m.has_focus(id));
+        let mut text = focused
+            .then(|| ui.data_mut(|d| d.get_temp::<String>(id)))
+            .flatten()
+            .unwrap_or_else(|| numeric::format_physical(factor));
+        let response = ui
+            .add_enabled(
+                user,
+                egui::TextEdit::singleline(&mut text)
+                    .id(id)
+                    .desired_width(80.0),
             )
             .on_hover_text(numeric::format_physical(factor));
-        if user && response.changed() {
-            view.user_scale = factor;
-            changed = true;
+        if response.has_focus() {
+            ui.data_mut(|d| d.insert_temp(id, text.clone()));
+        }
+        if user && response.lost_focus() {
+            ui.data_mut(|d| d.remove_temp::<String>(id));
+            if let Some(value) = numeric::parse_number(&text).filter(|v| v.is_finite()) {
+                if value != view.user_scale {
+                    view.user_scale = value;
+                    changed = true;
+                }
+            }
         }
         changed |= ui
             .checkbox(&mut view.show_undeformed, "Show Undeformed")
