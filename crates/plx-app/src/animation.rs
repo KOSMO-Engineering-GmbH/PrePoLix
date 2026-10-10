@@ -84,6 +84,20 @@ impl Animation {
         }
     }
 
+    /// Moves the animation to another increment, possibly of another step, keeping the
+    /// settings, the playing state and, for a scale factor animation, the frame.
+    pub fn retarget(&mut self, increments: Vec<usize>, start_increment: usize, modal: bool) {
+        self.modal = modal;
+        self.start_increment = start_increment;
+        if self.kind == AnimationKind::Increments {
+            self.frame = increments
+                .iter()
+                .position(|&i| i == start_increment)
+                .unwrap_or(0);
+        }
+        self.increments = increments;
+    }
+
     pub fn frame_count(&self) -> usize {
         match self.kind {
             AnimationKind::ScaleFactor => self.frames.max(2) as usize,

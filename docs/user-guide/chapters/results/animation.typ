@@ -17,7 +17,12 @@ The animation button on the results toolbar opens the animation window.
 )
 
 The buttons step through the frames or play them; the slider selects a frame. Closing the window
-returns to the increment shown before.
+shows the increment that was shown at the start, or the one you selected meanwhile.
+
+The window can stay open while you change the increment: the #ui("Step, Increment") list and the
+First, Previous, Next and Last Increment buttons of the results toolbar keep working. The
+animation continues with the new increment (or the increments of its step) and keeps its
+settings, so you can page through modes or steps without reopening the window.
 
 == Sound of the mode shapes <sound>
 

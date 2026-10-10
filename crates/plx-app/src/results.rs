@@ -593,6 +593,24 @@ impl ResultsView {
         }
     }
 
+    /// Shows another increment, also while the animation window is open: the animation then
+    /// continues with the new increment (and its step) instead of being restarted.
+    pub fn switch_increment(&mut self, target: usize) {
+        let Some(mut animation) = self.animation.take() else {
+            self.select_increment(target);
+            return;
+        };
+        self.select_increment(target);
+        let step = self.current_increment().map(|i| i.step);
+        let modal = self.current_increment().is_some_and(|i| i.kind.is_modal());
+        let increments = (0..self.increments.len())
+            .filter(|&i| Some(self.increments[i].step) == step)
+            .collect();
+        animation.retarget(increments, target, modal);
+        self.animation = Some(animation);
+        self.show_animation_frame();
+    }
+
     /// Opens an animation of the given kind over the step of the shown increment.
     pub fn start_animation(&mut self, kind: AnimationKind) {
         let start = self
@@ -1104,6 +1122,32 @@ mod tests {
             view.scale(),
             round_significant(0.25 * 10.0 / 8.0_f64.sqrt(), 2) as f32
         );
+    }
+
+    #[test]
+    fn switching_increment_keeps_the_animation_running() {
+        let still = [[0.0; 3]];
+        let mut view = ResultsView::new(
+            vec![
+                increment(1, 1, AnalysisKind::Static, &still),
+                increment(1, 2, AnalysisKind::Static, &still),
+                increment(2, 1, AnalysisKind::Static, &still),
+            ],
+            Some(([0.0; 3], [10.0; 3])),
+        );
+        view.select_increment(0);
+        view.start_animation(AnimationKind::Increments);
+        view.animation.as_mut().unwrap().fps = 7.0;
+        view.animation.as_mut().unwrap().play();
+        view.switch_increment(2);
+        let animation = view.animation.as_ref().unwrap();
+        assert_eq!(animation.increments, [2]);
+        assert_eq!(animation.start_increment, 2);
+        assert_eq!((animation.fps, animation.playing), (7.0, true));
+        assert_eq!(view.increment, 2);
+        view.switch_increment(0);
+        assert_eq!(view.animation.as_ref().unwrap().increments, [0, 1]);
+        assert_eq!(view.animation.as_ref().unwrap().frame, 0);
     }
 
     #[test]
