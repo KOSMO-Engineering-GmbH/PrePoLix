@@ -17,6 +17,7 @@ plates (rotations).
   [Submodel], [Displacements taken from the global model (static steps of a submodel,
     @submodel). #ui("Global step") selects the step of the global results, the check boxes the
     components.],
+  [Symmetry], [Holds the selected faces in their plane like a mirror image (@symmetry).],
 )
 
 The region is a selection of faces, edges or nodes, a node set or a surface. Displacement and

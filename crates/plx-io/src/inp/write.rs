@@ -17,7 +17,7 @@ use plx_model::{
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
     ModelSpace, NodeTie, OutputDimension, OutputKind, Region, Section, SectionKind, StaticStep,
     SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals,
-    UserKeyword, line_tangent,
+    UserKeyword, line_tangent, symmetry_dofs, symmetry_plane,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -56,6 +56,9 @@ pub enum WriteError {
          type Submodel)"
     )]
     NoGlobalResults { item: String },
+    /// A symmetry boundary condition whose region fixes no plane.
+    #[error("{item}: {reason}")]
+    NoSymmetryPlane { item: String, reason: String },
 }
 
 /// One entry of the keyword tree of an input file, the structure PrePoMax's keyword editor
@@ -368,7 +371,6 @@ pub fn model_keywords(
         })
         .collect();
     let heading = format!("*Heading\n{}\n", heading.lines().next().unwrap_or_default());
-    let empty = |name| Keyword::title(name, Vec::new());
     let mut tree = vec![Keyword::title("Heading", vec![Keyword::generated(heading)])];
     if let Some(submodel) = submodel(model, &sets.submodel_sets)? {
         tree.push(Keyword::title("Submodel", vec![submodel]));
@@ -380,7 +382,7 @@ pub fn model_keywords(
         Keyword::title("Element sets", element_sets),
         Keyword::title("Surfaces", surfaces),
         Keyword::title("Physical constants", physical_constants(model)),
-        empty("Coordinate systems"),
+        Keyword::title("Coordinate systems", transforms(&sets.transforms)),
         Keyword::title("Materials", materials),
         Keyword::title("Sections", sections),
         Keyword::title("Pre-tension sections", pre_tension_sections),
@@ -392,6 +394,19 @@ pub fn model_keywords(
         Keyword::title("Steps", steps),
     ]);
     Ok(tree)
+}
+
+/// `*Transform` of each node set that a skewed symmetry plane holds.
+fn transforms(transforms: &[(String, [f64; 3], [f64; 3])]) -> Vec<Keyword> {
+    (transforms.iter())
+        .map(|(set, a, b)| {
+            let values: Vec<String> = a.iter().chain(b).map(|&v| number(v)).collect();
+            Keyword::generated(format!(
+                "*Transform, Nset={set}, Type=R\n{}\n",
+                values.join(", ")
+            ))
+        })
+        .collect()
 }
 
 /// `*SUBMODEL` with the node sets of the submodel boundary conditions, as PrePoMax writes it
@@ -586,6 +601,9 @@ struct Sets<'a> {
     /// Reference and rotation node of each reference point an active rigid body is driven
     /// by, and the node set holding the reference node once something refers to it.
     reference_nodes: BTreeMap<String, ReferenceNodes>,
+    /// Local coordinate systems (`*Transform`, type R) of node sets whose symmetry plane is
+    /// no coordinate plane: the set with the local x and y axes.
+    transforms: Vec<(String, [f64; 3], [f64; 3])>,
 }
 
 /// The nodes CalculiX's `*Rigid body` adds for a reference point: the reference node takes
@@ -616,6 +634,7 @@ impl<'a> Sets<'a> {
             reference_nodes: BTreeMap::new(),
             pre_tension_nodes: BTreeMap::new(),
             submodel_sets: Vec::new(),
+            transforms: Vec::new(),
         };
         for (name, ids) in &mesh.node_sets {
             sets.node_sets.push((name.clone(), ids.clone()));
@@ -1548,6 +1567,30 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
                 }
                 if !sets.submodel_sets.iter().any(|(s, _)| *s == set) {
                     sets.submodel_sets.push((set, bc.name.clone()));
+                }
+            }
+            BoundaryKind::Symmetry { normal } => {
+                let plane = symmetry_plane(sets.mesh, &bc.region, space, normal).map_err(|e| {
+                    WriteError::NoSymmetryPlane {
+                        item: bc.name.clone(),
+                        reason: e.to_string(),
+                    }
+                })?;
+                // A coordinate plane holds global degrees of freedom; any other plane gets a
+                // local system with x along its normal, which turns rotations as well.
+                let (axis, transformed) = match plane.axis() {
+                    Some(axis) => (axis, false),
+                    None => (0, true),
+                };
+                if transformed {
+                    let (t1, _) = plane.in_plane_axes();
+                    if !sets.transforms.iter().any(|(s, ..)| *s == set) {
+                        sets.transforms.push((set.clone(), plane.normal, t1));
+                    }
+                }
+                for dof in symmetry_dofs(axis, dofs) {
+                    let dof = dof + 1;
+                    let _ = writeln!(out, "{set}, {dof}, {dof}, 0");
                 }
             }
         }

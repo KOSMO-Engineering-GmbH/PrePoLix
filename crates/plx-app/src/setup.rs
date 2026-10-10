@@ -17,7 +17,7 @@ use plx_model::{
     InitialConditionKind, Load, LoadKind, Material, MeshSet, ModalDamping, ModalDynamicsStep,
     ModeDamping, ModelSpace, NodeTie, OutputDimension, OutputKind, PlasticPoint, Quantity, Region,
     Section, SectionKind, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
-    SurfaceInteraction, Tie, UnitSystem, next_name,
+    SurfaceInteraction, SymmetryError, Tie, UnitSystem, next_name, symmetry_plane,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
@@ -722,6 +722,7 @@ const DEFINED_TEMPERATURE: &str = "Defined_Temperature";
 const INITIAL_VELOCITY: &str = "Initial_Velocity";
 const INITIAL_ANGULAR_VELOCITY: &str = "Initial_Angular_Velocity";
 const SUBMODEL: &str = "Submodel";
+const SYMMETRY: &str = "Symmetry";
 const FORCE: &str = "Concentrated_Force";
 const MOMENT: &str = "Moment";
 const PRESSURE: &str = "Pressure";
@@ -746,7 +747,7 @@ fn previews_motion(bc: &BoundaryCondition, fe: &FeModel) -> bool {
 }
 
 /// The boundary condition kinds of the dialog: label, default name and the kind.
-fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
+fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 5] {
     [
         ("Fixed", FIXED, BoundaryKind::Fixed),
         (
@@ -763,6 +764,11 @@ fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
                 dofs: [true, true, true, false, false, false],
             },
         ),
+        (
+            "Symmetry",
+            SYMMETRY,
+            BoundaryKind::Symmetry { normal: None },
+        ),
     ]
 }
 
@@ -772,7 +778,70 @@ fn boundary_kind_name(kind: &BoundaryKind) -> &'static str {
         BoundaryKind::Displacement(_) => DISPLACEMENT,
         BoundaryKind::Temperature(_) => TEMPERATURE,
         BoundaryKind::Submodel { .. } => SUBMODEL,
+        BoundaryKind::Symmetry { .. } => SYMMETRY,
     }
+}
+
+/// Rows of a symmetry boundary condition: where the normal of the plane comes from, the
+/// plane found for the region and a warning when the region is no plane.
+fn symmetry_rows(ui: &mut egui::Ui, normal: &mut Option<[f64; 3]>, region: &Region, model: &Model) {
+    let space = model.fe.properties.space;
+    let plane = symmetry_plane(&model.mesh, region, space, *normal);
+    ui.label("Plane normal");
+    ui.horizontal(|ui| {
+        if ui.radio(normal.is_none(), "From selection").clicked() {
+            *normal = None;
+        }
+        if ui.radio(normal.is_some(), "Entered").clicked() && normal.is_none() {
+            // Starts from the plane found so far.
+            *normal = Some(plane.map_or([1.0, 0.0, 0.0], |p| p.normal));
+        }
+    });
+    ui.end_row();
+    match normal {
+        Some(n) => {
+            let count = if space.is_2d() { 2 } else { 3 };
+            for (value, label) in n.iter_mut().zip(["N1", "N2", "N3"]).take(count) {
+                ui.label(label);
+                ui.add(numeric::drag_value(value).speed(0.01));
+                ui.end_row();
+            }
+        }
+        None => {
+            if let Ok(plane) = plane {
+                ui.label("Normal");
+                let [x, y, z] = plane.normal.map(|c| if c.abs() < 5e-7 { 0.0 } else { c });
+                ui.label(format!("({x:.6}, {y:.6}, {z:.6})"));
+                ui.end_row();
+            }
+        }
+    }
+    let warning = match plane {
+        Err(SymmetryError::NoNodes) => None,
+        Err(error) => Some(error.to_string()),
+        Ok(plane) => plane.warning(space),
+    };
+    if let Some(warning) = warning {
+        ui.label("");
+        let mut text = warning;
+        if let Some(first) = text.get_mut(0..1) {
+            first.make_ascii_uppercase();
+        }
+        ui.add(
+            egui::Label::new(egui::RichText::new(text).color(egui::Color32::from_rgb(200, 0, 0)))
+                .wrap(),
+        );
+        ui.end_row();
+    }
+    ui.label("");
+    ui.weak("Holds the displacement normal to the plane and,");
+    ui.end_row();
+    ui.label("");
+    ui.weak("for beams and shells, the rotations about the");
+    ui.end_row();
+    ui.label("");
+    ui.weak("in-plane axes. Select the faces in the cut plane.");
+    ui.end_row();
 }
 
 /// Rows of a submodel boundary condition, PrePoMax's `ViewSubmodelBC`: the step of the
@@ -1591,6 +1660,9 @@ impl Editor {
                 if let BoundaryKind::Submodel { step, dofs } = &mut bc.kind {
                     submodel_rows(ui, step, dofs, two_d, &model.fe);
                 }
+                if let BoundaryKind::Symmetry { normal } = &mut bc.kind {
+                    symmetry_rows(ui, normal, &region.region(), model);
+                }
                 if bc.kind.takes_amplitude() {
                     let playing = self.motion.is_some();
                     let playable = previews_motion(bc, &model.fe);
@@ -2194,6 +2266,12 @@ impl Editor {
                     return Err("The region is empty.".into());
                 }
             }
+        }
+        if let Draft::BoundaryCondition(_, bc, _) = &self.draft
+            && let BoundaryKind::Symmetry { normal: Some(n) } = bc.kind
+            && n.iter().all(|v| *v == 0.0)
+        {
+            return Err("The normal must not be the zero vector.".into());
         }
         if let Draft::BoundaryCondition(_, bc, _) = &self.draft
             && let BoundaryKind::Submodel { dofs, .. } = bc.kind

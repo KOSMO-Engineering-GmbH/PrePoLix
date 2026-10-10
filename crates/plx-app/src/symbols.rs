@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, Vec2, vec2};
 use glam::{DVec3, Vec3};
 use plx_mesh::{ElementId, NodeId};
-use plx_model::{BoundaryKind, Constraint, LoadKind, Region};
+use plx_model::{BoundaryKind, Constraint, LoadKind, Region, symmetry_plane};
 use plx_render::Camera;
 
 use crate::model::Model;
@@ -293,12 +293,28 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     add(points[index], DVec3::Z, SymbolShape::Ball);
                 }
             }
+            // A cone along the normal of the plane and plates about its in-plane axes.
+            Kind::Boundary(BoundaryKind::Symmetry { normal }) => {
+                let space = model.fe.properties.space;
+                let plane = symmetry_plane(&model.mesh, &item.region, space, normal);
+                if let (Ok(plane), Some(center)) =
+                    (plane, region_center(model, &item.region, &visible))
+                {
+                    add(center, DVec3::from(plane.normal), SymbolShape::Cone);
+                    if !space.is_2d() {
+                        let (t1, t2) = plane.in_plane_axes();
+                        add(center, DVec3::from(t1), SymbolShape::RotationLock);
+                        add(center, DVec3::from(t2), SymbolShape::RotationLock);
+                    }
+                }
+            }
             Kind::Boundary(kind) => {
                 let held: [bool; 6] = match kind {
                     BoundaryKind::Fixed => [true; 6],
                     BoundaryKind::Displacement(values) => values.map(|v| v.is_some()),
                     BoundaryKind::Temperature(_) => [false; 6],
                     BoundaryKind::Submodel { dofs, .. } => dofs,
+                    BoundaryKind::Symmetry { .. } => unreachable!("drawn above"),
                 };
                 if let Some(center) = region_center(model, &item.region, &visible) {
                     for (axis, &held) in held.iter().enumerate() {
