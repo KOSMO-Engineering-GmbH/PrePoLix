@@ -544,6 +544,13 @@ impl PrepolixApp {
                 }
             });
             ui.menu_button("Help", not_implemented);
+            // Version number, greyed out at the far right of the menu bar.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
+                        .color(ui.visuals().weak_text_color()),
+                );
+            });
         });
     }
 
