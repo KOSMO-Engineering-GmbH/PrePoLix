@@ -215,15 +215,18 @@ impl Analysis {
                         "Status: {} ({seconds:.1} s)",
                         Self::status_text(status)
                     ));
-                    if let Some(progress) = self.job.progress() {
-                        ui.separator();
-                        ui.label(format!(
+                    let progress = match self.job.progress() {
+                        Some(p) => Some(format!(
                             "Step {}, increment {}, iterations {}, time {}",
-                            progress.step,
-                            progress.increment,
-                            progress.iterations,
-                            progress.total_time
-                        ));
+                            p.step, p.increment, p.iterations, p.total_time
+                        )),
+                        // The .sta file only changes when an increment ends; until then the
+                        // solver output tells where the run is.
+                        None => live_progress(&self.output),
+                    };
+                    if let Some(text) = progress {
+                        ui.separator();
+                        ui.label(text);
                     }
                 });
                 ui.separator();
@@ -286,6 +289,34 @@ impl Analysis {
     }
 }
 
+/// Step, increment and iteration from the latest `STEP n`, `INCREMENT n` and `iteration n`
+/// lines of CalculiX's output, for the time before the first `.sta` line exists.
+fn live_progress(output: &[String]) -> Option<String> {
+    let number = |line: &str, key: &str| -> Option<u32> {
+        line.trim().strip_prefix(key)?.trim().parse().ok()
+    };
+    let (mut step, mut increment, mut iteration) = (None, None, None);
+    for line in output.iter().rev() {
+        if iteration.is_none() && increment.is_none() {
+            iteration = number(line, "iteration");
+        }
+        if increment.is_none() {
+            increment = number(line, "INCREMENT");
+        }
+        if step.is_none() {
+            step = number(line, "STEP");
+        }
+        if step.is_some() && increment.is_some() {
+            break;
+        }
+    }
+    let (step, increment) = (step?, increment?);
+    Some(match iteration {
+        Some(iteration) => format!("Step {step}, increment {increment}, iterations {iteration}"),
+        None => format!("Step {step}, increment {increment}"),
+    })
+}
+
 /// Copies the result files the defined fields read next to the input file, where CalculiX
 /// looks for them; a file already there is left alone. Returns a line per file for the
 /// monitor output.
@@ -311,4 +342,32 @@ pub fn copy_result_files(fe: &plx_model::FeModel, dir: &std::path::Path) -> Vec<
         }
     }
     notes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::live_progress;
+
+    #[test]
+    fn progress_follows_the_solver_output() {
+        let lines = |text: &str| text.lines().map(String::from).collect::<Vec<_>>();
+        assert_eq!(live_progress(&lines("started\nCalculiX")), None);
+        assert_eq!(
+            live_progress(&lines(" STEP 2\n\n INCREMENT 3\n\n ATTEMPT 1\n")),
+            Some("Step 2, increment 3".into())
+        );
+        assert_eq!(
+            live_progress(&lines(
+                " STEP 1\n INCREMENT 4\n iteration 2\n x\n iteration 5\n"
+            )),
+            Some("Step 1, increment 4, iterations 5".into())
+        );
+        // An iteration of an earlier increment does not count.
+        assert_eq!(
+            live_progress(&lines(
+                " STEP 1\n INCREMENT 1\n iteration 7\n INCREMENT 2\n"
+            )),
+            Some("Step 1, increment 2".into())
+        );
+    }
 }
