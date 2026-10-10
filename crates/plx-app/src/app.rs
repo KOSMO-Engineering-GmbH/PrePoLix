@@ -1309,15 +1309,9 @@ impl Workbench {
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
             crate::setup::toggle_active(&mut model.fe, &item);
         }
-        if let (Some((index, visible)), Some(model)) =
-            (response.constraint_visibility, self.model.as_mut())
-        {
-            for (i, constraint) in model.fe.constraints.iter_mut().enumerate() {
-                if index.is_none_or(|index| index == i)
-                    && let Some(shown) = constraint.visible_mut()
-                {
-                    *shown = visible;
-                }
+        if let Some(model) = self.model.as_mut() {
+            for (item, visible) in &response.symbol_visibility {
+                crate::setup::set_visible(&mut model.fe, item, *visible);
             }
         }
         if let (Some(item), Some(model)) = (response.swap_master_slave, self.model.as_mut())
@@ -3771,22 +3765,25 @@ impl Workbench {
             })
         };
         let is_selected = |item: TreeItem| edited.is_none() && selected == Some(&item);
-        // Like PrePoMax, deactivated items have no symbols; the edited one is drawn anyway.
+        // Like PrePoMax, deactivated items have no symbols, hidden ones only while selected;
+        // the edited one is drawn anyway.
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
-            if step.active && bc.active && !replaced(false, i) {
+            let selected = is_selected(TreeItem::BoundaryCondition(index, i));
+            if step.active && bc.active && (bc.visible || selected) && !replaced(false, i) {
                 items.push(symbols::Item {
                     kind: symbols::Kind::Boundary(bc.kind),
                     region: bc.region.clone(),
-                    selected: is_selected(TreeItem::BoundaryCondition(index, i)),
+                    selected,
                 });
             }
         }
         for (i, load) in step.loads.iter().enumerate() {
-            if step.active && load.active && !replaced(true, i) {
+            let selected = is_selected(TreeItem::Load(index, i));
+            if step.active && load.active && (load.visible || selected) && !replaced(true, i) {
                 items.push(symbols::Item {
                     kind: symbols::Kind::Load(load.kind),
                     region: load.region.clone(),
-                    selected: is_selected(TreeItem::Load(index, i)),
+                    selected,
                 });
             }
         }

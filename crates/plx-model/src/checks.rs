@@ -1890,6 +1890,7 @@ mod tests {
         step.boundary_conditions.push(BoundaryCondition {
             name: "Fixed-1".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(vec![1, 4, 5, 8]),
             kind: BoundaryKind::Fixed,
             amplitude: None,
@@ -1897,6 +1898,7 @@ mod tests {
         step.loads.push(Load {
             name: "Force-1".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(vec![7]),
             kind: LoadKind::ConcentratedForce([0.0, 0.0, -1.0]),
             amplitude: None,
@@ -1964,6 +1966,7 @@ mod tests {
         step.boundary_conditions.push(BoundaryCondition {
             name: "Submodel-1".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(vec![2, 3, 6, 7]),
             kind: BoundaryKind::Submodel {
                 step: 1,
@@ -2011,6 +2014,7 @@ mod tests {
         model.steps[0].boundary_conditions.push(BoundaryCondition {
             name: "Fixed-1".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(vec![1, 2]),
             kind: BoundaryKind::Fixed,
             amplitude: None,
@@ -2132,6 +2136,7 @@ mod tests {
         model.steps[0].loads.push(Load {
             name: "Gravity-1".into(),
             active: true,
+            visible: true,
             region: Region::Parts(mesh.parts.iter().map(|p| p.name.clone()).collect()),
             kind: LoadKind::Gravity([0.0, 0.0, -9.81]),
             amplitude: None,
@@ -2280,6 +2285,7 @@ mod tests {
         step.boundary_conditions.push(BoundaryCondition {
             name: "Displacement-1".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(vec![1, 2]),
             kind: BoundaryKind::Displacement([Some(0.1), None, None, None, None, None]),
             amplitude: None,
@@ -2515,6 +2521,7 @@ mod tests {
         bcs.push(BoundaryCondition {
             name: "Roller".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(vec![2]),
             kind: BoundaryKind::Displacement([None, None, Some(0.0), None, None, None]),
             amplitude: None,
@@ -2522,6 +2529,7 @@ mod tests {
         bcs.push(BoundaryCondition {
             name: "Plane".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(mesh.node_ids().to_vec()),
             kind: BoundaryKind::Displacement([None, Some(0.0), None, None, None, None]),
             amplitude: None,
@@ -2575,6 +2583,7 @@ mod tests {
         step.boundary_conditions.push(BoundaryCondition {
             name: "Temperature-1".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(vec![1]),
             kind: BoundaryKind::Temperature(20.0),
             amplitude: None,
@@ -2582,6 +2591,7 @@ mod tests {
         step.loads.push(Load {
             name: "Flux-1".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(vec![7]),
             kind: LoadKind::ConcentratedFlux(10.0),
             amplitude: None,

@@ -404,6 +404,7 @@ mod tests {
         step.boundary_conditions.push(BoundaryCondition {
             name: "Fix".into(),
             active: true,
+            visible: true,
             region: fixed.clone(),
             kind: BoundaryKind::Fixed,
             amplitude: None,
@@ -411,6 +412,7 @@ mod tests {
         step.loads.push(Load {
             name: "Pull".into(),
             active: true,
+            visible: true,
             region: pulled.clone(),
             kind: LoadKind::Pressure(-100.0),
             amplitude: None,

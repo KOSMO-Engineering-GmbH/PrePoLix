@@ -204,8 +204,8 @@ pub struct TreeResponse {
     pub move_step: Option<(usize, bool)>,
     /// Swap master and slave of a tie, spring connection or contact pair.
     pub swap_master_slave: Option<TreeItem>,
-    /// Hide (`false`) or show the symbol of a constraint by index, or of all (`None`).
-    pub constraint_visibility: Option<(Option<usize>, bool)>,
+    /// Hide (`false`) or show the symbols of constraints, boundary conditions or loads.
+    pub symbol_visibility: Vec<(TreeItem, bool)>,
     /// An entry of the analysis' context menu, or the monitor by double click.
     pub analysis: Option<AnalysisAction>,
     /// Open the material library.
@@ -599,6 +599,16 @@ fn expander(ui: &mut Ui, openness: f32, response: &Response) {
     ui.painter().add(Shape::mesh(mesh));
 }
 
+/// Whether the context menu of `group` shows and hides the symbol of `item`.
+fn shows_symbol_of(group: &TreeItem, item: &TreeItem) -> bool {
+    match (group, item) {
+        (TreeItem::Group("Constraints"), TreeItem::Constraint(_)) => true,
+        (TreeItem::StepGroup(s, "BCs"), TreeItem::BoundaryCondition(t, _))
+        | (TreeItem::StepGroup(s, "Loads"), TreeItem::Load(t, _)) => s == t,
+        _ => false,
+    }
+}
+
 /// Icon of a part after its element types, as PrePoMax tells solid, shell and beam parts apart.
 fn part_icon(part: &PartInfo) -> TreeIcon {
     if !part.visible {
@@ -695,8 +705,8 @@ struct Tree<'a> {
     inactive: HashSet<TreeItem>,
     /// Items with a master and a slave, whose menu offers to swap them.
     master_slave: HashSet<TreeItem>,
-    /// Constraints with a symbol in the 3D view, and whether it is shown; hidden ones get
-    /// PrePoMax's hide icon.
+    /// Constraints, boundary conditions and loads with a symbol in the 3D view, and whether
+    /// it is shown; hidden ones get PrePoMax's hide icon.
     symbols: HashMap<TreeItem, bool>,
     /// Number of steps, to disable "Move Down" on the last one.
     step_count: usize,
@@ -831,13 +841,17 @@ impl Tree<'_> {
                     }
                 }
                 // PrePoMax offers the search on constraints and contact pairs.
-                if item == TreeItem::Group("Constraints") && !self.symbols.is_empty() {
+                let members: Vec<TreeItem> = (self.symbols.keys())
+                    .filter(|member| shows_symbol_of(&item, member))
+                    .cloned()
+                    .collect();
+                if !members.is_empty() {
                     ui.separator();
-                    if ui.button("Show All").clicked() {
-                        self.response.constraint_visibility = Some((None, true));
-                    }
-                    if ui.button("Hide All").clicked() {
-                        self.response.constraint_visibility = Some((None, false));
+                    for (label, visible) in [("Show All", true), ("Hide All", false)] {
+                        if ui.button(label).clicked() {
+                            (self.response.symbol_visibility)
+                                .extend(members.iter().map(|m| (m.clone(), visible)));
+                        }
                     }
                 }
                 if matches!(item, TreeItem::Group("Constraints" | "Contact Pairs")) {
@@ -865,12 +879,12 @@ impl Tree<'_> {
                     if ui.button("Edit …").clicked() {
                         self.response.open = Some(item.clone());
                     }
-                    if let (TreeItem::Constraint(i), Some(&visible)) =
-                        (&item, self.symbols.get(&item))
-                    {
+                    if let Some(&visible) = self.symbols.get(&item) {
                         let label = if visible { "Hide" } else { "Show" };
                         if ui.button(label).clicked() {
-                            self.response.constraint_visibility = Some((Some(*i), !visible));
+                            self.response
+                                .symbol_visibility
+                                .push((item.clone(), !visible));
                         }
                     }
                     if can_deactivate(&item) {
@@ -1475,6 +1489,13 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 }
                 for (i, _) in (step.loads.iter().enumerate()).filter(|(_, l)| !l.active) {
                     tree.inactive.insert(TreeItem::Load(s, i));
+                }
+                for (i, bc) in step.boundary_conditions.iter().enumerate() {
+                    tree.symbols
+                        .insert(TreeItem::BoundaryCondition(s, i), bc.visible);
+                }
+                for (i, load) in step.loads.iter().enumerate() {
+                    tree.symbols.insert(TreeItem::Load(s, i), load.visible);
                 }
                 for (i, _) in (step.history_outputs.iter().enumerate()).filter(|(_, h)| !h.active) {
                     tree.inactive.insert(TreeItem::HistoryOutput(s, i));

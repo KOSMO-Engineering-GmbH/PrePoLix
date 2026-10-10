@@ -30,6 +30,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
     step.boundary_conditions.push(BoundaryCondition {
         name: "Fixed-1".into(),
         active: true,
+        visible: true,
         region: Region::NodeSet("FIX".into()),
         kind: BoundaryKind::Fixed,
         amplitude: None,
@@ -64,6 +65,7 @@ fn tip_force() -> Load {
     Load {
         name: "Force-1".into(),
         active: true,
+        visible: true,
         region: Region::Nodes(vec![99]),
         kind: LoadKind::ConcentratedForce([0.0, 0.0, -100.0]),
         amplitude: None,
@@ -132,6 +134,7 @@ fn picked_faces_become_one_element_set_per_face_number() {
     let load = Load {
         name: "Pressure 1".into(),
         active: true,
+        visible: true,
         region: Region::Faces(vec![(10, 4), (20, 4), (1, 6)]),
         kind: LoadKind::Pressure(2.5),
         amplitude: None,
@@ -155,6 +158,7 @@ fn empty_regions_and_unknown_materials_are_errors() {
     let (mesh, mut model) = cantilever(Load {
         name: "Force-1".into(),
         active: true,
+        visible: true,
         region: Region::Nodes(Vec::new()),
         kind: LoadKind::ConcentratedForce([1.0, 0.0, 0.0]),
         amplitude: None,
@@ -277,6 +281,7 @@ fn moment(moment: [f64; 3]) -> Load {
     Load {
         name: "Moment-1".into(),
         active: true,
+        visible: true,
         region: Region::ReferencePoint("RP-1".into()),
         kind: LoadKind::Moment(moment),
         amplitude: None,
@@ -289,6 +294,7 @@ fn a_rigid_body_and_its_reference_point_are_written_like_prepomax_does() {
     let bc = BoundaryCondition {
         name: "Turn-1".into(),
         active: true,
+        visible: true,
         region: Region::ReferencePoint("RP-1".into()),
         kind: BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, Some(0.01)]),
         amplitude: None,
@@ -363,6 +369,7 @@ fn calculix_turns_the_rigid_tip_by_the_rotation_of_its_reference_point() {
     let bc = BoundaryCondition {
         name: "Turn-1".into(),
         active: true,
+        visible: true,
         region: Region::ReferencePoint("RP-1".into()),
         kind: BoundaryKind::Displacement([None, None, None, None, None, Some(angle)]),
         amplitude: None,
@@ -420,6 +427,7 @@ fn calculix_yields_the_bar_pulled_beyond_its_yield_stress() {
     let load = Load {
         name: "Pressure-1".into(),
         active: true,
+        visible: true,
         region: Region::Surface("TIP".into()),
         kind: LoadKind::Pressure(-stress),
         amplitude: None,
@@ -442,6 +450,7 @@ fn calculix_yields_the_bar_pulled_beyond_its_yield_stress() {
         BoundaryCondition {
             name: format!("Symmetry-{}", axis + 1),
             active: true,
+            visible: true,
             region: Region::Nodes(nodes_at(axis, min[axis])),
             kind: BoundaryKind::Displacement(dofs),
             amplitude: None,
@@ -490,6 +499,7 @@ fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
     model.steps[0].loads = vec![Load {
         name: "Pre_Tension-1".into(),
         active: true,
+        visible: true,
         region: Region::Faces(faces),
         kind: LoadKind::PreTension {
             value,
@@ -503,6 +513,7 @@ fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
     model.steps[0].boundary_conditions.push(BoundaryCondition {
         name: "Fixed-2".into(),
         active: true,
+        visible: true,
         region: Region::Surface("TIP".into()),
         kind: BoundaryKind::Fixed,
         amplitude: None,
@@ -633,6 +644,7 @@ fn calculix_pressure_on_a_surface_balances_the_reactions() {
     let load = Load {
         name: "Pressure-1".into(),
         active: true,
+        visible: true,
         region: Region::Surface("TIP".into()),
         kind: LoadKind::Pressure(2.0),
         amplitude: None,
@@ -657,6 +669,7 @@ fn calculix_reads_quadratic_elements_over_two_lines() {
     let load = Load {
         name: "Force-1".into(),
         active: true,
+        visible: true,
         region: Region::Nodes(vec![NODE]),
         kind: LoadKind::ConcentratedForce(FORCE),
         amplitude: None,
@@ -726,6 +739,7 @@ fn calculix_balances_a_surface_traction() {
     let load = Load {
         name: "Surface_Traction-1".into(),
         active: true,
+        visible: true,
         region: Region::Surface("TIP".into()),
         kind: LoadKind::SurfaceTraction([0.0, -80.0, 0.0]),
         amplitude: None,
@@ -1104,6 +1118,7 @@ fn buckle_analysis() -> (FeMesh, FeModel) {
         Load {
             name: "Force-1".into(),
             active: true,
+            visible: true,
             region: Region::NodeSet("TIP".into()),
             kind: LoadKind::ConcentratedForce([-1.0, 0.0, 0.0]),
             amplitude: None,
@@ -1381,6 +1396,7 @@ fn deactivated_items_are_left_out_as_comments() {
     model.steps[0].loads.push(Load {
         name: "Empty-1".into(),
         active: false,
+        visible: true,
         // Not even an empty region stops the export of a deactivated item.
         region: Region::Nodes(Vec::new()),
         kind: LoadKind::ConcentratedForce([1.0, 0.0, 0.0]),
@@ -1516,6 +1532,7 @@ fn plane_model(
         step.boundary_conditions.push(BoundaryCondition {
             name: format!("Displacement_Rotation-{}", k + 1),
             active: true,
+            visible: true,
             region: Region::Nodes(nodes),
             kind: BoundaryKind::Displacement(values),
             amplitude: None,
@@ -1524,6 +1541,7 @@ fn plane_model(
     step.loads.push(Load {
         name: "Load-1".into(),
         active: true,
+        visible: true,
         region,
         kind: load,
         amplitude: None,
@@ -1777,6 +1795,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
     step.boundary_conditions.push(BoundaryCondition {
         name: "Fixed-1".into(),
         active: true,
+        visible: true,
         region: Region::Nodes(bottom),
         kind: BoundaryKind::Fixed,
         amplitude: None,
@@ -1784,6 +1803,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
     step.loads.push(Load {
         name: "Pressure-1".into(),
         active: true,
+        visible: true,
         region: Region::Faces((101..=104).map(|e| (e, 2)).collect()),
         kind: LoadKind::Pressure(10.0),
         amplitude: None,
@@ -1931,6 +1951,7 @@ fn calculix_carries_the_load_across_a_contact() {
         model.steps[0].boundary_conditions.push(BoundaryCondition {
             name: "Side-1".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(top),
             kind: BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, None]),
             amplitude: None,
@@ -2105,6 +2126,7 @@ fn blocks_model(
     step.boundary_conditions.push(BoundaryCondition {
         name: "Fixed-1".into(),
         active: true,
+        visible: true,
         region: Region::Faces(blocks.a_bottom.clone()),
         kind: BoundaryKind::Fixed,
         amplitude: None,
@@ -2112,6 +2134,7 @@ fn blocks_model(
     step.loads.push(Load {
         name: "Surface_Traction-1".into(),
         active: true,
+        visible: true,
         region: Region::Faces(blocks.b_top.clone()),
         kind: LoadKind::SurfaceTraction(force),
         amplitude: None,
@@ -2302,6 +2325,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
     step.boundary_conditions.push(BoundaryCondition {
         name: "Fixed-1".into(),
         active: true,
+        visible: true,
         region: Region::Nodes(vec![1]),
         kind: BoundaryKind::Fixed,
         amplitude: None,
@@ -2309,6 +2333,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
     step.loads.push(Load {
         name: "Force-1".into(),
         active: true,
+        visible: true,
         region: Region::Nodes(vec![tip]),
         kind: load,
         amplitude: None,
@@ -2557,6 +2582,7 @@ fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
     model.steps[0].boundary_conditions.push(BoundaryCondition {
         name: "Held".into(),
         active: true,
+        visible: true,
         amplitude: None,
         region: Region::Nodes(vec![101]),
         kind: BoundaryKind::Displacement([None, None, Some(0.0), None, None, None]),
@@ -2685,6 +2711,7 @@ fn calculix_stretches_two_trusses_tied_at_a_node_like_one() {
     model.steps[0].boundary_conditions.push(BoundaryCondition {
         name: "Sideways".into(),
         active: true,
+        visible: true,
         amplitude: None,
         region: Region::Nodes(nodes),
         kind: BoundaryKind::Displacement([None, Some(0.0), Some(0.0), None, None, None]),
@@ -2786,6 +2813,7 @@ fn calculix_stretches_a_truss_by_f_l_over_e_a() {
     model.steps[0].boundary_conditions.push(BoundaryCondition {
         name: "Sideways".into(),
         active: true,
+        visible: true,
         region: Region::Nodes(nodes),
         kind: BoundaryKind::Displacement([None, Some(0.0), Some(0.0), None, None, None]),
         amplitude: None,
@@ -2831,6 +2859,7 @@ fn temperature(name: &str, region: Region, value: f64) -> BoundaryCondition {
     BoundaryCondition {
         name: name.into(),
         active: true,
+        visible: true,
         region,
         kind: BoundaryKind::Temperature(value),
         amplitude: None,
@@ -2841,6 +2870,7 @@ fn heat_load(name: &str, region: Region, kind: LoadKind) -> Load {
     Load {
         name: name.into(),
         active: true,
+        visible: true,
         region,
         kind,
         amplitude: None,
@@ -2884,6 +2914,7 @@ fn writes_heat_transfer_keywords() {
             BoundaryCondition {
                 name: "Fixed-1".into(),
                 active: true,
+                visible: true,
                 region: Region::NodeSet("FIX".into()),
                 kind: BoundaryKind::Fixed,
                 amplitude: None,
@@ -3089,6 +3120,7 @@ fn calculix_strains_the_bar_by_the_temperatures_of_a_result_file() {
     let hold = |name: &str, nodes: Vec<NodeId>, held: [bool; 3]| BoundaryCondition {
         name: name.into(),
         active: true,
+        visible: true,
         region: Region::Nodes(nodes),
         kind: BoundaryKind::Displacement([
             held[0].then_some(0.0),
@@ -3293,6 +3325,7 @@ fn calculix_expands_the_bar_in_a_coupled_step() {
     let support = |name: &str, nodes: Vec<NodeId>, values: [Option<f64>; 6]| BoundaryCondition {
         name: name.into(),
         active: true,
+        visible: true,
         region: Region::Nodes(nodes),
         kind: BoundaryKind::Displacement(values),
         amplitude: None,
@@ -3403,6 +3436,7 @@ fn writes_amplitudes_and_their_references() {
     step.boundary_conditions.push(BoundaryCondition {
         name: "Displacement-1".into(),
         active: true,
+        visible: true,
         region: Region::Nodes(vec![99]),
         kind: BoundaryKind::Displacement([None, Some(0.5), None, None, None, None]),
         amplitude: Some("Half".into()),
@@ -3691,6 +3725,7 @@ fn calculix_prints_the_contact_force_of_a_pair() {
     model.steps[0].boundary_conditions.push(BoundaryCondition {
         name: "Side-1".into(),
         active: true,
+        visible: true,
         region: Region::Nodes(top),
         kind: BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, None]),
         amplitude: None,
@@ -3818,6 +3853,7 @@ fn body_load(kind: LoadKind) -> Load {
     Load {
         name: "Body-1".into(),
         active: true,
+        visible: true,
         region: Region::Parts(vec!["EALL".into()]),
         kind,
         amplitude: None,
@@ -3972,6 +4008,7 @@ fn cantilever_submodel(dofs: [bool; 6]) -> (FeMesh, FeModel) {
     step.boundary_conditions.push(BoundaryCondition {
         name: "Submodel-1".into(),
         active: true,
+        visible: true,
         region: Region::Nodes(cut),
         kind: BoundaryKind::Submodel { step: 1, dofs },
         amplitude: None,

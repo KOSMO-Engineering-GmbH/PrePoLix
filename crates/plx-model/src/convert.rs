@@ -375,6 +375,7 @@ mod tests {
         step.loads.push(Load {
             name: "Pressure-1".into(),
             active: true,
+            visible: true,
             region: Region::Surface("A".into()),
             kind: LoadKind::Pressure(2.0),
             amplitude: None,
@@ -383,6 +384,7 @@ mod tests {
         step.loads.push(Load {
             name: "Force-1".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(Vec::new()),
             kind: LoadKind::ConcentratedForce([1000.0, 0.0, 0.0]),
             amplitude: None,

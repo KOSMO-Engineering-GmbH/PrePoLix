@@ -1028,6 +1028,7 @@ impl Editor {
                     BoundaryCondition {
                         name: next_name(name, existing),
                         active: true,
+                        visible: true,
                         region: Region::Nodes(Vec::new()),
                         kind,
                         amplitude: None,
@@ -1047,6 +1048,7 @@ impl Editor {
                     Load {
                         name: next_name(name, existing),
                         active: true,
+                        visible: true,
                         region: Region::Nodes(Vec::new()),
                         kind,
                         amplitude: None,
@@ -2477,6 +2479,22 @@ pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
     active.map(|a| *a = !*a).is_some()
 }
 
+/// Shows or hides the symbol of a constraint, boundary condition or load in the 3D view;
+/// returns false for other items.
+pub fn set_visible(fe: &mut FeModel, item: &TreeItem, visible: bool) -> bool {
+    let shown = match *item {
+        TreeItem::BoundaryCondition(s, i) => (fe.steps.get_mut(s))
+            .and_then(|st| st.boundary_conditions.get_mut(i))
+            .map(|b| &mut b.visible),
+        TreeItem::Load(s, i) => (fe.steps.get_mut(s))
+            .and_then(|st| st.loads.get_mut(i))
+            .map(|l| &mut l.visible),
+        TreeItem::Constraint(i) => fe.constraints.get_mut(i).and_then(Constraint::visible_mut),
+        _ => None,
+    };
+    shown.map(|v| *v = visible).is_some()
+}
+
 /// Moves step `s` one place up or down, like reordering in PrePoMax's step list; returns the
 /// new index. Loads, boundary conditions and outputs belong to their step and move with it.
 pub fn move_step(fe: &mut FeModel, s: usize, up: bool) -> Option<usize> {
@@ -3646,6 +3664,7 @@ mod tests {
         step.boundary_conditions.push(BoundaryCondition {
             name: "Displacement_Rotation-1".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(Vec::new()),
             kind: BoundaryKind::Displacement([Some(0.0), None, None, None, None, None]),
             amplitude: None,
@@ -3714,6 +3733,7 @@ mod tests {
         fe.steps[0].boundary_conditions.push(BoundaryCondition {
             name: "Fixed-1".into(),
             active: true,
+            visible: true,
             region: Region::NodeSet("FIX".into()),
             kind: BoundaryKind::Fixed,
             amplitude: None,
@@ -3721,6 +3741,7 @@ mod tests {
         fe.steps[0].loads.push(Load {
             name: "Pressure-1".into(),
             active: true,
+            visible: true,
             region: Region::Surface("TOP".into()),
             kind: LoadKind::Pressure(1.0),
             amplitude: None,
@@ -3784,6 +3805,7 @@ mod tests {
             BoundaryCondition {
                 name: "Fixed-1".into(),
                 active: true,
+                visible: true,
                 region: Region::NodeSet("FIX".into()),
                 kind: BoundaryKind::Fixed,
                 amplitude: None,
@@ -3791,6 +3813,7 @@ mod tests {
             BoundaryCondition {
                 name: "Temperature-1".into(),
                 active: true,
+                visible: true,
                 region: Region::NodeSet("HOT".into()),
                 kind: BoundaryKind::Temperature(100.0),
                 amplitude: None,
@@ -3800,6 +3823,7 @@ mod tests {
             Load {
                 name: "Pressure-1".into(),
                 active: true,
+                visible: true,
                 region: Region::Surface("TOP".into()),
                 kind: LoadKind::Pressure(1.0),
                 amplitude: None,
@@ -3808,6 +3832,7 @@ mod tests {
             Load {
                 name: "Convective_Film-1".into(),
                 active: true,
+                visible: true,
                 region: Region::Surface("TOP".into()),
                 kind: LoadKind::Film {
                     sink: 20.0,
@@ -3875,12 +3900,36 @@ mod tests {
     }
 
     #[test]
+    fn symbols_are_hidden_and_shown() {
+        let mut fe = FeModel::default();
+        Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        fe.steps[0].loads.push(Load {
+            name: "Force-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(vec![1]),
+            kind: LoadKind::ConcentratedForce([1.0, 0.0, 0.0]),
+            amplitude: None,
+            factor_amplitude: None,
+        });
+        assert!(set_visible(&mut fe, &TreeItem::Load(0, 0), false));
+        assert!(!fe.steps[0].loads[0].visible);
+        assert!(!set_visible(
+            &mut fe,
+            &TreeItem::BoundaryCondition(0, 0),
+            false
+        ));
+        assert!(!set_visible(&mut fe, &TreeItem::Step(0), false));
+    }
+
+    #[test]
     fn steps_bcs_and_loads_are_switched_off_and_on() {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         fe.steps[0].boundary_conditions.push(BoundaryCondition {
             name: "Fixed-1".into(),
             active: true,
+            visible: true,
             region: Region::NodeSet("FIX".into()),
             kind: BoundaryKind::Fixed,
             amplitude: None,
@@ -3949,6 +3998,7 @@ mod tests {
         let mut film = Load {
             name: "Film-1".into(),
             active: true,
+            visible: true,
             region: Region::Nodes(vec![1]),
             kind: LoadKind::Film {
                 sink: 20.0,
