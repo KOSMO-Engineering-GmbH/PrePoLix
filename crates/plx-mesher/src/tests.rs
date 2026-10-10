@@ -955,3 +955,30 @@ fn contact_edges_found_in_2d_survive_remeshing() {
         );
     }
 }
+
+/// A face split in the CAD program, here a ring on the upper shaft, is a face of its own on
+/// the mesh: its border is drawn and it can be picked although nothing bends there.
+#[test]
+fn split_faces_keep_their_outline_on_the_mesh() {
+    if !gmsh_available() {
+        return;
+    }
+    let geometry = import_cad(&testdata("welle_mit_teilflaeche.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
+    let mesh = generate_mesh(&geometry).unwrap().mesh;
+    // Two cylinders, two end faces, the shoulder and the ring splitting the upper cylinder.
+    assert_eq!(mesh.cad.faces.len(), 7);
+    let skin = plx_mesh::extract_part_skin(&mesh, &mesh.parts[0], 30.0);
+    let regions: BTreeSet<usize> = skin.faces.iter().map(|f| f.region).collect();
+    assert_eq!(regions.len(), 7);
+    // The ring's borders at z = 28 and 32 are feature edges.
+    let coords = mesh.coords();
+    for z in [28.0, 32.0] {
+        let on_circle = (skin.edges.iter())
+            .filter(|e| e.feature)
+            .filter(|e| [e.a, e.b].iter().all(|&n| (coords[n][2] - z).abs() < 1e-6))
+            .count();
+        assert!(on_circle >= 8, "z = {z}: {on_circle} edges");
+    }
+}
