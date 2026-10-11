@@ -1670,9 +1670,21 @@ impl Workbench {
             self.generate_mesh(ctx, None);
         }
         if let Some(index) = response.mesh_part {
-            let name = (self.geometry.as_ref()).and_then(|g| g.parts.get(index));
-            if let Some(name) = name.map(|p| p.name.clone()) {
-                self.generate_mesh(ctx, Some(vec![name]));
+            // A part among several selected ones meshes them all.
+            let selected = self.tree.selected_parts(view);
+            let indices: Vec<usize> = if selected.contains(&index) {
+                selected.into_iter().collect()
+            } else {
+                vec![index]
+            };
+            let names: Vec<String> = match self.geometry.as_ref() {
+                Some(g) => (indices.iter())
+                    .filter_map(|&i| g.parts.get(i).map(|p| p.name.clone()))
+                    .collect(),
+                None => Vec::new(),
+            };
+            if !names.is_empty() {
+                self.generate_mesh(ctx, Some(names));
             }
         }
         if response.search_contacts {
