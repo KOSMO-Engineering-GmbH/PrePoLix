@@ -19,7 +19,7 @@ env:
 jobs:
   windows-installer:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -32,13 +32,18 @@ jobs:
         with:
           path: |
             target/gmsh-windows
-            target/ccx/windows
             target/typst
-          key: gmsh-windows-${{ hashFiles('scripts/fetch_gmsh.py', 'scripts/fetch_ccx.py', 'installer/ccx/*', 'scripts/build_user_guide.sh') }}
+          key: gmsh-windows-${{ hashFiles('scripts/fetch_gmsh.py', 'scripts/build_user_guide.sh') }}
+      # CalculiX zu bauen dauert; neu nur, wenn sich Skript oder Patches ändern.
+      - uses: actions/cache@v4
+        with:
+          path: target/ccx/windows
+          key: ccx-windows-${{ hashFiles('scripts/build_ccx.sh', 'installer/ccx/**') }}
       - name: MinGW und NSIS
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends gcc-mingw-w64-x86-64 nsis zstd
+          sudo apt-get install -y -qq --no-install-recommends gcc-mingw-w64-x86-64 \
+            g++-mingw-w64-x86-64 gfortran-mingw-w64-x86-64 gfortran cmake flex bison zlib1g-dev wine nsis
       - run: scripts/build_windows_installer.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -60,7 +65,7 @@ jobs:
     # Das älteste unterstützte Ubuntu: das AppImage läuft nur mit einer glibc, die mindestens so
     # neu ist wie die des Build-Systems.
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -71,15 +76,18 @@ jobs:
         with:
           path: |
             target/gmsh
-            target/ccx/linux
             target/appimage/tools
             target/typst
-          key: appimage-${{ hashFiles('scripts/fetch_gmsh.py', 'scripts/fetch_ccx.py', 'installer/ccx/*', 'scripts/build_appimage.sh', 'scripts/build_user_guide.sh') }}
+          key: appimage-${{ hashFiles('scripts/fetch_gmsh.py', 'scripts/build_appimage.sh', 'scripts/build_user_guide.sh') }}
+      - uses: actions/cache@v4
+        with:
+          path: target/ccx/linux
+          key: ccx-linux-${{ hashFiles('scripts/build_ccx.sh', 'installer/ccx/**') }}
       - name: Systembibliotheken
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends libasound2-dev libglu1-mesa \
-            libxft2 libxcursor1 libxinerama1 libgomp1 file zsync zstd
+            libxft2 libxcursor1 libxinerama1 libgomp1 file zsync gfortran cmake flex bison zlib1g-dev
       - run: scripts/build_appimage.sh
       - uses: actions/upload-artifact@v4
         with:

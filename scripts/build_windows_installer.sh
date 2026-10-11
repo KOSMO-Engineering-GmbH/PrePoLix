@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Builds the Windows installer for prepolix on Linux: cross-compiles prepolix.exe for
-# x86_64-pc-windows-gnu with MinGW, fetches the Gmsh DLL and the CalculiX solver and packs
+# x86_64-pc-windows-gnu with MinGW, fetches the Gmsh DLL, builds the CalculiX solver and packs
 # everything with NSIS.
 #
 #     scripts/build_windows_installer.sh
 #
-# Needs (Debian/Ubuntu): sudo apt install gcc-mingw-w64-x86-64 nsis python3 curl xz-utils zstd
+# Needs (Debian/Ubuntu): sudo apt install gcc-mingw-w64-x86-64 nsis python3 curl xz-utils
+# and what scripts/build_ccx.sh needs for CalculiX on Windows,
 # and the Rust target:   rustup target add x86_64-pc-windows-gnu
 #
 # The installer ends up in target/windows-installer/prepolix-<version>-setup.exe.
@@ -32,7 +33,7 @@ version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Car
 
 cargo build --release --locked -p plx-app --target "$target"
 [ -f "$gmsh/gmsh-4.15.dll" ] || python3 scripts/fetch_gmsh.py --platform windows --dest "$gmsh"
-[ -f "$ccx/bin/ccx.exe" ] || python3 scripts/fetch_ccx.py --platform windows --dest "$ccx"
+[ -f "$ccx/bin/ccx.exe" ] || scripts/build_ccx.sh windows
 scripts/build_user_guide.sh html
 
 rm -rf "$stage"

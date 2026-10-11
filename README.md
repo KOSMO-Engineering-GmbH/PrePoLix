@@ -119,11 +119,12 @@ not tested. The *Test Gmsh* button in the settings loads the library and meshes 
 
 ### CalculiX
 
-The Windows installer and the AppImage ship CalculiX 2.23 (the conda-forge build with SPOOLES and
-ARPACK) and use it when no other executable is set. To use another CalculiX, for example one with
-Pardiso, install it, e.g. from [calculix.de](http://www.calculix.de/) or your package manager
+The Windows installer and the AppImage ship CalculiX 2.23 with the SPOOLES, PaStiX and ARPACK
+solvers and use it when no other executable is set. New steps solve with PaStiX, which is much
+faster than SPOOLES on larger models. To use another CalculiX, for example one with Pardiso,
+install it, e.g. from [calculix.de](http://www.calculix.de/) or your package manager
 (`sudo apt install calculix-ccx`), and select the executable in *Tools > Settings*. A self-test
-button there checks that it works. From a clone, `python3 scripts/fetch_ccx.py` fetches the shipped
+button there checks that it works. From a clone, `scripts/build_ccx.sh` builds the shipped
 CalculiX into `target/ccx`, where development builds find it.
 
 ## Documentation

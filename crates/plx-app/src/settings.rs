@@ -211,10 +211,22 @@ impl Solver {
             .map(|d| d.solvers.as_slice())
     }
 
-    /// The executable the detected solvers belong to: the resolved path, so that an update
-    /// of the bundled CalculiX is probed again.
+    /// The executable the detected solvers belong to: the resolved path with the file's size
+    /// and modification time, so that another CalculiX at the same path, such as an update of
+    /// the bundled one, is probed again.
     pub fn executable_key(&self) -> String {
-        self.job_solver().executable.display().to_string()
+        let executable = self.job_solver().executable;
+        let Ok(meta) = std::fs::metadata(&executable) else {
+            return executable.display().to_string();
+        };
+        let modified = (meta.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        format!(
+            "{} ({} bytes, {modified})",
+            executable.display(),
+            meta.len()
+        )
     }
 
     pub fn job_solver(&self) -> plx_job::Solver {
@@ -808,6 +820,27 @@ mod tests {
         assert_eq!(preferred_solver(&[Spooles, PaStiX]), PaStiX);
         assert_eq!(preferred_solver(&[Spooles]), Default);
         assert_eq!(preferred_solver(&[]), Default);
+    }
+
+    #[test]
+    fn replaced_executable_is_probed_again() {
+        let dir = std::env::temp_dir().join(format!("plx-ccx-key-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("ccx");
+        std::fs::write(&exe, "old").unwrap();
+        let mut solver = Solver {
+            executable: exe.display().to_string(),
+            ..Solver::default()
+        };
+        solver.detected = Some(DetectedSolvers {
+            executable: solver.executable_key(),
+            solvers: vec![EquationSolver::Spooles],
+        });
+        assert!(solver.solvers().is_some());
+        // Same path and version, but another build, e.g. the bundled CalculiX of an update.
+        std::fs::write(&exe, "new build").unwrap();
+        assert!(solver.solvers().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

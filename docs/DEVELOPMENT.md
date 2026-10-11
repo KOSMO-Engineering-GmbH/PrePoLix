@@ -41,18 +41,23 @@ Linux the Gmsh library also needs `libGLU` and `libXft`.
 
 ## CalculiX
 
-The releases ship CalculiX 2.23 as built by conda-forge (with SPOOLES and ARPACK, plus the
-libraries it needs). `scripts/fetch_ccx.py` downloads the pinned packages, checks their SHA-256 and
-unpacks them into `target/ccx/<platform>`, where builds in `target/<profile>` find it when no
-executable is set:
+The releases ship CalculiX 2.23 with the SPOOLES, PaStiX and ARPACK solvers, built from pinned
+sources by `scripts/build_ccx.sh`: CalculiX from Guido Dhondt's repository with the fixes of
+conda-forge's CalculiX package, SPOOLES with conda-forge's fixes for its multithreaded solver,
+PaStiX4CalculiX with Scotch, ARPACK-NG and a single-threaded OpenBLAS (PaStiX and SPOOLES run
+their own threads). Everything is linked statically into one executable that needs only the C
+library, or nothing beyond Windows itself. The result lands in `target/ccx/<platform>`, where builds
+in `target/<profile>` find it when no executable is set:
 
 ```sh
-python3 scripts/fetch_ccx.py                        # Linux
-python3 scripts/fetch_ccx.py --platform windows     # Windows
+scripts/build_ccx.sh            # Linux
+scripts/build_ccx.sh windows    # Windows, cross-compiled with MinGW
 ```
 
-The installer puts it in `ccx` next to `prepolix.exe`, the AppImage in `usr/lib/prepolix/ccx`.
-It needs the `zstd` program (or Python 3.14).
+The head of the script lists the packages it needs. A first build takes a while (OpenBLAS most of
+it); intermediate files stay in `target/ccx-build/<platform>`, and finished parts are not built
+again. The installer puts the result in `ccx` next to `prepolix.exe`, the AppImage in
+`usr/lib/prepolix/ccx`. Fixes to PaStiX' build scripts are in `installer/ccx/patches`.
 
 ## Windows installer
 

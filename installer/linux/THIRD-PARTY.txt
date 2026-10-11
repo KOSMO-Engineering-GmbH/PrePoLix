@@ -46,22 +46,36 @@ Rust libraries (compiled into prepolix)
 
 CalculiX ccx 2.23 (in usr/lib/prepolix/ccx of the AppImage)
     The solver. Copyright (C) 1998-2025 Guido Dhondt. GNU GPL version 2 or
-    later, see ccx/licenses/CalculiX-GPL-2.0.txt. The unmodified Linux
-    package from conda-forge (with SPOOLES and ARPACK); ccx/SOURCE.txt lists
-    the exact packages.
-    Source: http://www.dhondt.de/ccx_2.23.src.tar.bz2 with the fixes and the
-    build recipe at
+    later, see ccx/licenses/CalculiX-GPL-2.0.txt. Built by
+    scripts/build_ccx.sh of PrePoLix from CalculiX 2.23 with the fixes of
+    conda-forge's CalculiX package, with the SPOOLES, PaStiX and ARPACK
+    solvers linked in; ccx/SOURCE.txt lists the exact sources.
+    Source: https://github.com/Dhondtguido/CalculiX with the fixes at
     https://github.com/conda-forge/calculix-feedstock/tree/9d06fb5716f31488e18f67d13956164a6857e05c
 
-    It comes with, also unmodified from conda-forge:
+    Linked into ccx:
 
-    ARPACK-NG 3.9.1 (libarpack.so.2)
+    SPOOLES 2.2
+        Public domain. With conda-forge's fixes for its multithreaded solver.
+        Source: http://www.netlib.org/linalg/spooles/ and
+        https://github.com/conda-forge/spooles-feedstock
+    PaStiX 6.0.1 (PaStiX4CalculiX)
+        CeCILL-C license, see ccx/licenses/PaStiX-CeCILL-C.txt. Copyright
+        Bordeaux INP, CNRS, Inria and Université de Bordeaux; the version
+        adapted for CalculiX.
+        Source: https://github.com/Kabbone/PaStiX4CalculiX with the patches
+        in installer/ccx/patches of the PrePoLix source.
+    Scotch 7.0.11
+        CeCILL-C license, see ccx/licenses/Scotch-CeCILL-C.txt.
+        Source: https://gitlab.inria.fr/scotch/scotch
+    ARPACK-NG 3.9.1
         BSD license, see ccx/licenses/ARPACK-LICENSE.txt.
         Source: https://github.com/opencollab/arpack-ng
-    BLAS and LAPACK 3.11.0, reference implementation (libblas, liblapack)
-        BSD license, see ccx/licenses/LAPACK-LICENSE.txt.
-        Source: https://github.com/Reference-LAPACK/lapack
-    GCC runtime libraries 16.2 (libgfortran, libgomp, libgcc_s, libquadmath)
+    OpenBLAS 0.3.30, with LAPACK
+        BSD license, see ccx/licenses/OpenBLAS-LICENSE.txt and
+        ccx/licenses/LAPACK-LICENSE.txt.
+        Source: https://github.com/OpenMathLib/OpenBLAS
+    GCC runtime libraries (libgfortran, libgomp, libgcc, libquadmath)
         GNU GPL version 3 with the GCC Runtime Library Exception, see
         ccx/licenses/GPL-3.0.txt and
         ccx/licenses/GCC-RUNTIME-LIBRARY-EXCEPTION.txt.

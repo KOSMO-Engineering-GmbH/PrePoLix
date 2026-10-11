@@ -16,7 +16,7 @@
 # Needs (Debian/Ubuntu): sudo apt install gcc g++ gfortran make cmake git curl patch perl
 #                            python3 flex bison zlib1g-dev
 # and for Windows:       sudo apt install gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
-#                            gfortran-mingw-w64-x86-64
+#                            gfortran-mingw-w64-x86-64 wine
 set -euo pipefail
 
 platform="${1:-linux}"
@@ -69,7 +69,9 @@ else
     CC=gcc CXX=g++ FC=gfortran AR=ar RANLIB=ranlib
     exe=ccx
 fi
-for tool in "$CC" "$CXX" "$FC" make cmake git curl patch perl python3; do
+tools=("$CC" "$CXX" "$FC" make cmake git curl patch perl python3 flex bison)
+[ "$platform" = windows ] && tools+=(wine)
+for tool in "${tools[@]}"; do
     command -v "$tool" >/dev/null || {
         echo "$tool fehlt, siehe Kopf von $0" >&2
         exit 1
@@ -112,25 +114,27 @@ archive_source() {
 
 cmake_cross=()
 if [ "$platform" = windows ]; then
-    cmake_cross=(-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX"
-        -DCMAKE_Fortran_COMPILER="$FC" -DCMAKE_RC_COMPILER="$host-windres"
-        -DCMAKE_FIND_ROOT_PATH="$prefix" -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
-        -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY)
+    cmake_cross=(-DCMAKE_SYSTEM_NAME=Windows -DCMAKE_SYSTEM_PROCESSOR=x86_64
+        -DCMAKE_C_COMPILER="$CC" -DCMAKE_CXX_COMPILER="$CXX" -DCMAKE_Fortran_COMPILER="$FC"
+        -DCMAKE_RC_COMPILER="$host-windres"
+        -DCMAKE_FIND_ROOT_PATH="$prefix;/usr/$host" -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER
+        -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY
+        -DCMAKE_EXE_LINKER_FLAGS=-static -DCMAKE_CROSSCOMPILING_EMULATOR=wine)
+    # Scotch runs a program it builds to write its headers, which needs Wine here.
+    export WINEPREFIX="$work/wine" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml="
 fi
 
 # OpenBLAS: BLAS, LAPACK and LAPACKE. Single-threaded, because PaStiX and SPOOLES run their own
 # threads; with locking, since those call it from several threads. DYNAMIC_ARCH picks the
-# kernels for the processor at run time.
+# kernels for the processor at run time, from those in DYNAMIC_LIST (all would take hours to
+# build); TARGET is the oldest processor the rest of the code runs on.
 if ! done_marker openblas; then
     step OpenBLAS
     git_source openblas "$OPENBLAS_REPO" "$OPENBLAS_COMMIT"
     blas_args=(USE_THREAD=0 USE_LOCKING=1 USE_OPENMP=0 DYNAMIC_ARCH=1 NO_SHARED=1 NO_CBLAS=0
-        NO_LAPACKE=0 BUILD_TESTING=0 NUM_THREADS=64 CC="$CC" FC="$FC")
-    if [ "$platform" = windows ]; then
-        blas_args+=(HOSTCC=gcc TARGET=HASWELL BINARY=64 OS=WINNT CROSS=1 CROSS_SUFFIX=$host-)
-    else
-        blas_args+=(TARGET=HASWELL)
-    fi
+        NO_LAPACKE=0 BUILD_TESTING=0 NUM_THREADS=64 CC="$CC" FC="$FC" TARGET=PRESCOTT
+        DYNAMIC_LIST="PRESCOTT NEHALEM SANDYBRIDGE HASWELL SKYLAKEX ZEN")
+    [ "$platform" = windows ] && blas_args+=(HOSTCC=gcc BINARY=64 OS=WINNT CROSS=1 CROSS_SUFFIX=$host-)
     make -C "$src/openblas" -s -j"$jobs" "${blas_args[@]}" libs netlib >"$work/openblas.log" 2>&1 ||
         { tail -30 "$work/openblas.log"; exit 1; }
     make -C "$src/openblas" -s "${blas_args[@]}" PREFIX="$prefix" install >>"$work/openblas.log" 2>&1
@@ -183,6 +187,13 @@ fi
 if ! done_marker scotch; then
     step Scotch
     archive_source scotch "$SCOTCH_URL" "$SCOTCH_SHA256"
+    if [ "$platform" = windows ]; then
+        # Sets up the Wine prefix once, before parallel jobs would do it at the same time.
+        wine cmd /c exit >/dev/null 2>&1 || true
+        wineserver -w
+    fi
+    # As a target name, the program is run through the emulator (Wine) when cross-compiling.
+    sed -i 's/COMMAND $<TARGET_FILE:dummysizes>/COMMAND dummysizes/' "$src/scotch/src/libscotch/CMakeLists.txt"
     cmake -S "$src/scotch" -B "$work/scotch" -DCMAKE_BUILD_TYPE=Release "${cmake_cross[@]}" \
         -DBUILD_SHARED_LIBS=OFF -DBUILD_PTSCOTCH=OFF -DBUILD_LIBESMUMPS=OFF -DBUILD_LIBSCOTCHMETIS=OFF \
         -DBUILD_FORTRAN=OFF -DINSTALL_METIS_HEADERS=OFF -DUSE_ZLIB=OFF -DUSE_LZMA=OFF -DUSE_BZ2=OFF \

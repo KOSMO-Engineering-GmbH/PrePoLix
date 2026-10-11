@@ -43,7 +43,7 @@ The project, including geometry, mesh and model, is saved as a PrePoLix project 
 == Requirements
 
 - *CalculiX* (`ccx`) is needed to run analyses. The Windows installer and the Linux AppImage
-  include CalculiX 2.23 with the SPOOLES and ARPACK solvers, so analyses run right after
+  include CalculiX 2.23 with the PaStiX, SPOOLES and ARPACK solvers, so analyses run right after
   installation. Another CalculiX, for example one built with Pardiso, can be set under
   #menu("Tools", "Settings ...", "CalculiX"); #ui("Test CalculiX") checks it (@settings).
 - *Gmsh* is needed to import and mesh CAD geometry. The Windows installer and the Linux AppImage
