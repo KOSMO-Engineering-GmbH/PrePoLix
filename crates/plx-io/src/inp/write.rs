@@ -1268,23 +1268,39 @@ fn tie(sets: &mut Sets, tie: &Tie) -> Result<Keyword, WriteError> {
     // belong to the copies of the cut nodes then, and a tie to them would bypass the preload:
     // the original nodes, which the cut's equations hold apart from the copies, become the
     // slave nodes instead, tied to the faces of the other part.
-    let at_cut = |region: &Region| {
-        (region.nodes(sets.mesh).iter()).any(|n| sets.cut_originals.contains_key(n))
+    // The nodes of a tie side, also of its faces: a side picked on the CAD geometry lists the
+    // original nodes, its element faces the copies.
+    let side_nodes = |region: &Region| -> BTreeSet<NodeId> {
+        let faces = region.faces(sets.mesh);
+        (region.nodes(sets.mesh).into_iter())
+            .chain(
+                faces
+                    .iter()
+                    .flat_map(|&(e, f)| constraints::face_node_ids(sets.mesh, e, f)),
+            )
+            .collect()
     };
-    let (master_at_cut, slave_at_cut) = (at_cut(&tie.master), at_cut(&tie.slave));
-    let (slave_region, master_region) = if master_at_cut && !slave_at_cut {
-        (&tie.master, &tie.slave)
+    let at_cut = |nodes: &BTreeSet<NodeId>| {
+        (nodes.iter()).any(|n| {
+            sets.cut_originals.contains_key(n) || sets.cut_originals.values().any(|o| o == n)
+        })
+    };
+    let (master_nodes, slave_nodes) = (side_nodes(&tie.master), side_nodes(&tie.slave));
+    let (master_at_cut, slave_at_cut) = (at_cut(&master_nodes), at_cut(&slave_nodes));
+    let (slave_region, master_region, slave_nodes) = if master_at_cut && !slave_at_cut {
+        (&tie.master, &tie.slave, master_nodes)
     } else {
-        (&tie.slave, &tie.master)
+        (&tie.slave, &tie.master, slave_nodes)
     };
     let master = sets.surface(&tie.name, "Master", master_region)?;
     // CalculiX (2.21 to 2.23) ties the edge faces of membranes to nothing: their expanded
     // nodes have no active degrees of freedom there, and the model has no stiffness. Their
     // nodes tie correctly, and a membrane has no rotations to lose.
     let slave = if master_at_cut || slave_at_cut {
-        let originals = (slave_region.nodes(sets.mesh).iter())
+        let originals: BTreeSet<NodeId> = (slave_nodes.iter())
             .map(|n| sets.cut_originals.get(n).copied().unwrap_or(*n))
-            .collect::<Vec<_>>();
+            .collect();
+        let originals = originals.into_iter().collect();
         sets.node_surface(&tie.name, "Slave", &Region::Nodes(originals))?
     } else if membrane_edges(sets.mesh, slave_region) {
         sets.node_surface(&tie.name, "Slave", slave_region)?
