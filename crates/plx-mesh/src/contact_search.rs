@@ -3,9 +3,12 @@
 //! `ContactGraph`.
 //!
 //! Surfaces are the smooth patches of the part skins, which stand for the CAD faces the way
-//! PrePoMax's geometry surfaces do. In 2D models the surfaces are chains of outline edges of
-//! the plane elements, split at corners, the way CalculiX takes the edges as faces. Two surfaces are in contact where triangles of both face
-//! each other within the search distance and angle. The pairs found are grouped (by parts,
+//! PrePoMax's geometry surfaces do: of solids their outer side, of shells and membranes the
+//! top and the bottom side, and the free edges of shells in chains between corners. In 2D
+//! models the surfaces are chains of outline edges of the plane elements, split at corners,
+//! the way CalculiX takes the edges as faces. Two surfaces are in contact where triangles of
+//! both face each other within the search distance and angle; an edge is searched as a strip
+//! across it, perpendicular to its shell, or along z in 2D. The pairs found are grouped (by parts,
 //! by the contact graph or not at all). Master is the side with the coarser mesh, then the
 //! stiffer material, then the larger area, the usual rule for CalculiX contact; a surface
 //! touching several better masters is the slave of all of them at once, so that it is a
@@ -17,8 +20,63 @@ use crate::element::ElementFamily;
 use crate::mesh::{ElementId, FeMesh};
 use crate::skin::PartSkin;
 
-/// A surface patch: part index and patch (region) of the part's skin.
-pub type SurfaceId = (usize, usize);
+/// A surface patch: part index, which side or edge of the part, and the number of the patch
+/// (the region of the part's skin, or the chain of edges).
+pub type SurfaceId = (usize, SurfaceKind, usize);
+
+/// What a contact surface is, PrePoMax's geometry types of the search.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SurfaceKind {
+    /// The outer side of solid elements.
+    Solid,
+    /// The top (positive normal, CalculiX face S2) of shells and membranes.
+    ShellTop,
+    /// Their bottom (S1).
+    ShellBottom,
+    /// Free edges of shells and membranes (S3 and up), and the outline of 2D elements.
+    ShellEdge,
+}
+
+impl SurfaceKind {
+    /// PrePoMax's name in the search's table.
+    pub fn label(self) -> &'static str {
+        match self {
+            SurfaceKind::Solid => "Solid",
+            SurfaceKind::ShellTop | SurfaceKind::ShellBottom => "Shell",
+            SurfaceKind::ShellEdge => "Shell edge",
+        }
+    }
+}
+
+/// Which surfaces are searched, PrePoMax's geometry filter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GeometryFilter {
+    pub solid: bool,
+    /// Top and bottom of shells and membranes.
+    pub shell: bool,
+    /// Free edges of shells and membranes, and the outline of 2D elements.
+    pub shell_edge: bool,
+}
+
+impl Default for GeometryFilter {
+    fn default() -> Self {
+        Self {
+            solid: true,
+            shell: true,
+            shell_edge: true,
+        }
+    }
+}
+
+impl GeometryFilter {
+    fn takes(&self, kind: SurfaceKind) -> bool {
+        match kind {
+            SurfaceKind::Solid => self.solid,
+            SurfaceKind::ShellTop | SurfaceKind::ShellBottom => self.shell,
+            SurfaceKind::ShellEdge => self.shell_edge,
+        }
+    }
+}
 
 /// How the pairs of touching surfaces become contact pairs, PrePoMax's "Group by".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -42,6 +100,7 @@ pub struct SearchParameters {
     pub group_by: GroupBy,
     /// Young's modulus of each part's material, where known, for choosing the master.
     pub stiffness: Vec<Option<f64>>,
+    pub filter: GeometryFilter,
 }
 
 /// A master and a slave side of a contact pair found, each a set of surfaces.
@@ -75,13 +134,21 @@ impl MasterSlaveItem {
         std::mem::swap(&mut self.master_name, &mut self.slave_name);
         std::mem::swap(&mut self.master, &mut self.slave);
     }
+
+    /// What touches, as in PrePoMax's table, e.g. "Shell edge-Solid": the kind of the
+    /// master's and of the slave's first surface.
+    pub fn geometry(&self) -> String {
+        let kind = |side: &BTreeSet<SurfaceId>| side.first().map_or("", |id| id.1.label());
+        format!("{}-{}", kind(&self.master), kind(&self.slave))
+    }
 }
 
 /// One surface patch prepared for the search.
 struct Surface {
     id: SurfaceId,
-    /// Corner points of each face, normals pointing out of the material. An edge of a 2D
-    /// element is drawn out along z into a quadrilateral, so that it is searched like a face.
+    /// Corner points of each face, normals pointing out of the material. An edge is drawn
+    /// out into a quadrilateral, so that it is searched like a face: across its shell, or
+    /// along z in 2D.
     faces: Vec<Vec<[f64; 3]>>,
     /// Bounds of each face, enlarged by half the search distance.
     face_bounds: Vec<Bounds>,
@@ -148,7 +215,7 @@ pub fn find_contact_pairs(
     searched: &[bool],
     parameters: &SearchParameters,
 ) -> Vec<MasterSlaveItem> {
-    let surfaces = contact_surfaces(mesh, skins, searched, parameters.distance);
+    let surfaces = contact_surfaces(mesh, skins, searched, parameters);
     let angle = parameters.angle_deg.to_radians();
     let mut touching = Vec::new();
     for i in 0..surfaces.len() {
@@ -180,12 +247,15 @@ pub fn find_contact_pairs(
             ContactGraph::new(&context, &items, false).master_slave_items()
         }
         GroupBy::Parts => {
-            let mut by_parts: BTreeMap<(usize, usize), (BTreeSet<SurfaceId>, BTreeSet<SurfaceId>)> =
+            let mut by_parts: BTreeMap<_, (BTreeSet<SurfaceId>, BTreeSet<SurfaceId>)> =
                 BTreeMap::new();
             for &(a, b) in &touching {
-                // Sides by part order; the contact graph decides which is master.
+                // Sides by part order; the contact graph decides which is master. Edges of
+                // shells touching a part make a pair of their own, as in PrePoMax.
                 let (master, slave) = if a.0 < b.0 { (a, b) } else { (b, a) };
-                let entry = by_parts.entry((master.0, slave.0)).or_default();
+                let edge = |id: SurfaceId| id.1 == SurfaceKind::ShellEdge;
+                let key = (master.0, edge(master), slave.0, edge(slave));
+                let entry = by_parts.entry(key).or_default();
                 entry.0.insert(master);
                 entry.1.insert(slave);
             }
@@ -224,51 +294,76 @@ struct PatchFace {
     /// CalculiX face number, S1 = 1.
     face: u8,
     /// Corner node indices in order, the normal pointing out of the material; the two ends
-    /// of the edge for 2D elements.
+    /// of an edge, its outside to the right when looking along the normal of its element.
     corners: Vec<usize>,
     /// Corner and midside node indices.
     nodes: Vec<usize>,
+    /// The normal of the shell an edge belongs to, across which it is drawn out; `None`
+    /// for faces and for the edges of 2D elements, which are drawn out along z.
+    across: Option<[f64; 3]>,
 }
 
-/// The faces of all surface patches: those of solid elements from the skins, and the
-/// outline edges of the plane elements of 2D models.
+/// The faces of all surface patches: those of solid elements from the skins, both sides of
+/// shells, and the outline edges of shells and of the plane elements of 2D models.
 fn patch_faces(mesh: &FeMesh, skins: &[PartSkin]) -> Vec<PatchFace> {
     let elements = mesh.elements();
     let mut faces = Vec::new();
     for (part, skin) in skins.iter().enumerate() {
         for face in &skin.faces {
-            if elements[face.element].shape.family() != ElementFamily::Solid
-                || face.corners.len() < 3
-            {
+            let element = &elements[face.element];
+            if face.corners.len() < 3 {
                 continue;
             }
-            faces.push(PatchFace {
-                surface: (part, face.region),
-                element: elements[face.element].id,
-                face: face.face as u8 + 1,
-                // Element faces are numbered with their normal into the element.
-                corners: face.corners.iter().rev().copied().collect(),
-                nodes: face.corners.iter().chain(&face.mids).copied().collect(),
-            });
+            let nodes: Vec<usize> = face.corners.iter().chain(&face.mids).copied().collect();
+            if element.shape.family() == ElementFamily::Solid {
+                faces.push(PatchFace {
+                    surface: (part, SurfaceKind::Solid, face.region),
+                    element: element.id,
+                    face: face.face as u8 + 1,
+                    // Element faces are numbered with their normal into the element.
+                    corners: face.corners.iter().rev().copied().collect(),
+                    nodes,
+                    across: None,
+                });
+            } else if element.is_shell() {
+                // The top faces along the element's normal, the bottom against it.
+                faces.push(PatchFace {
+                    surface: (part, SurfaceKind::ShellTop, face.region),
+                    element: element.id,
+                    face: 2,
+                    corners: face.corners.clone(),
+                    nodes: nodes.clone(),
+                    across: None,
+                });
+                faces.push(PatchFace {
+                    surface: (part, SurfaceKind::ShellBottom, face.region),
+                    element: element.id,
+                    face: 1,
+                    corners: face.corners.iter().rev().copied().collect(),
+                    nodes,
+                    across: None,
+                });
+            }
         }
     }
     for (part, entry) in mesh.parts.iter().enumerate() {
-        faces.extend(plane_outline(mesh, part, &entry.elements));
+        faces.extend(outline(mesh, part, &entry.elements));
     }
     faces
 }
 
-/// Largest angle between neighbouring outline edges of one 2D surface, like the feature angle
+/// Largest angle between neighbouring outline edges of one surface, like the feature angle
 /// of the skins.
-const PLANE_FEATURE_ANGLE_DEG: f64 = 30.0;
+const OUTLINE_FEATURE_ANGLE_DEG: f64 = 30.0;
 
-/// The outline edges of the plane elements of a part, grouped into chains between corners.
-fn plane_outline(mesh: &FeMesh, part: usize, ids: &[ElementId]) -> Vec<PatchFace> {
+/// The outline edges of the plane elements and of the shells of a part, grouped into chains
+/// between corners.
+fn outline(mesh: &FeMesh, part: usize, ids: &[ElementId]) -> Vec<PatchFace> {
     let coords = mesh.coords();
     let mut edges: Vec<PatchFace> = Vec::new();
     let mut count: HashMap<(usize, usize), usize> = HashMap::new();
     for element in ids.iter().filter_map(|&id| mesh.element(id)) {
-        if !element.is_plane() {
+        if !element.is_plane() && !element.is_shell() {
             continue;
         }
         let Some(nodes) = (element.nodes.iter())
@@ -277,16 +372,23 @@ fn plane_outline(mesh: &FeMesh, part: usize, ids: &[ElementId]) -> Vec<PatchFace
         else {
             continue;
         };
-        // Counter-clockwise elements have their outward edge normals to the right of the
-        // edge direction; clockwise ones are walked the other way round.
         let corners = element.shape.edges().len();
-        let area: f64 = (0..corners)
-            .map(|k| {
-                let (p, q) = (coords[nodes[k]], coords[nodes[(k + 1) % corners]]);
-                p[0] * q[1] - q[0] * p[1]
-            })
-            .sum();
-        for (k, edge) in element.faces().iter().enumerate() {
+        let corner_nodes = &nodes[..corners];
+        // A shell's edges are outward to the right looking along its normal. Of 2D elements
+        // the counter-clockwise ones have their outward edge normals to the right of the
+        // edge direction; clockwise ones are walked the other way round.
+        let (across, forward) = if element.is_shell() {
+            (Some(crate::skin::face_normal(coords, corner_nodes)), true)
+        } else {
+            let area: f64 = (0..corners)
+                .map(|k| {
+                    let (p, q) = (coords[nodes[k]], coords[nodes[(k + 1) % corners]]);
+                    p[0] * q[1] - q[0] * p[1]
+                })
+                .sum();
+            (None, area >= 0.0)
+        };
+        for (number, edge) in element.edge_faces() {
             let [a, b] = [edge.corners[0], edge.corners[1]].map(|l| nodes[l]);
             *count.entry((a.min(b), a.max(b))).or_default() += 1;
             let mut all = vec![a, b];
@@ -294,11 +396,12 @@ fn plane_outline(mesh: &FeMesh, part: usize, ids: &[ElementId]) -> Vec<PatchFace
                 all.extend(edge.mids.iter().map(|&l| nodes[l]));
             }
             edges.push(PatchFace {
-                surface: (part, 0),
+                surface: (part, SurfaceKind::ShellEdge, 0),
                 element: element.id,
-                face: k as u8 + 1,
-                corners: if area >= 0.0 { vec![a, b] } else { vec![b, a] },
+                face: number,
+                corners: if forward { vec![a, b] } else { vec![b, a] },
                 nodes: all,
+                across: across.map(normalize),
             });
         }
     }
@@ -322,7 +425,7 @@ fn plane_outline(mesh: &FeMesh, part: usize, ids: &[ElementId]) -> Vec<PatchFace
         }
     }
     let direction = |e: &PatchFace| normalize(sub(coords[e.corners[1]], coords[e.corners[0]]));
-    let limit = PLANE_FEATURE_ANGLE_DEG.to_radians().cos();
+    let limit = OUTLINE_FEATURE_ANGLE_DEG.to_radians().cos();
     for touching in at_node.values() {
         if let [i, j] = touching[..]
             && dot(direction(&edges[i]), direction(&edges[j])) >= limit
@@ -336,7 +439,7 @@ fn plane_outline(mesh: &FeMesh, part: usize, ids: &[ElementId]) -> Vec<PatchFace
         let r = root(&mut parent, i);
         let next = numbers.len();
         let number = *numbers.entry(r).or_insert(next);
-        edge.surface = (part, number);
+        edge.surface = (part, SurfaceKind::ShellEdge, number);
     }
     edges
 }
@@ -346,14 +449,17 @@ fn contact_surfaces(
     mesh: &FeMesh,
     skins: &[PartSkin],
     searched: &[bool],
-    distance: f64,
+    parameters: &SearchParameters,
 ) -> Vec<Surface> {
+    let distance = parameters.distance;
     let coords = mesh.coords();
     // Edges of 2D elements are drawn out by a length of the model's size.
     let depth = model_size(coords).max(distance * 10.0);
     let mut patches: BTreeMap<SurfaceId, Surface> = BTreeMap::new();
     for face in patch_faces(mesh, skins) {
-        if !searched.get(face.surface.0).copied().unwrap_or(false) {
+        if !searched.get(face.surface.0).copied().unwrap_or(false)
+            || !parameters.filter.takes(face.surface.1)
+        {
             continue;
         }
         let surface = patches.entry(face.surface).or_insert_with(|| Surface {
@@ -368,8 +474,17 @@ fn contact_surfaces(
         let mut points: Vec<[f64; 3]> = face.corners.iter().map(|&n| coords[n]).collect();
         surface.edge_lengths += mean_edge_length(&points);
         if let [a, b] = points[..] {
-            let up = |p: [f64; 3]| [p[0], p[1], p[2] + depth];
-            points = vec![a, b, up(b), up(a)];
+            points = match face.across {
+                // A strip as wide as the edge is long, centred on the shell.
+                Some(normal) => {
+                    let half = scale(normal, 0.5 * length(sub(b, a)));
+                    vec![sub(a, half), sub(b, half), add(b, half), add(a, half)]
+                }
+                None => {
+                    let up = |p: [f64; 3]| [p[0], p[1], p[2] + depth];
+                    vec![a, b, up(b), up(a)]
+                }
+            };
         }
         let mut bounds = Bounds::empty();
         for &point in &points {
@@ -382,11 +497,13 @@ fn contact_surfaces(
         surface.face_bounds.push(bounds);
     }
     let mut surfaces: Vec<Surface> = patches.into_values().collect();
-    // The same faces in two parts are the interface of parts meshed together.
+    // The same faces in two parts are the interface of parts meshed together; the top and
+    // the bottom of a shell are not.
     for i in 0..surfaces.len() {
         for j in i + 1..surfaces.len() {
             let (a, b) = (&surfaces[i], &surfaces[j]);
-            if a.nodes.len() == b.nodes.len()
+            if a.id.1 == b.id.1
+                && a.nodes.len() == b.nodes.len()
                 && a.bounds.intersects(&b.bounds)
                 && a.nodes == b.nodes
             {
@@ -698,6 +815,8 @@ struct Context<'a> {
 /// How well a side of a contact suits being the master; see [`Priority::master_first`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Priority {
+    /// Only edges of shells, which are slaves of faces: the edge has a single row of nodes.
+    edge: bool,
     /// Mean edge length of the faces, weighted by area.
     mesh_size: f64,
     /// The largest Young's modulus of the parts, 0 if unknown.
@@ -718,11 +837,12 @@ impl Priority {
         }
     }
 
-    /// Orders the better master first: the coarser mesh, so that the finer mesh's nodes
+    /// Orders the better master first: a face before an edge of a shell, then the coarser mesh, so that the finer mesh's nodes
     /// are the slaves that cannot pass through the master; then the stiffer material; then
     /// the larger area.
     fn master_first(&self, other: &Self) -> std::cmp::Ordering {
-        (other.mesh_step().cmp(&self.mesh_step()))
+        (self.edge.cmp(&other.edge))
+            .then(other.mesh_step().cmp(&self.mesh_step()))
             .then(other.stiffness.total_cmp(&self.stiffness))
             .then(other.area.total_cmp(&self.area))
     }
@@ -753,6 +873,7 @@ impl Context<'_> {
             .filter_map(|id| self.stiffness.get(id.0).copied().flatten())
             .fold(0.0, f64::max);
         Priority {
+            edge: !ids.is_empty() && ids.iter().all(|id| id.1 == SurfaceKind::ShellEdge),
             mesh_size: if area > 0.0 { weighted / area } else { 0.0 },
             stiffness,
             area,
@@ -1151,6 +1272,7 @@ mod tests {
             angle_deg: 35.0,
             group_by,
             stiffness,
+            filter: GeometryFilter::default(),
         };
         find_contact_pairs(mesh, &skins, &vec![true; mesh.parts.len()], &parameters)
     }
@@ -1326,6 +1448,115 @@ mod tests {
             name: name.into(),
             elements,
         });
+    }
+
+    /// A plate of `n` × `n` S4 shells of the size in the plane through `origin` spanned by
+    /// the axes `u` and `v`, with its own nodes, as part `name`.
+    fn add_plate(mesh: &mut FeMesh, name: &str, origin: [f64; 3], [u, v]: [[f64; 3]; 2], n: usize) {
+        let first_node = mesh.coords().len() as u32 + 1;
+        let first_element = mesh.elements().len() as u32 + 1;
+        let id = |i: usize, j: usize| first_node + (i + (n + 1) * j) as u32;
+        for j in 0..=n {
+            for i in 0..=n {
+                let (a, b) = (i as f64 / n as f64, j as f64 / n as f64);
+                mesh.set_node(id(i, j), add(origin, add(scale(u, a), scale(v, b))));
+            }
+        }
+        let mut elements = Vec::new();
+        for j in 0..n {
+            for i in 0..n {
+                let element = first_element + elements.len() as u32;
+                mesh.add_element(Element {
+                    id: element,
+                    type_name: "S4".into(),
+                    shape: ElementShape::Quad4,
+                    nodes: vec![id(i, j), id(i + 1, j), id(i + 1, j + 1), id(i, j + 1)],
+                })
+                .unwrap();
+                elements.push(element);
+            }
+        }
+        mesh.parts.push(Part {
+            name: name.into(),
+            elements,
+        });
+    }
+
+    fn faces_of(mesh: &FeMesh, ids: &BTreeSet<SurfaceId>) -> Vec<(ElementId, u8)> {
+        let skins: Vec<PartSkin> = (mesh.parts.iter())
+            .map(|p| extract_part_skin(mesh, p, 30.0))
+            .collect();
+        surface_faces(mesh, &skins, ids)
+    }
+
+    #[test]
+    fn the_edge_of_a_shell_standing_on_a_block_is_the_slave_of_its_face() {
+        // A block of 2 x 2 x 1 hexes from z = 1 to 2, and a vertical plate of 3 x 3 shells
+        // in x = 0.5 below it, its top edge on the bottom face of the block.
+        let mut mesh = FeMesh::default();
+        add_box(&mut mesh, "BLOCK", [0.0, 0.0, 1.0], [1.0; 3], [2, 2, 1]);
+        add_plate(
+            &mut mesh,
+            "PLATE",
+            [0.5, 0.0, 0.0],
+            [[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            3,
+        );
+        for group_by in [GroupBy::None, GroupBy::Parts, GroupBy::Graph] {
+            let items = search(&mesh, group_by);
+            assert_eq!(items.len(), 1, "{group_by:?}: {items:?}");
+            let item = &items[0];
+            assert_eq!(item.name(), "BLOCK_to_PLATE");
+            assert_eq!(item.geometry(), "Solid-Shell edge");
+            // The bottom faces S1 of the block, and the top edges of the top row of shells,
+            // from node 3 to 4: face S5.
+            assert_eq!(
+                faces_of(&mesh, &item.master),
+                [(1, 1), (2, 1), (3, 1), (4, 1)]
+            );
+            assert_eq!(faces_of(&mesh, &item.slave), [(11, 5), (12, 5), (13, 5)]);
+        }
+        let only_solids = GeometryFilter {
+            shell_edge: false,
+            ..GeometryFilter::default()
+        };
+        let skins: Vec<PartSkin> = (mesh.parts.iter())
+            .map(|p| extract_part_skin(&mesh, p, 30.0))
+            .collect();
+        let parameters = SearchParameters {
+            distance: 0.01,
+            angle_deg: 35.0,
+            group_by: GroupBy::Parts,
+            stiffness: Vec::new(),
+            filter: only_solids,
+        };
+        assert!(find_contact_pairs(&mesh, &skins, &[true, true], &parameters).is_empty());
+    }
+
+    #[test]
+    fn a_shell_on_a_block_touches_it_with_the_side_facing_it() {
+        // A coarse plate on top of a block faces it with its bottom, a plate below the block
+        // with its top; being coarser, the plate is the master.
+        for (z, face, kind) in [
+            (1.0, 1, SurfaceKind::ShellBottom),
+            (0.0, 2, SurfaceKind::ShellTop),
+        ] {
+            let mut mesh = FeMesh::default();
+            add_cube(&mut mesh, "BLOCK", [0.0; 3], 4);
+            add_plate(
+                &mut mesh,
+                "PLATE",
+                [0.0, 0.0, z],
+                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                1,
+            );
+            let items = search(&mesh, GroupBy::Parts);
+            assert_eq!(items.len(), 1, "{z}: {items:?}");
+            let item = &items[0];
+            assert_eq!(item.master.first().unwrap().1, kind);
+            assert_eq!(item.geometry(), "Shell-Solid");
+            assert_eq!(faces_of(&mesh, &item.master), [(65, face)]);
+        }
     }
 
     #[test]
