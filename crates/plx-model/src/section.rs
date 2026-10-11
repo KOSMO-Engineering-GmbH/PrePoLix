@@ -112,6 +112,17 @@ impl SectionKind {
                  Section",
                 element.id
             )),
+            // Plane elements of a 2D model take a solid section; shells of a 3D model are
+            // typed S3 to S8R and need their thickness.
+            SectionKind::Solid
+                if element.shape.family() == ElementFamily::Surface
+                    && element.type_name.to_ascii_uppercase().starts_with('S') =>
+            {
+                Some(format!(
+                    "Element {} is a shell element; shells need a Shell Section",
+                    element.id
+                ))
+            }
             SectionKind::Solid => None,
             SectionKind::Shell { .. } if element.shape.family() != ElementFamily::Surface => {
                 Some(format!(

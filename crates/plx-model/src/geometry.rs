@@ -83,7 +83,7 @@ pub struct MeshingParameters {
     pub midside_nodes_on_geometry: bool,
     /// Improves element quality after meshing with Netgen's optimiser.
     pub optimize: bool,
-    /// Faces of 2D models are meshed with mostly quadrilaterals instead of triangles.
+    /// Faces (2D models and shells) are meshed with mostly quadrilaterals instead of triangles.
     pub quad_dominated: bool,
 }
 
