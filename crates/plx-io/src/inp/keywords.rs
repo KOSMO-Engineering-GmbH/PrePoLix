@@ -82,6 +82,8 @@ pub const WRITTEN_KEYWORDS: &[(&str, &str)] = &[
     ("*CYCLIC SYMMETRY MODEL", "Cyclic symmetry"),
     ("*SENSITIVITY", "Sensitivity step"),
     ("*DESIGN VARIABLES", "Sensitivity step"),
+    ("*DESIGN RESPONSE", "Sensitivity step"),
+    ("*FILTER", "Sensitivity step"),
     ("*OBJECTIVE", "Sensitivity step"),
 ];
 
