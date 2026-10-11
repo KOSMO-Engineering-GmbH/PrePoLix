@@ -41,6 +41,7 @@
 #include "chapters/model/cyclic-symmetry.typ"
 #include "chapters/model/modal-dynamics.typ"
 #include "chapters/model/sensitivity.typ"
+#include "chapters/model/creep.typ"
 #include "chapters/model/bcs-loads.typ"
 #include "chapters/model/symmetry.typ"
 #include "chapters/model/pre-tension.typ"

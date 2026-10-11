@@ -41,6 +41,8 @@ pub enum Problem {
     /// A plastic hardening curve CalculiX rejects: no elasticity, a row without a yield
     /// stress, or plastic strains that do not start at 0 and grow.
     InvalidPlastic,
+    /// A creep law with nonpositive constants, or without elasticity.
+    InvalidCreep,
     NoConductivity,
     NoSpecificHeat,
     NoInitialTemperature,
@@ -76,6 +78,8 @@ pub enum Problem {
     NoSensitivityBase,
     /// A later sensitivity step with another design region: CalculiX reads one, the first.
     DesignRegionIgnored,
+    /// A Visco step in a model whose materials have no creep law: it is a static step.
+    NoCreep,
     /// A cyclic symmetry tie CalculiX rejects, or nodal diameters beyond what its sectors
     /// carry.
     InvalidCyclicSymmetry,
@@ -119,7 +123,8 @@ impl Problem {
             | Problem::ContactIgnored
             | Problem::ContactWithCoriolis
             | Problem::WheelOffSurface
-            | Problem::DesignRegionIgnored => Severity::Warning,
+            | Problem::DesignRegionIgnored
+            | Problem::NoCreep => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -150,10 +155,12 @@ impl Problem {
             Problem::NoLoad => "No load",
             Problem::NoRigidBody => "Reference point without rigid body",
             Problem::InvalidPlastic => "Invalid plasticity",
+            Problem::InvalidCreep => "Invalid creep law",
             Problem::NoExpansion => "Temperature without thermal expansion",
             Problem::NoStoredModes => "No stored eigenmodes",
             Problem::NoSensitivityBase => "No step for the sensitivities",
             Problem::DesignRegionIgnored => "Design region ignored",
+            Problem::NoCreep => "Visco step without creep",
             Problem::InvalidCyclicSymmetry => "Invalid cyclic symmetry",
             Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
             Problem::NoRotation => "No rotation",
@@ -194,6 +201,10 @@ impl Problem {
                 "A boundary condition or load on a reference point acts on the rigid body the \
                  point drives. Without an active rigid body constraint with this reference \
                  point there is no node to apply it to; the input file would be incomplete."
+            }
+            Problem::InvalidCreep => {
+                "CalculiX reads Norton's creep law only after an isotropic elasticity and \
+                 refuses a constant A or an exponent n that is not positive."
             }
             Problem::InvalidPlastic => {
                 "The hardening curve of a plastic material lists the yield stress over the \
@@ -334,6 +345,10 @@ impl Problem {
                  the design region of the first Sensitivity step; the regions of later ones \
                  are not used."
             }
+            Problem::NoCreep => {
+                "A Visco step lets the materials with a creep law (Norton) creep over its time \
+                 period. Without such a material it computes the same as a Static step."
+            }
             Problem::InvalidCyclicSymmetry => {
                 "A cyclic symmetry tie models a whole part by one sector of a 3D mesh. It \
                  needs at least two sectors and an axis, and a sector of N carries the nodal \
@@ -424,6 +439,9 @@ impl Problem {
                 "Create a Rigid Body constraint on the surface or nodes the reference point \
                  shall drive, or put the boundary condition or load on nodes of the mesh."
             }
+            Problem::InvalidCreep => {
+                "Edit the material: enter the elasticity and positive values of A and n."
+            }
             Problem::InvalidPlastic => {
                 "Edit the material: enter the elastic constants and a hardening curve that \
                  starts at plastic strain 0 with the yield stress, e.g. 235 MPa at 0 and \
@@ -511,6 +529,9 @@ impl Problem {
             Problem::DesignRegionIgnored => {
                 "Give all Sensitivity steps the same design region, or analyse the other \
                  region in a copy of the model."
+            }
+            Problem::NoCreep => {
+                "Edit a material of the model and tick Creep (Norton), or use a Static step."
             }
             Problem::InvalidCyclicSymmetry => {
                 "Edit the tie: check the number of sectors and the axis direction, or untick \
@@ -763,6 +784,16 @@ impl FeModel {
                     format!("{} needs the eigenmodes of a Frequency step", step.name),
                 ));
             }
+            let used = |m: &&crate::Material| self.sections.iter().any(|s| s.material == m.name);
+            if matches!(step.kind, StepKind::Visco(_))
+                && !(self.materials.iter().filter(used)).any(|m| m.creep.is_some())
+            {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::NoCreep,
+                    format!("{}: no material of a section has a creep law", step.name),
+                ));
+            }
             if let StepKind::Sensitivity(settings) = &step.kind {
                 let previous = (self.steps[..s].iter()).rev().find(|p| p.active);
                 let fits = match previous.map(|p| &p.kind) {
@@ -815,7 +846,11 @@ impl FeModel {
                     format!("{} prescribes temperatures (Defined Field)", step.name),
                 ));
             }
-            if let StepKind::Static(settings) = &step.kind
+            if let StepKind::Static(settings)
+            | StepKind::Visco(crate::ViscoStep {
+                increments: settings,
+                ..
+            }) = &step.kind
                 && settings.incrementation != crate::Incrementation::Default
                 && settings.initial_increment > settings.time_period
             {
@@ -888,6 +923,20 @@ impl FeModel {
                 };
                 if let Some(detail) = detail {
                     findings.push(Finding::new(item, Problem::InvalidPlastic, detail));
+                }
+            }
+            if let Some(creep) = &material.creep
+                && mechanical
+            {
+                let detail = match creep.problem() {
+                    _ if material.elastic.is_none() => {
+                        Some(format!("{} creeps but is not elastic", material.name))
+                    }
+                    Some(problem) => Some(format!("{}: {problem}", material.name)),
+                    None => None,
+                };
+                if let Some(detail) = detail {
+                    findings.push(Finding::new(item, Problem::InvalidCreep, detail));
                 }
             }
             if thermal && material.conductivity.is_none() {
@@ -1334,6 +1383,7 @@ impl FeModel {
         let static_mechanical = matches!(
             step.kind,
             StepKind::Static(_)
+                | StepKind::Visco(_)
                 | StepKind::Buckle(_)
                 | StepKind::CoupledTempDisp(_)
                 | StepKind::UncoupledTempDisp(_)
@@ -2294,6 +2344,27 @@ mod tests {
 
     fn problems(findings: &[Finding]) -> Vec<(ModelItem, Problem)> {
         findings.iter().map(|f| (f.item, f.problem)).collect()
+    }
+
+    #[test]
+    fn a_visco_step_needs_a_creeping_material() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        let mut visco = Step::new_visco("Step-2");
+        visco.boundary_conditions = model.steps[0].boundary_conditions.clone();
+        visco.loads = model.steps[0].loads.clone();
+        model.steps.push(visco);
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Step(1), Problem::NoCreep)]
+        );
+        model.materials[0].creep = Some(crate::Creep::default());
+        assert_eq!(check(&model, &mesh), []);
+        model.materials[0].creep.as_mut().unwrap().n = 0.0;
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Material(0), Problem::InvalidCreep)]
+        );
     }
 
     #[test]

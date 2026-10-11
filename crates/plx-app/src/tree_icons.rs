@@ -165,6 +165,7 @@ pub enum StepGlyph {
     ModalDynamics,
     SteadyStateDynamics,
     Sensitivity,
+    Visco,
 }
 
 impl StepGlyph {
@@ -182,6 +183,7 @@ impl StepGlyph {
             StepGlyph::ModalDynamics => "Modal Dynamics",
             StepGlyph::SteadyStateDynamics => "Steady State Dynamics",
             StepGlyph::Sensitivity => "Sensitivity",
+            StepGlyph::Visco => "Visco",
         }
     }
 }
@@ -200,6 +202,7 @@ impl From<&StepKind> for StepGlyph {
             StepKind::ModalDynamics(_) => StepGlyph::ModalDynamics,
             StepKind::SteadyStateDynamics(_) => StepGlyph::SteadyStateDynamics,
             StepKind::Sensitivity(_) => StepGlyph::Sensitivity,
+            StepKind::Visco(_) => StepGlyph::Visco,
         }
     }
 }
@@ -365,6 +368,14 @@ fn paint_step_type(painter: &Painter, min: Pos2, glyph: StepGlyph) {
             curve(1.5, 14.5, INK, &|x| 12.5 - 4.0 * arc(x));
             curve(1.5, 14.5, BLUE, &|x| 7.0 - 4.0 * arc(x));
             arrow((8.0, 12.0), (8.0, 6.5), ORANGE);
+        }
+        // A creep curve: the strain grows on over time.
+        StepGlyph::Visco => {
+            axes();
+            curve(2.0, 15.0, RED, &|x| {
+                let t = (x - 2.0) / 13.0;
+                12.5 - 4.0 * (1.0 - (-8.0 * t).exp()) - 6.0 * t
+            });
         }
     }
 }

@@ -108,6 +108,11 @@ together with supports and mechanical loads.
 
 Incrementation and solver fields are the same as for a static step.
 
+=== Visco
+
+A static step over a creep time in which materials with a creep law creep (`*VISCO`), see
+@creep.
+
 === Field outputs <step-field-outputs>
 
 Field outputs control what CalculiX writes to the result file (`.frd`) as `*NODE FILE`,

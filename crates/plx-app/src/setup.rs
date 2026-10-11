@@ -18,7 +18,8 @@ use plx_model::{
     Material, MeshSet, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad,
     NodeTie, OutputDimension, OutputKind, PlasticPoint, Quantity, Region, Section, SectionKind,
     SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
-    SurfaceInteraction, SymmetryError, Tie, UnitSystem, Wheel, next_name, symmetry_plane,
+    SurfaceInteraction, SymmetryError, Tie, UnitSystem, ViscoStep, Wheel, next_name,
+    symmetry_plane,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
@@ -2481,6 +2482,11 @@ impl Editor {
             Draft::SurfaceInteraction(interaction, _) => {
                 contacts::validate_interaction(interaction)?;
             }
+            Draft::Material(material) => {
+                if let Some(problem) = material.creep.as_ref().and_then(|c| c.problem()) {
+                    return Err(problem.into());
+                }
+            }
             Draft::Amplitude(amplitude, _) => amplitude_dialog::validate(amplitude)?,
             Draft::FieldOutput(_, output) => output.check_variables()?,
             Draft::HistoryOutput(_, output, region) => {
@@ -2531,6 +2537,11 @@ impl Editor {
                 StepKind::SteadyStateDynamics(settings) => {
                     if let Some(problem) = settings.problem() {
                         return Err(problem);
+                    }
+                }
+                StepKind::Visco(settings) => {
+                    if settings.creep_tolerance <= 0.0 {
+                        return Err("The creep strain tolerance must be positive.".into());
                     }
                 }
                 StepKind::Static(_) | StepKind::ComplexFrequency(_) => {}
@@ -3378,6 +3389,7 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     ui.end_row();
     material.elastic = elastic.then_some(values);
     plastic_rows(ui, material, units);
+    creep_rows(ui, material, units);
     for (label, value, quantity) in [
         (
             "Thermal conductivity",
@@ -3531,6 +3543,31 @@ fn plastic_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     material.plastic = plastic.then_some(values);
 }
 
+/// Norton's creep law of the material form, which acts in Visco steps.
+fn creep_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
+    let mut creeps = material.creep.is_some();
+    ui.checkbox(&mut creeps, "Creep (Norton)")
+        .on_hover_text("The material creeps in Visco steps; Static steps ignore the creep law.");
+    ui.end_row();
+    let mut creep = material.creep.unwrap_or_default();
+    for (label, value) in [
+        ("    A", &mut creep.a),
+        ("    Stress exponent n", &mut creep.n),
+        ("    Time exponent m", &mut creep.m),
+    ] {
+        ui.label(label);
+        ui.add_enabled(creeps, numeric::drag_value(value).speed(0.0));
+        ui.end_row();
+    }
+    ui.label("");
+    let (stress, time) = (units.unit(Quantity::Pressure), units.unit(Quantity::Time));
+    ui.weak(format!(
+        "Creep strain rate = A * stress^n * time^m, stress in {stress}, time in {time}."
+    ));
+    ui.end_row();
+    material.creep = creeps.then_some(creep);
+}
+
 fn hardening_label(hardening: Hardening) -> &'static str {
     match hardening {
         Hardening::Isotropic => "Isotropic",
@@ -3572,7 +3609,7 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
 /// outputs, in PrePoMax's order.
-fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 11] {
+fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 12] {
     let heat = HeatTransferStep::default();
     [
         (
@@ -3626,6 +3663,11 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 11] 
             FieldOutput::coupled_defaults(),
         ),
         (
+            VISCO_LABEL,
+            StepKind::Visco(ViscoStep::default()),
+            FieldOutput::visco_defaults(),
+        ),
+        (
             SENSITIVITY_LABEL,
             StepKind::Sensitivity(SensitivityStep::default()),
             FieldOutput::sensitivity_defaults(),
@@ -3644,6 +3686,7 @@ const STEADY_STATE_LABEL: &str = "Steady State Dynamics (frequency response)";
 const COMPLEX_FREQUENCY_LABEL: &str = "Complex Frequency (rotating, Coriolis)";
 const BUCKLE_LABEL: &str = "Buckle";
 const SENSITIVITY_LABEL: &str = "Sensitivity (shape)";
+const VISCO_LABEL: &str = "Visco (creep)";
 
 fn step_kind_label(kind: &StepKind) -> &'static str {
     match kind {
@@ -3658,6 +3701,7 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
         StepKind::CoupledTempDisp(_) => COUPLED_LABEL,
         StepKind::UncoupledTempDisp(_) => UNCOUPLED_LABEL,
         StepKind::Sensitivity(_) => SENSITIVITY_LABEL,
+        StepKind::Visco(_) => VISCO_LABEL,
     }
 }
 
@@ -3697,7 +3741,28 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
         // PrePoMax offers no NLGEOM for the uncoupled step.
         StepKind::UncoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::Sensitivity(settings) => sensitivity_form(ui, settings, units),
+        StepKind::Visco(settings) => visco_form(ui, settings, units),
     }
+}
+
+/// Settings of a visco step: those of a static step over the creep time and the creep
+/// strain tolerance of the automatic increments.
+fn visco_form(ui: &mut Ui, settings: &mut ViscoStep, units: UnitSystem) {
+    increments_form(ui, &mut settings.increments, units, true);
+    ui.label("Creep strain tolerance");
+    ui.add(
+        numeric::drag_value(&mut settings.creep_tolerance)
+            .range(0.0..=1.0)
+            .speed(0.0),
+    )
+    .on_hover_text(
+        "Largest error of the creep strain in an increment (CETOL); smaller values give \
+         shorter automatic increments.",
+    );
+    ui.end_row();
+    ui.label("");
+    ui.weak("Materials creep only with a creep law (Material > Creep); the others stay elastic.");
+    ui.end_row();
 }
 
 /// Settings of a sensitivity step: the design responses and the filter. The design region

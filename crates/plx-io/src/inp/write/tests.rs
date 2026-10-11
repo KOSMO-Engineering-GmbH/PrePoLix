@@ -2394,6 +2394,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
             specific_heat: None,
             expansion: None,
             plastic: None,
+            creep: None,
         }],
         sections: vec![Section {
             name: "Beam-1".into(),
@@ -4762,6 +4763,122 @@ fn calculix_computes_the_sensitivities_of_the_eigenfrequencies() {
         assert!((mode.value - f).abs() < 1e-3 * f, "{} vs. {f}", mode.value);
         assert!(mode.field("SENFREQ").is_some());
     }
+}
+
+#[test]
+fn a_visco_step_and_a_creep_law_are_written() {
+    let (mesh, mut model) = cantilever(tip_force());
+    model.materials[0].creep = Some(plx_model::Creep {
+        a: 1e-15,
+        n: 5.0,
+        m: 0.0,
+    });
+    let mut step = Step::new_visco("Step-2");
+    step.boundary_conditions = model.steps[0].boundary_conditions.clone();
+    step.loads = model.steps[0].loads.clone();
+    model.steps.push(step);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Elastic\n210000, 0.3\n*Creep, Law=Norton\n1.00000000E-15, 5, 0\n",
+        "*Step, Inc=1000\n*Visco, Cetol=0.0001\n1, 1000, 0.00001, 1.00000000E30\n",
+        "*El file\nS, E, PEEQ, NOE\n",
+    ] {
+        assert!(text.contains(line), "{line:?} missing in\n{text}");
+    }
+}
+
+/// A bar under a constant stress creeps by Norton's law: after the time t of the visco
+/// step its creep strain is A stress^n t.
+#[test]
+fn calculix_creeps_the_bar_by_nortons_law() {
+    let stress = 100.0;
+    let load = Load {
+        name: "Pressure-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Surface("TIP".into()),
+        kind: LoadKind::Pressure(-stress),
+        amplitude: None,
+        factor_amplitude: None,
+    };
+    let (mesh, mut model) = cantilever(load);
+    let creep = plx_model::Creep {
+        a: 1e-15,
+        n: 5.0,
+        m: 0.0,
+    };
+    model.materials[0].creep = Some(creep);
+    // Held on three symmetry planes, so that the bar is in uniaxial tension.
+    let (min, max) = mesh.bounds().unwrap();
+    let nodes_at = |axis: usize, value: f64| -> Vec<NodeId> {
+        (1..=99)
+            .filter(|&id| mesh.node(id).is_some_and(|c| c[axis] == value))
+            .collect()
+    };
+    let hold = |axis: usize| {
+        let mut dofs = [None; 6];
+        dofs[axis] = Some(0.0);
+        BoundaryCondition {
+            name: format!("Symmetry-{}", axis + 1),
+            active: true,
+            visible: true,
+            region: Region::Nodes(nodes_at(axis, min[axis])),
+            kind: BoundaryKind::Displacement(dofs),
+            amplitude: None,
+        }
+    };
+    model.steps[0].boundary_conditions = vec![hold(0), hold(1), hold(2)];
+    model.steps[0].field_outputs = FieldOutput::visco_defaults();
+    // The static step loads the bar at once; the visco step keeps the load for 1000 s.
+    let mut step = Step::new_visco("Step-2");
+    step.boundary_conditions = model.steps[0].boundary_conditions.clone();
+    step.loads = model.steps[0].loads.clone();
+    model.steps.push(step);
+    let Some(frd) = run_ccx("kriechen", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let time = 1000.0;
+    let expected = creep.a * stress.powf(creep.n) * time;
+    let last = frd.increments.last().unwrap();
+    assert_eq!(last.step, 2);
+    // The analysis time runs on from the end of the static step.
+    assert!(
+        (last.value - 1.0 - time).abs() < 1e-6 * time,
+        "{}",
+        last.value
+    );
+    let elastic = stress / 210_000.0;
+    let index = |node| frd.mesh.node_index(node).unwrap();
+    for node in nodes_at(0, max[0]) {
+        let s = last
+            .field("STRESS")
+            .unwrap()
+            .component("S11")
+            .unwrap()
+            .values[index(node)];
+        assert!((f64::from(s) - stress).abs() < 0.01 * stress, "{s}");
+        let peeq = last.field("PE").unwrap().component("PE").unwrap().values[index(node)];
+        let peeq = f64::from(peeq);
+        assert!(
+            (peeq - expected).abs() < 0.02 * expected,
+            "{peeq} != {expected}"
+        );
+        let strain = last
+            .field("TOSTRAIN")
+            .unwrap()
+            .component("E11")
+            .unwrap()
+            .values[index(node)];
+        let strain = f64::from(strain);
+        assert!(
+            (strain - elastic - expected).abs() < 0.02 * expected,
+            "{strain} != {elastic} + {expected}"
+        );
+    }
+    // The static step does not creep.
+    let first = frd.increments.iter().find(|i| i.step == 1).unwrap();
+    let peeq = first.field("PE").unwrap().component("PE").unwrap().values[index(1)];
+    assert!(f64::from(peeq).abs() < 1e-3 * expected, "{peeq}");
 }
 
 /// An annular steel disk of C3D8 elements, 20 to 60 mm in radius and 4 mm thick, held at

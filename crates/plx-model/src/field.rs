@@ -206,6 +206,14 @@ impl FieldOutput {
         outputs
     }
 
+    /// Field outputs of a new visco step: those of a static step and the equivalent creep
+    /// strain, which CalculiX writes as `PEEQ`.
+    pub fn visco_defaults() -> Vec<Self> {
+        let mut outputs = Self::defaults();
+        outputs[1].variables.push("PEEQ".into());
+        outputs
+    }
+
     /// Field outputs PrePoMax adds to a new heat transfer step: temperatures, reaction heat
     /// flows and heat fluxes.
     pub fn heat_transfer_defaults() -> Vec<Self> {

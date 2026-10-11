@@ -17,7 +17,8 @@ use plx_model::{
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
     ModelSpace, MovingFrame, NodeTie, OutputDimension, OutputKind, Region, Section, SectionKind,
     SensitivityStep, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior,
-    SurfaceInteraction, Tie, Totals, UserKeyword, line_tangent, symmetry_dofs, symmetry_plane,
+    SurfaceInteraction, Tie, Totals, UserKeyword, ViscoStep, line_tangent, symmetry_dofs,
+    symmetry_plane,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -864,6 +865,15 @@ fn materials(model: &FeModel) -> Vec<Keyword> {
                 }
                 properties.push(Keyword::generated(out));
             }
+            // CalculiX reads the creep law after the elasticity and the plasticity.
+            if let Some(creep) = material.creep {
+                properties.push(Keyword::generated(format!(
+                    "*Creep, Law=Norton\n{}, {}, {}\n",
+                    number(creep.a),
+                    number(creep.n),
+                    number(creep.m)
+                )));
+            }
             // Thermal properties in PrePoMax's order.
             if let Some(expansion) = material.expansion {
                 let mut out = String::from("*Expansion");
@@ -1669,6 +1679,7 @@ fn step_block<'f>(
             heat_transfer_step(settings, "*Uncoupled temperature-displacement", false)
         }
         StepKind::Dynamic(settings) => dynamic_step(settings),
+        StepKind::Visco(settings) => visco_step(settings),
         StepKind::ModalDynamics(settings) => modal_dynamics_step(settings),
         StepKind::SteadyStateDynamics(settings) => steady_state_dynamics_step(settings),
         StepKind::Sensitivity(settings) => sensitivity_step(sets, &step.name, settings)?,
@@ -2052,6 +2063,7 @@ fn deactivated_step(step: &Step) -> Keyword {
         StepKind::CoupledTempDisp(_) => "CoupledTempDispStep",
         StepKind::UncoupledTempDisp(_) => "UncoupledTempDispStep",
         StepKind::Dynamic(_) => "DynamicStep",
+        StepKind::Visco(_) => "ViscoStep",
         StepKind::ModalDynamics(_) => "ModalDynamicsStep",
         StepKind::SteadyStateDynamics(_) => "SteadyStateDynamicsStep",
         StepKind::Sensitivity(_) => "SensitivityStep",
@@ -2199,6 +2211,18 @@ fn static_step(settings: &StaticStep) -> (String, String) {
         let _ = write!(keyword, ", Solver={solver}");
     }
     incremented_step(settings, keyword, settings.nlgeom)
+}
+
+/// The `*Step` line and the procedure of a visco step: a static step whose automatic
+/// increments the creep strain tolerance limits.
+fn visco_step(settings: &ViscoStep) -> (String, String) {
+    let increments = &settings.increments;
+    let mut keyword = String::from("*Visco");
+    if let Some(solver) = increments.solver.keyword() {
+        let _ = write!(keyword, ", Solver={solver}");
+    }
+    let _ = write!(keyword, ", Cetol={}", number(settings.creep_tolerance));
+    incremented_step(increments, keyword, increments.nlgeom)
 }
 
 /// The `*Step` line and the procedure of a sensitivity step: one `*Design response` per
