@@ -132,6 +132,10 @@ impl FeModel {
                          Stefan-Boltzmann constant (model properties)"
                             .into(),
                     )
+                } else if let LoadKind::Moving(moving) = &load.kind
+                    && let Some(problem) = moving.problem(self, self.properties.space.is_2d())
+                {
+                    Some(problem)
                 } else {
                     (load.region.missing_reference(mesh))
                         .or_else(|| self.missing_region_point(&load.region))

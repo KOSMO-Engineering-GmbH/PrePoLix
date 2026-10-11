@@ -20,14 +20,19 @@ switches to the #ui("FE Model") tab.
   inset: (x: 5pt, y: 4pt),
   table.header([*Part*], [*Elements*]),
   [Solid (3D models)], [Tetrahedra `C3D4` (linear) or `C3D10` (quadratic)],
+  [Face (3D models)], [Shells: triangles `S3`, `S6` or quad-dominated with `S4`, `S8`; the
+    thickness comes from a shell section (@shell-section)],
   [Face (2D models)], [Triangles, or quad-dominated with quadrilaterals; written as `CPS`,
     `CPE` or `CAX` elements depending on the model space],
   [Line (3D models)], [`B31` or `B32` lines; the section decides whether they are written as
     beams or trusses (@sections)],
 )
 
-Faces can only be meshed in 2D models and solids and lines only in 3D models. Shell meshes of
-3D models are not available yet.
+Solids and lines can only be meshed in 3D models. Faces are meshed in both: in a 3D model they
+become shells, which, as in PrePoMax, get their thickness from a #ui("Shell") section; a solid
+section on shells is reported as an invalid section.
+
+#screenshot("shell-mesh-3d.png", [A disk imported into a 3D model and meshed with `S6` shells])
 
 === Changing the element type <element-type>
 
@@ -83,7 +88,8 @@ values and meshes at once.
   [Midside nodes on geometry], [Places midside nodes on the curved geometry instead of on the
     straight edge between the corner nodes (only with second order).],
   [Optimize mesh (Netgen)], [Improves the element quality after meshing (default on).],
-  [Quad-dominated mesh (2D)], [Creates mainly quadrilaterals on faces of 2D models.],
+  [Quad-dominated surface mesh], [Creates mainly quadrilaterals on faces: plane elements of 2D
+    models and shells of 3D models.],
 )
 
 === Mesh setup items

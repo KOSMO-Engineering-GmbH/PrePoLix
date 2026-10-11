@@ -69,6 +69,23 @@ fn nodal_values_and_totals_over_increments() {
 }
 
 #[test]
+fn every_time_gets_a_row_without_step_lines() {
+    // Some CalculiX builds print neither step nor increment lines.
+    let text: String = STATIC
+        .lines()
+        .filter(|l| !l.contains("S T E P") && !l.contains("INCREMENT"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let import = parse_dat(&text);
+    let set = &import.sets[0];
+    assert_eq!(set.rows, [(0, 1, 0.5), (0, 2, 1.0)]);
+    let u3 = set.field("DISPLACEMENTS").unwrap().component("U3").unwrap();
+    assert_eq!(u3.entries[0].values, [-1.902165E-01, -3.804330E-01]);
+    // Blocks of the same time share their row.
+    assert_eq!(import.sets[1].rows, [(0, 1, 0.5), (0, 2, 1.0)]);
+}
+
+#[test]
 fn element_values_by_integration_point_with_von_mises() {
     let import = parse_dat(STATIC);
     let set = import.sets.iter().find(|s| s.name == "EALL").unwrap();
@@ -345,4 +362,70 @@ fn complex_frequency_steps_have_real_and_imaginary_parts_and_a_whirl() {
         set.rows.iter().map(|r| r.2).collect::<Vec<_>>(),
         [732.5508, 1049.649]
     );
+}
+
+/// A cyclic symmetric frequency step: one table per nodal diameter, every mode twice.
+const CYCLIC_FREQUENCY: &str = "
+                        S T E P       1
+
+
+     E I G E N V A L U E   O U T P U T
+
+  NODAL   MODE NO    EIGENVALUE                      FREQUENCY
+ DIAMETER                                    REAL PART            IMAGINARY PART
+                                    (RAD/TIME)      (CYCLES/TIME)   (RAD/TIME)
+
+    0          1   0.3019626E+09   0.1737707E+05   0.2765647E+04   0.0000000E+00
+    0          2   0.3019626E+09   0.1737707E+05   0.2765647E+04   0.0000000E+00
+    0          3   0.3434227E+10   0.5860227E+05   0.9326842E+04   0.0000000E+00
+    0          4   0.3434227E+10   0.5860227E+05   0.9326842E+04   0.0000000E+00
+
+     E I G E N M O D E   T U R N I N G   D I R E C T I O N
+
+    Axis reference direction:  0.0000E+00  0.0000E+00 -0.1000E+01
+
+  NODAL   MODE NO     TURNING DIRECTION (F=FORWARD,B=BACKWARD)
+ DIAMETER
+
+    0          1          F
+    0          2          F
+    0          3          B
+    0          4          F
+
+     E I G E N V A L U E   O U T P U T
+
+  NODAL   MODE NO    EIGENVALUE                      FREQUENCY
+ DIAMETER                                    REAL PART            IMAGINARY PART
+                                    (RAD/TIME)      (CYCLES/TIME)   (RAD/TIME)
+
+    1          1   0.2745316E+09   0.1656900E+05   0.2637037E+04   0.0000000E+00
+    1          2   0.2745316E+09   0.1656900E+05   0.2637037E+04   0.0000000E+00
+    1          3   0.1090763E+11   0.1044396E+06   0.1662208E+05   0.0000000E+00
+    1          4   0.1090763E+11   0.1044396E+06   0.1662208E+05   0.0000000E+00
+
+     E I G E N M O D E   T U R N I N G   D I R E C T I O N
+
+    Axis reference direction:  0.0000E+00  0.0000E+00 -0.1000E+01
+
+  NODAL   MODE NO     TURNING DIRECTION (F=FORWARD,B=BACKWARD)
+ DIAMETER
+
+    1          1          B
+    1          2          B
+    1          3          B
+    1          4          B
+";
+
+#[test]
+fn cyclic_frequency_steps_number_their_modes_through_the_nodal_diameters() {
+    let import = parse_dat(CYCLIC_FREQUENCY);
+    assert!(import.warnings.is_empty(), "{:?}", import.warnings);
+    let output = import.sets[0].field("EIGENVALUE_OUTPUT").unwrap();
+    let component = |name: &str| &output.component(name).unwrap().entries[0].values;
+    assert_eq!(component("NODAL_DIAMETER"), &[0.0, 0.0, 1.0, 1.0]);
+    assert_eq!(
+        component("FREQUENCY"),
+        &[2765.647, 9326.842, 2637.037, 16622.08]
+    );
+    assert_eq!(component("TURNING_DIRECTION"), &[1.0, -1.0, -1.0, -1.0]);
 }

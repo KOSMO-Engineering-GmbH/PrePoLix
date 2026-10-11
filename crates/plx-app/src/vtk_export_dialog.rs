@@ -155,6 +155,7 @@ mod tests {
 
     fn increment(step: u32, increment: u32) -> Increment {
         Increment {
+            nodal_diameter: None,
             step,
             increment,
             kind: AnalysisKind::Static,

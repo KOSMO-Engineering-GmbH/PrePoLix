@@ -12,6 +12,18 @@ exactly what is listed under it in the tree.]
 
 #screenshot("step.png", [Static step])
 
+=== Step types in the tree
+
+Every step shows a pictogram of its type in front of its name, so that you can tell the steps
+apart whatever you named them. Hover over the pictogram or the name to read the type.
+
+#screenshot("step-types.png", [Static, frequency, complex frequency, buckle, heat transfer,
+  coupled, dynamic, modal dynamics, steady state dynamics and sensitivity steps])
+
+#screenshot("step-type-tooltip.png", [Tooltip of a step])
+
+A deactivated step shows the red no-entry sign instead; its tooltip still names the type.
+
 === Order of the steps
 
 CalculiX runs the steps in the order of the list, and a step starts from the state at the end of
@@ -55,6 +67,8 @@ Computes eigenfrequencies and mode shapes (`*FREQUENCY`). A frequency step takes
   [Number of eigenfrequencies], [Default 10.],
   [Lower / Upper frequency bound], [Optional range of frequencies to compute.],
   [Store matrices and eigenmodes], [Writes the `.eig` file (`STORAGE=YES`).],
+  [Nodal diameter range], [Only in cyclic symmetric models (@cyclic-symmetry): the nodal
+    diameters to compute.],
 )
 
 Materials need a density in a frequency step.
@@ -94,6 +108,11 @@ together with supports and mechanical loads.
 )
 
 Incrementation and solver fields are the same as for a static step.
+
+=== Visco
+
+A static step over a creep time in which materials with a creep law creep (`*VISCO`), see
+@creep.
 
 === Field outputs <step-field-outputs>
 
@@ -140,6 +159,13 @@ step. Hovering over a variable shows what it is.
     Contact: `CDIS CSTR CELS CNUM CF`.],
   [Totals], [#ui("Yes") adds the sum over the region, #ui("Only") writes only the sum.],
 )
+
+#screenshot("history-output-dialog.png", [Element history output of picked faces])
+
+CalculiX prints a history output at every increment, so a step gives one row per increment:
+a linear static step one row, a nonlinear step (Nlgeom, contact, plasticity) as many rows as it
+takes increments, a frequency or buckle step one row per mode. A history output also stays in
+effect in the following steps until a step defines history outputs of the same type (node, element or contact) of its own.
 
 When results are opened, the `.dat` file is read too, and the history outputs appear on the
 #ui("Results") tab (@history-outputs).

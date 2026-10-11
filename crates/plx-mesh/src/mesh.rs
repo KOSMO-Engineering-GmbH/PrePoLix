@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -293,6 +293,84 @@ impl FeMesh {
             .collect();
     }
 
+    /// Adds another mesh as new parts, as PrePoMax's import of a mesh into a model: the
+    /// other mesh is numbered after the highest node and element numbers this one has, so
+    /// that nothing that refers to the existing parts points into the new ones. A part, set
+    /// or surface whose name is taken gets a number appended (`NAME-2`). Returns the parts
+    /// as added, with their new names.
+    pub fn append(&mut self, other: FeMesh) -> Vec<String> {
+        let node_offset = self.node_ids.iter().copied().max().unwrap_or(0);
+        let element_offset = self.elements.iter().map(|e| e.id).max().unwrap_or(0);
+        let mut used: BTreeSet<String> = (self.parts.iter().map(|p| &p.name))
+            .chain(self.node_sets.keys())
+            .chain(self.element_sets.keys())
+            .chain(self.surfaces.keys())
+            .map(|n| n.to_uppercase())
+            .collect();
+        let mut fresh = |name: &str| -> String {
+            let mut new = name.to_string();
+            for number in 2.. {
+                if !used.contains(&new.to_uppercase()) {
+                    break;
+                }
+                new = format!("{name}-{number}");
+            }
+            used.insert(new.to_uppercase());
+            new
+        };
+        for (&id, &coords) in other.node_ids.iter().zip(&other.coords) {
+            self.set_node(id + node_offset, coords);
+        }
+        for element in other.elements {
+            // The elements come from a valid mesh whose numbers are shifted past this one's.
+            let _ = self.add_element(Element {
+                id: element.id + element_offset,
+                nodes: element.nodes.iter().map(|n| n + node_offset).collect(),
+                ..element
+            });
+        }
+        let shifted = |ids: &[ElementId]| -> Vec<ElementId> {
+            ids.iter().map(|e| e + element_offset).collect()
+        };
+        let mut renamed = BTreeMap::new();
+        let mut added = Vec::new();
+        for part in other.parts {
+            let name = fresh(&part.name);
+            renamed.insert(part.name.clone(), name.clone());
+            added.push(name.clone());
+            self.parts.push(Part {
+                name,
+                elements: shifted(&part.elements),
+            });
+        }
+        for (name, elements) in other.element_sets {
+            // A part's element set keeps the part's name.
+            let name = renamed.get(&name).cloned().unwrap_or_else(|| fresh(&name));
+            self.element_sets.insert(name, shifted(&elements));
+        }
+        for (name, nodes) in other.node_sets {
+            let nodes = nodes.iter().map(|n| n + node_offset).collect();
+            self.node_sets.insert(fresh(&name), nodes);
+        }
+        for (name, surface) in other.surfaces {
+            let surface = match surface {
+                SurfaceDefinition::ElementFaces(faces) => SurfaceDefinition::ElementFaces(
+                    faces
+                        .iter()
+                        .map(|&(e, f)| (e + element_offset, f))
+                        .collect(),
+                ),
+                SurfaceDefinition::Nodes(nodes) => {
+                    SurfaceDefinition::Nodes(nodes.iter().map(|n| n + node_offset).collect())
+                }
+            };
+            self.surfaces.insert(fresh(&name), surface);
+        }
+        self.cad
+            .extend(other.cad.offset(node_offset, element_offset));
+        added
+    }
+
     /// Whether a part, set or surface already has this name; CalculiX ignores case.
     pub fn name_in_use(&self, name: &str) -> bool {
         let same = |n: &String| n.eq_ignore_ascii_case(name);
@@ -517,6 +595,45 @@ mod tests {
                 ("Wood", vec![5]),
             ]
         );
+    }
+
+    #[test]
+    fn an_appended_mesh_is_numbered_on_and_renamed() {
+        let beam = |first: NodeId, id: ElementId, part: &str| {
+            let mut mesh = FeMesh::default();
+            mesh.set_node(first, [0.0; 3]);
+            mesh.set_node(first + 1, [1.0, 0.0, 0.0]);
+            mesh.add_element(Element {
+                id,
+                type_name: "B31".into(),
+                shape: ElementShape::Line2,
+                nodes: vec![first, first + 1],
+            })
+            .unwrap();
+            mesh.parts.push(Part {
+                name: part.into(),
+                elements: vec![id],
+            });
+            mesh.element_sets.insert(part.into(), vec![id]);
+            mesh.node_sets.insert("ENDS".into(), vec![first, first + 1]);
+            mesh
+        };
+        let mut mesh = beam(1, 1, "BEAM");
+        let added = mesh.append(beam(1, 1, "BEAM"));
+        assert_eq!(added, ["BEAM-2"]);
+        assert_eq!(mesh.node_ids(), [1, 2, 3, 4]);
+        assert_eq!(mesh.element(2).unwrap().nodes, [3, 4]);
+        assert_eq!(mesh.parts[1].name, "BEAM-2");
+        assert_eq!(mesh.parts[1].elements, [2]);
+        assert_eq!(mesh.element_sets["BEAM-2"], [2]);
+        assert_eq!(mesh.element_sets["BEAM"], [1]);
+        assert_eq!(mesh.node_sets["ENDS"], [1, 2]);
+        assert_eq!(mesh.node_sets["ENDS-2"], [3, 4]);
+        // Into an empty mesh, the numbers stay.
+        let mut empty = FeMesh::default();
+        assert_eq!(empty.append(beam(5, 7, "BEAM")), ["BEAM"]);
+        assert_eq!(empty.node_ids(), [5, 6]);
+        assert!(empty.element(7).is_some());
     }
 
     #[test]

@@ -10,14 +10,16 @@ use std::collections::BTreeSet;
 use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
-    Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind,
-    BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, DefinedField, DefinedFieldKind,
-    DynamicProcedure, DynamicStep, Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep,
-    Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
-    InitialConditionKind, Load, LoadKind, Material, MeshSet, ModalDamping, ModalDynamicsStep,
-    ModeDamping, ModelSpace, NodeTie, OutputDimension, OutputKind, PlasticPoint, Quantity, Region,
-    Section, SectionKind, SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step,
-    StepKind, SurfaceInteraction, SymmetryError, Tie, UnitSystem, next_name, symmetry_plane,
+    AXIS_LABELS, Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition,
+    BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CyclicSymmetry,
+    DefinedField, DefinedFieldKind, DynamicProcedure, DynamicStep, Elastic, EquationSolver,
+    FeModel, FieldOutput, FrequencyStep, GLOBAL, Hardening, HeatTransferStep, HistoryKind,
+    HistoryOutput, Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind,
+    Material, MeshSet, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad,
+    NodeTie, OutputDimension, OutputKind, PlasticPoint, Quantity, Region, Section, SectionKind,
+    SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
+    SurfaceInteraction, SymmetryError, Tie, UnitSystem, ViscoStep, Wheel, next_name,
+    symmetry_plane,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
@@ -157,6 +159,15 @@ impl RegionDraft {
         mesh: &FeMesh,
     ) -> Self {
         let mut draft = Self::new(sources, target);
+        // Picked nodes, faces or CAD entities come from the selection, also where the
+        // dialog lists another source first (whole parts for element regions).
+        if matches!(
+            region,
+            Region::Nodes(_) | Region::Faces(_) | Region::Geometry(_)
+        ) && sources.contains(&Source::Selection)
+        {
+            draft.source = Source::Selection;
+        }
         match region {
             Region::Parts(parts) => {
                 draft.source = Source::Parts;
@@ -581,6 +592,191 @@ fn force_rows(ui: &mut Ui, force: &mut [f64; 3], two_d: bool, units: UnitSystem)
     }
 }
 
+/// Rows of a moving load: the path along an axis of a coordinate system, the contact patch
+/// and the wheels relative to the vehicle's reference point.
+fn moving_rows(ui: &mut Ui, moving: &mut MovingLoad, fe: &FeModel, two_d: bool, units: UnitSystem) {
+    ui.label("Coordinate system");
+    egui::ComboBox::from_id_salt("moving load system")
+        .selected_text(moving.system.as_str())
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            let names = std::iter::once(GLOBAL)
+                .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
+            for name in names {
+                ui.selectable_value(&mut moving.system, name.to_string(), name);
+            }
+        });
+    ui.end_row();
+    let axes = if two_d { 2 } else { 3 };
+    let axis_row = |ui: &mut Ui, label: &str, axis: &mut usize, hover: &str| {
+        ui.label(label);
+        ui.horizontal(|ui| {
+            for (index, name) in AXIS_LABELS.iter().enumerate().take(axes) {
+                let button =
+                    egui::Button::selectable(*axis == index, *name).frame_when_inactive(true);
+                if ui.add(button).on_hover_text(hover).clicked() {
+                    *axis = index;
+                }
+            }
+        });
+        ui.end_row();
+    };
+    axis_row(
+        ui,
+        "Path along",
+        &mut moving.travel_axis,
+        "Axis of the coordinate system the load travels along",
+    );
+    if !two_d {
+        axis_row(
+            ui,
+            "Across the path",
+            &mut moving.lateral_axis,
+            "Axis across the path in the running surface: the patch width and the wheel \
+             offsets 'Across' are measured along it. The remaining axis is the surface normal.",
+        );
+        let (travel, across) = (moving.travel_axis, moving.lateral_axis);
+        if let Some(normal) = (0..3).find(|&k| travel != across && k != travel && k != across) {
+            ui.label("");
+            ui.weak(format!(
+                "{} is the surface normal; the selected faces set the height.",
+                AXIS_LABELS[normal]
+            ));
+            ui.end_row();
+        }
+    }
+    ui.label("Start");
+    ui.add(numeric::quantity(&mut moving.start, units, Quantity::Length).speed(1.0))
+        .on_hover_text("Position of the reference point in the first step");
+    ui.end_row();
+    ui.label("End");
+    ui.add(numeric::quantity(&mut moving.end, units, Quantity::Length).speed(1.0))
+        .on_hover_text("Position of the reference point in the last step");
+    ui.end_row();
+    ui.label("Positions");
+    ui.add(
+        egui::DragValue::new(&mut moving.positions)
+            .range(1..=10_000)
+            .speed(0.2),
+    )
+    .on_hover_text("Each position is a static step of its own");
+    ui.end_row();
+    let stations = moving.stations();
+    if stations.len() > 1 {
+        ui.label("");
+        ui.weak(format!(
+            "Spacing {}",
+            numeric::format_physical(stations[1] - stations[0])
+        ));
+        ui.end_row();
+    }
+    ui.label("Contact patch length");
+    ui.add(numeric::quantity(&mut moving.patch_length, units, Quantity::Length).speed(1.0))
+        .on_hover_text("Length of each wheel's contact patch along the path");
+    ui.end_row();
+    if !two_d {
+        ui.label("Contact patch width");
+        ui.add(numeric::quantity(&mut moving.patch_width, units, Quantity::Length).speed(1.0))
+            .on_hover_text("Width of each wheel's contact patch across the path");
+        ui.end_row();
+    }
+    ui.label("Wheels");
+    ui.vertical(|ui| {
+        let mut remove = None;
+        egui::Grid::new("moving load wheels")
+            .striped(true)
+            .spacing([6.0, 2.0])
+            .show(ui, |ui| {
+                ui.label("");
+                ui.strong("Along");
+                if !two_d {
+                    ui.strong("Across");
+                }
+                for label in ["F1", "F2", "F3"].iter().take(if two_d { 2 } else { 3 }) {
+                    ui.strong(*label);
+                }
+                ui.label("");
+                ui.end_row();
+                for (index, wheel) in moving.wheels.iter_mut().enumerate() {
+                    ui.label(format!("{}", index + 1));
+                    let width = 70.0;
+                    ui.add_sized(
+                        [width, 18.0],
+                        numeric::quantity(&mut wheel.along, units, Quantity::Length).speed(1.0),
+                    );
+                    if !two_d {
+                        ui.add_sized(
+                            [width, 18.0],
+                            numeric::quantity(&mut wheel.across, units, Quantity::Length)
+                                .speed(1.0),
+                        );
+                    }
+                    for value in wheel.force.iter_mut().take(if two_d { 2 } else { 3 }) {
+                        ui.add_sized(
+                            [width, 18.0],
+                            numeric::quantity(value, units, Quantity::Force).speed(1.0),
+                        );
+                    }
+                    if ui.small_button("Remove").clicked() {
+                        remove = Some(index);
+                    }
+                    ui.end_row();
+                }
+            });
+        if let Some(index) = remove {
+            moving.wheels.remove(index);
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Add wheel").clicked() {
+                let wheel = moving.wheels.last().copied().unwrap_or(Wheel {
+                    along: 0.0,
+                    across: 0.0,
+                    force: [0.0; 3],
+                });
+                moving.wheels.push(wheel);
+            }
+            if ui
+                .button("Mirror")
+                .on_hover_text(
+                    "Adds the wheels mirrored about the reference point along the path, \
+                     e.g. the other half of a symmetric axle layout",
+                )
+                .clicked()
+            {
+                let mirrored: Vec<Wheel> = (moving.wheels.iter())
+                    .filter(|w| w.along != 0.0)
+                    .map(|w| Wheel {
+                        along: -w.along,
+                        ..*w
+                    })
+                    .collect();
+                moving.wheels.extend(mirrored);
+            }
+        });
+    });
+    ui.end_row();
+    let total: [f64; 3] =
+        std::array::from_fn(|k| moving.wheels.iter().map(|w| w.force[k]).sum::<f64>());
+    ui.label("");
+    ui.weak(format!(
+        "Total force ({})",
+        (total.iter().take(if two_d { 2 } else { 3 }))
+            .map(|f| numeric::format_physical(*f))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
+    ui.end_row();
+    for line in [
+        "Wheel offsets are measured from the reference point, forces act in global",
+        "directions. Select the faces the wheels run on. A wheel off them carries no",
+        "force, one partly off the covered part. One static step is written per position.",
+    ] {
+        ui.label("");
+        ui.weak(line);
+        ui.end_row();
+    }
+}
+
 /// Forces of axisymmetric models act on the whole revolution, as in CalculiX.
 fn revolution_hint(ui: &mut Ui, axisymmetric: bool) {
     if axisymmetric {
@@ -742,6 +938,7 @@ const FILM: &str = "Convective_Film";
 const RADIATION: &str = "Radiation";
 const GRAVITY: &str = "Gravity";
 const CENTRIFUGAL: &str = "Centrifugal_Load";
+const MOVING: &str = "Moving_Load";
 
 /// Whether the boundary condition dialog offers a preview of the motion: a prescribed
 /// displacement that follows an amplitude of the model.
@@ -886,7 +1083,7 @@ const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
 
 /// The load kinds of the dialog in PrePoMax's order: label, default name and the kind with
 /// zero values.
-fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
+fn load_kinds() -> [(&'static str, &'static str, LoadKind); 13] {
     [
         (
             "Concentrated Force",
@@ -909,6 +1106,11 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
                 axis: [0.0, 0.0, 1.0],
                 speed: 0.0,
             },
+        ),
+        (
+            "Moving Load",
+            MOVING,
+            LoadKind::Moving(MovingLoad::default()),
         ),
         (
             "Pre-tension (bolt preload)",
@@ -1006,6 +1208,7 @@ fn load_kind_name(kind: &LoadKind) -> &'static str {
         LoadKind::Radiation { .. } => RADIATION,
         LoadKind::Gravity(_) => GRAVITY,
         LoadKind::Centrifugal { .. } => CENTRIFUGAL,
+        LoadKind::Moving(_) => MOVING,
     }
 }
 
@@ -1142,7 +1345,7 @@ impl Editor {
                         active: true,
                         visible: true,
                         region: Region::Nodes(Vec::new()),
-                        kind,
+                        kind: kind.clone(),
                         amplitude: None,
                         factor_amplitude: None,
                     },
@@ -1410,7 +1613,7 @@ impl Editor {
     pub fn step_item(&self) -> Option<(usize, Option<usize>, crate::symbols::Item)> {
         let (step, kind, region) = match &self.draft {
             Draft::BoundaryCondition(s, bc, r) => (*s, crate::symbols::Kind::Boundary(bc.kind), r),
-            Draft::Load(s, load, r) => (*s, crate::symbols::Kind::Load(load.kind), r),
+            Draft::Load(s, load, r) => (*s, crate::symbols::Kind::Load(load.kind.clone()), r),
             _ => return None,
         };
         let item = crate::symbols::Item {
@@ -1763,6 +1966,10 @@ impl Editor {
                             if step_kind.is_some_and(|s| !s.supports_load(&kind)) {
                                 continue;
                             }
+                            // A moving load drives over a surface, which a revolution has not.
+                            if axisymmetric && matches!(kind, LoadKind::Moving(_)) {
+                                continue;
+                            }
                             if ui.selectable_label(current == name, label).clicked()
                                 && current != name
                             {
@@ -1770,7 +1977,7 @@ impl Editor {
                                 load.kind = kind;
                                 rename_default(&mut load.name, current, name, &taken);
                                 if moved {
-                                    *region = load_region(&kind, None, &model.fe, &model.mesh);
+                                    *region = load_region(&load.kind, None, &model.fe, &model.mesh);
                                 }
                             }
                         }
@@ -1944,6 +2151,7 @@ impl Editor {
                         );
                         ui.end_row();
                     }
+                    LoadKind::Moving(moving) => moving_rows(ui, moving, &model.fe, two_d, units),
                     LoadKind::Radiation { sink, emissivity } => {
                         ui.label("Sink temperature");
                         ui.add(numeric::quantity(sink, units, Quantity::Temperature).speed(1.0));
@@ -2284,9 +2492,19 @@ impl Editor {
                 contacts::validate_contact_pair(pair, fe)?;
                 regions.validate()?;
             }
-            Draft::Tie(_, regions) => regions.validate()?,
+            Draft::Tie(tie, regions) => {
+                regions.validate()?;
+                if let Some(problem) = tie.cyclic.as_ref().and_then(CyclicSymmetry::problem) {
+                    return Err(problem);
+                }
+            }
             Draft::SurfaceInteraction(interaction, _) => {
                 contacts::validate_interaction(interaction)?;
+            }
+            Draft::Material(material) => {
+                if let Some(problem) = material.creep.as_ref().and_then(|c| c.problem()) {
+                    return Err(problem.into());
+                }
             }
             Draft::Amplitude(amplitude, _) => amplitude_dialog::validate(amplitude)?,
             Draft::FieldOutput(_, output) => output.check_variables()?,
@@ -2338,6 +2556,11 @@ impl Editor {
                 StepKind::SteadyStateDynamics(settings) => {
                     if let Some(problem) = settings.problem() {
                         return Err(problem);
+                    }
+                }
+                StepKind::Visco(settings) => {
+                    if settings.creep_tolerance <= 0.0 {
+                        return Err("The creep strain tolerance must be positive.".into());
                     }
                 }
                 StepKind::Static(_) | StepKind::ComplexFrequency(_) => {}
@@ -2865,22 +3088,32 @@ fn history_output_form(
     ui.end_row();
     ui.label("Variables");
     let choices = output.kind.choices();
-    ui.horizontal_wrapped(|ui| {
-        ui.set_max_width(320.0);
-        for &variable in choices {
-            let mut on = output.variables.iter().any(|v| v == variable);
-            let checkbox = ui
-                .checkbox(&mut on, variable)
-                .on_hover_text(plx_model::output_variable_description(variable));
-            if checkbox.changed() {
-                output.variables.retain(|v| v != variable);
-                if on {
-                    output.variables.push(variable.to_string());
+    // Fixed rows of five in a nested grid; a wrapped layout inside the property grid
+    // overlapped the row below it.
+    let mut changed = false;
+    egui::Grid::new("history variables")
+        .spacing([10.0, 2.0])
+        .show(ui, |ui| {
+            for row in choices.chunks(5) {
+                for &variable in row {
+                    let mut on = output.variables.iter().any(|v| v == variable);
+                    let checkbox = ui
+                        .checkbox(&mut on, variable)
+                        .on_hover_text(plx_model::output_variable_description(variable));
+                    if checkbox.changed() {
+                        changed = true;
+                        output.variables.retain(|v| v != variable);
+                        if on {
+                            output.variables.push(variable.to_string());
+                        }
+                    }
                 }
-                output.normalize_variables();
+                ui.end_row();
             }
-        }
-    });
+        });
+    if changed {
+        output.normalize_variables();
+    }
     ui.end_row();
     ui.label("Totals");
     egui::ComboBox::from_id_salt("history totals")
@@ -3185,6 +3418,7 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     ui.end_row();
     material.elastic = elastic.then_some(values);
     plastic_rows(ui, material, units);
+    creep_rows(ui, material, units);
     for (label, value, quantity) in [
         (
             "Thermal conductivity",
@@ -3338,6 +3572,31 @@ fn plastic_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     material.plastic = plastic.then_some(values);
 }
 
+/// Norton's creep law of the material form, which acts in Visco steps.
+fn creep_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
+    let mut creeps = material.creep.is_some();
+    ui.checkbox(&mut creeps, "Creep (Norton)")
+        .on_hover_text("The material creeps in Visco steps; Static steps ignore the creep law.");
+    ui.end_row();
+    let mut creep = material.creep.unwrap_or_default();
+    for (label, value) in [
+        ("    A", &mut creep.a),
+        ("    Stress exponent n", &mut creep.n),
+        ("    Time exponent m", &mut creep.m),
+    ] {
+        ui.label(label);
+        ui.add_enabled(creeps, numeric::drag_value(value).speed(0.0));
+        ui.end_row();
+    }
+    ui.label("");
+    let (stress, time) = (units.unit(Quantity::Pressure), units.unit(Quantity::Time));
+    ui.weak(format!(
+        "Creep strain rate = A * stress^n * time^m, stress in {stress}, time in {time}."
+    ));
+    ui.end_row();
+    material.creep = creeps.then_some(creep);
+}
+
 fn hardening_label(hardening: Hardening) -> &'static str {
     match hardening {
         Hardening::Isotropic => "Isotropic",
@@ -3379,7 +3638,7 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
 /// outputs, in PrePoMax's order.
-fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 11] {
+fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 12] {
     let heat = HeatTransferStep::default();
     [
         (
@@ -3433,6 +3692,11 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 11] 
             FieldOutput::coupled_defaults(),
         ),
         (
+            VISCO_LABEL,
+            StepKind::Visco(ViscoStep::default()),
+            FieldOutput::visco_defaults(),
+        ),
+        (
             SENSITIVITY_LABEL,
             StepKind::Sensitivity(SensitivityStep::default()),
             FieldOutput::sensitivity_defaults(),
@@ -3451,6 +3715,7 @@ const STEADY_STATE_LABEL: &str = "Steady State Dynamics (frequency response)";
 const COMPLEX_FREQUENCY_LABEL: &str = "Complex Frequency (rotating, Coriolis)";
 const BUCKLE_LABEL: &str = "Buckle";
 const SENSITIVITY_LABEL: &str = "Sensitivity (shape)";
+const VISCO_LABEL: &str = "Visco (creep)";
 
 fn step_kind_label(kind: &StepKind) -> &'static str {
     match kind {
@@ -3465,6 +3730,7 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
         StepKind::CoupledTempDisp(_) => COUPLED_LABEL,
         StepKind::UncoupledTempDisp(_) => UNCOUPLED_LABEL,
         StepKind::Sensitivity(_) => SENSITIVITY_LABEL,
+        StepKind::Visco(_) => VISCO_LABEL,
     }
 }
 
@@ -3493,7 +3759,7 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
     let units = fe.properties.units;
     match &mut step.kind {
         StepKind::Static(settings) => static_form(ui, settings, units),
-        StepKind::Frequency(settings) => frequency_form(ui, settings, units),
+        StepKind::Frequency(settings) => frequency_form(ui, settings, units, fe.cyclic_symmetry()),
         StepKind::Dynamic(settings) => dynamic_form(ui, settings, units),
         StepKind::ModalDynamics(settings) => modal_dynamics_form(ui, settings, units),
         StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
@@ -3504,7 +3770,28 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
         // PrePoMax offers no NLGEOM for the uncoupled step.
         StepKind::UncoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::Sensitivity(settings) => sensitivity_form(ui, settings, units),
+        StepKind::Visco(settings) => visco_form(ui, settings, units),
     }
+}
+
+/// Settings of a visco step: those of a static step over the creep time and the creep
+/// strain tolerance of the automatic increments.
+fn visco_form(ui: &mut Ui, settings: &mut ViscoStep, units: UnitSystem) {
+    increments_form(ui, &mut settings.increments, units, true);
+    ui.label("Creep strain tolerance");
+    ui.add(
+        numeric::drag_value(&mut settings.creep_tolerance)
+            .range(0.0..=1.0)
+            .speed(0.0),
+    )
+    .on_hover_text(
+        "Largest error of the creep strain in an increment (CETOL); smaller values give \
+         shorter automatic increments.",
+    );
+    ui.end_row();
+    ui.label("");
+    ui.weak("Materials creep only with a creep law (Material > Creep); the others stay elastic.");
+    ui.end_row();
 }
 
 /// Settings of a sensitivity step: the design responses and the filter. The design region
@@ -3831,7 +4118,12 @@ fn solver_row(ui: &mut Ui, solver: &mut EquationSolver, eigenvalues: bool) {
     ui.end_row();
 }
 
-fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep, units: UnitSystem) {
+fn frequency_form(
+    ui: &mut Ui,
+    settings: &mut FrequencyStep,
+    units: UnitSystem,
+    cyclic: Option<&CyclicSymmetry>,
+) {
     ui.label("");
     ui.checkbox(
         &mut settings.perturbation,
@@ -3864,8 +4156,36 @@ fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep, units: UnitSystem) 
         "Store matrices and eigenmodes (Storage, .eig)",
     );
     ui.end_row();
+    if let Some(cyclic) = cyclic {
+        nodal_diameter_rows(ui, &mut settings.nodal_diameters, cyclic);
+    }
     ui.label("");
     ui.weak("Loads have no effect in a frequency step; only the boundary conditions count.");
+    ui.end_row();
+}
+
+/// The nodal diameters a cyclic symmetric model is solved for, PrePoMax's minimum and
+/// maximum cyclic symmetry mode; unchecked, CalculiX solves all of them.
+fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, cyclic: &CyclicSymmetry) {
+    let highest = cyclic.highest_nodal_diameter();
+    let mut set = range.is_some();
+    ui.checkbox(&mut set, "Nodal diameter range")
+        .on_hover_text(format!(
+            "Cyclic symmetry: the eigenfrequencies are computed for each nodal diameter \
+             from 0 to {highest}, or only for this range. The number of eigenfrequencies \
+             counts per nodal diameter."
+        ));
+    let mut values = range.unwrap_or([0, highest]);
+    ui.add_enabled_ui(set, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("from");
+            ui.add(egui::DragValue::new(&mut values[0]).range(0..=highest));
+            ui.label("to");
+            let low = values[0];
+            ui.add(egui::DragValue::new(&mut values[1]).range(low..=highest));
+        });
+    });
+    *range = set.then_some(values);
     ui.end_row();
 }
 
@@ -4058,6 +4378,11 @@ mod tests {
         let parts = Region::Parts(vec!["A".into(), "B".into()]);
         let draft = RegionDraft::from_region(&parts, ELEMENT_SOURCES, Target::Faces, &mesh);
         assert_eq!(draft.region(), parts);
+        // Element regions list whole parts first; picked faces still reopen as a selection.
+        let faces = Region::Faces(vec![(3, 2)]);
+        let draft = RegionDraft::from_region(&faces, SOLID_SOURCES, Target::Faces, &mesh);
+        assert_eq!(draft.source, Source::Selection);
+        assert_eq!(draft.region(), faces);
     }
 
     #[test]

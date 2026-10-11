@@ -3,7 +3,8 @@
 //! Matej Borovinsek), gradients reduced to a few shades.
 
 use egui::epaint::Mesh;
-use egui::{Color32, Painter, Pos2, Rect, Shape, pos2};
+use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
+use plx_model::StepKind;
 
 /// Edge length of a tree icon in points.
 pub const SIZE: f32 = 16.0;
@@ -36,6 +37,8 @@ pub enum TreeIcon {
     InitialConditions,
     Steps,
     Step,
+    /// A step of a known type, drawn as a pictogram of that type.
+    StepType(StepGlyph),
     FieldOutput,
     HistoryOutput,
     BoundaryCondition,
@@ -89,6 +92,7 @@ fn pixmap(icon: TreeIcon) -> &'static Pixmap {
         TreeIcon::InitialConditions => &INITIAL_CONDITIONS,
         TreeIcon::Steps => &STEPS,
         TreeIcon::Step => &STEP,
+        TreeIcon::StepType(_) => unreachable!("step types are drawn with strokes"),
         TreeIcon::FieldOutput => &FIELD_OUTPUT,
         TreeIcon::HistoryOutput => &HISTORY_OUTPUT,
         TreeIcon::HotSpot => &HOT_SPOT,
@@ -114,6 +118,10 @@ fn pixmap(icon: TreeIcon) -> &'static Pixmap {
 /// and runs of equal pixels merged, so that the icon stays sharp at any zoom factor. A plain
 /// mesh is used because egui would blur the edges of single pixel rectangles.
 pub fn paint(painter: &Painter, min: Pos2, icon: TreeIcon) {
+    if let TreeIcon::StepType(glyph) = icon {
+        paint_step_type(painter, min, glyph);
+        return;
+    }
     let ppp = painter.pixels_per_point();
     let snap = |v: f32| (v * ppp).round() / ppp;
     let pixmap = pixmap(icon);
@@ -141,6 +149,235 @@ pub fn paint(painter: &Painter, min: Pos2, icon: TreeIcon) {
         }
     }
     painter.add(Shape::mesh(mesh));
+}
+
+/// The pictograms of the step types, so that a step shows its type independent of its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepGlyph {
+    Static,
+    Frequency,
+    ComplexFrequency,
+    Buckle,
+    HeatTransfer,
+    CoupledTempDisp,
+    UncoupledTempDisp,
+    Dynamic,
+    ModalDynamics,
+    SteadyStateDynamics,
+    Sensitivity,
+    Visco,
+}
+
+impl StepGlyph {
+    /// Name of the step type, shown in the tooltip.
+    pub fn name(self) -> &'static str {
+        match self {
+            StepGlyph::Static => "Static",
+            StepGlyph::Frequency => "Frequency",
+            StepGlyph::ComplexFrequency => "Complex Frequency",
+            StepGlyph::Buckle => "Buckle",
+            StepGlyph::HeatTransfer => "Heat Transfer",
+            StepGlyph::CoupledTempDisp => "Coupled Temperature-Displacement",
+            StepGlyph::UncoupledTempDisp => "Uncoupled Temperature-Displacement",
+            StepGlyph::Dynamic => "Dynamic",
+            StepGlyph::ModalDynamics => "Modal Dynamics",
+            StepGlyph::SteadyStateDynamics => "Steady State Dynamics",
+            StepGlyph::Sensitivity => "Sensitivity",
+            StepGlyph::Visco => "Visco",
+        }
+    }
+}
+
+impl From<&StepKind> for StepGlyph {
+    fn from(kind: &StepKind) -> Self {
+        match kind {
+            StepKind::Static(_) => StepGlyph::Static,
+            StepKind::Frequency(_) => StepGlyph::Frequency,
+            StepKind::ComplexFrequency(_) => StepGlyph::ComplexFrequency,
+            StepKind::Buckle(_) => StepGlyph::Buckle,
+            StepKind::HeatTransfer(_) => StepGlyph::HeatTransfer,
+            StepKind::CoupledTempDisp(_) => StepGlyph::CoupledTempDisp,
+            StepKind::UncoupledTempDisp(_) => StepGlyph::UncoupledTempDisp,
+            StepKind::Dynamic(_) => StepGlyph::Dynamic,
+            StepKind::ModalDynamics(_) => StepGlyph::ModalDynamics,
+            StepKind::SteadyStateDynamics(_) => StepGlyph::SteadyStateDynamics,
+            StepKind::Sensitivity(_) => StepGlyph::Sensitivity,
+            StepKind::Visco(_) => StepGlyph::Visco,
+        }
+    }
+}
+
+const INK: Color32 = Color32::from_rgb(70, 70, 70);
+const BLUE: Color32 = Color32::from_rgb(52, 101, 190);
+const RED: Color32 = Color32::from_rgb(214, 70, 40);
+const GREEN: Color32 = Color32::from_rgb(40, 145, 80);
+const ORANGE: Color32 = Color32::from_rgb(225, 140, 20);
+const PURPLE: Color32 = Color32::from_rgb(130, 70, 170);
+
+/// Draws the pictogram of a step type into the 16 x 16 square at `min` with strokes, so
+/// that it scales with the display.
+fn paint_step_type(painter: &Painter, min: Pos2, glyph: StepGlyph) {
+    let at = |x: f32, y: f32| min + vec2(x, y);
+    let line = |points: &[(f32, f32)], color: Color32| {
+        let points = points.iter().map(|&(x, y)| at(x, y)).collect();
+        painter.add(Shape::line(points, Stroke::new(1.5, color)));
+    };
+    let curve = |from: f32, to: f32, color: Color32, y: &dyn Fn(f32) -> f32| {
+        let steps = 28;
+        let points = (0..=steps)
+            .map(|i| {
+                let x = from + (to - from) * i as f32 / steps as f32;
+                (x, y(x))
+            })
+            .collect::<Vec<_>>();
+        line(&points, color);
+    };
+    let axes = || line(&[(1.5, 1.0), (1.5, 14.5), (15.0, 14.5)], INK);
+    let arrow = |from: (f32, f32), to: (f32, f32), color: Color32| {
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let length = dx.hypot(dy);
+        let (ux, uy) = (dx / length, dy / length);
+        line(&[from, to], color);
+        let base = (to.0 - 3.0 * ux, to.1 - 3.0 * uy);
+        let wing = |sign: f32| (base.0 - 2.0 * uy * sign, base.1 + 2.0 * ux * sign);
+        painter.add(Shape::convex_polygon(
+            vec![
+                at(to.0, to.1),
+                at(wing(1.0).0, wing(1.0).1),
+                at(wing(-1.0).0, wing(-1.0).1),
+            ],
+            color,
+            Stroke::NONE,
+        ));
+    };
+    let tau = std::f32::consts::TAU;
+    match glyph {
+        // A load on a supported bar.
+        StepGlyph::Static => {
+            arrow((8.0, 0.5), (8.0, 7.5), RED);
+            painter.rect_filled(
+                Rect::from_min_size(at(1.5, 8.5), vec2(13.0, 3.0)),
+                0.0,
+                BLUE,
+            );
+            line(&[(3.0, 12.0), (3.0, 15.0)], INK);
+            line(&[(13.0, 12.0), (13.0, 15.0)], INK);
+        }
+        // A standing wave.
+        StepGlyph::Frequency => {
+            line(&[(1.0, 8.0), (15.0, 8.0)], Color32::from_gray(190));
+            curve(1.0, 15.0, BLUE, &|x| {
+                8.0 - 5.5 * ((x - 1.0) / 14.0 * tau * 1.5).sin()
+            });
+        }
+        // A decaying wave.
+        StepGlyph::ComplexFrequency => {
+            line(&[(1.0, 8.0), (15.0, 8.0)], Color32::from_gray(190));
+            curve(1.0, 15.0, PURPLE, &|x| {
+                let t = (x - 1.0) / 14.0;
+                8.0 - 6.5 * (-1.6 * t).exp() * (t * tau * 2.0).sin()
+            });
+        }
+        // A bent column under a load.
+        StepGlyph::Buckle => {
+            arrow((8.0, 0.5), (8.0, 4.5), RED);
+            let points = (0..=20)
+                .map(|i| {
+                    let t = i as f32 / 20.0;
+                    (8.0 + 3.5 * (std::f32::consts::PI * t).sin(), 4.5 + 9.0 * t)
+                })
+                .collect::<Vec<_>>();
+            line(&points, BLUE);
+            line(&[(3.5, 14.8), (12.5, 14.8)], INK);
+        }
+        // Rising heat.
+        StepGlyph::HeatTransfer => {
+            for x in [3.5, 8.0, 12.5] {
+                let points = (0..=16)
+                    .map(|i| {
+                        let t = i as f32 / 16.0;
+                        (x + 1.3 * (t * tau * 1.5).sin(), 14.5 - 13.0 * t)
+                    })
+                    .collect::<Vec<_>>();
+                line(&points, RED);
+            }
+        }
+        // Heat on a bar.
+        StepGlyph::CoupledTempDisp => {
+            for x in [4.5, 8.0, 11.5] {
+                let points = (0..=10)
+                    .map(|i| {
+                        let t = i as f32 / 10.0;
+                        (x + 1.1 * (t * tau * 1.5).sin(), 8.0 - 7.0 * t)
+                    })
+                    .collect::<Vec<_>>();
+                line(&points, RED);
+            }
+            painter.rect_filled(
+                Rect::from_min_size(at(1.5, 10.0), vec2(13.0, 3.0)),
+                0.0,
+                BLUE,
+            );
+            line(&[(3.0, 13.5), (3.0, 15.5)], INK);
+            line(&[(13.0, 13.5), (13.0, 15.5)], INK);
+        }
+        // Heat flowing one way into a bar.
+        StepGlyph::UncoupledTempDisp => {
+            for x in [4.0, 8.0] {
+                let points = (0..=10)
+                    .map(|i| {
+                        let t = i as f32 / 10.0;
+                        (x + 1.1 * (t * tau * 1.5).sin(), 8.0 - 7.0 * t)
+                    })
+                    .collect::<Vec<_>>();
+                line(&points, RED);
+            }
+            arrow((12.5, 1.0), (12.5, 8.0), ORANGE);
+            painter.rect_filled(
+                Rect::from_min_size(at(1.5, 10.0), vec2(13.0, 3.0)),
+                0.0,
+                BLUE,
+            );
+            line(&[(3.0, 13.5), (3.0, 15.5)], INK);
+            line(&[(13.0, 13.5), (13.0, 15.5)], INK);
+        }
+        // A clock.
+        StepGlyph::Dynamic => {
+            painter.circle_stroke(at(8.0, 8.0), 6.5, Stroke::new(1.5, BLUE));
+            line(&[(8.0, 3.5), (8.0, 8.0), (11.0, 10.0)], INK);
+        }
+        // Two superposed modes over time.
+        StepGlyph::ModalDynamics => {
+            axes();
+            curve(2.0, 15.0, GREEN, &|x| {
+                let t = (x - 2.0) / 13.0 * tau;
+                8.0 - 3.5 * t.sin() - 2.5 * (3.0 * t + 0.6).sin()
+            });
+        }
+        // A resonance peak over the frequency.
+        StepGlyph::SteadyStateDynamics => {
+            axes();
+            curve(2.0, 15.0, ORANGE, &|x| {
+                let d = (x - 8.0) / 1.8;
+                14.0 - 12.0 / (1.0 + d * d)
+            });
+        }
+        // A shape moved by a design step.
+        StepGlyph::Sensitivity => {
+            let arc = |x: f32| (std::f32::consts::PI * (x - 1.5) / 13.0).sin();
+            curve(1.5, 14.5, INK, &|x| 12.5 - 4.0 * arc(x));
+            curve(1.5, 14.5, BLUE, &|x| 7.0 - 4.0 * arc(x));
+            arrow((8.0, 12.0), (8.0, 6.5), ORANGE);
+        }
+        // A creep curve: the strain grows on over time.
+        StepGlyph::Visco => {
+            axes();
+            curve(2.0, 15.0, RED, &|x| {
+                let t = (x - 2.0) / 13.0;
+                12.5 - 4.0 * (1.0 - (-8.0 * t).exp()) - 6.0 * t
+            });
+        }
+    }
 }
 
 /// Mesh.ico

@@ -1776,6 +1776,112 @@ mod tests {
         assert!(max > 300.0 && max < 1500.0, "largest stress {max}");
     }
 
+    /// A flat disk in a 3D model is meshed as shells and thickened by a shell section; thin,
+    /// clamped at its rim and loaded by its weight it sags as a Kirchhoff plate does.
+    #[test]
+    fn surfaces_in_3d_models_solve_as_shells() {
+        if !gmsh_available()
+            || std::process::Command::new("ccx")
+                .arg("-v")
+                .output()
+                .is_err()
+        {
+            eprintln!("Gmsh or ccx missing, test skipped");
+            return;
+        }
+        use plx_model::{
+            BoundaryCondition, BoundaryKind, Elastic, Load, LoadKind, Material, ModelSpace, Region,
+            Section, Step,
+        };
+        let mut model = load(&testdata("membran.step"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
+        let mut geometry = model.geometry.clone().unwrap();
+        geometry.meshing.max_size = 2.0;
+        geometry.meshing.quad_dominated = true;
+        let mut mesh = plx_mesher::generate_mesh(&geometry).unwrap().mesh;
+        ModelSpace::ThreeD
+            .prepare_generated_mesh(&mut mesh)
+            .unwrap();
+        assert!(mesh.elements().iter().all(|e| e.type_name == "S8"));
+        model.set_mesh(mesh);
+        let (radius, thickness, young, poisson) = (20.0, 0.25, 210000.0, 0.3);
+        let (density, gravity) = (7.85e-9, 9810.0);
+        let rim: Vec<NodeId> = (model.mesh.node_ids().iter().zip(model.mesh.coords()))
+            .filter(|(_, c)| (c[0].hypot(c[1]) - radius).abs() < 1e-6)
+            .map(|(id, _)| *id)
+            .collect();
+        assert!(rim.len() > 20);
+        let part = model.mesh.parts[0].name.clone();
+        let mut step = Step::new_static("Step-1");
+        step.boundary_conditions.push(BoundaryCondition {
+            name: "Clamped".into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(rim),
+            kind: BoundaryKind::Fixed,
+            amplitude: None,
+        });
+        step.loads.push(Load {
+            name: "Weight".into(),
+            active: true,
+            visible: true,
+            region: Region::Parts(vec![part.clone()]),
+            kind: LoadKind::Gravity([0.0, 0.0, -gravity]),
+            amplitude: None,
+            factor_amplitude: None,
+        });
+        let solid = Section {
+            name: "Section-1".into(),
+            material: "Steel".into(),
+            region: Region::Parts(vec![part]),
+            thickness: 1.0,
+            kind: SectionKind::Solid,
+        };
+        model.fe = FeModel {
+            materials: vec![Material {
+                name: "Steel".into(),
+                density: Some(density),
+                elastic: Some(Elastic { young, poisson }),
+                ..Default::default()
+            }],
+            sections: vec![solid.clone()],
+            steps: vec![step],
+            ..FeModel::default()
+        };
+        // A solid section would leave the shells without a thickness.
+        assert!(plx_io::inp::write_inp(&model.mesh, &model.fe, "Membran").is_err());
+        model.fe.sections[0].kind = SectionKind::Shell {
+            thickness,
+            offset: 0.0,
+        };
+        let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Membran").unwrap();
+        assert!(inp.contains("*Shell section"), "{inp}");
+        let dir = std::env::temp_dir().join(format!("prepolix-shell-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("membran.inp"), inp).unwrap();
+        let status = std::process::Command::new("ccx")
+            .args(["-i", "membran"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "ccx: {status:?}");
+        let results = read_frd(&dir.join("membran.frd")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let disp = results.increments.last().unwrap().field("DISP").unwrap();
+        let sag = (disp.component("U3").unwrap().values.iter())
+            .copied()
+            .fold(0.0f32, f32::min);
+        // Centre deflection of a clamped circular plate: q a^4 / (64 D).
+        let q = density * gravity * thickness;
+        let stiffness = young * thickness.powi(3) / (12.0 * (1.0 - poisson * poisson));
+        let expected = -q * radius.powi(4) / (64.0 * stiffness);
+        assert!(
+            (f64::from(sag) / expected - 1.0).abs() < 0.02,
+            "sag {sag}, plate theory {expected}"
+        );
+    }
+
     /// Parts sharing a section share a material, which is all an `.frd` file groups the
     /// elements by; the results take the parts of the input they were computed from.
     #[test]

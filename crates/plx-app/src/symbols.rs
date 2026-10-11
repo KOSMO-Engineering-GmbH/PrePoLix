@@ -271,6 +271,40 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     add(foot, direction, SymbolShape::RotationLock);
                 }
             }
+            // The wheels at the first and the last position, pressing on the faces below.
+            Kind::Load(LoadKind::Moving(ref moving)) => {
+                let Ok((_, travel, lateral)) = moving.path_axes(&model.fe) else {
+                    continue;
+                };
+                let (travel, lateral) = (DVec3::from(travel), DVec3::from(lateral));
+                let two_d = model.fe.properties.space.is_2d();
+                let centers: Vec<DVec3> = (face_geometry(model, &item.region, &visible))
+                    .iter()
+                    .map(|f| f.center)
+                    .collect();
+                let mut stations = moving.stations();
+                stations.dedup_by(|a, b| a == b);
+                if stations.len() > 2 {
+                    stations = vec![stations[0], stations[stations.len() - 1]];
+                }
+                for station in stations {
+                    let points = moving.wheel_points(&model.fe, station);
+                    for (point, wheel) in points.into_iter().zip(&moving.wheels) {
+                        let point = DVec3::from(point);
+                        // Offset of a face centre from the wheel within the path's plane.
+                        let in_plane = |c: DVec3| {
+                            let d = c - point;
+                            let across = if two_d { 0.0 } else { d.dot(lateral) };
+                            d.dot(travel) * travel + across * lateral
+                        };
+                        let nearest = (centers.iter()).min_by(|a, b| {
+                            in_plane(**a).length().total_cmp(&in_plane(**b).length())
+                        });
+                        let target = nearest.map_or(point, |&c| c - in_plane(c));
+                        add(target, DVec3::from(wheel.force), SymbolShape::ArrowOnto);
+                    }
+                }
+            }
             Kind::Load(
                 LoadKind::SurfaceFlux(_) | LoadKind::Film { .. } | LoadKind::Radiation { .. },
             ) => {

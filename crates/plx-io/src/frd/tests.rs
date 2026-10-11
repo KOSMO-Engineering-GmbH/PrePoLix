@@ -173,3 +173,30 @@ fn truncated_binary_data_is_an_error() {
     bytes.truncate(400);
     assert!(read_frd_bytes(&bytes).is_err());
 }
+
+/// CalculiX writes a data set per field of each mode of a cyclic symmetric model, numbered
+/// on through the nodal diameters, and only the first of each cosine and sine pair.
+#[test]
+fn cyclic_symmetric_modes_carry_their_nodal_diameter() {
+    let import = read_frd(&testdata("cyclic_sector.frd")).unwrap();
+    assert!(import.warnings.is_empty(), "{:?}", import.warnings);
+    let modes: Vec<_> = (import.increments.iter())
+        .map(|i| (i.increment, i.nodal_diameter, i.value))
+        .collect();
+    assert_eq!(
+        modes,
+        [
+            (1, Some(1), 5180.798039),
+            (2, Some(1), 17183.54392),
+            (3, Some(2), 5340.474182),
+            (4, Some(2), 27753.78035),
+        ]
+    );
+    let names: Vec<&str> = (import.increments[0].fields.iter())
+        .map(|f| f.name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        ["DISP", "DISPI", "STRESS", "STRESSI", "ERROR", "ERRORI"]
+    );
+}

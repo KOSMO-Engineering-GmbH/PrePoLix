@@ -92,6 +92,8 @@ surface.
     master surface.],
   [Master / Slave], [The two surfaces, picked with their #ui("...") buttons. Choose the finer
     mesh as slave.],
+  [Cyclic symmetry], [Ties the two cut faces of a sector of a rotationally repeating part, see
+    @cyclic-symmetry.],
 )
 
 === Node ties

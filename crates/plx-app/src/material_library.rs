@@ -673,6 +673,17 @@ fn material_models(
         }
         models.push(("Plastic", rows));
     }
+    if let Some(creep) = material.creep {
+        models.push((
+            "Creep",
+            vec![
+                ("Law", "Norton".to_string()),
+                ("A", format_value(creep.a)),
+                ("Stress exponent n", format_value(creep.n)),
+                ("Time exponent m", format_value(creep.m)),
+            ],
+        ));
+    }
     if let Some(expansion) = material.expansion {
         models.push((
             "Thermal Expansion",

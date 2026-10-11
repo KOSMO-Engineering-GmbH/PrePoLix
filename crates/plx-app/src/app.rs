@@ -8,6 +8,7 @@ use plx_results::hot_spot::{HotSpot, HotSpotPath};
 
 use crate::analysis::{Analysis, MonitorEvent};
 use crate::animation::{AnimationKind, ColorLimits, Playback};
+use crate::animation_export::{self, Format};
 use crate::contact_search::{ContactSearchDialog, SearchResult};
 use crate::exploded::{ExplodedDialog, ExplodedResult};
 use crate::features::{FeatureDialog, FeatureKind, FeatureResult};
@@ -48,6 +49,8 @@ enum LoadEvent {
     Finished(PathBuf, Result<Box<LoadedModel>, String>),
     /// CAD files added to the geometry of the open model.
     Added(Vec<PathBuf>, Result<Box<plx_mesher::CadAddition>, String>),
+    /// Meshes of input files, each read from its file, to add as parts of the open model.
+    MeshesRead(Vec<(PathBuf, Result<Box<plx_io::inp::InpImport>, String>)>),
 }
 
 struct Workbench {
@@ -136,6 +139,10 @@ struct Workbench {
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
     screenshot: Screenshot,
+    /// Animation export taking its frames from the 3D view.
+    recording: Option<animation_export::Recording>,
+    /// Exported animation being encoded, with its file name.
+    animation_encoding: Option<(String, animation_export::Encoder)>,
     /// Open dialog of a hot spot definition of the current results.
     hot_spot_dialog: Option<HotSpotDialog>,
     /// Hot spot whose paths are shown, edited or selected, with the results file and its
@@ -256,6 +263,8 @@ impl PrepolixApp {
                 findings_window: None,
                 open_results: None,
                 screenshot: Screenshot::default(),
+                recording: None,
+                animation_encoding: None,
                 hot_spot_dialog: None,
                 hot_spot_preview: None,
                 hot_spot_plotted: None,
@@ -338,8 +347,9 @@ impl PrepolixApp {
     }
 
     /// PrePoMax's Geometry > Import: one or several STEP, IGES or BREP files, read into
-    /// one geometry. A model that already has geometry or a mesh keeps it; the new parts
-    /// are added.
+    /// one geometry, or input files (.inp) whose mesh becomes mesh parts, such as a mesh
+    /// written by "Export Deformed Mesh". A model that already has geometry or a mesh keeps
+    /// it; the new parts are added.
     fn import_dialog(&mut self, ctx: &egui::Context) {
         if self.loading.is_some() {
             return;
@@ -358,11 +368,19 @@ impl PrepolixApp {
         std::thread::spawn(move || {
             let picked = rfd::FileDialog::new()
                 .set_title("Import Geometry")
+                .add_filter(IMPORT_FILTER.0, IMPORT_FILTER.1)
                 .add_filter(GEOMETRY_FILTER.0, GEOMETRY_FILTER.1)
+                .add_filter("Input file (*.inp)", &["inp", "INP"])
                 .pick_files();
             let Some(paths) = picked.filter(|p| !p.is_empty()) else {
                 return;
             };
+            let (meshes, paths): (Vec<PathBuf>, Vec<PathBuf>) =
+                paths.into_iter().partition(|p| !plx_mesher::is_cad_file(p));
+            if paths.is_empty() {
+                read_meshes_in_background(meshes, sender, ctx);
+                return;
+            }
             match base {
                 Some((geometry, taken, units)) => {
                     let _ = sender.send(LoadEvent::Started(paths[0].clone()));
@@ -374,7 +392,10 @@ impl PrepolixApp {
                     let _ = sender.send(LoadEvent::Added(paths, result));
                     ctx.request_repaint();
                 }
-                None => load_geometry_in_background(paths, units, sender, ctx),
+                None => load_geometry_in_background(paths, units, sender.clone(), ctx.clone()),
+            }
+            if !meshes.is_empty() {
+                read_meshes_in_background(meshes, sender, ctx);
             }
         });
     }
@@ -406,6 +427,10 @@ impl PrepolixApp {
                 LoadEvent::Added(paths, result) => {
                     self.loading = None;
                     self.workbench.geometry_added(&paths, result);
+                }
+                LoadEvent::MeshesRead(files) => {
+                    self.loading = None;
+                    self.workbench.meshes_added(files);
                 }
             }
         }
@@ -600,7 +625,7 @@ impl PrepolixApp {
             if icons::button(ui, Icon::Open, "Open (Ctrl+O)", can_open, false).clicked() {
                 self.open_dialog(ui.ctx());
             }
-            let import = "Import Geometry (STEP, IGES, BREP)";
+            let import = "Import Geometry (STEP, IGES, BREP) or mesh (INP)";
             if icons::button(ui, Icon::Import, import, can_open, false).clicked() {
                 self.import(ui.ctx());
             }
@@ -704,6 +729,23 @@ impl PrepolixApp {
                 ui.spinner();
                 ui.label(format!("Loading {} …", path.display()));
             }
+            (None, _) if self.workbench.recording.is_some() => {
+                if let Some(recording) = &self.workbench.recording {
+                    let (done, all) = recording.progress();
+                    ui.spinner();
+                    ui.label(format!(
+                        "Recording {}: frame {} of {all} (Esc cancels)",
+                        recording.file,
+                        (done + 1).min(all)
+                    ));
+                }
+            }
+            (None, _) if self.workbench.animation_encoding.is_some() => {
+                if let Some((file, _)) = &self.workbench.animation_encoding {
+                    ui.spinner();
+                    ui.label(format!("Writing {file} …"));
+                }
+            }
             (None, _) if self.workbench.meshing.is_some() => {
                 ui.spinner();
                 ui.label("Meshing …");
@@ -805,6 +847,22 @@ fn load_geometry_in_background(
     ctx.request_repaint();
 }
 
+/// Reads the meshes of input files on the calling thread, to be added to the open model.
+fn read_meshes_in_background(paths: Vec<PathBuf>, sender: Sender<LoadEvent>, ctx: egui::Context) {
+    let _ = sender.send(LoadEvent::Started(paths[0].clone()));
+    ctx.request_repaint();
+    let files = (paths.into_iter())
+        .map(|path| {
+            let result = plx_io::inp::read_inp(&path)
+                .map(Box::new)
+                .map_err(|e| e.to_string());
+            (path, result)
+        })
+        .collect();
+    let _ = sender.send(LoadEvent::MeshesRead(files));
+    ctx.request_repaint();
+}
+
 /// The selected tree item and the parts selected along with it.
 type TreeSelection = (Option<(TreeView, TreeItem)>, BTreeSet<usize>);
 
@@ -823,6 +881,14 @@ fn lost_selections(fe: &plx_model::FeModel, mesh: &plx_mesh::FeMesh) -> usize {
         .filter(|r| r.by_mesh_ids() && r.missing_reference(mesh).is_some())
         .count()
 }
+
+/// File dialog filter of everything Import Geometry takes.
+const IMPORT_FILTER: (&str, &[&str]) = (
+    "Geometry or mesh (*.step, *.stp, *.iges, *.igs, *.brep, *.inp)",
+    &[
+        "step", "STEP", "stp", "STP", "iges", "IGES", "igs", "IGS", "brep", "BREP", "inp", "INP",
+    ],
+);
 
 /// File dialog filter of the CAD formats Gmsh imports.
 const GEOMETRY_FILTER: (&str, &[&str]) = (
@@ -4080,6 +4146,75 @@ impl Workbench {
         self.view_command = Some(ViewCommand::Fit);
     }
 
+    /// PrePoMax's import of a mesh into a model: the mesh of each input file is added as
+    /// parts. The parts already there keep their numbers and names; a part, set or surface
+    /// of the new mesh whose name is taken gets a number appended.
+    fn meshes_added(&mut self, files: Vec<(PathBuf, Result<Box<plx_io::inp::InpImport>, String>)>) {
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let mut any = false;
+        for (path, result) in files {
+            let name = path.file_name().map_or_else(
+                || path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            let import = match result {
+                Ok(import) => *import,
+                Err(error) => {
+                    self.output.push(format!("Error importing {name}: {error}"));
+                    continue;
+                }
+            };
+            if import.mesh.element_count() == 0 {
+                self.output.push(format!(
+                    "Error importing {name}: it contains no elements that can be displayed"
+                ));
+                continue;
+            }
+            let space = plx_model::ModelSpace::of_mesh(&import.mesh);
+            if model.mesh.element_count() == 0 && model.geometry.is_none() {
+                // Into an empty model, the mesh decides what the model is, as opening it does.
+                model.fe.properties.space = space;
+            } else if space.is_2d() != model.fe.properties.space.is_2d() {
+                self.output.push(format!(
+                    "Error importing {name}: its elements are {}, the model is {}",
+                    space.label(),
+                    model.fe.properties.space.label()
+                ));
+                continue;
+            }
+            let (nodes, elements) = (import.mesh.node_count(), import.mesh.element_count());
+            let mut added = Vec::new();
+            model.edit_mesh(|mesh, _| added = mesh.append(import.mesh));
+            self.output.push(format!(
+                "{name} imported: {nodes} nodes, {elements} elements, {} part(s) added ({})",
+                added.len(),
+                added.join(", ")
+            ));
+            for warning in &import.warnings {
+                self.output.push(format!("Warning: {warning}"));
+            }
+            // The heading is not part of a mesh, so skipping it is no news.
+            let keywords: Vec<String> = (import.skipped_keywords.keys())
+                .filter(|k| *k != "HEADING")
+                .map(|k| format!("*{k}"))
+                .collect();
+            if !keywords.is_empty() {
+                self.output.push(format!(
+                    "Only the mesh is read; skipped: {}",
+                    keywords.join(", ")
+                ));
+            }
+            any = true;
+        }
+        if any {
+            self.after_parts_changed();
+            self.set_tree_view(TreeView::FeModel);
+            self.view_command = Some(ViewCommand::Fit);
+        }
+    }
+
     /// PrePoMax's Delete of geometry parts: the geometry loses the solids or faces; a mesh
     /// already generated from them stays, as parts of the FE model.
     fn delete_geometry_parts(&mut self, indices: &[usize]) {
@@ -4514,7 +4649,7 @@ impl Workbench {
             let selected = is_selected(TreeItem::Load(index, i));
             if step.active && load.active && (load.visible || selected) && !replaced(true, i) {
                 items.push(symbols::Item {
-                    kind: symbols::Kind::Load(load.kind),
+                    kind: symbols::Kind::Load(load.kind.clone()),
                     region: load.region.clone(),
                     selected,
                 });
@@ -5397,14 +5532,52 @@ impl Workbench {
 
     /// Plays the animation and shows its window; marks the scene for rebuilding.
     fn animate(&mut self, ctx: &egui::Context) {
+        if let Some((file, encoder)) = &self.animation_encoding
+            && let Some(result) = encoder.poll()
+        {
+            self.output
+                .push(result.unwrap_or_else(|err| format!("{file}: {err}")));
+            self.animation_encoding = None;
+        }
         let model = match self.tree_view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
             TreeView::FeModel => self.model.as_mut(),
         };
-        let Some(view) = model.and_then(|m| m.results.as_mut()) else {
+        let Some(view) = model
+            .and_then(|m| m.results.as_mut())
+            .filter(|view| view.animation.is_some())
+        else {
+            if self.recording.take().is_some() {
+                self.output.push("Animation export cancelled".into());
+            }
             return;
         };
+        if let Some(recording) = self.recording.take() {
+            let ((frame, playing), file) = (recording.restore, recording.file.clone());
+            let (recording, step) = recording.update(ctx, self.viewport.rect);
+            self.recording = recording;
+            let shown = match step {
+                animation_export::Step::Wait => return,
+                animation_export::Step::Show(frame) => frame,
+                animation_export::Step::Finished(encoder) => {
+                    self.animation_encoding = Some((file, encoder));
+                    frame
+                }
+                animation_export::Step::Cancelled => {
+                    self.output.push("Animation export cancelled".into());
+                    frame
+                }
+            };
+            if let Some(animation) = &mut view.animation {
+                animation.go_to(shown);
+                // Back to the state from before once the recording ended.
+                animation.playing = self.recording.is_none() && playing;
+            }
+            view.show_animation_frame();
+            self.frame_changed = true;
+            return;
+        }
         let Some(animation) = &mut view.animation else {
             return;
         };
@@ -5416,8 +5589,22 @@ impl Workbench {
             }
             ctx.request_repaint();
         }
-        match animation_window(ctx, view) {
+        match animation_window(ctx, view, self.animation_encoding.is_some()) {
             WindowEvent::None => {}
+            WindowEvent::Export(format) => {
+                let ffmpeg = animation_export::ffmpeg_executable(&self.settings.post.ffmpeg);
+                if let Some(recording) =
+                    start_animation_export(view, format, ffmpeg, &mut self.output)
+                {
+                    let first = recording.first_frame();
+                    self.recording = Some(recording);
+                    if let Some(animation) = &mut view.animation {
+                        animation.go_to(first);
+                    }
+                    view.show_animation_frame();
+                    self.frame_changed = true;
+                }
+            }
             WindowEvent::Frame => {
                 view.show_animation_frame();
                 self.frame_changed = true;
@@ -5886,12 +6073,63 @@ enum WindowEvent {
     Frame,
     /// Settings changed that affect every frame.
     Settings,
+    /// Export of the animation as a file of this format.
+    Export(Format),
     Close,
+}
+
+/// Asks for the file and starts recording the frames of the animation of `view` in the order
+/// of its playback; `None` when cancelled or FFmpeg is missing for a video.
+fn start_animation_export(
+    view: &mut ResultsView,
+    format: Format,
+    ffmpeg: PathBuf,
+    output: &mut Vec<String>,
+) -> Option<animation_export::Recording> {
+    let animation = view.animation.as_mut()?;
+    if format.needs_ffmpeg()
+        && let Err(err) = animation_export::ffmpeg_version(&ffmpeg)
+    {
+        output.push(format!(
+            "{err}. Exporting {} needs FFmpeg: install it or set its path under Tools > \
+             Settings > Post-processing; GIF works without it.",
+            format.extension().to_uppercase()
+        ));
+        return None;
+    }
+    let path = rfd::FileDialog::new()
+        .set_title("Export Animation")
+        .add_filter(format.filter_name(), &[format.extension()])
+        .set_file_name(format!("animation.{}", format.extension()))
+        .save_file()?;
+    let path = if path.extension().is_none() {
+        path.with_extension(format.extension())
+    } else {
+        path
+    };
+    let file = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let restore = (animation.frame, animation.playing);
+    animation.playing = false;
+    let sequence = animation_export::frame_sequence(animation.frame_count(), animation.playback);
+    let encoder = animation_export::Encoder::start(animation_export::Job {
+        format,
+        path,
+        fps: animation.fps,
+        repeat: animation.playback != Playback::Once,
+        ffmpeg,
+    });
+    Some(animation_export::Recording::new(
+        sequence, encoder, file, restore,
+    ))
 }
 
 /// PrePoMax's animation dialog: kind, frames, speed, playback mode, colour limits and the
 /// player controls.
-fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent {
+/// `exporting` greys out the export button while an exported animation is being written.
+fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool) -> WindowEvent {
     let mut event = WindowEvent::None;
     let mut open = true;
     let mut restart = None;
@@ -5914,6 +6152,7 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent 
                         for (kind, label) in [
                             (AnimationKind::ScaleFactor, "Scale factor"),
                             (AnimationKind::Increments, "Step increments"),
+                            (AnimationKind::Steps, "Steps"),
                         ] {
                             if ui.radio(animation.kind == kind, label).clicked()
                                 && animation.kind != kind
@@ -6000,6 +6239,20 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent 
                 }
                 ui.add_space(8.0);
                 ui.label(format!("Frame {} of {}", frame + 1, last + 1));
+                ui.add_space(8.0);
+                let tip = if exporting {
+                    "Export Animation (the last export is still being written)"
+                } else {
+                    "Export Animation"
+                };
+                let export = icons::button(ui, Icon::Save, tip, !exporting, false);
+                egui::Popup::menu(&export).show(|ui| {
+                    for format in Format::ALL {
+                        if ui.button(format.menu_label()).clicked() {
+                            event = WindowEvent::Export(format);
+                        }
+                    }
+                });
                 if let Some(target) = target {
                     animation.playing = false;
                     if animation.go_to(target) && matches!(event, WindowEvent::None) {

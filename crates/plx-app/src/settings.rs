@@ -82,6 +82,8 @@ pub struct PostProcessing {
     pub undeformed_outline: bool,
     /// Colour bands of the legend for newly opened results.
     pub levels: u32,
+    /// FFmpeg for exporting animations as MP4 or MKV; empty for `ffmpeg` on the `PATH`.
+    pub ffmpeg: String,
 }
 
 impl Default for PostProcessing {
@@ -92,6 +94,7 @@ impl Default for PostProcessing {
             status_block: true,
             undeformed_outline: true,
             levels: plx_render::contour::DEFAULT_LEVELS,
+            ffmpeg: String::new(),
         }
     }
 }
@@ -535,6 +538,17 @@ impl SettingsWindow {
                     ui.add(
                         numeric::drag_value(&mut p.levels)
                             .range(2..=plx_render::contour::MAX_LEVELS),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("FFmpeg executable");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut p.ffmpeg)
+                            .hint_text("ffmpeg")
+                            .desired_width(200.0),
+                    )
+                    .on_hover_text(
+                        "Writes animations as MP4 or MKV. Leave empty for ffmpeg on the PATH.",
                     );
                 });
             }

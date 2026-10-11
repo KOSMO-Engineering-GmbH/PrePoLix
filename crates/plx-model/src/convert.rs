@@ -106,6 +106,7 @@ impl FeModel {
                     c.option(&mut f.lower_frequency, Quantity::Frequency);
                     c.option(&mut f.upper_frequency, Quantity::Frequency);
                 }
+                StepKind::Visco(v) => v.increments.convert_units(&c),
                 StepKind::Dynamic(d) => {
                     d.increments.convert_units(&c);
                     if let Some(damping) = &mut d.damping {
@@ -185,6 +186,21 @@ impl FeModel {
                         c.all(point, Quantity::Length);
                         c.value(speed, Quantity::RotationalSpeed);
                     }
+                    LoadKind::Moving(moving) => {
+                        for length in [
+                            &mut moving.start,
+                            &mut moving.end,
+                            &mut moving.patch_length,
+                            &mut moving.patch_width,
+                        ] {
+                            c.value(length, Quantity::Length);
+                        }
+                        for wheel in &mut moving.wheels {
+                            c.value(&mut wheel.along, Quantity::Length);
+                            c.value(&mut wheel.across, Quantity::Length);
+                            c.all(&mut wheel.force, Quantity::Force);
+                        }
+                    }
                 }
             }
         }
@@ -250,6 +266,13 @@ impl Material {
                 c.value(&mut point.stress, Quantity::Pressure);
                 c.value(&mut point.temperature, Quantity::Temperature);
             }
+        }
+        // The strain rate a * stress^n * time^m is per time: a scales with the stress to
+        // the power -n and the time to the power -(m + 1).
+        if let Some(creep) = &mut self.creep {
+            let stress = c.from.factor_to(Quantity::Pressure, c.to);
+            let time = c.from.factor_to(Quantity::Time, c.to);
+            creep.a *= stress.powf(-creep.n) * time.powf(-(creep.m + 1.0));
         }
     }
 }
@@ -367,6 +390,11 @@ mod tests {
                 poisson: 0.3,
             }),
             conductivity: Some(50.0),
+            creep: Some(crate::Creep {
+                a: 1e-15,
+                n: 5.0,
+                m: 0.0,
+            }),
             ..Material::default()
         });
         model.sections.push(Section {
@@ -404,6 +432,8 @@ mod tests {
         assert!(close(material.elastic.unwrap().young, 2.1e8));
         // 50 W/(m·K) is 50 mW/(mm·K) and 0.05 kW/(m·K).
         assert!(close(material.conductivity.unwrap(), 0.05));
+        // The same creep rate at 100 MPa = 1e5 kPa: 1e-15 * 100^5 = a * (1e5)^5.
+        assert!(close(material.creep.unwrap().a, 1e-30));
         assert!(close(model.sections[0].thickness, 0.005));
         let loads = &model.steps[0].loads;
         assert!(matches!(loads[0].kind, LoadKind::Pressure(p) if close(p, 2000.0)));

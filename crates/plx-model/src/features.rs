@@ -528,6 +528,13 @@ impl FeModel {
                 *system = new.to_string();
             }
         }
+        for load in self.steps.iter_mut().flat_map(|s| &mut s.loads) {
+            if let crate::LoadKind::Moving(moving) = &mut load.kind
+                && moving.system == old
+            {
+                moving.system = new.to_string();
+            }
+        }
     }
 
     /// Results on a renamed plane follow it.

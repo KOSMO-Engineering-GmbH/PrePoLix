@@ -436,6 +436,7 @@ mod tests {
                 specific_heat: None,
                 expansion: None,
                 plastic: None,
+                creep: None,
             }],
             sections: vec![Section {
                 name: "Section-1".into(),
