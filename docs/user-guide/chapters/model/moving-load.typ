@@ -18,8 +18,11 @@ needed. Create it with #ui("Create ...") on #ui("Loads") of a static step or
     of the path, typically the start of the beam on the rail axis. #ui("Global") uses the global
     axes.],
   [Path along], [The axis of the system the wheels travel along.],
-  [Lateral axis], [The axis across the path; wheels side by side differ in their offset along it.
-    3D models only.],
+  [Across the path], [The axis across the path in the running surface. The contact patch width
+    and the wheel offsets #ui("Across") are measured along it. The remaining axis is the normal of
+    the running surface; its height comes from the selected faces. Example: a crane rail with the
+    local x axis along the rail and y pointing across it to the trolley: #ui("Path along") X,
+    #ui("Across the path") Y. 3D models only.],
   [Start, End], [Position of the vehicle's reference point along the path in the first and in
     the last step.],
   [Positions], [Number of positions, spread evenly from start to end. Each one is a static step
