@@ -1,4 +1,5 @@
-//! Screenshot of the 3D view with its annotations, copied to the clipboard or saved as PNG.
+//! Screenshot of the 3D view with its annotations, or of another part of the window such as a
+//! plot, copied to the clipboard or saved as PNG.
 //!
 //! egui captures the whole window; the image is cropped to the view afterwards. The capture
 //! is requested one frame after the click so that the closing menu is no longer painted.
@@ -14,15 +15,34 @@ pub enum Target {
     File,
 }
 
+/// A capture: where it goes and the part of the window it shows.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Request {
+    target: Target,
+    /// Part of the window in points; `None` is the 3D view.
+    region: Option<Rect>,
+}
+
 #[derive(Default)]
 pub struct Screenshot {
     /// Requested capture, sent with the next frame.
-    pending: Option<Target>,
+    pending: Option<Request>,
 }
 
 impl Screenshot {
     pub fn request(&mut self, target: Target) {
-        self.pending = Some(target);
+        self.pending = Some(Request {
+            target,
+            region: None,
+        });
+    }
+
+    /// A capture of `region` of the window, in points, instead of the 3D view.
+    pub fn request_region(&mut self, target: Target, region: Rect) {
+        self.pending = Some(Request {
+            target,
+            region: Some(region),
+        });
     }
 
     /// Sends a pending request and delivers captured images; `view` is the 3D view in points.
@@ -37,18 +57,27 @@ impl Screenshot {
                     } => user_data
                         .data
                         .as_ref()
-                        .and_then(|d| d.downcast_ref::<Target>())
-                        .map(|target| (*target, image.clone())),
+                        .and_then(|d| d.downcast_ref::<Request>())
+                        .map(|request| (*request, image.clone())),
                     _ => None,
                 })
                 .collect()
         });
-        for (target, image) in captured {
-            let image = crop(&image, view, ctx.pixels_per_point());
-            deliver(ctx, target, image, output);
+        for (request, image) in captured {
+            let image = crop(
+                &image,
+                request.region.unwrap_or(view),
+                ctx.pixels_per_point(),
+            );
+            let name = if request.region.is_some() {
+                "plot"
+            } else {
+                "screenshot"
+            };
+            deliver(ctx, request.target, image, name, output);
         }
-        if let Some(target) = self.pending.take() {
-            ctx.send_viewport_cmd(ViewportCommand::Screenshot(UserData::new(target)));
+        if let Some(request) = self.pending.take() {
+            ctx.send_viewport_cmd(ViewportCommand::Screenshot(UserData::new(request)));
             ctx.request_repaint();
         }
     }
@@ -63,20 +92,26 @@ pub fn crop(image: &ColorImage, rect: Rect, pixels_per_point: f32) -> ColorImage
     image.region_by_pixels([x0, y0], [x1 - x0, y1 - y0])
 }
 
-fn deliver(ctx: &Context, target: Target, image: ColorImage, output: &mut Vec<String>) {
+/// Copies or saves the image; `name` is what it shows, lower case.
+fn deliver(ctx: &Context, target: Target, image: ColorImage, name: &str, output: &mut Vec<String>) {
     let [width, height] = image.size;
+    let mut chars = name.chars();
+    let title = chars
+        .next()
+        .map(|c| c.to_uppercase().chain(chars).collect::<String>())
+        .unwrap_or_default();
     match target {
         Target::Clipboard => {
             ctx.copy_image(image);
             output.push(format!(
-                "Screenshot ({width} x {height}) copied to the clipboard"
+                "{title} ({width} x {height}) copied to the clipboard"
             ));
         }
         Target::File => {
             let Some(path) = rfd::FileDialog::new()
-                .set_title("Save Screenshot As")
+                .set_title(format!("Save {title} As"))
                 .add_filter("PNG image", &["png"])
-                .set_file_name("screenshot.png")
+                .set_file_name(format!("{name}.png"))
                 .save_file()
             else {
                 return;
@@ -87,9 +122,9 @@ fn deliver(ctx: &Context, target: Target, image: ColorImage, output: &mut Vec<St
                 path
             };
             match write_png(&path, &image) {
-                Ok(()) => output.push(format!("Screenshot saved: {}", path.display())),
+                Ok(()) => output.push(format!("{title} saved: {}", path.display())),
                 Err(err) => output.push(format!(
-                    "Screenshot could not be saved ({}): {err}",
+                    "{title} could not be saved ({}): {err}",
                     path.display()
                 )),
             }

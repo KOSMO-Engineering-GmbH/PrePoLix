@@ -420,6 +420,33 @@ mod tests {
     }
 
     #[test]
+    fn table_plots_keep_missing_values() {
+        let plot = plx_results::saved_view::SavedPathPlot {
+            path: "SP_A.STRESSES.MISES".into(),
+            offset: Some([20.0, 30.0]),
+            size: [400.0, 240.0],
+            on_path: false,
+            height: 80.0,
+            title: String::new(),
+            x_label: "Increment".into(),
+            y_label: String::new(),
+            y_range: None,
+            hot_spot: false,
+            table: Some(plx_results::saved_view::SavedTablePlot {
+                x_label: "Increment".into(),
+                x: vec![1.0, 2.0, 3.0],
+                curves: vec![("12_1".into(), vec![0.5, f64::NAN, 1.5])],
+            }),
+        };
+        let saved = ron::to_string(&plot).unwrap();
+        let loaded: plx_results::saved_view::SavedPathPlot = ron::from_str(&saved).unwrap();
+        let table = loaded.table.unwrap();
+        assert_eq!(table.x, [1.0, 2.0, 3.0]);
+        let values = &table.curves[0].1;
+        assert!(values[0] == 0.5 && values[1].is_nan() && values[2] == 1.5);
+    }
+
+    #[test]
     fn bound_results_are_restored_from_the_project() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mesh = read_inp(&root.join("testdata/block_c3d20r.inp"))

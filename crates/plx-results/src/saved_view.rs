@@ -22,7 +22,7 @@ pub struct SavedView {
     pub hidden_parts: Vec<String>,
     /// What the query tool left in the view.
     pub annotations: Vec<SavedAnnotation>,
-    /// Plots of result paths in the view.
+    /// Plots of result paths, hot spots and history tables in the view.
     pub path_plots: Vec<SavedPathPlot>,
 }
 
@@ -83,4 +83,16 @@ pub struct SavedPathPlot {
     /// The plot of a hot spot of that name rather than of a path.
     #[serde(default)]
     pub hot_spot: bool,
+    /// The plot of a history output table rather than of a path, with its values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table: Option<SavedTablePlot>,
+}
+
+/// Curves plotted from a history output table: x values and the y values of each named
+/// curve, row by row. Missing values are NaN.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SavedTablePlot {
+    pub x_label: String,
+    pub x: Vec<f64>,
+    pub curves: Vec<(String, Vec<f64>)>,
 }
