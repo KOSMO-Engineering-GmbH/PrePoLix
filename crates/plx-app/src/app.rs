@@ -141,8 +141,8 @@ struct Workbench {
     /// Hot spot whose paths are shown, edited or selected, with the results file and its
     /// paths there.
     hot_spot_preview: Option<(HotSpot, usize, Vec<HotSpotPath>)>,
-    /// The table of hot spot values is open on the Results tab.
-    hot_spot_window: bool,
+    /// The toe node whose path the hot spot dialog plots, as last drawn.
+    hot_spot_plotted: Option<plx_mesh::NodeId>,
     /// Audio output of the sound window, opened when it first plays.
     audio: Option<sound::Player>,
     /// The section view, while it is on; it cuts whatever the 3D view shows.
@@ -257,7 +257,7 @@ impl PrepolixApp {
                 screenshot: Screenshot::default(),
                 hot_spot_dialog: None,
                 hot_spot_preview: None,
-                hot_spot_window: false,
+                hot_spot_plotted: None,
                 audio: None,
                 section: None,
                 section_dialog: None,
@@ -1020,7 +1020,6 @@ impl eframe::App for PrepolixApp {
         self.workbench.update_highlight();
         self.workbench.update_symbols(&ctx);
         self.workbench.update_hot_spot_preview();
-        self.workbench.hot_spot_window(&ctx);
         self.workbench.findings_window(&ctx);
         self.workbench.settings_window(&ctx);
         self.workbench.model_dialog_window(&ctx);
@@ -1301,7 +1300,7 @@ impl Workbench {
                             self.current_result = self.results.len() - 1;
                         }
                     }
-                    self.evaluate_hot_spots(true);
+                    self.evaluate_hot_spots();
                 } else {
                     self.tree.selected = None;
                     self.editor = None;
@@ -1601,9 +1600,6 @@ impl Workbench {
                 self.generate_mesh(ctx, Some(vec![name]));
             }
         }
-        if response.hot_spot_table {
-            self.show_hot_spot_table();
-        }
         if response.search_contacts {
             self.open_contact_search();
         }
@@ -1684,9 +1680,9 @@ impl Workbench {
         }
     }
 
-    /// Evaluates the hot spots of the current results file and writes the values next to
-    /// it; `table` opens their table.
-    fn evaluate_hot_spots(&mut self, table: bool) {
+    /// Evaluates the hot spots of the current results file over all increments and writes
+    /// the values next to it.
+    fn evaluate_hot_spots(&mut self) {
         let Some(results) = self.results.get_mut(self.current_result) else {
             return;
         };
@@ -1695,7 +1691,6 @@ impl Workbench {
         hot_spots.reports = Vec::new();
         hot_spots.file = None;
         if reports.is_empty() {
-            self.hot_spot_window = false;
             self.update_contour();
             return;
         }
@@ -1713,21 +1708,7 @@ impl Workbench {
                 .extend(report.warnings.iter().map(|w| format!("Warning: {w}")));
         }
         hot_spots.reports = reports;
-        if table {
-            self.show_hot_spot_table();
-        } else {
-            self.update_contour();
-        }
-    }
-
-    fn show_hot_spot_table(&mut self) {
-        let evaluated = (self.results.get(self.current_result))
-            .is_some_and(|m| !m.hot_spots.reports.is_empty());
-        if evaluated {
-            self.hot_spot_window = true;
-            self.set_tree_view(TreeView::Results);
-            self.update_contour();
-        }
+        self.update_contour();
     }
 
     fn edit_hot_spot(&mut self, index: usize) {
@@ -1749,7 +1730,7 @@ impl Workbench {
             .push(format!("Hot spot {} deleted", removed.name));
         self.hot_spot_dialog = None;
         self.tree.selected = None;
-        self.evaluate_hot_spots(self.hot_spot_window);
+        self.evaluate_hot_spots();
     }
 
     fn hot_spot_dialog_window(&mut self, ctx: &egui::Context) {
@@ -1759,14 +1740,41 @@ impl Workbench {
         ) else {
             return;
         };
-        let (hot_spot, next) = match dialog.show(ctx, model) {
+        let action = dialog.show(ctx, model);
+        let plot_name = dialog.plot_name(&model.hot_spots.definitions);
+        if dialog.take_plot_toggle() {
+            match model
+                .path_plots
+                .iter()
+                .position(|p| p.is_hot_spot(&plot_name))
+            {
+                Some(index) => {
+                    model.path_plots.remove(index);
+                }
+                None => {
+                    model.path_plots.push(PathPlot::hot_spot(plot_name.clone()));
+                    dialog.set_plot_key(plot_name.clone());
+                }
+            }
+        }
+        let (hot_spot, next) = match action {
             DialogAction::Open => return,
             DialogAction::Cancel => {
+                // The plot of a hot spot that was not created goes with it.
+                if dialog.edit.is_none() {
+                    model.path_plots.retain(|p| !p.is_hot_spot(&plot_name));
+                }
                 self.hot_spot_dialog = None;
                 return;
             }
             DialogAction::Ok { output, next } => (output, next),
         };
+        // The plot follows a renamed hot spot.
+        for plot in model.path_plots.iter_mut() {
+            if plot.is_hot_spot(&plot_name) {
+                plot.path = hot_spot.name.clone();
+            }
+        }
         let definitions = &mut model.hot_spots.definitions;
         let verb = match dialog.edit.filter(|&i| i < definitions.len()) {
             Some(index) => {
@@ -1785,28 +1793,7 @@ impl Workbench {
         } else {
             self.hot_spot_dialog = None;
         }
-        // The table would cover the selection window while the next one is picked.
-        self.evaluate_hot_spots(!next);
-    }
-
-    /// The table of hot spot values of the shown results file.
-    fn hot_spot_window(&mut self, ctx: &egui::Context) {
-        if !self.hot_spot_window || self.tree_view != TreeView::Results {
-            return;
-        }
-        let Some(model) = self.results.get(self.current_result) else {
-            return;
-        };
-        if model.hot_spots.reports.is_empty() {
-            return;
-        }
-        let step = (model.results.as_ref())
-            .and_then(ResultsView::current_increment)
-            .map(|i| (i.step, i.increment));
-        if !crate::hot_spots::window(ctx, &model.hot_spots, step) {
-            self.hot_spot_window = false;
-            self.update_contour();
-        }
+        self.evaluate_hot_spots();
     }
 
     /// Finds the paths of the hot spot being edited or selected in the Results tree.
@@ -1822,7 +1809,12 @@ impl Workbench {
             _ => None,
         };
         let shown = (self.hot_spot_preview.as_ref()).map(|(h, index, _)| (h, *index));
+        let plotted = (self.hot_spot_dialog.as_ref()).and_then(HotSpotDialog::plotted_node);
+        let plotted_changed = std::mem::replace(&mut self.hot_spot_plotted, plotted) != plotted;
         if wanted.as_ref().map(|h| (h, current)) == shown {
+            if plotted_changed {
+                self.update_contour();
+            }
             return;
         }
         self.hot_spot_preview = match (wanted, model) {
@@ -1836,19 +1828,18 @@ impl Workbench {
     }
 
     /// Hot spot paths drawn over the results, deformed like them: of the hot spot edited or
-    /// selected, else of all evaluated ones while their table is open.
+    /// selected.
     fn overlay_paths(&self) -> Vec<Vec<glam::Vec3>> {
         let model = self.results.get(self.current_result);
         let Some(model) = model.filter(|_| self.tree_view == TreeView::Results) else {
             return Vec::new();
         };
+        // The dialog shows the path of one toe node, that of the highest hot spot stress.
+        let plotted = (self.hot_spot_dialog.as_ref()).and_then(HotSpotDialog::plotted_node);
         match &self.hot_spot_preview {
             Some((_, index, paths)) if *index == self.current_result => {
+                let paths = paths.iter().filter(|p| plotted.is_none_or(|n| p.node == n));
                 crate::hot_spots::render_paths(model, paths)
-            }
-            _ if self.hot_spot_window => {
-                let reports = model.hot_spots.reports.iter();
-                crate::hot_spots::render_paths(model, reports.flat_map(|r| &r.paths))
             }
             _ => Vec::new(),
         }
@@ -2027,14 +2018,6 @@ impl Workbench {
             .clicked()
         {
             self.create(NewItem::ResultHotSpot);
-        }
-        let evaluated = (self.results.get(self.current_result))
-            .is_some_and(|m| !m.hot_spots.reports.is_empty());
-        if ui
-            .add_enabled(evaluated, egui::Button::new("Hot Spot Table"))
-            .clicked()
-        {
-            self.show_hot_spot_table();
         }
         ui.separator();
         if ui
@@ -4739,7 +4722,7 @@ impl Workbench {
         if dialog.take_plot_toggle()
             && let Some(name) = plot_name.clone()
         {
-            match model.path_plots.iter().position(|p| p.path == name) {
+            match model.path_plots.iter().position(|p| p.is_path(&name)) {
                 Some(index) => {
                     model.path_plots.remove(index);
                 }
@@ -4754,7 +4737,7 @@ impl Workbench {
             FeatureResult::Ok => {
                 // The plot follows a renamed path.
                 if let (Some(old), Some(path)) = (plot_name, dialog.path_draft()) {
-                    for plot in model.path_plots.iter_mut().filter(|p| p.path == old) {
+                    for plot in model.path_plots.iter_mut().filter(|p| p.is_path(&old)) {
                         plot.path = path.name.clone();
                     }
                 }
@@ -4764,7 +4747,7 @@ impl Workbench {
             FeatureResult::Cancel => {
                 // The plot of a path that was not created goes with it.
                 if let Some(old) = plot_name.filter(|_| dialog.creates()) {
-                    model.path_plots.retain(|p| p.path != old);
+                    model.path_plots.retain(|p| !p.is_path(&old));
                 }
                 self.viewport.preview = Default::default();
             }
@@ -4806,12 +4789,30 @@ impl Workbench {
             Some((edited, draft)) if edited == name => Some(draft.clone()),
             _ => fe.result_paths.iter().find(|p| p.name == name).cloned(),
         };
+        let edited_hot_spot = (self.hot_spot_dialog.as_ref())
+            .map(|d| (d.plot_name(&model.hot_spots.definitions), d.hot_spot()));
+        let hot_spot =
+            |definitions: &[plx_results::hot_spot::HotSpot], name: &str| match &edited_hot_spot {
+                Some((edited, draft)) if edited == name => Some(draft.clone()),
+                _ => definitions.iter().find(|h| h.name == name).cloned(),
+            };
         let mut plots = std::mem::take(&mut model.path_plots);
-        plots.retain(|plot| path(&model.fe, &plot.path).is_some());
+        plots.retain(|plot| match plot.kind {
+            path_plot::PlotKind::Path => path(&model.fe, &plot.path).is_some(),
+            path_plot::PlotKind::HotSpot => {
+                hot_spot(&model.hot_spots.definitions, &plot.path).is_some()
+            }
+        });
         let boxes = (plots.iter_mut().enumerate())
-            .filter_map(|(index, plot)| {
-                let path = path(&model.fe, &plot.path)?;
-                plot.plot_box(index, model, &path)
+            .filter_map(|(index, plot)| match plot.kind {
+                path_plot::PlotKind::Path => {
+                    let path = path(&model.fe, &plot.path)?;
+                    plot.plot_box(index, model, &path)
+                }
+                path_plot::PlotKind::HotSpot => {
+                    let hot_spot = hot_spot(&model.hot_spots.definitions, &plot.path)?;
+                    plot.hot_spot_box(index, model, &hot_spot)
+                }
             })
             .collect();
         model.path_plots = plots;

@@ -222,8 +222,6 @@ pub struct TreeResponse {
     pub transform_part: Option<usize>,
     /// Merge the selected mesh parts into one.
     pub merge_parts: bool,
-    /// Show the table of the hot spot values.
-    pub hot_spot_table: bool,
     /// Open PrePoMax's Search Contact Pairs.
     pub search_contacts: bool,
     /// The warning sign of an item was clicked: explain its findings.
@@ -497,7 +495,10 @@ fn deletable(view: TreeView, item: &TreeItem) -> bool {
         || feature(item).is_some()
         || matches!(
             item,
-            TreeItem::ResultFieldOutput(_) | TreeItem::HistorySet(_) | TreeItem::MeshItem(_)
+            TreeItem::ResultFieldOutput(_)
+                | TreeItem::HistorySet(_)
+                | TreeItem::HotSpot(_)
+                | TreeItem::MeshItem(_)
         )
         || (view == TreeView::FeModel && set_kind(item).is_some())
 }
@@ -889,12 +890,6 @@ impl Tree<'_> {
                     ui.separator();
                     if ui.button("Search Contact Pairs …").clicked() {
                         self.response.search_contacts = true;
-                    }
-                }
-                if item == TreeItem::Group(HOT_SPOTS) {
-                    ui.separator();
-                    if ui.button("Show Table").clicked() {
-                        self.response.hot_spot_table = true;
                     }
                 }
                 if creates.is_some() {
@@ -1841,6 +1836,12 @@ mod tests {
             &TreeItem::Constraint(1)
         ));
         assert!(contains(&TreeItem::Group("Parts"), &TreeItem::Part(2)));
+    }
+
+    #[test]
+    fn hot_spots_can_be_deleted() {
+        assert!(deletable(TreeView::Results, &TreeItem::HotSpot(0)));
+        assert!(!deletable(TreeView::Results, &TreeItem::Part(0)));
     }
 
     #[test]

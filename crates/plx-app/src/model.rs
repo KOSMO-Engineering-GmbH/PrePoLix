@@ -1929,7 +1929,10 @@ mod tests {
                     plx_results::saved_view::SavedAnnotation::Node(99),
                     plx_results::saved_view::SavedAnnotation::Distance([1, 99]),
                 ],
-                path_plots: vec![crate::path_plot::PathPlot::new("Path-1".into()).saved()],
+                path_plots: vec![
+                    crate::path_plot::PathPlot::new("Path-1".into()).saved(),
+                    crate::path_plot::PathPlot::hot_spot("Hot_Spot-1".into()).saved(),
+                ],
                 // Camera and mesh edges belong to the 3D view, not to the results.
                 camera: None,
                 mesh_edges: None,
