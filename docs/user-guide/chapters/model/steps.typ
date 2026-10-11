@@ -28,10 +28,11 @@ results refer to the order at the time of the run.
 
 === Solver
 
-All step types have a #ui("Solver") field: #ui("Default (Pardiso if available)"),
+All step types have a #ui("Solver") field: #ui("Default (Pardiso or PaStiX if available)"),
 #ui("Pardiso"), #ui("Spooles"), #ui("PaStiX"), #ui("Iterative scaling") or
 #ui("Iterative Cholesky"). #ui("Default") uses Pardiso if the CalculiX executable contains it,
-otherwise the default of CalculiX. Frequency and buckle steps need a direct solver.
+otherwise PaStiX if it contains that, otherwise the default of CalculiX (SPOOLES in the
+CalculiX shipped with PrePoLix). Frequency and buckle steps need a direct solver.
 
 === Static
 

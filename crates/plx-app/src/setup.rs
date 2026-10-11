@@ -3896,7 +3896,7 @@ fn increments_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem, me
 
 fn solver_label(solver: EquationSolver) -> &'static str {
     match solver {
-        EquationSolver::Default => "Default (Pardiso if available)",
+        EquationSolver::Default => "Default (Pardiso or PaStiX if available)",
         EquationSolver::Pardiso => "Pardiso",
         EquationSolver::Spooles => "Spooles",
         EquationSolver::PaStiX => "PaStiX",

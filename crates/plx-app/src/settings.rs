@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// Key of the settings in eframe's storage.
 pub const STORAGE_KEY: &str = "settings";
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub graphics: Graphics,
@@ -17,6 +17,36 @@ pub struct Settings {
     pub gmsh: Gmsh,
     /// Model space and unit system last chosen for a new model, proposed for the next one.
     pub new_model: plx_model::ModelProperties,
+    /// Version of the stored settings, for [`Settings::upgrade`]; missing (0) in those of
+    /// versions before it existed.
+    #[serde(default)]
+    pub format: u32,
+}
+
+/// [`Settings::format`] of this version.
+const FORMAT: u32 = 1;
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            graphics: Graphics::default(),
+            post: PostProcessing::default(),
+            solver: Solver::default(),
+            gmsh: Gmsh::default(),
+            new_model: plx_model::ModelProperties::default(),
+            format: FORMAT,
+        }
+    }
+}
+
+impl Settings {
+    /// Brings settings stored by an older version up to date.
+    pub fn upgrade(&mut self) {
+        if self.format < 1 {
+            self.solver.forget_old_default();
+        }
+        self.format = FORMAT;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -70,7 +100,8 @@ impl Default for PostProcessing {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Solver {
-    /// The CalculiX executable; a bare name is looked up on `PATH`.
+    /// The CalculiX executable; a bare name is looked up on `PATH`, empty for the one shipped
+    /// with prepolix (see [`bundled_ccx`]).
     pub executable: String,
     /// Threads for the solver (`OMP_NUM_THREADS`).
     pub threads: u32,
@@ -102,7 +133,7 @@ pub struct DetectedKeywords {
 impl Default for Solver {
     fn default() -> Self {
         Self {
-            executable: "ccx".into(),
+            executable: String::new(),
             threads: 1,
             work_dir: String::new(),
             detected: None,
@@ -120,21 +151,19 @@ impl Solver {
     }
 
     /// The solver for steps left at [`EquationSolver::Default`]: Pardiso if the executable
-    /// has it, otherwise CalculiX's own choice. The executable is probed the first time.
+    /// has it, else PaStiX, otherwise CalculiX's own choice. The executable is probed the
+    /// first time.
     pub fn default_solver(&mut self) -> EquationSolver {
         if self.solvers().is_none()
             && let Some(solvers) =
                 crate::solver_check::available_solvers(&self.job_solver(), &self.work_dir())
         {
             self.detected = Some(DetectedSolvers {
-                executable: self.executable.clone(),
+                executable: self.executable_key(),
                 solvers,
             });
         }
-        match self.solvers() {
-            Some(solvers) if solvers.contains(&EquationSolver::Pardiso) => EquationSolver::Pardiso,
-            _ => EquationSolver::Default,
-        }
+        preferred_solver(self.solvers().unwrap_or_default())
     }
 
     /// Those of `keywords` the executable does not know. Keywords not tested on it yet are
@@ -180,16 +209,87 @@ impl Solver {
     pub fn solvers(&self) -> Option<&[EquationSolver]> {
         self.detected
             .as_ref()
-            .filter(|d| d.executable == self.executable)
+            .filter(|d| d.executable == self.executable_key())
             .map(|d| d.solvers.as_slice())
+    }
+
+    /// The executable the detected solvers belong to: the resolved path, so that an update
+    /// of the bundled CalculiX is probed again.
+    pub fn executable_key(&self) -> String {
+        self.job_solver().executable.display().to_string()
     }
 
     pub fn job_solver(&self) -> plx_job::Solver {
         plx_job::Solver {
-            executable: clean_path(&self.executable).into(),
+            executable: match clean_path(&self.executable) {
+                "" => default_executable(),
+                path => path.into(),
+            },
             threads: self.threads.max(1),
         }
     }
+
+    /// Settings saved before CalculiX was shipped hold the old default `ccx`; empty means the
+    /// same where no CalculiX is bundled, and the bundled one where it is.
+    fn forget_old_default(&mut self) {
+        if self.executable.trim() == "ccx" {
+            self.executable.clear();
+        }
+    }
+}
+
+/// The fastest of the detected direct solvers, or CalculiX's own choice.
+fn preferred_solver(solvers: &[EquationSolver]) -> EquationSolver {
+    [EquationSolver::Pardiso, EquationSolver::PaStiX]
+        .into_iter()
+        .find(|s| solvers.contains(s))
+        .unwrap_or(EquationSolver::Default)
+}
+
+/// Where the shipped CalculiX lies relative to the directory of the executable: Windows
+/// installer, Linux AppImage (usr/bin next to usr/lib), and target/ccx/<platform> for
+/// target/<profile>/prepolix.
+const BUNDLED_LOCATIONS: [&str; 3] = [
+    "ccx/bin",
+    "../lib/prepolix/ccx/bin",
+    if cfg!(windows) {
+        "../ccx/windows/bin"
+    } else {
+        "../ccx/linux/bin"
+    },
+];
+
+/// The CalculiX shipped with prepolix, if there is one.
+pub fn bundled_ccx() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    find_bundled_ccx(exe.parent()?)
+}
+
+fn find_bundled_ccx(exe_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let name = if cfg!(windows) { "ccx.exe" } else { "ccx" };
+    BUNDLED_LOCATIONS
+        .iter()
+        .map(|dir| exe_dir.join(dir).join(name))
+        .find(|path| path.is_file())
+        // Without `..` in the path shown in the settings and the output.
+        .map(|path| {
+            std::fs::canonicalize(&path)
+                .map(strip_verbatim)
+                .unwrap_or(path)
+        })
+}
+
+/// `canonicalize` gives `\\?\C:\...` on Windows, which the settings would show as is.
+fn strip_verbatim(path: std::path::PathBuf) -> std::path::PathBuf {
+    match path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
+        Some(plain) if !plain.starts_with("UNC") => plain.into(),
+        _ => path,
+    }
+}
+
+/// CalculiX when the setting is empty: the bundled one, else `ccx` on the `PATH`.
+pub fn default_executable() -> std::path::PathBuf {
+    bundled_ccx().unwrap_or_else(|| "ccx".into())
 }
 
 /// Where the Gmsh library comes from, for geometry import and meshing.
@@ -287,6 +387,7 @@ pub struct SettingsWindow {
     page: Page,
     draft: Settings,
     default_work_dir: String,
+    default_executable: String,
     solver_check: SolverCheck,
     gmsh_check: GmshCheck,
 }
@@ -325,6 +426,7 @@ impl SettingsWindow {
             page: Page::PostProcessing,
             draft: settings.clone(),
             default_work_dir: default_work_dir().display().to_string(),
+            default_executable: default_executable().display().to_string(),
             solver_check: SolverCheck::NotRun,
             gmsh_check: GmshCheck::NotRun,
         }
@@ -433,7 +535,13 @@ impl SettingsWindow {
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| {
                         ui.label("Executable");
-                        ui.text_edit_singleline(&mut solver.executable);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut solver.executable)
+                                .hint_text(self.default_executable.as_str()),
+                        )
+                        .on_hover_text(
+                            "Leave empty for the CalculiX shipped with PrePoLix, or ccx on the PATH if there is none.",
+                        );
                         ui.end_row();
                         ui.label("Threads");
                         ui.add(numeric::drag_value(&mut solver.threads).range(1..=256));
@@ -446,7 +554,7 @@ impl SettingsWindow {
                         ui.end_row();
                         ui.label("Equation solvers");
                         ui.label(solvers_text(solver.solvers()))
-                            .on_hover_text("Steps with the default solver use Pardiso if CalculiX includes it. Checked at the first analysis and by \"Test CalculiX\".");
+                            .on_hover_text("Steps with the default solver use Pardiso if CalculiX includes it, else PaStiX. Checked at the first analysis and by \"Test CalculiX\".");
                         ui.end_row();
                     });
                 ui.add_space(8.0);
@@ -551,7 +659,7 @@ impl SettingsWindow {
         {
             if let Some(solvers) = report.solvers {
                 self.draft.solver.detected = Some(DetectedSolvers {
-                    executable: self.draft.solver.executable.clone(),
+                    executable: self.draft.solver.executable_key(),
                     solvers,
                 });
             }
@@ -674,6 +782,60 @@ mod tests {
             std::path::Path::new("/opt/ccx")
         );
         assert_eq!(solver.work_dir(), std::path::Path::new("/tmp/plx"));
+    }
+
+    #[test]
+    fn empty_executable_means_the_bundled_calculix() {
+        let solver = Solver::default();
+        assert_eq!(solver.job_solver().executable, default_executable());
+        // Settings of older versions stored the then default `ccx`.
+        let mut old: Settings = ron::from_str("(solver: (executable: \"ccx\"))").unwrap();
+        old.upgrade();
+        assert_eq!(old.solver.executable, "");
+        // Once upgraded, `ccx` is what the user chose, also after a round trip.
+        let mut chosen = Settings::default();
+        chosen.solver.executable = "ccx".into();
+        let mut chosen: Settings = ron::from_str(&ron::to_string(&chosen).unwrap()).unwrap();
+        chosen.upgrade();
+        assert_eq!(chosen.solver.executable, "ccx");
+        let mut own: Settings = ron::from_str("(solver: (executable: \"/opt/ccx\"))").unwrap();
+        own.upgrade();
+        assert_eq!(own.solver.executable, "/opt/ccx");
+    }
+
+    #[test]
+    fn default_steps_take_pardiso_then_pastix() {
+        use EquationSolver::*;
+        assert_eq!(preferred_solver(&[Spooles, PaStiX, Pardiso]), Pardiso);
+        assert_eq!(preferred_solver(&[Spooles, PaStiX]), PaStiX);
+        assert_eq!(preferred_solver(&[Spooles]), Default);
+        assert_eq!(preferred_solver(&[]), Default);
+    }
+
+    #[test]
+    fn bundled_calculix_is_found_next_to_the_program() {
+        let root = std::env::temp_dir().join(format!("plx-bundled-ccx-{}", std::process::id()));
+        let exe_dir = root.join("usr").join("bin");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        assert_eq!(find_bundled_ccx(&exe_dir), None);
+        // Where the AppImage carries it.
+        let bin = root.join("usr/lib/prepolix/ccx/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let name = if cfg!(windows) { "ccx.exe" } else { "ccx" };
+        std::fs::write(bin.join(name), "").unwrap();
+        let found = find_bundled_ccx(&exe_dir).unwrap();
+        assert!(found.ends_with(std::path::Path::new("lib/prepolix/ccx/bin").join(name)));
+        assert!(!found.to_string_lossy().contains(".."));
+        // The Windows installer's folder next to the program wins.
+        let local = exe_dir.join("ccx").join("bin");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(local.join(name), "").unwrap();
+        assert!(
+            find_bundled_ccx(&exe_dir)
+                .unwrap()
+                .starts_with(std::fs::canonicalize(&exe_dir).unwrap())
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

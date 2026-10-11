@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Builds the Linux AppImage of prepolix: release build, Gmsh library and the system libraries it
-# needs (via linuxdeploy), desktop entry, icon, .plx file type and license texts, packed with
-# appimagetool, and the offline user guide.
+# needs (via linuxdeploy), the CalculiX solver, desktop entry, icon, .plx file type and license
+# texts, packed with appimagetool, and the offline user guide.
 #
 #     scripts/build_appimage.sh
 #
 # Needs (Debian/Ubuntu): sudo apt install libasound2-dev libglu1-mesa libxft2 libxcursor1 \
-#                            libxinerama1 libgomp1 python3 curl file zsync xz-utils
+#                            libxinerama1 libgomp1 python3 curl file zsync xz-utils zstd
 # The AppImage runs on systems with a glibc at least as new as the build system's, so releases
 # are built on the oldest supported Ubuntu runner.
 #
@@ -20,6 +20,7 @@ out=target/appimage
 appdir="$out/AppDir"
 tools="$out/tools"
 gmsh=target/gmsh
+ccx=target/ccx/linux
 # Pinned so a release does not change with the tools' rolling builds.
 linuxdeploy_url=https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
 appimagetool_url=https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
@@ -38,6 +39,7 @@ version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Car
 
 cargo build --release --locked -p plx-app
 [ -f "$gmsh/libgmsh.so.4.15" ] || python3 scripts/fetch_gmsh.py --platform linux --dest "$gmsh"
+[ -x "$ccx/bin/ccx" ] || python3 scripts/fetch_ccx.py --platform linux --dest "$ccx"
 scripts/build_user_guide.sh html
 
 mkdir -p "$tools"
@@ -78,6 +80,12 @@ for i in range(struct.unpack_from("<H", data, 4)[0]):
 PY
 rm -f "$appdir/.DirIcon"
 cp crates/plx-app/assets/icon/prepolix.png "$appdir/.DirIcon"
+
+# CalculiX with its own libraries (ccx finds them via its RPATH $ORIGIN/../lib), outside of
+# linuxdeploy so that it keeps the libraries it was built and tested with. prepolix uses it
+# when no other CalculiX is set.
+mkdir -p "$appdir/usr/lib/prepolix"
+cp -r "$ccx" "$appdir/usr/lib/prepolix/ccx"
 
 install -Dm644 installer/linux/prepolix-mime.xml "$appdir/usr/share/mime/packages/prepolix.xml"
 

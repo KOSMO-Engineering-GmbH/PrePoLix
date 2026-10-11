@@ -47,14 +47,14 @@ Projects are saved as `.plx` files.
 
 ## Installation
 
-PrePoLix needs two other programs: the solver CalculiX (not bundled on any platform) and, for
-geometry import and meshing, Gmsh (bundled by the Windows installer and the Linux AppImage). See the sections below.
+PrePoLix needs two other programs: the solver CalculiX and, for geometry import and meshing, Gmsh.
+The Windows installer and the Linux AppImage bundle both. See the sections below.
 
 ### Windows
 
 Download `prepolix-<version>-setup.exe` from the
 [latest release](https://github.com/KwentiN-ui/prepolix/releases/latest) and run it. It installs
-PrePoLix with a Start menu entry, bundles Gmsh and can associate `.plx` project files.
+PrePoLix with a Start menu entry, bundles Gmsh and CalculiX and can associate `.plx` project files.
 
 ### Linux
 
@@ -119,9 +119,12 @@ not tested. The *Test Gmsh* button in the settings loads the library and meshes 
 
 ### CalculiX
 
-PrePoLix does not ship the solver. Install CalculiX (`ccx`) separately, for example from
-[calculix.de](http://www.calculix.de/) or your package manager (`sudo apt install calculix-ccx`),
-and select the executable in *Tools > Settings*. A self-test button there checks that it works.
+The Windows installer and the AppImage ship CalculiX 2.23 (the conda-forge build with SPOOLES and
+ARPACK) and use it when no other executable is set. To use another CalculiX, for example one with
+Pardiso, install it, e.g. from [calculix.de](http://www.calculix.de/) or your package manager
+(`sudo apt install calculix-ccx`), and select the executable in *Tools > Settings*. A self-test
+button there checks that it works. From a clone, `python3 scripts/fetch_ccx.py` fetches the shipped
+CalculiX into `target/ccx`, where development builds find it.
 
 ## Documentation
 
