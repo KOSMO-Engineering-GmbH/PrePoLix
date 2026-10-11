@@ -287,9 +287,12 @@ if [ "$platform" = windows ]; then
     ldomp=-fopenmp
     link=(-static)
 else
-    # libgfortran, libquadmath and libgomp linked in: only the C library remains.
+    # libgfortran, libquadmath and libgomp linked in: only the C library remains. The archives
+    # are named directly because gfortran before 13 (Ubuntu 22.04, the AppImage job) has no
+    # -static-libquadmath and otherwise links libquadmath.so.
     ldomp=
-    link=(-static-libgfortran -static-libgcc -static-libquadmath "$($FC -print-file-name=libgomp.a)"
+    link=(-static-libgfortran -static-libgcc "$($FC -print-file-name=libgfortran.a)"
+        "$($FC -print-file-name=libquadmath.a)" "$($FC -print-file-name=libgomp.a)"
         -lpthread -ldl -lrt)
 fi
 make -s -j"$jobs" -f "$root/installer/ccx/Makefile.prepolix" VERSION="$CCX_VERSION" \
@@ -300,6 +303,12 @@ rm -rf "$out"
 mkdir -p "$out/bin" "$out/licenses"
 cp "ccx_${CCX_VERSION}_prepolix" "$out/bin/$exe" 2>/dev/null || cp "ccx_${CCX_VERSION}_prepolix.exe" "$out/bin/$exe"
 "${host:+$host-}strip" "$out/bin/$exe"
+if [ "$platform" = linux ]; then
+    # Only the C library may remain a dependency, otherwise ccx fails on systems without gfortran.
+    extra=$(readelf -d "$out/bin/$exe" | sed -n 's/.*NEEDED.*\[\(.*\)\]/\1/p' |
+        grep -Ev '^(libc|libm|libpthread|libdl|librt|libmvec|ld-linux-x86-64)\.so' || true)
+    [ -z "$extra" ] || { echo "ccx hängt von $extra ab" >&2; exit 1; }
+fi
 cp "$src/calculix/LICENSE" "$out/licenses/CalculiX-GPL-2.0.txt"
 cp "$root/LICENSE" "$out/licenses/GPL-3.0.txt"
 cp "$src/arpack/COPYING" "$out/licenses/ARPACK-LICENSE.txt"
