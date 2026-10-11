@@ -48,6 +48,8 @@ pub struct PartInfo {
     /// Whether the part takes part in the colour scale of results (PrePoMax: colour
     /// contours on); a part without them is plain grey and leaves the legend range alone.
     pub contours: bool,
+    /// Dimension of the CAD shape of a geometry part: 3 solid, 2 face, 1 edge.
+    pub dimension: Option<u8>,
 }
 
 /// A loaded input file with everything the GUI shows about it.
@@ -453,6 +455,7 @@ impl Model {
                 bounds: None,
                 visible: true,
                 contours: true,
+                dimension: None,
             });
         }
         let mut model = Self {
@@ -512,6 +515,9 @@ impl Model {
             .collect();
         let mut model = Self::with_skins(path, mesh, skins);
         model.is_geometry = true;
+        for (part, dimension) in model.parts.iter_mut().zip(display.part_dimensions) {
+            part.dimension = Some(dimension);
+        }
         model.cad_entities = display.entities;
         model.geometry_solids = display.solids;
         model
