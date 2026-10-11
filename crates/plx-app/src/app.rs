@@ -3881,6 +3881,37 @@ impl Workbench {
                     None => model.path_plots.push(PathPlot::table(data.clone())),
                 }
             }
+            match response.export {
+                Some(crate::xy_plot::Export::Clipboard) => {
+                    (self.screenshot).request_region(screenshot::Target::Clipboard, response.plot)
+                }
+                Some(crate::xy_plot::Export::Png) => {
+                    (self.screenshot).request_region(screenshot::Target::File, response.plot)
+                }
+                Some(crate::xy_plot::Export::Svg) => {
+                    let svg =
+                        crate::xy_plot::to_svg(data, response.plot.width(), response.plot.height());
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Save Plot As")
+                        .add_filter("SVG image", &["svg"])
+                        .set_file_name("plot.svg")
+                        .save_file()
+                    {
+                        let path = if path.extension().is_none() {
+                            path.with_extension("svg")
+                        } else {
+                            path
+                        };
+                        self.output.push(match std::fs::write(&path, svg) {
+                            Ok(()) => format!("Plot saved: {}", path.display()),
+                            Err(err) => {
+                                format!("Plot could not be saved ({}): {err}", path.display())
+                            }
+                        });
+                    }
+                }
+                None => {}
+            }
             if response.closed {
                 self.history_plot = None;
             }

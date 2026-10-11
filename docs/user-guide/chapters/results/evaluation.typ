@@ -64,6 +64,12 @@ the selected columns over the first one.
 
 #screenshot("history-table.png", [Eigenfrequencies from the `.dat` file])
 
+#ui("Export") in the plot window copies the plot to the clipboard as an image (#ui("Copy to
+Clipboard")) or saves it as a PNG or SVG file. The SVG file is vector graphics with the curves,
+grid and legend, for reports in good print quality.
+
+#screenshot("table-plot-export.png", [The Export menu of a plot window])
+
 #ui("Show in View") in the plot window puts the plot into the 3D view as an annotation, like a
 path plot (see @paths): it stays after the window is closed and appears in screenshots. Drag the box
 to move it and its bottom right corner to resize it. #ui("Edit...") in its context menu, or a
