@@ -1091,6 +1091,13 @@ fn pick_project_file(model: &Model, title: &str, suffix: &str) -> Option<PathBuf
     Some(path)
 }
 
+/// Geometry imported into a model that has nothing yet keeps its FE model and its file: a
+/// project saved before the import is still saved to its own file, not to the CAD file.
+fn take_over_empty_model(model: &mut Model, old: &Model) {
+    model.fe = old.fe.clone();
+    model.path = old.path.clone();
+}
+
 impl Workbench {
     fn model_loaded(&mut self, path: PathBuf, result: Result<Box<LoadedModel>, String>) {
         match result {
@@ -1317,7 +1324,7 @@ impl Workbench {
                         && old.mesh.element_count() == 0
                         && old.geometry.is_none()
                     {
-                        model.fe = old.fe.clone();
+                        take_over_empty_model(&mut model, old);
                     }
                     // 2D models lie in the x-y plane and are seen from the front.
                     if model.fe.properties.space.is_2d() {
@@ -5985,6 +5992,21 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent 
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn import_into_saved_new_model_keeps_the_project_file() {
+        let saved = Model::new(
+            std::path::Path::new("/tmp/neu.plx"),
+            plx_mesh::FeMesh::default(),
+        );
+        let mut imported = Model::new(
+            std::path::Path::new("/tmp/teil.step"),
+            plx_mesh::FeMesh::default(),
+        );
+        take_over_empty_model(&mut imported, &saved);
+        assert!(imported.is_project());
+        assert_eq!(imported.path, saved.path);
+    }
 
     #[derive(Default)]
     struct MemoryStorage(HashMap<String, String>);
