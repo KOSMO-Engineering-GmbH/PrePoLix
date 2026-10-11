@@ -1,13 +1,17 @@
 //! Hot spot stresses in the Results workspace: the definitions of a results file, their
-//! paths in the 3D view, the evaluation, the output file and the table of values.
+//! paths in the 3D view, the evaluation and output file, and the plot of the stress along
+//! the path with its extrapolation that the dialog and the 3D view show.
 
 use std::path::{Path, PathBuf};
 
 use glam::Vec3;
-use plx_mesh::SkinFace;
+use plx_mesh::{NodeId, SkinFace};
 use plx_model::UnitSystem;
-use plx_results::hot_spot::{self, HotSpot, HotSpotPath, HotSpotReport};
+use plx_results::hot_spot::{
+    self, HotSpot, HotSpotComponent, HotSpotPath, HotSpotReport, ReadoutPoint,
+};
 
+use crate::features::Marks;
 use crate::model::Model;
 
 /// The hot spots of one results file: defined on it, like its derived outputs, and
@@ -115,78 +119,170 @@ pub fn summary(reports: &[HotSpotReport]) -> Vec<String> {
         .collect()
 }
 
-/// The table of the values in the shown increment. Returns false when it was closed.
-pub fn window(ctx: &egui::Context, evaluation: &HotSpots, step: Option<(u32, u32)>) -> bool {
-    let mut open = true;
-    egui::Window::new("Hot Spot Stresses")
-        .open(&mut open)
-        .collapsible(false)
-        .default_size([520.0, 320.0])
-        .pivot(egui::Align2::RIGHT_TOP)
-        .default_pos(ctx.content_rect().right_top() + egui::vec2(-20.0, 90.0))
-        .show(ctx, |ui| {
-            if let Some(file) = &evaluation.file {
-                ui.label(format!("All increments in {}", file.display()));
-            }
-            match step {
-                Some((step, increment)) => {
-                    ui.label(format!("Shown: Step {step}, Increment {increment}"))
+/// Points on the plotted stress curve of a hot spot path.
+const CURVE_POINTS: usize = 81;
+/// The curve runs this far beyond the furthest read-out point.
+const CURVE_REACH: f64 = 1.25;
+
+/// What the dialog and the plot in the 3D view show of a hot spot in the shown increment:
+/// the stress along the path of its toe node with the highest hot spot stress, the read-out
+/// points and the extrapolation back to the toe.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HotSpotPlot {
+    pub node: NodeId,
+    /// Toe nodes with a path; the plotted one has the highest hot spot stress of them.
+    pub paths: usize,
+    pub component: HotSpotComponent,
+    /// Stress along the path, by distance from the toe.
+    pub distances: Vec<f64>,
+    pub values: Vec<f64>,
+    /// Read-out points, extrapolation line and hot spot stress, drawn over the curve.
+    pub marks: Marks,
+    /// Start and end of the plotted stretch of the path, in model coordinates.
+    pub ends: [[f64; 3]; 2],
+    pub warnings: Vec<String>,
+}
+
+impl HotSpotPlot {
+    /// Values the plot shows when its range is automatic: all but a sharp peak right at the
+    /// toe, the notch stress, which would flatten the extrapolation to a line at the bottom.
+    pub fn range(&self) -> [f64; 2] {
+        let first = self.marks.support.first().map_or(0.0, |p| p[0]);
+        let marked = (self.marks.support.iter().chain(&self.marks.line)).map(|p| p[1]);
+        let away = (self.distances.iter().zip(&self.values))
+            .filter(|(d, _)| **d >= 0.5 * first)
+            .map(|(_, v)| *v);
+        let finite = || marked.clone().chain(away.clone()).filter(|v| v.is_finite());
+        let low = finite().fold(f64::INFINITY, f64::min);
+        let high = finite().fold(f64::NEG_INFINITY, f64::max);
+        if !(low.is_finite() && high.is_finite()) {
+            return [0.0, 1.0];
+        }
+        let span = (high - low).max(1e-12 * high.abs().max(1.0));
+        let all = self.values.iter().copied().filter(|v| v.is_finite());
+        let peak_low = all.clone().fold(low, f64::min);
+        let peak_high = all.fold(high, f64::max);
+        // A peak that stays within twice the range is shown whole.
+        let low = if low - peak_low <= span {
+            peak_low
+        } else {
+            low - 0.1 * span
+        };
+        let high = if peak_high - high <= span {
+            peak_high
+        } else {
+            high + 0.1 * span
+        };
+        [low, high]
+    }
+
+    /// The curve, the read-out points and the hot spot stress as tables, for spreadsheets.
+    pub fn to_csv(&self, separator: char) -> String {
+        let name = self.component.short();
+        let mut text = format!("Distance{separator}{name}\n");
+        for (d, v) in self.distances.iter().zip(&self.values) {
+            text += &format!("{d}{separator}{v}\n");
+        }
+        text += &format!("\nRead-out distance{separator}{name}\n");
+        for [d, s] in &self.marks.support {
+            text += &format!("{d}{separator}{s}\n");
+        }
+        text += &format!(
+            "\nNode{separator}S_hs\n{}{separator}{}\n",
+            self.node, self.marks.hot_spot
+        );
+        text
+    }
+}
+
+/// The paths of a definition, located again only when it changes, and the stress curve of
+/// the path last plotted.
+#[derive(Default)]
+pub struct Located {
+    /// The definition in the units of the results the paths were located for.
+    key: Option<HotSpot>,
+    /// The results' mesh the paths lie on, to locate them again on new results.
+    mesh: Option<(usize, usize)>,
+    paths: Vec<HotSpotPath>,
+    warnings: Vec<String>,
+    /// Read-out points along the path of the plotted toe node, by the index of the path.
+    curve: Option<(usize, Vec<ReadoutPoint>)>,
+}
+
+impl Located {
+    /// The plot of `hot_spot` on the shown increment of `model`, or why there is none.
+    pub fn plot(&mut self, model: &Model, hot_spot: &HotSpot) -> Result<HotSpotPlot, String> {
+        let view = model.results.as_ref().ok_or("No results loaded.")?;
+        let hot_spot = hot_spot.in_units(units(model));
+        let coords = model.mesh.coords();
+        let mesh = Some((coords.as_ptr() as usize, coords.len()));
+        if self.key.as_ref() != Some(&hot_spot) || self.mesh != mesh {
+            (self.paths, self.warnings) =
+                hot_spot::hot_spot_paths(&model.mesh, surface_faces(model), &hot_spot);
+            self.key = Some(hot_spot.clone());
+            self.mesh = mesh;
+            self.curve = None;
+        }
+        if self.paths.is_empty() {
+            return Err(match self.warnings.first() {
+                Some(warning) => warning.clone(),
+                None if hot_spot.toe.nodes(&model.mesh).is_empty() => {
+                    "Select a node at the weld toe.".into()
                 }
-                None => ui.label("No increment selected"),
-            };
-            ui.separator();
-            egui::ScrollArea::both()
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for (r, report) in evaluation.reports.iter().enumerate() {
-                        ui.strong(&report.name);
-                        ui.label(format!("{}, {}", report.method, report.component.short()));
-                        for warning in &report.warnings {
-                            ui.colored_label(egui::Color32::from_rgb(170, 90, 0), warning);
-                        }
-                        let values = (report.increments.iter())
-                            .find(|i| Some((i.step, i.increment)) == step);
-                        let Some(values) = values else {
-                            ui.weak("No stresses in this increment.");
-                            ui.add_space(8.0);
-                            continue;
-                        };
-                        if let Some(maximum) = values.maximum() {
-                            ui.label(format!(
-                                "Maximum: S_hs = {:.2} at node {}",
-                                maximum.hot_spot, maximum.node
-                            ));
-                        }
-                        let maximum = values.maximum().map(|m| m.node);
-                        egui::Grid::new(("hot spot table", r))
-                            .striped(true)
-                            .num_columns(report.distances.len() + 2)
-                            .show(ui, |ui| {
-                                ui.strong("Node");
-                                for d in &report.distances {
-                                    ui.strong(format!("S({})", short(*d)));
-                                }
-                                ui.strong("S_hs");
-                                ui.end_row();
-                                for value in &values.values {
-                                    ui.label(value.node.to_string());
-                                    for s in &value.readings {
-                                        ui.label(format!("{s:.2}"));
-                                    }
-                                    let text = format!("{:.2}", value.hot_spot);
-                                    if Some(value.node) == maximum {
-                                        ui.strong(text);
-                                    } else {
-                                        ui.label(text);
-                                    }
-                                    ui.end_row();
-                                }
-                            });
-                        ui.add_space(8.0);
-                    }
-                });
-        });
-    open
+                None => "No path could be placed.".into(),
+            });
+        }
+        let increment = view.current_increment().ok_or("No increment selected.")?;
+        let distances = hot_spot.distances();
+        let weights = hot_spot::extrapolation_weights(&distances);
+        let values =
+            hot_spot::evaluate_increment(&self.paths, hot_spot.component, &weights, increment)
+                .ok_or("The shown increment has no stresses (S).")?;
+        let (k, value) = (values.iter().enumerate())
+            .filter(|(_, v)| v.hot_spot.is_finite())
+            .max_by(|a, b| a.1.hot_spot.total_cmp(&b.1.hot_spot))
+            .unwrap_or((0, &values[0]));
+        let path = &self.paths[k];
+        let reach = CURVE_REACH * distances.iter().copied().fold(0.0, f64::max);
+        if self.curve.as_ref().is_none_or(|(index, _)| *index != k) {
+            let points =
+                hot_spot::path_curve(&model.mesh, surface_faces(model), path, reach, CURVE_POINTS);
+            self.curve = Some((k, points));
+        }
+        let curve = self.curve.as_ref().map_or(&[][..], |(_, c)| c.as_slice());
+        let values_along =
+            hot_spot::readings(curve, hot_spot.component, increment).unwrap_or_default();
+        let last = distances.iter().copied().fold(0.0, f64::max);
+        let line = (0..=40)
+            .map(|i| {
+                let x = last * i as f64 / 40.0;
+                [x, hot_spot::extrapolated(&distances, &value.readings, x)]
+            })
+            .collect();
+        let end = curve.last().map_or(reach, |p| p.distance);
+        let ends = [
+            path.position,
+            std::array::from_fn(|i| path.position[i] + path.direction[i] * end),
+        ];
+        Ok(HotSpotPlot {
+            node: value.node,
+            paths: self.paths.len(),
+            component: hot_spot.component,
+            distances: curve.iter().map(|p| p.distance).collect(),
+            values: values_along,
+            marks: Marks {
+                support: distances
+                    .iter()
+                    .zip(&value.readings)
+                    .map(|(&d, &s)| [d, s])
+                    .collect(),
+                line,
+                hot_spot: value.hot_spot,
+            },
+            ends,
+            warnings: self.warnings.clone(),
+        })
+    }
 }
 
 /// A distance without float noise, e.g. 4.8 instead of 4.800000000000001.
@@ -254,6 +350,50 @@ mod tests {
         let paths = paths(&results, &results.hot_spots.definitions[0]);
         assert_eq!(paths.len(), 3);
         assert_eq!(render_paths(&results, &paths)[0].len(), 3);
+    }
+
+    #[test]
+    fn plot_shows_the_edge_node_with_the_highest_stress() {
+        // The cantilever of the test above: an edge across the top at x = 40 to 60 picks the
+        // node nearest to the support, x = 40, where the bending stress is highest.
+        let results = load(&testdata("kragbalken_c3d20r.frd"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
+        let toe = [40.0, 50.0, 60.0].map(|x| node_at(&results, [x, 5.0, 10.0]));
+        let hot_spot = HotSpot {
+            toe: Region::Nodes(toe.to_vec()),
+            direction: [1.0, 0.0, 0.0],
+            thickness: 10.0,
+            ..HotSpot::new("Hot_Spot-1")
+        };
+        let mut located = Located::default();
+        let plot = located.plot(&results, &hot_spot).unwrap();
+        assert_eq!(plot.node, toe[0]);
+        assert_eq!(plot.paths, 3);
+        assert!((plot.marks.hot_spot - 36.0).abs() / 36.0 < 0.01, "{plot:?}");
+        // Read-out points at 0.4 t and 1.0 t; the dashed line starts at the hot spot stress
+        // and passes through them.
+        assert_eq!(plot.marks.support.len(), 2);
+        let line = &plot.marks.line;
+        assert_eq!(line[0], [0.0, plot.marks.hot_spot]);
+        assert!((line.last().unwrap()[1] - plot.marks.support[1][1]).abs() < 1e-9);
+        // The curve runs from the toe a quarter beyond the last read-out point and follows
+        // the linear bending stress there.
+        assert_eq!(plot.distances.len(), CURVE_POINTS);
+        assert!((plot.distances.last().unwrap() - 12.5).abs() < 1e-9);
+        let (d, s) = (plot.distances[40], plot.values[40]);
+        let beam = 0.6 * (100.0 - 40.0 - d);
+        assert!((s - beam).abs() / beam < 0.02, "{d}: {s} vs {beam}");
+        assert_eq!(plot.ends[0], [40.0, 5.0, 10.0]);
+        assert!((plot.ends[1][0] - 52.5).abs() < 1e-9);
+        let [low, high] = plot.range();
+        assert!(low <= 0.6 * 47.5 && high >= plot.marks.hot_spot);
+        let csv = plot.to_csv(';');
+        assert!(csv.starts_with("Distance;S_PERP\n0;"));
+        assert!(csv.contains("\nRead-out distance;S_PERP\n4;"));
+        // Without toe nodes there is nothing to plot.
+        let empty = HotSpot::new("Hot_Spot-2");
+        assert!(located.plot(&results, &empty).is_err());
     }
 
     #[test]

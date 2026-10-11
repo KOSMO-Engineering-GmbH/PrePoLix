@@ -151,6 +151,21 @@ pub fn extrapolation_weights(distances: &[f64]) -> Vec<f64> {
         .collect()
 }
 
+/// The extrapolation polynomial through `readings` at `distances`, evaluated at `x`: at 0 it
+/// is the hot spot stress, between the read-out points it is the line or parabola a plot
+/// draws through them.
+pub fn extrapolated(distances: &[f64], readings: &[f64], x: f64) -> f64 {
+    (distances.iter().zip(readings).enumerate())
+        .map(|(i, (&di, &si))| {
+            let basis: f64 = (distances.iter().enumerate())
+                .filter(|&(j, _)| j != i)
+                .map(|(_, &dj)| (x - dj) / (di - dj))
+                .product();
+            si * basis
+        })
+        .sum()
+}
+
 /// Which stress is extrapolated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HotSpotComponent {
@@ -239,5 +254,8 @@ mod tests {
         let f = |x: f64| 3.0 - 2.0 * x + 0.5 * x * x;
         let at_toe: f64 = distances.iter().zip(&weights).map(|(&d, w)| w * f(d)).sum();
         assert!((at_toe - 3.0).abs() < 1e-9);
+        let readings = distances.map(f);
+        assert!((extrapolated(&distances, &readings, 0.0) - at_toe).abs() < 1e-9);
+        assert!((extrapolated(&distances, &readings, 4.0) - f(4.0)).abs() < 1e-9);
     }
 }
