@@ -621,10 +621,20 @@ fn moving_rows(ui: &mut Ui, moving: &mut MovingLoad, fe: &FeModel, two_d: bool, 
     if !two_d {
         axis_row(
             ui,
-            "Lateral axis",
+            "Across the path",
             &mut moving.lateral_axis,
-            "Axis across the path, along which wheels sit side by side",
+            "Axis across the path in the running surface: the patch width and the wheel \
+             offsets 'Across' are measured along it. The remaining axis is the surface normal.",
         );
+        let (travel, across) = (moving.travel_axis, moving.lateral_axis);
+        if let Some(normal) = (0..3).find(|&k| travel != across && k != travel && k != across) {
+            ui.label("");
+            ui.weak(format!(
+                "{} is the surface normal; the selected faces set the height.",
+                AXIS_LABELS[normal]
+            ));
+            ui.end_row();
+        }
     }
     ui.label("Start");
     ui.add(numeric::quantity(&mut moving.start, units, Quantity::Length).speed(1.0))
