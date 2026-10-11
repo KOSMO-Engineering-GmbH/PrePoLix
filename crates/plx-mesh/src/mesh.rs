@@ -189,6 +189,42 @@ impl FeMesh {
         self.element_index(id).map(|index| &self.elements[index])
     }
 
+    /// The element edges between the end nodes of `segments`, as the end nodes followed by
+    /// the midside node of a quadratic element: the lines of a picked edge of a shell or a
+    /// solid. A segment no element has as an edge is left out.
+    pub fn edge_lines(&self, segments: &[[NodeId; 2]]) -> Vec<Vec<NodeId>> {
+        let wanted: BTreeSet<[NodeId; 2]> = segments
+            .iter()
+            .map(|&[a, b]| [a.min(b), a.max(b)])
+            .collect();
+        let mut lines: BTreeMap<[NodeId; 2], Vec<NodeId>> = BTreeMap::new();
+        for element in &self.elements {
+            let quadratic = element.shape.is_quadratic();
+            let node = |local: usize| element.nodes.get(local).copied();
+            for face in element.faces() {
+                let corners = face.corners;
+                // A 2D element's faces are its edges already.
+                let count = if corners.len() == 2 { 1 } else { corners.len() };
+                for k in 0..count {
+                    let ends = (node(corners[k]), node(corners[(k + 1) % corners.len()]));
+                    let (Some(a), Some(b)) = ends else {
+                        continue;
+                    };
+                    let key = [a.min(b), a.max(b)];
+                    if !wanted.contains(&key) || lines.contains_key(&key) {
+                        continue;
+                    }
+                    let mut line = vec![a, b];
+                    if quadratic && let Some(m) = face.mids.get(k).and_then(|&l| node(l)) {
+                        line.push(m);
+                    }
+                    lines.insert(key, line);
+                }
+            }
+        }
+        lines.into_values().collect()
+    }
+
     /// Axis-aligned bounding box of all nodes.
     pub fn bounds(&self) -> Option<([f64; 3], [f64; 3])> {
         let mut coords = self.coords.iter();
@@ -535,6 +571,36 @@ impl TryFrom<MeshFile> for FeMesh {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn edge_lines_find_element_edges_with_their_midside_nodes() {
+        use crate::{Element, ElementShape};
+        let mut mesh = super::FeMesh::default();
+        for (id, p) in (1..).zip([
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]) {
+            mesh.set_node(id, p);
+        }
+        for id in 5..=10 {
+            mesh.set_node(id, [0.1 * f64::from(id), 0.5, 0.5]);
+        }
+        mesh.add_element(Element {
+            id: 1,
+            type_name: "C3D10".into(),
+            shape: ElementShape::Tet10,
+            nodes: (1..=10).collect(),
+        })
+        .unwrap();
+        // C3D10: 5 between 1-2, 7 between 3-1, 9 between 2-4; 1-99 is no edge.
+        let lines = mesh.edge_lines(&[[2, 1], [1, 3], [4, 2], [1, 99]]);
+        let found: Vec<[u32; 3]> = (lines.iter())
+            .map(|l| [l[0].min(l[1]), l[0].max(l[1]), l[2]])
+            .collect();
+        assert_eq!(found, vec![[1, 2, 5], [1, 3, 7], [2, 4, 9]]);
+    }
+
     #[test]
     fn merging_parts_keeps_the_first_and_joins_its_element_set() {
         let mut mesh = super::FeMesh::default();

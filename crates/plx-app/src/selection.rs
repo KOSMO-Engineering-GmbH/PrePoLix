@@ -99,6 +99,9 @@ pub enum Target {
     Faces,
     /// In 2D models they act on the outline: the edges of the 2D elements, stored as faces.
     Edges,
+    /// Edges of 3D parts, e.g. of a shell for a surface traction along it: the element
+    /// edges along the outline, by their end nodes.
+    Lines,
     /// A single point, e.g. an end of a path: picked as nodes, but the geometry mode takes
     /// only corner points, as an edge or a face does not define a point.
     Point,
@@ -144,7 +147,7 @@ impl SelectBy {
     fn label(self, target: Target) -> &'static str {
         match self {
             SelectBy::Geometry if target == Target::Faces => "Faces",
-            SelectBy::Geometry if target == Target::Edges => "Edges",
+            SelectBy::Geometry if matches!(target, Target::Edges | Target::Lines) => "Edges",
             SelectBy::Geometry if target == Target::Point => "Points",
             SelectBy::Geometry => "Faces, edges and points",
             SelectBy::GeometryPart | SelectBy::Part => "Part",
@@ -178,6 +181,13 @@ impl SelectBy {
                     | SelectBy::FaceAngle
                     | SelectBy::GeometrySurfaceAngle
             ),
+            Target::Lines => matches!(
+                self,
+                SelectBy::Geometry
+                    | SelectBy::GeometryEdgeAngle
+                    | SelectBy::Edge
+                    | SelectBy::EdgeAngle
+            ),
         }
     }
 
@@ -197,6 +207,8 @@ impl SelectBy {
 pub enum Items {
     Nodes(BTreeSet<NodeId>),
     Faces(BTreeSet<(ElementId, u8)>),
+    /// Element edges of 3D parts by their end nodes, the smaller first.
+    Edges(BTreeSet<[NodeId; 2]>),
     /// Faces, edges and vertices of the CAD geometry the mesh was generated from.
     Geometry(BTreeSet<CadEntity>),
 }
@@ -214,6 +226,7 @@ impl Items {
                     Target::Faces | Target::Edges => {
                         Items::Faces(mesh.cad_faces(&entities).into_iter().collect())
                     }
+                    Target::Lines => Items::Edges(cad_segments(mesh, &entities)),
                 }
             }
             items => items,
@@ -449,6 +462,9 @@ impl Picker {
         {
             return Items::Geometry(BTreeSet::from([entity]));
         }
+        if target == Target::Lines {
+            return self.pick_edges(model, hit);
+        }
         if hit.line {
             return self.pick_line(model, hit, target, precision);
         }
@@ -462,7 +478,7 @@ impl Picker {
                 },
                 _ => match self.pick(model, hit, Target::Nodes, precision) {
                     Items::Nodes(nodes) => nodes,
-                    Items::Faces(_) | Items::Geometry(_) => BTreeSet::new(),
+                    Items::Faces(_) | Items::Edges(_) | Items::Geometry(_) => BTreeSet::new(),
                 },
             };
             return Items::Faces(outline_edges_within(model, Some(hit.part), &nodes));
@@ -512,6 +528,7 @@ impl Picker {
             Target::Faces | Target::Edges => {
                 Items::Faces(faces.iter().map(|&f| picker.face_id(f)).collect())
             }
+            Target::Lines => Items::Edges(BTreeSet::new()),
             Target::Nodes | Target::Point => Items::Nodes(
                 picker.node_ids(
                     faces
@@ -525,6 +542,25 @@ impl Picker {
 }
 
 impl Picker {
+    /// What a click picks as edges of a 3D part: the chain of outline edges nearest to it,
+    /// running to the corners or, in the angle modes, on while it bends less than the angle.
+    fn pick_edges(&self, model: &Model, hit: &Hit) -> Items {
+        if hit.line {
+            return Items::Edges(BTreeSet::new());
+        }
+        let picker = MeshPicker::new(model, hit.part);
+        let Some(edge) = picker.nearest_edge(hit.point) else {
+            return Items::Edges(BTreeSet::new());
+        };
+        let chain = match self.select_by {
+            SelectBy::GeometryEdgeAngle | SelectBy::EdgeAngle => {
+                picker.chain_edges(edge, Some(self.angle.to_radians()))
+            }
+            _ => picker.geometry_edge(edge),
+        };
+        Items::Edges(picker.segments(chain))
+    }
+
     /// What a click picks as a point: in the geometry mode the corner point of the geometry
     /// nearest to the click, wherever on the face or edge it is, else the nodes of the mode.
     fn pick_point(&self, model: &Model, hit: &Hit, precision: f32) -> Items {
@@ -588,6 +624,23 @@ impl Picker {
 
     fn pick_box_inner(&self, model: &Model, area: &BoxSelect, target: Target) -> Items {
         let mesh = &model.mesh;
+        if target == Target::Lines {
+            let mut edges = BTreeSet::new();
+            for part in (0..model.parts.len()).filter(|&p| model.parts[p].visible) {
+                let picker = MeshPicker::new(model, part);
+                let inside = (picker.feature_edges()).filter(|(_, edge)| {
+                    let mut nodes = [Some(edge.a), Some(edge.b), edge.mid].into_iter().flatten();
+                    if area.crossing {
+                        nodes.any(|n| area.contains(model.render_position(n)))
+                    } else {
+                        nodes.all(|n| area.contains(model.render_position(n)))
+                    }
+                });
+                let inside: Vec<usize> = inside.map(|(i, _)| i).collect();
+                edges.extend(picker.segments(inside));
+            }
+            return Items::Edges(edges);
+        }
         if target == Target::Edges {
             let edges = (model.outline_edges().into_iter())
                 .filter(|(part, _, _)| model.parts[*part].visible)
@@ -666,6 +719,7 @@ impl Picker {
                     .map(|&(part, f)| MeshPicker::new(model, part).face_id(f))
                     .collect(),
             ),
+            Target::Lines => Items::Edges(BTreeSet::new()),
             Target::Nodes | Target::Point => {
                 let ids = mesh.node_ids();
                 Items::Nodes(
@@ -831,6 +885,14 @@ pub fn preview(model: &Model, items: &Items) -> Preview {
                 .map(|n| model.render_position(n))
                 .collect();
         }
+        Items::Edges(edges) => {
+            preview.lines = (edges.iter())
+                .filter_map(|&[a, b]| {
+                    let position = |id| Some(model.render_position(model.mesh.node_index(id)?));
+                    Some([position(a)?, position(b)?])
+                })
+                .collect();
+        }
         Items::Faces(faces) if model.is_plane() => {
             preview.lines = edge_lines(model, faces)
                 .into_iter()
@@ -858,6 +920,30 @@ pub fn preview(model: &Model, items: &Items) -> Preview {
         }
     }
     preview
+}
+
+/// The mesh segments along CAD edges, the smaller node first.
+pub fn cad_segments(mesh: &plx_mesh::FeMesh, entities: &[CadEntity]) -> BTreeSet<[NodeId; 2]> {
+    (entities.iter())
+        .filter_map(|e| match e {
+            CadEntity::Edge(tag) => mesh.cad.segments.get(tag),
+            _ => None,
+        })
+        .flatten()
+        .map(|&[a, b]| [a.min(b), a.max(b)])
+        .collect()
+}
+
+/// All outline edges of the visible parts, for the selection of edges of 3D parts.
+pub fn visible_segments(model: &Model) -> BTreeSet<[NodeId; 2]> {
+    (0..model.parts.len())
+        .filter(|&p| model.parts[p].visible)
+        .flat_map(|p| {
+            let picker = MeshPicker::new(model, p);
+            let edges: Vec<usize> = picker.feature_edges().map(|(i, _)| i).collect();
+            picker.segments(edges)
+        })
+        .collect()
 }
 
 /// How far the outline may bend at a node and still count as one edge when the geometry
@@ -939,7 +1025,20 @@ impl<'a> MeshPicker<'a> {
         match target {
             Target::Nodes | Target::Point => Items::Nodes(BTreeSet::new()),
             Target::Faces | Target::Edges => Items::Faces(BTreeSet::new()),
+            Target::Lines => Items::Edges(BTreeSet::new()),
         }
+    }
+
+    /// Skin edges by the ids of their end nodes, the smaller first.
+    fn segments(&self, edges: impl IntoIterator<Item = usize>) -> BTreeSet<[NodeId; 2]> {
+        let ids = self.model.mesh.node_ids();
+        let skin = &self.model.skin(self.part).edges;
+        (edges.into_iter())
+            .map(|e| {
+                let (a, b) = (ids[skin[e].a], ids[skin[e].b]);
+                [a.min(b), a.max(b)]
+            })
+            .collect()
     }
 
     fn face_id(&self, face: usize) -> (ElementId, u8) {
@@ -1127,6 +1226,22 @@ impl<'a> MeshPicker<'a> {
 
     /// The feature edges of the chain through `start`, see [`MeshPicker::edge_chain`].
     fn chain_edges(&self, start: usize, angle: Option<f64>) -> BTreeSet<usize> {
+        self.chain_edges_with(start, angle, false)
+    }
+
+    /// The feature edges of the chain through `start` as an edge of the geometry: on to
+    /// where other edges meet it or it bends by more than [`OUTLINE_ANGLE`], as at the
+    /// corners of a flat shell, whose outline is one loop.
+    fn geometry_edge(&self, start: usize) -> BTreeSet<usize> {
+        self.chain_edges_with(start, Some(OUTLINE_ANGLE.to_radians()), true)
+    }
+
+    fn chain_edges_with(
+        &self,
+        start: usize,
+        angle: Option<f64>,
+        junctions: bool,
+    ) -> BTreeSet<usize> {
         let edges = &self.model.skin(self.part).edges;
         let mut at_node: HashMap<usize, Vec<usize>> = HashMap::new();
         for (index, edge) in self.feature_edges() {
@@ -1149,7 +1264,10 @@ impl<'a> MeshPicker<'a> {
                     let follow = match cos_limit {
                         // Continue straight on: the next edge leaves in about the direction the
                         // current one arrived.
-                        Some(limit) => incoming.dot(direction(next, node)) >= limit,
+                        Some(limit) => {
+                            incoming.dot(direction(next, node)) >= limit
+                                && (!junctions || others.len() == 2)
+                        }
                         None => others.len() == 2,
                     };
                     if follow && seen.insert(next) {
@@ -1214,6 +1332,7 @@ fn line_end_near(model: &Model, hit: &Hit, precision: f32) -> Option<NodeId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plx_model::Region;
 
     #[test]
     fn history_replays_prepomax_operations() {
@@ -1376,6 +1495,78 @@ mod tests {
         assert!(
             outline.len() > 11,
             "a 95° limit follows the outline around the corners"
+        );
+    }
+
+    #[test]
+    fn edges_of_a_solid_are_picked_as_element_edges() {
+        let (model, hit) = beam_hit(55.0, 2.0);
+        let edges = |picker: &Picker| match picker.pick(&model, &hit, Target::Lines, 0.5) {
+            Items::Edges(edges) => edges,
+            other => panic!("{other:?} instead of edges"),
+        };
+        // The long top edge at y = 0 from corner to corner: ten element edges.
+        let top = edges(&picker(SelectBy::Geometry));
+        assert_eq!(top.len(), 10);
+        for [a, b] in &top {
+            let (p, q) = (model.mesh.node(*a).unwrap(), model.mesh.node(*b).unwrap());
+            assert!(p[1] == 0.0 && q[1] == 0.0 && p[2] == 10.0 && q[2] == 10.0);
+        }
+        assert_eq!(edges(&picker(SelectBy::EdgeAngle)), top);
+        // Faces and nodes are no edges.
+        assert!(!SelectBy::Surface.allowed(Target::Lines));
+        assert!(!SelectBy::Node.allowed(Target::Lines));
+        // The region takes the edges and spreads a load over all of them by length.
+        let region = Region::Edges(top.into_iter().collect());
+        let lines = region.edges(&model.mesh);
+        assert_eq!(lines.len(), 10);
+    }
+
+    /// The side of a flat shell ends at the corners of the plate, although its outline is
+    /// one smooth loop of feature edges.
+    #[test]
+    fn an_edge_of_a_flat_shell_runs_from_corner_to_corner() {
+        use plx_mesh::{Element, ElementShape, FeMesh, Part};
+        let mut mesh = FeMesh::default();
+        let id = |i: u32, j: u32| j * 11 + i + 1;
+        for j in 0..=6 {
+            for i in 0..=10 {
+                mesh.set_node(id(i, j), [10.0 * f64::from(i), 10.0 * f64::from(j), 0.0]);
+            }
+        }
+        let mut elements = Vec::new();
+        for j in 0..6 {
+            for i in 0..10 {
+                let element = j * 10 + i + 1;
+                mesh.add_element(Element {
+                    id: element,
+                    type_name: "S4".into(),
+                    shape: ElementShape::Quad4,
+                    nodes: vec![id(i, j), id(i + 1, j), id(i + 1, j + 1), id(i, j + 1)],
+                })
+                .unwrap();
+                elements.push(element);
+            }
+        }
+        mesh.parts.push(Part {
+            name: "PLATE".into(),
+            elements,
+        });
+        let model = Model::new(std::path::Path::new("platte.inp"), mesh);
+        let p = model.mesh.coords()[0];
+        let first = Vec3::new(p[0] as f32, p[1] as f32, p[2] as f32);
+        let origin = Vec3::new(55.0, 1.0, 50.0) - first + model.render_position(0);
+        let hit = model.pick(origin, Vec3::NEG_Z).unwrap();
+        let Items::Edges(edges) = picker(SelectBy::Geometry).pick(&model, &hit, Target::Lines, 0.5)
+        else {
+            panic!("no edges");
+        };
+        assert_eq!(edges.len(), 10);
+        assert!(
+            edges
+                .iter()
+                .flatten()
+                .all(|&n| model.mesh.node(n).unwrap()[1] == 0.0)
         );
     }
 

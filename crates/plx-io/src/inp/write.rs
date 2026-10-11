@@ -1905,9 +1905,15 @@ fn step_block<'f>(
             LoadKind::SurfaceTraction(force) => {
                 let faces = load.region.faces(sets.mesh);
                 let axisymmetric = space == ModelSpace::Axisymmetric;
-                let nodal = traction_forces(sets.mesh, &faces, force, axisymmetric);
+                // On faces by area, on picked edges by length.
+                let nodal = if faces.is_empty() {
+                    let edges = load.region.edges(sets.mesh);
+                    edge_traction_forces(sets.mesh, &edges, force, axisymmetric)
+                } else {
+                    traction_forces(sets.mesh, &faces, force, axisymmetric)
+                };
                 if nodal.is_empty() {
-                    return Err(empty(&load.name, "element faces"));
+                    return Err(empty(&load.name, "element faces or edges"));
                 }
                 let _ = writeln!(out, "*Cload{amplitude}");
                 for (node, values) in nodal {
@@ -2136,6 +2142,37 @@ fn traction_forces(
     }
     (weights.into_iter())
         .map(|(node, weight)| (node, force.map(|f| f * weight / total_area)))
+        .collect()
+}
+
+/// A total force spread over element edges by length, the edges given as their end nodes
+/// and midside node: the consistent nodal forces of a constant line load.
+fn edge_traction_forces(
+    mesh: &FeMesh,
+    edges: &[Vec<NodeId>],
+    force: [f64; 3],
+    axisymmetric: bool,
+) -> BTreeMap<NodeId, [f64; 3]> {
+    let mut weights: BTreeMap<NodeId, f64> = BTreeMap::new();
+    let mut total = 0.0;
+    for edge in edges {
+        let Some(points) = edge
+            .iter()
+            .map(|&n| mesh.node(n))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        for (&node, weight) in edge.iter().zip(edge_weights(&points, axisymmetric)) {
+            *weights.entry(node).or_default() += weight;
+            total += weight;
+        }
+    }
+    if total <= 0.0 {
+        return BTreeMap::new();
+    }
+    (weights.into_iter())
+        .map(|(node, weight)| (node, force.map(|f| f * weight / total)))
         .collect()
 }
 

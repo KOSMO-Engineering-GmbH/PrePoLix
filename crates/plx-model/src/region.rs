@@ -15,6 +15,9 @@ pub enum Region {
     Nodes(Vec<NodeId>),
     /// Picked element faces as (element, CalculiX face number 1..6).
     Faces(Vec<(ElementId, u8)>),
+    /// Picked element edges of 3D parts by their end nodes, e.g. the edge of a shell a
+    /// surface traction acts on.
+    Edges(Vec<[NodeId; 2]>),
     /// A node set of the input file.
     NodeSet(String),
     /// An element set of the input file.
@@ -48,7 +51,7 @@ impl Region {
                 ids.extend(mesh.cad_faces(entities).iter().map(|(e, _)| *e));
             }
             Region::Nodes(_) | Region::NodeSet(_) | Region::Surface(_) => {}
-            Region::ReferencePoint(_) => {}
+            Region::Edges(_) | Region::ReferencePoint(_) => {}
         }
         ids.into_iter().collect()
     }
@@ -70,6 +73,7 @@ impl Region {
                 ids.extend(mesh.node_sets.get(name).into_iter().flatten().copied());
             }
             Region::Faces(faces) => ids.extend(face_nodes(mesh, faces)),
+            Region::Edges(_) => ids.extend(self.edges(mesh).into_iter().flatten()),
             Region::Geometry(entities) => ids.extend(mesh.cad_nodes(entities)),
             Region::Surface(name) => match mesh.surfaces.get(name) {
                 Some(SurfaceDefinition::Nodes(nodes)) => ids.extend(nodes.iter().copied()),
@@ -96,12 +100,33 @@ impl Region {
         }
     }
 
+    /// Element edges of the region, for loads along edges: the picked edges or those along
+    /// picked CAD edges, each as its end nodes and the midside node of quadratic elements.
+    pub fn edges(&self, mesh: &FeMesh) -> Vec<Vec<NodeId>> {
+        match self {
+            Region::Edges(segments) => mesh.edge_lines(segments),
+            Region::Geometry(entities) => {
+                let segments: Vec<[NodeId; 2]> = (entities.iter())
+                    .filter_map(|e| match e {
+                        CadEntity::Edge(tag) => mesh.cad.segments.get(tag),
+                        _ => None,
+                    })
+                    .flatten()
+                    .copied()
+                    .collect();
+                mesh.edge_lines(&segments)
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// Short description for the GUI, e.g. "3 nodes".
     pub fn describe(&self) -> String {
         match self {
             Region::Parts(names) => names.join(", "),
             Region::Nodes(nodes) => format!("{} nodes", nodes.len()),
             Region::Faces(faces) => format!("{} element faces", faces.len()),
+            Region::Edges(edges) => format!("{} element edges", edges.len()),
             Region::NodeSet(name) | Region::ElementSet(name) | Region::Surface(name) => {
                 name.clone()
             }
@@ -120,7 +145,7 @@ impl Region {
 
     /// Whether the region refers to node or element numbers, which remeshing invalidates.
     pub fn by_mesh_ids(&self) -> bool {
-        matches!(self, Region::Nodes(_) | Region::Faces(_))
+        matches!(self, Region::Nodes(_) | Region::Faces(_) | Region::Edges(_))
     }
 }
 

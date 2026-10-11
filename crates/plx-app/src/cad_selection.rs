@@ -111,7 +111,7 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
         {
             return Some(CadEntity::Vertex(vertex));
         }
-        return (target != Target::Faces).then_some(entity);
+        return (!matches!(target, Target::Faces | Target::Lines)).then_some(entity);
     }
     let skin_face = model.skin(hit.part).faces.get(hit.face)?;
     let element = model.mesh.elements()[skin_face.element].id;
@@ -124,7 +124,7 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
     };
     match target {
         Target::Faces => Some(CadEntity::Face(face)),
-        Target::Edges => nearest_edge().map(|(edge, _)| CadEntity::Edge(edge)),
+        Target::Edges | Target::Lines => nearest_edge().map(|(edge, _)| CadEntity::Edge(edge)),
         Target::Nodes | Target::Point => {
             let vertices: BTreeSet<i32> = (edges.iter())
                 .filter_map(|e| index.edge_vertices.get(e))
