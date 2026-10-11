@@ -15,7 +15,7 @@ use plx_model::{
     ContactMethod, ContactPair, DefinedFieldKind, DynamicStep, FeModel, FieldOutput, FrequencyStep,
     GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
-    ModelSpace, NodeTie, OutputDimension, OutputKind, Region, Section, SectionKind,
+    ModelSpace, MovingFrame, NodeTie, OutputDimension, OutputKind, Region, Section, SectionKind,
     SensitivityStep, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior,
     SurfaceInteraction, Tie, Totals, UserKeyword, line_tangent, symmetry_dofs, symmetry_plane,
 };
@@ -171,12 +171,13 @@ pub fn write_check_inp(
         .iter_mut()
         .find(|k| matches!(&k.kind, KeywordKind::Title(name) if name == "Steps"))
     {
-        // A deactivated step stays a comment.
+        // A deactivated step stays a comment; a step with moving loads has a `*Step` for
+        // each position.
         for (step, _) in (steps.children.iter_mut().zip(&model.steps)).filter(|(_, s)| s.active) {
-            if let Some(procedure) =
-                (step.children.first_mut()).and_then(|header| header.children.first_mut())
-            {
-                *procedure = no_analysis();
+            for header in &mut step.children {
+                if let Some(procedure) = header.children.first_mut() {
+                    *procedure = no_analysis();
+                }
             }
         }
         if !model.steps.iter().any(|s| s.active) {
@@ -331,6 +332,7 @@ pub fn model_keywords(
                 pair_surfaces: &pair_surfaces,
                 shells: (model.sections.iter())
                     .any(|s| matches!(s.kind, SectionKind::Shell { .. })),
+                model,
             };
             write_step(&mut sets, step, &context)
         })
@@ -1497,6 +1499,8 @@ struct StepContext<'a> {
     /// `*STEP, PERTURBATION` of the frequency step whose stored modes a complex frequency
     /// step uses; CalculiX stops when the two differ.
     stored_perturbation: bool,
+    /// The model, for the coordinate systems of moving loads.
+    model: &'a FeModel,
     /// The model is a cyclic symmetric sector: frequency steps select the nodal diameters.
     cyclic: bool,
     /// See [`cyclic_slave_nodes`].
@@ -1518,7 +1522,117 @@ fn stored_perturbation(before: &[Step]) -> bool {
 ///
 /// Like PrePoMax, a deactivated step or item keeps its place in the file as a comment
 /// (`** Name: Fixed-1: Deactivated`), and nothing of it is written, not even its sets.
+///
+/// A step with moving loads holds one `*Step` per position of the loads, all alike but for
+/// the forces of the moving loads; a moving load with fewer positions than another stays at
+/// its last one.
 fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Keyword, WriteError> {
+    if !step.active {
+        return Ok(deactivated_step(step));
+    }
+    let two_d = context.space.is_2d();
+    let mut moving = Vec::new();
+    for (index, load) in step.loads.iter().enumerate() {
+        if let LoadKind::Moving(load_kind) = &load.kind
+            && load.active
+            && step.kind.supports_load(&load.kind)
+        {
+            if context.space == ModelSpace::Axisymmetric {
+                return Err(WriteError::InvalidLoad {
+                    item: load.name.clone(),
+                    reason: "a moving load needs a 3D or plane model".into(),
+                });
+            }
+            let faces = load.region.faces(sets.mesh);
+            if faces.is_empty() {
+                return Err(empty(&load.name, "element faces"));
+            }
+            let frames =
+                (load_kind.frames(context.model, sets.mesh, &faces, two_d)).map_err(|reason| {
+                    WriteError::InvalidLoad {
+                        item: load.name.clone(),
+                        reason,
+                    }
+                })?;
+            moving.push((index, load_kind.stations(), frames));
+        }
+    }
+    let first = step_block(sets, step, context, |index| {
+        let (_, _, frames) = moving.iter().find(|(i, ..)| *i == index)?;
+        frames.first()
+    })?;
+    let count = moving.iter().map(|(_, s, _)| s.len()).max().unwrap_or(1);
+    let mut blocks = Vec::with_capacity(count);
+    for position in 0..count {
+        let mut block = first.clone();
+        if !moving.is_empty() {
+            let mut comment = format!("** Moving load position {} of {count}", position + 1);
+            for (index, stations, _) in &moving {
+                let station = stations[position.min(stations.len() - 1)];
+                let _ = write!(
+                    comment,
+                    ", {} at {}",
+                    step.loads[*index].name,
+                    number(station)
+                );
+            }
+            block.text = format!("{comment}\n{}", block.text);
+        }
+        if position > 0
+            && let Some(loads) = (block.children.iter_mut())
+                .find(|k| matches!(&k.kind, KeywordKind::Title(t) if t == "Loads"))
+        {
+            for (index, _, frames) in &moving {
+                let load = &step.loads[*index];
+                let frame = &frames[position.min(frames.len() - 1)];
+                let text = moving_load_text(load, frame, context)?;
+                let marker = format!("** Name: {}", load.name);
+                if let Some(keyword) = (loads.children.iter_mut()).find(|k| {
+                    k.text
+                        .strip_prefix(&marker)
+                        .is_some_and(|rest| rest.starts_with(['\n', ':']))
+                }) {
+                    keyword.text = text;
+                }
+            }
+        }
+        blocks.push(block);
+    }
+    Ok(Keyword::title(&step.name, blocks))
+}
+
+/// The keyword of a moving load at one position: its nodal forces as `*Cload`.
+fn moving_load_text(
+    load: &plx_model::Load,
+    frame: &MovingFrame,
+    context: &StepContext,
+) -> Result<String, WriteError> {
+    // All wheels off the region: nothing to load, and an empty `*Cload` is no keyword.
+    if frame.forces.is_empty() {
+        return Ok(format!("** Name: {}: No wheel on the region\n", load.name));
+    }
+    let dofs = if context.space.is_2d() { 2 } else { 3 };
+    let amplitude =
+        amplitude_parameter(context.amplitudes, &load.name, "Amplitude", &load.amplitude)?;
+    let mut out = format!("** Name: {}\n*Cload{amplitude}\n", load.name);
+    for (node, values) in &frame.forces {
+        for (dof, value) in (1..).zip(values).take(dofs) {
+            if *value != 0.0 {
+                let _ = writeln!(out, "{node}, {dof}, {}", number(*value));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The `*Step` of a step and everything in it, with the moving loads at the positions
+/// `moving` gives by load index.
+fn step_block<'f>(
+    sets: &mut Sets,
+    step: &Step,
+    context: &StepContext,
+    moving: impl Fn(usize) -> Option<&'f MovingFrame>,
+) -> Result<Keyword, WriteError> {
     let &StepContext {
         extra_boundary,
         space,
@@ -1530,12 +1644,10 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         stored_perturbation,
         cyclic,
         cyclic_slaves,
+        ..
     } = context;
     // Nodes of 2D models move in the x-y plane only; CalculiX fails on rotations there.
     let dofs = if space.is_2d() { 2 } else { 6 };
-    if !step.active {
-        return Ok(deactivated_step(step));
-    }
     let (header, procedure) = match &step.kind {
         StepKind::Static(settings) => static_step(settings),
         StepKind::Frequency(settings) => {
@@ -1700,7 +1812,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
     } else {
         &[]
     };
-    for load in step_loads {
+    for (index, load) in step_loads.iter().enumerate() {
         if !load.active || !kind.supports_load(&load.kind) {
             loads.push(deactivated(&load.name));
             continue;
@@ -1720,6 +1832,10 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
             None => String::new(),
         };
         match load.kind {
+            LoadKind::Moving(_) => {
+                let frame = moving(index).cloned().unwrap_or_default();
+                out = moving_load_text(load, &frame, context)?;
+            }
             LoadKind::ConcentratedForce(force) => {
                 let set = sets.node_set(&load.name, &load.region)?;
                 let _ = writeln!(out, "*Cload{amplitude}");
@@ -1869,10 +1985,7 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         Keyword::title("Field outputs", field_outputs),
         Keyword::title("End step", vec![end]),
     ];
-    Ok(Keyword::title(
-        &step.name,
-        vec![Keyword::parent(header, contents)],
-    ))
+    Ok(Keyword::parent(header, contents))
 }
 
 /// The defined temperatures of a step as PrePoMax's `CalDefinedTemperature` writes them:

@@ -87,6 +87,8 @@ pub enum Problem {
     ContactIgnored,
     /// Contact pairs in a complex frequency step: the Coriolis coupling goes wrong.
     ContactWithCoriolis,
+    /// A wheel of a moving load that is off the selected surface at some positions.
+    WheelOffSurface,
     /// Found in the solver output only.
     NoConvergence,
     /// Found in the solver output only.
@@ -116,6 +118,7 @@ impl Problem {
             | Problem::NoRotation
             | Problem::ContactIgnored
             | Problem::ContactWithCoriolis
+            | Problem::WheelOffSurface
             | Problem::DesignRegionIgnored => Severity::Warning,
             _ => Severity::Error,
         }
@@ -156,6 +159,7 @@ impl Problem {
             Problem::NoRotation => "No rotation",
             Problem::ContactIgnored => "Contact ignored",
             Problem::ContactWithCoriolis => "Contact with Coriolis",
+            Problem::WheelOffSurface => "Wheel off the surface",
             Problem::NoConvergence => "No convergence",
             Problem::MpcAndSpc => "Degree of freedom bound twice",
             Problem::RotationIn2d => "Rotation in a 2D model",
@@ -297,6 +301,12 @@ impl Problem {
                 "The initial increment is larger than the time period of the step. \
                  CalculiX rejects the step with \"initial increment size exceeds step \
                  size\"."
+            }
+            Problem::WheelOffSurface => {
+                "At some positions of the moving load a wheel is partly or fully off the \
+                 selected surface. Its force is left out there, as when a crane drives off \
+                 the end of its runway beam. Wanted for a vehicle that drives over the whole \
+                 structure; a mistake if the wheels should stay on it."
             }
             Problem::NoLoad => {
                 "The step has neither an active load nor a prescribed displacement. The \
@@ -479,6 +489,11 @@ impl Problem {
                 "In the step choose an initial increment no larger than the time period."
             }
             Problem::NoLoad => "Under Loads create a load or activate a deactivated one.",
+            Problem::WheelOffSurface => {
+                "If the wheels should stay on the surface, check the start and end of the \
+                 path, the wheel offsets and the coordinate system, or select all faces the \
+                 wheels run on."
+            }
             Problem::NoExpansion => {
                 "Edit the material and enter a thermal expansion coefficient \
                  (steel: 1.2e-5 1/K)."
@@ -965,6 +980,30 @@ impl FeModel {
             }
         }
         for (i, load) in step.loads.iter().enumerate() {
+            if let LoadKind::Moving(moving) = &load.kind
+                && load.active
+                && step.kind.supports_load(&load.kind)
+                && let Ok(frames) =
+                    moving.frames(self, mesh, &load.region.faces(mesh), space.is_2d())
+            {
+                for wheel in 0..moving.wheels.len() {
+                    let off = (frames.iter())
+                        .filter(|f| f.on_region.get(wheel).is_some_and(|&s| s < 1.0 - 1e-6))
+                        .count();
+                    if off > 0 {
+                        findings.push(Finding::new(
+                            ModelItem::Load(s, i),
+                            Problem::WheelOffSurface,
+                            format!(
+                                "{}: wheel {} at {off} of {} positions",
+                                load.name,
+                                wheel + 1,
+                                frames.len()
+                            ),
+                        ));
+                    }
+                }
+            }
             if load.active && step.kind.supports_load(&load.kind) && !driven(&load.region) {
                 findings.push(Finding::new(
                     ModelItem::Load(s, i),

@@ -18,6 +18,7 @@ mod geometry;
 mod history;
 pub mod library;
 mod mesh_set;
+mod moving_load;
 mod properties;
 mod region;
 mod section;
@@ -47,6 +48,7 @@ pub use geometry::{
 pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use library::MaterialLibrary;
 pub use mesh_set::{MeshSet, SetKind};
+pub use moving_load::{AXIS_LABELS, MovingFrame, MovingLoad, Wheel};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
 pub use section::{
@@ -642,6 +644,10 @@ impl StepKind {
 
     /// Whether a load of this kind acts in the step, PrePoMax's `IsLoadTypeSupported`.
     pub fn supports_load(&self, kind: &LoadKind) -> bool {
+        // Each position of a moving load is a static step of its own.
+        if matches!(kind, LoadKind::Moving(_)) {
+            return matches!(self, StepKind::Static(_));
+        }
         self.supports_loads()
             && if kind.is_thermal() {
                 self.is_thermal()
@@ -1386,7 +1392,7 @@ pub struct Load {
     pub factor_amplitude: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum LoadKind {
     /// Force applied at every node of the region, as CalculiX's `*CLOAD` on a node set.
     ConcentratedForce([f64; 3]),
@@ -1430,6 +1436,9 @@ pub enum LoadKind {
         axis: [f64; 3],
         speed: f64,
     },
+    /// Wheel loads that travel over a surface region, one static step per position; see
+    /// [`MovingLoad`].
+    Moving(MovingLoad),
 }
 
 impl LoadKind {
@@ -1453,6 +1462,7 @@ impl LoadKind {
                 | LoadKind::PreTension { .. }
                 | LoadKind::Gravity(_)
                 | LoadKind::Centrifugal { .. }
+                | LoadKind::Moving(_)
         )
     }
 

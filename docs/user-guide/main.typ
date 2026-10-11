@@ -44,6 +44,7 @@
 #include "chapters/model/bcs-loads.typ"
 #include "chapters/model/symmetry.typ"
 #include "chapters/model/pre-tension.typ"
+#include "chapters/model/moving-load.typ"
 #include "chapters/model/defined-fields.typ"
 #include "chapters/model/keywords.typ"
 
