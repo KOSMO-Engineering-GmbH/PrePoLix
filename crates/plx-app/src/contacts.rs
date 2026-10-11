@@ -111,16 +111,22 @@ fn color_row(ui: &mut Ui, label: &str, color: &mut [u8; 3]) {
     ui.end_row();
 }
 
+const ADJUST_HELP: &str = "Moves slave nodes onto the master surface before the analysis, so \
+    that small gaps and overlaps from meshing do not start the contact with a jump or a \
+    force. Only the start geometry changes. Without an adjust distance only nodes that \
+    penetrate are moved; with it, all slave nodes within the distance.";
+
 /// A value that may be left to CalculiX: a check box and the number.
 fn optional_row(
     ui: &mut Ui,
     label: &str,
+    help: &str,
     value: &mut Option<f64>,
     default: f64,
     (units, quantity): (UnitSystem, Quantity),
 ) {
     let mut set = value.is_some();
-    ui.checkbox(&mut set, label);
+    ui.checkbox(&mut set, label).on_hover_text(help);
     let mut number_value = value.unwrap_or(default);
     ui.add_enabled(set, numeric::physical(&mut number_value, units, quantity));
     *value = set.then_some(number_value);
@@ -133,12 +139,15 @@ pub fn tie_form(ui: &mut Ui, model: &Model, tie: &mut Tie, regions: &mut MasterS
     optional_row(
         ui,
         "Position tolerance",
+        "Slave nodes farther than this from the master surface are not tied. Untick to \
+         let CalculiX choose a tolerance from the mesh.",
         &mut tie.position_tolerance,
         0.05,
         length,
     );
     ui.label("");
-    ui.checkbox(&mut tie.adjust, "Move slave nodes onto master (Adjust)");
+    ui.checkbox(&mut tie.adjust, "Move slave nodes onto master (Adjust)")
+        .on_hover_text(ADJUST_HELP);
     ui.end_row();
     regions.ui(ui, model);
     color_row(ui, "Master color", &mut tie.master_color);
@@ -211,9 +220,13 @@ pub fn contact_pair_form(
         .width(200.0)
         .show_ui(ui, |ui| {
             for method in ContactMethod::ALL {
-                ui.selectable_value(&mut pair.method, method, method.name());
+                ui.selectable_value(&mut pair.method, method, method.name())
+                    .on_hover_text(method.summary());
             }
         });
+    ui.end_row();
+    ui.label("");
+    ui.add(egui::Label::new(RichText::new(pair.method.description()).weak()).wrap());
     ui.end_row();
     ui.label("");
     let node_to_surface = pair.method == ContactMethod::NodeToSurface;
@@ -221,19 +234,26 @@ pub fn contact_pair_form(
         node_to_surface,
         egui::Checkbox::new(&mut pair.small_sliding, "Small sliding"),
     )
-    .on_hover_text("Pairing only at the start of each increment; Node to surface only.");
+    .on_hover_text(
+        "Slave nodes are paired with master faces only at the start of each increment and \
+         the pairing is kept during the iterations. Faster and more stable when the surfaces \
+         slide little compared with the element size. Node to surface only.",
+    );
     if !node_to_surface {
         pair.small_sliding = false;
     }
     ui.end_row();
     ui.label("");
-    ui.checkbox(&mut pair.adjust, "Move slave nodes onto master (Adjust)");
+    ui.checkbox(&mut pair.adjust, "Move slave nodes onto master (Adjust)")
+        .on_hover_text(ADJUST_HELP);
     ui.end_row();
     if pair.adjust {
         let length = (model.fe.properties.units, Quantity::Length);
         optional_row(
             ui,
             "Adjust distance",
+            "Slave nodes within this distance of the master surface are moved onto it. \
+             Untick to move only nodes that penetrate the master surface.",
             &mut pair.adjustment_size,
             0.01,
             length,
@@ -436,14 +456,20 @@ fn model_description(property: &InteractionProperty) -> Description {
     match property {
         InteractionProperty::SurfaceBehavior(_) => (
             "Surface Behavior",
-            "Contact pressure as a function of the overclosure of the surfaces.",
+            "Contact pressure as a function of the overclosure (penetration) of the surfaces. \
+             Hard is the usual rigid contact; the other models \
+             define a soft contact with your own curve.",
         ),
-        InteractionProperty::Friction(_) => {
-            ("Friction", "Coulomb friction between the contact surfaces.")
-        }
+        InteractionProperty::Friction(_) => (
+            "Friction",
+            "Coulomb friction: the tangential force is limited to the friction coefficient \
+             times the contact pressure. Adds nonlinearity; use small coefficients first \
+             and enough increments.",
+        ),
         InteractionProperty::GapConductance(_) => (
             "Gap Conductance",
-            "Heat conduction across the gap between the contact surfaces.",
+            "Heat conduction across the gap between the contact surfaces, for thermal and \
+             coupled steps. Without it the contact is thermally insulating.",
         ),
     }
 }
@@ -534,7 +560,11 @@ impl Rows<'_> {
     fn surface_behavior(&mut self, ui: &mut Ui, behavior: &mut SurfaceBehavior) {
         let description = (
             "Pressure-overclosure",
-            "Curve of the contact pressure over the overclosure (pressure-overclosure).",
+            "Hard: no penetration allowed, the usual choice. Linear: pressure grows linearly with \
+             the overclosure, a soft penalty contact. Exponential: pressure rises \
+             exponentially as the gap closes, which helps convergence from open contact. \
+             Tabular: your own curve. Tied: the surfaces stay connected with the stiffness K \
+             (see also Ties).",
         );
         self.row(ui, description, |ui| {
             egui::ComboBox::from_id_salt("pressure overclosure")

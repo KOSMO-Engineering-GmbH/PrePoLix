@@ -308,7 +308,9 @@ impl ContactSearchDialog {
         ui.horizontal_top(|ui| {
             group(ui, "Search Parameters", |ui| {
                 egui::Grid::new("search parameters").show(ui, |ui| {
-                    ui.label("Distance");
+                    ui.label("Distance").on_hover_text(
+                        "Two surfaces count as touching when their gap is smaller than this.",
+                    );
                     let units = model.fe.properties.units;
                     ui.add(
                         numeric::quantity(&mut self.distance, units, Quantity::Length)
@@ -316,7 +318,10 @@ impl ContactSearchDialog {
                             .speed(0.001),
                     );
                     ui.end_row();
-                    ui.label("Angle");
+                    ui.label("Angle").on_hover_text(
+                        "Largest angle between the normals of two touching faces. 35 degrees \
+                         skips faces that only meet at a sharp edge.",
+                    );
                     ui.add(
                         numeric::drag_value(&mut self.angle)
                             .range(0.0..=180.0)
@@ -324,7 +329,10 @@ impl ContactSearchDialog {
                             .suffix(" °"),
                     );
                     ui.end_row();
-                    ui.label("Group by");
+                    ui.label("Group by").on_hover_text(
+                        "None: one pair per touching face pair. Parts: one pair per pair of \
+                         parts. Graph: merges surfaces so that each node is slave only once.",
+                    );
                     egui::ComboBox::from_id_salt("group by")
                         .selected_text(group_label(self.group_by))
                         .show_ui(ui, |ui| {
@@ -368,7 +376,11 @@ impl ContactSearchDialog {
             });
             group(ui, "Contact Pair Parameters", |ui| {
                 egui::Grid::new("pair parameters").show(ui, |ui| {
-                    ui.label("Type");
+                    ui.label("Type").on_hover_text(
+                        "Tie glues the surfaces together without sliding or separation. \
+                         Contact lets them touch, slide and separate, as defined by the \
+                         Surface Interaction.",
+                    );
                     egui::ComboBox::from_id_salt("pair type")
                         .selected_text(self.kind.label())
                         .show_ui(ui, |ui| {
@@ -383,12 +395,15 @@ impl ContactSearchDialog {
                         interaction_combo(ui, "search interaction", &mut self.interaction, model);
                     });
                     ui.end_row();
-                    ui.label("Method");
+                    ui.label("Method").on_hover_text(self.method.description());
                     ui.add_enabled_ui(contact, |ui| {
                         method_combo(ui, "search method", &mut self.method);
                     });
                     ui.end_row();
-                    ui.label("Adjust mesh");
+                    ui.label("Adjust mesh").on_hover_text(
+                        "Moves slave nodes onto the master surface at the start, so that \
+                         meshing gaps and overlaps do not disturb the contact.",
+                    );
                     yes_no(ui, "search adjust", &mut self.adjust);
                     ui.end_row();
                 });
@@ -869,7 +884,8 @@ fn method_combo(ui: &mut Ui, id: &str, method: &mut ContactMethod) {
         .selected_text(method.name())
         .show_ui(ui, |ui| {
             for choice in METHODS {
-                ui.selectable_value(method, choice, choice.name());
+                ui.selectable_value(method, choice, choice.name())
+                    .on_hover_text(choice.description());
             }
         });
 }

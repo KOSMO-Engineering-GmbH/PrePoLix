@@ -57,12 +57,19 @@ pairs refer to. Move the models you need from #ui("Available") to #ui("Selected"
 #screenshot("surface-interaction.png", [Surface interaction with surface behaviour])
 
 #fields(
-  [Surface Behavior], [Pressure-overclosure relation: #ui("Hard"), #ui("Linear") (stiffness K and
-    tension at large clearance σ#sub[∞]), #ui("Exponential") (c#sub[0], p#sub[0]),
-    #ui("Tabular") (pressure over overclosure) or #ui("Tied") (stiffness K).],
-  [Friction], [#ui("Friction coefficient") and the optional #ui("Stick slope").],
+  [Surface Behavior], [Pressure-overclosure relation, the contact pressure over the overclosure
+    (penetration) of the surfaces. #ui("Hard") is the usual rigid contact. The others are soft
+    contacts: #ui("Linear") (stiffness K, about 5 to 50 times Young's modulus per length, and
+    tension at large clearance σ#sub[∞]), #ui("Exponential") (pressure p#sub[0] at zero gap,
+    dropping to 1 % at gap c#sub[0]; helps convergence from open contact), #ui("Tabular") (your
+    own curve) or #ui("Tied") (the surfaces stay connected with stiffness K).],
+  [Friction], [Coulomb friction: the tangential force is limited to #ui("Friction coefficient")
+    times the contact pressure. The optional #ui("Stick slope") is the stiffness while sticking;
+    CalculiX chooses it if empty. Friction makes the analysis more nonlinear, so start with
+    small coefficients and enough increments.],
   [Gap Conductance], [Heat transfer across the contact, constant or as a table over pressure
-    and temperature.],
+    and temperature, for thermal and coupled steps. Without it the contact is thermally
+    insulating.],
 )
 
 === Contact pairs
@@ -70,13 +77,22 @@ pairs refer to. Move the models you need from #ui("Available") to #ui("Selected"
 #menu("Interaction", "Create Contact Pair ...") creates a contact between a master and a slave
 surface.
 
+#screenshot("contact-pair.png", [Create Contact Pair; the grey text below #ui("Method") explains
+  the chosen method])
+
 #fields(
   [Surface Interaction], [The contact behaviour (see above).],
-  [Method], [#ui("Node to surface"), #ui("Surface to surface") (default), #ui("Mortar") or
-    #ui("Massless").],
-  [Small sliding], [For node-to-surface contact with small relative movement.],
-  [Adjust], [Moves slave nodes within #ui("Adjust distance") onto the master surface.],
-  [Master / Slave], [The two surfaces, picked with their #ui("...") buttons.],
+  [Method], [How CalculiX enforces the contact, see the table below. All contact pairs of a
+    model must use the same method.],
+  [Small sliding], [Slave nodes are paired with master faces only at the start of each
+    increment and the pairing is kept during the iterations. This is faster and more stable when
+    the surfaces slide little compared with the element size. Only for #ui("Node to surface").],
+  [Adjust], [Moves slave nodes onto the master surface before the analysis, so that small gaps
+    or overlaps from meshing do not start the contact with a jump. With #ui("Adjust distance")
+    all slave nodes within that distance are moved; without it only nodes that penetrate the
+    master surface. Only the start geometry changes, not the real geometry.],
+  [Master / Slave], [The two surfaces, picked with their #ui("...") buttons. Choose the finer
+    mesh as slave.],
 )
 
 In 3D models the master and slave regions can also be edges of shells and membranes, where a
@@ -84,6 +100,32 @@ shell meets a solid face edge on: a click near a free edge of a shell picks the 
 #ui("Edge angle") and, under #ui("More"), #ui("Edge"). CalculiX takes such an edge as a face of
 the shell (S3 and up). For a contact on a shell edge use #ui("Surface to surface") with a
 #ui("Tied") surface behavior; CalculiX needs a #ui("Stick slope") under #ui("Friction") for it.
+
+==== Which method?
+
+#fields(
+  [Node to surface], [Each slave node is kept outside the master surface. Works with nodes or
+    faces as slave and in all step types, including dynamics. Master nodes may poke through the
+    slave surface and the pressure is noisy, so the finer mesh must be the slave. Best with linear
+    elements and for explicit dynamics.],
+  [Surface to surface], [Face-to-face penalty contact (default). The contact condition is
+    integrated over the slave faces, so the slave must consist of element faces. Smoother
+    pressures and better convergence than node to surface, especially with quadratic elements.
+    Slower per iteration. A good choice for static contact.],
+  [Mortar], [Face-to-face mortar contact. The most accurate contact pressure and little
+    dependence on which side is master, which matters when you read contact pressures. Static
+    steps only, element-face surfaces required, and the slowest method. Try it if surface to
+    surface gives oscillating pressures; it is not meant for dynamics.],
+  [Massless], [Massless node-to-face contact for explicit dynamics. Use it only in explicit
+    dynamic steps.],
+)
+
+#note[The method is a CalculiX feature. See the sections on contact in the CalculiX manual
+  (node-to-face, face-to-face penalty, face-to-face mortar and massless contact) for the exact
+  formulations and limits.]
+
+Hover over a method in the list to see a short description. The Search Contact Pairs window shows
+the same texts.
 
 === Ties
 
@@ -118,7 +160,8 @@ creates ties or contact pairs for them.
 #screenshot("contact-search.png", [Search Contact Pairs])
 
 #fields(
-  [Distance], [Surfaces closer than this count as touching (default 0.01 mm).],
+  [Distance], [Surfaces closer than this count as touching (default 0.01 mm). For a tie it also
+    becomes the position tolerance, for a contact the adjust distance.],
   [Angle], [Largest angle between the surface normals (default 35°).],
   [Group by], [#ui("None"): one pair per touching surface pair. #ui("Parts") (default): one pair
     per pair of parts. #ui("Graph"): merges surfaces so that each node is slave only once.],

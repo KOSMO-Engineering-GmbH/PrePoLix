@@ -17,8 +17,15 @@ selected at once. Gmsh with OpenCASCADE reads the files, so Gmsh must be availab
   are read as they are.
 - Default element sizes are derived from the size of the geometry: maximum 5 % and minimum 0.1 %
   of the bounding box diagonal.
+- Parts keep the names they have in the CAD program, as STEP files from Onshape, SolidWorks or
+  FreeCAD carry them, for solids and for surface parts alike. The names are made fit for
+  CalculiX: upper case, letters, digits, `-` and `_`, German umlauts written out (`Stütze`
+  becomes `STUETZE`). A name that is already taken gets a number appended (`OBEN-2`). Parts
+  without a name in the file are called `SOLID-1`, `SHELL-1` or `LINE-1`.
 
 #screenshot("geometry.png", [Imported geometry on the Geometry tab])
+
+#screenshot("step-part-names.png", [Parts of a STEP file with the names from the CAD program])
 
 === Importing a mesh <mesh-import>
 

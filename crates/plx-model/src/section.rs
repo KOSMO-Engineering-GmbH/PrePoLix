@@ -47,8 +47,9 @@ pub enum SectionKind {
     Shell { thickness: f64, offset: f64 },
     /// Surface elements of a 3D model as membranes (`*MEMBRANE SECTION`): like a shell, but
     /// carrying in-plane forces only, without bending stiffness or rotations. The elements
-    /// must be linear membranes, `M3D3`, `M3D4` or `M3D4R`, chosen as the part's element
-    /// type; see [`crate::element_type_options`] for why quadratic ones are refused.
+    /// must be linear: membranes `M3D3`, `M3D4` or `M3D4R`, or linear shells, which are
+    /// written as these (see [`membrane_type`]); see [`crate::element_type_options`] for
+    /// why quadratic ones are refused.
     Membrane { thickness: f64, offset: f64 },
 }
 
@@ -161,11 +162,13 @@ impl SectionKind {
                     element.id
                 ))
             }
-            SectionKind::Membrane { .. } if !membrane => Some(format!(
-                "Element {} is a {} element; a Membrane Section needs membrane \
-                 elements, choose an M3D element type for its part",
-                element.id, element.type_name
-            )),
+            SectionKind::Membrane { .. } if !membrane && membrane_type(&upper).is_none() => {
+                Some(format!(
+                    "Element {} is a {} element; a Membrane Section needs triangles or \
+                     quads of a 3D model",
+                    element.id, element.type_name
+                ))
+            }
             SectionKind::Membrane { .. } => None,
             _ if !line => Some(format!("Element {} is not a line element", element.id)),
             SectionKind::Beam(beam)
@@ -180,6 +183,18 @@ impl SectionKind {
             }
             _ => None,
         }
+    }
+}
+
+/// The membrane a linear shell is written as under a membrane section: `S3` becomes `M3D3`,
+/// `S4` `M3D4` and `S4R` `M3D4R`. Quadratic shells have none; CalculiX gets quadratic
+/// membranes wrong.
+pub fn membrane_type(shell_type: &str) -> Option<&'static str> {
+    match shell_type.to_ascii_uppercase().as_str() {
+        "S3" => Some("M3D3"),
+        "S4" => Some("M3D4"),
+        "S4R" => Some("M3D4R"),
+        _ => None,
     }
 }
 
@@ -432,9 +447,12 @@ mod tests {
                     .is_some()
             );
         }
+        // Linear shells are written as membranes.
+        assert_eq!(membrane.rejects(&element("S4R", ElementShape::Quad4)), None);
+        assert_eq!(membrane_type("S4R"), Some("M3D4R"));
         assert!(
             membrane
-                .rejects(&element("S4", ElementShape::Quad4))
+                .rejects(&element("S8", ElementShape::Quad8))
                 .is_some()
         );
         assert!(

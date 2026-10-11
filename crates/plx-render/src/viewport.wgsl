@@ -6,7 +6,8 @@ struct Globals {
     view_dir: vec4<f32>,
     background_top: vec4<f32>,
     background_bottom: vec4<f32>,
-    // x: depth offset of edges towards the viewer, about one and a half pixels.
+    // x, y: target size in pixels; z: width of wide edges in pixels; w: their pull towards the
+    // viewer, half their width.
     edge: vec4<f32>,
     // x: number of contour bands, 0 to show part colours.
     contour: vec4<f32>,
@@ -126,13 +127,11 @@ struct EdgeOut {
     @location(1) world: vec3<f32>,
 };
 
-// Edges lie exactly on surface triangles; pulling them slightly towards the viewer keeps them from
-// flickering in and out of the depth test (polygon offset alone is too weak for a float depth buffer).
-// The offset is a fixed number of pixels, so it never reaches through thin walls.
+// Edges lie exactly on surface triangles; the surfaces are pushed back behind them by a
+// slope-scaled depth bias (EDGE_OFFSET_PX of renderer.rs), so they pass the depth test.
 fn edge_vertex(position: vec3<f32>, color: vec4<f32>) -> EdgeOut {
     var out: EdgeOut;
     out.position = globals.view_proj * vec4<f32>(position, 1.0);
-    out.position.z -= globals.edge.x * out.position.w;
     out.color = color;
     out.world = position;
     return out;
@@ -167,7 +166,7 @@ fn vs_wide_edge(
         globals.view_proj * vec4<f32>(a, 1.0),
         globals.view_proj * vec4<f32>(b, 1.0),
     );
-    let size = globals.edge.yz;
+    let size = globals.edge.xy;
     let screen_a = ends[0].xy / ends[0].w * size;
     let screen_b = ends[1].xy / ends[1].w * size;
     var along = screen_b - screen_a;
@@ -181,10 +180,12 @@ fn vs_wide_edge(
     let forward = f32(end) * 2.0 - 1.0;
     // Half the width to each side and beyond each end, so that segments join without gaps;
     // NDC spans two units across the target.
-    let offset = (across * side + along * forward) * globals.edge.w / size;
+    let offset = (across * side + along * forward) * globals.edge.z / size;
     var out: EdgeOut;
     out.position = ends[end];
-    out.position.z -= globals.edge.x * out.position.w;
+    // The quad reaches half its width into the faces beside the line, further than the depth
+    // bias of a face sloping away from the viewer covers.
+    out.position.z -= globals.edge.w * out.position.w;
     out.position = vec4<f32>(out.position.xy + offset * out.position.w, out.position.zw);
     out.color = vec4<f32>(color, 1.0);
     out.world = select(a, b, end == 1u);

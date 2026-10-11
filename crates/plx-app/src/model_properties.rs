@@ -427,6 +427,7 @@ mod tests {
         let display = plx_mesher::GeometryDisplay {
             mesh,
             entities: vec![CadEntity::Face(1), CadEntity::Face(2)],
+            part_dimensions: vec![2, 2],
             solids,
             faces: 2,
             edges: 0,
