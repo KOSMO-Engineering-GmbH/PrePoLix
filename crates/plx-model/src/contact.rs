@@ -159,6 +159,53 @@ impl ContactMethod {
     }
 }
 
+impl ContactMethod {
+    /// One line for the tooltip of the method list and the search dialog.
+    pub fn summary(self) -> &'static str {
+        match self {
+            ContactMethod::NodeToSurface => {
+                "Slave nodes against master faces. Fast and robust; the default of many solvers."
+            }
+            ContactMethod::SurfaceToSurface => {
+                "Penalty contact integrated over the slave faces. Smoother pressures than node to surface."
+            }
+            ContactMethod::Mortar => {
+                "Mortar contact. Most accurate pressures, but for static steps only."
+            }
+            ContactMethod::Massless => "Massless node-to-face contact for explicit dynamics only.",
+        }
+    }
+
+    /// When to use the method, its strengths, weaknesses and requirements.
+    pub fn description(self) -> &'static str {
+        match self {
+            ContactMethod::NodeToSurface => {
+                "Each slave node is kept outside the master surface. Works with nodes or faces as \
+                 slave and with all step types, including dynamics. Master nodes may poke \
+                 through the slave surface, and the pressure is noisy, so choose the finer mesh \
+                 as slave. Recommended with linear elements and for explicit dynamics."
+            }
+            ContactMethod::SurfaceToSurface => {
+                "Face-to-face penalty contact: the contact condition is integrated over the \
+                 faces of the slave surface, which must therefore consist of element faces. \
+                 Pressures are smoother and the solution converges better than with node to \
+                 surface, especially with quadratic elements (C3D10, C3D20). Slower per \
+                 iteration. A good default for static contact."
+            }
+            ContactMethod::Mortar => {
+                "Face-to-face mortar contact. The most accurate contact pressure and little \
+                 dependence on which side is master. It can only be used in static steps and \
+                 needs element-face surfaces; try it when Surface to surface gives \
+                 oscillating pressures. Slowest of the methods."
+            }
+            ContactMethod::Massless => {
+                "Node-to-face contact without contact stiffness mass, designed for explicit \
+                 dynamics (Dynamic step with explicit integration). Use it only there."
+            }
+        }
+    }
+}
+
 /// Two surfaces that may touch (`*CONTACT PAIR`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContactPair {
