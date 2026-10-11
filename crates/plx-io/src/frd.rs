@@ -156,7 +156,14 @@ impl<'a> Reader<'a> {
                 i.step == block.step && i.increment == block.increment && i.kind == block.kind
             });
             match target {
-                Some(target) => target.fields.push(field),
+                Some(target) => {
+                    // The surface normals of a sensitivity step come without the frequency
+                    // of the first mode.
+                    if target.value == 0.0 {
+                        target.value = block.value;
+                    }
+                    target.fields.push(field);
+                }
                 None => self.import.increments.push(Increment {
                     step: block.step,
                     increment: block.increment,
@@ -371,17 +378,6 @@ impl<'a> Reader<'a> {
             increment: 1,
             mode: None,
         });
-        let kind = match int_field(header, 56..58).unwrap_or(0) {
-            0 => AnalysisKind::Static,
-            1 => AnalysisKind::Dynamic,
-            2 => AnalysisKind::Frequency,
-            // CalculiX writes 3 for every other procedure; with a mode number it is a
-            // complex frequency step.
-            3 if step.mode.is_some() => AnalysisKind::ComplexFrequency,
-            4 => AnalysisKind::Buckling,
-            other => AnalysisKind::Other(other),
-        };
-
         let field_line = self
             .next_line()
             .ok_or_else(|| self.error("Result block ends after the header"))?;
@@ -390,6 +386,18 @@ impl<'a> Reader<'a> {
             .nth(1)
             .unwrap_or("UNBEKANNT")
             .to_string();
+        let kind = match int_field(header, 56..58).unwrap_or(0) {
+            0 => AnalysisKind::Static,
+            1 => AnalysisKind::Dynamic,
+            2 => AnalysisKind::Frequency,
+            // CalculiX writes 3 for every other procedure; with a mode number it is a
+            // complex frequency step, with the surface normals and sensitivities a
+            // sensitivity step.
+            3 if step.mode.is_some() => AnalysisKind::ComplexFrequency,
+            3 if field_name == "NORM" || field_name.starts_with("SEN") => AnalysisKind::Sensitivity,
+            4 => AnalysisKind::Buckling,
+            other => AnalysisKind::Other(other),
+        };
         let declared = int_field(&field_line, 13..18).unwrap_or(0).max(0) as usize;
         let mut names = Vec::new();
         for _ in 0..declared {
@@ -422,6 +430,14 @@ impl<'a> Reader<'a> {
         let increment = match (kind, step.mode) {
             (AnalysisKind::Frequency | AnalysisKind::ComplexFrequency, Some(mode)) => mode,
             (AnalysisKind::Buckling, _) => self.buckling_increment(header, step.step, value),
+            // Every eigenfrequency gets a SENFREQ block of increment 1; they become one
+            // increment per mode, as in the frequency step before.
+            (AnalysisKind::Sensitivity, _) if field_name == "SENFREQ" => {
+                let modes = (self.blocks.iter())
+                    .filter(|b| b.step == step.step && b.field_name == "SENFREQ")
+                    .count();
+                modes as u32 + 1
+            }
             _ if step.increment == 0 => int_field(header, 58..63)
                 .map(|n| n.max(0) as u32)
                 .unwrap_or(0),

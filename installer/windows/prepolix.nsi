@@ -45,7 +45,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "GNU GPL 3.0 or later"
 !define MUI_ABORTWARNING
 !define MUI_COMPONENTSPAGE_SMALLDESC
 
-!define MUI_WELCOMEPAGE_TEXT "This wizard installs ${APPNAME} ${VERSION}, a pre- and postprocessor for CalculiX.$\r$\n$\r$\nThe CalculiX solver (ccx) is not included. Set its path after installation under Tools > Settings.$\r$\n$\r$\n$_CLICK"
+!define MUI_WELCOMEPAGE_TEXT "This wizard installs ${APPNAME} ${VERSION}, a pre- and postprocessor for CalculiX.$\r$\n$\r$\nThe CalculiX solver (ccx) is included, so analyses run right after installation. Another CalculiX can be set under Tools > Settings.$\r$\n$\r$\n$_CLICK"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${STAGE}\LICENSE.txt"
 !insertmacro MUI_PAGE_COMPONENTS
@@ -90,6 +90,10 @@ Section "${APPNAME} (required)" SecApp
   ; The offline user guide that Help > User Guide opens.
   SetOutPath "$INSTDIR\doc"
   File "${STAGE}\doc\user-guide.html"
+  ; CalculiX with its DLLs, used when no other CalculiX is set. An update replaces it whole.
+  RMDir /r "$INSTDIR\ccx"
+  SetOutPath "$INSTDIR\ccx"
+  File /r "${STAGE}\ccx\*.*"
   SetOutPath "$INSTDIR"
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -144,7 +148,7 @@ Section "Open .plx projects with ${APPNAME}" SecAssociation
 SectionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
-  !insertmacro MUI_DESCRIPTION_TEXT ${SecApp} "The program with the Gmsh library for geometry import and meshing."
+  !insertmacro MUI_DESCRIPTION_TEXT ${SecApp} "The program with the Gmsh library for geometry import and meshing and the CalculiX solver."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecStartMenu} "Start menu entry for all users."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecDesktop} "Desktop icon for all users."
   !insertmacro MUI_DESCRIPTION_TEXT ${SecAssociation} "Double-clicking a .plx file opens it in ${APPNAME}."
@@ -167,6 +171,7 @@ Section "Uninstall"
   Delete "$INSTDIR\SOURCE.txt"
   RMDir /r "$INSTDIR\licenses"
   RMDir /r "$INSTDIR\doc"
+  RMDir /r "$INSTDIR\ccx"
   ; The work directory prepolix creates next to itself when it may write there.
   RMDir /r "$INSTDIR\Temp"
   Delete "$INSTDIR\uninstall.exe"
