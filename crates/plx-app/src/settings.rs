@@ -170,10 +170,8 @@ impl Solver {
     /// tested now, a few hundredths of a second each.
     pub fn unknown_keywords(&mut self, keywords: &[String]) -> Vec<String> {
         use plx_io::inp::keywords::normalized;
-        let solver = plx_job::Solver {
-            executable: clean_path(&self.executable).into(),
-            threads: 1,
-        };
+        // An empty executable means the bundled CalculiX, see `job_solver`.
+        let solver = self.job_solver();
         let version = crate::solver_check::version_text(&solver.executable);
         if (self.keywords.as_ref())
             .is_none_or(|k| k.executable != self.executable || k.version != version)
