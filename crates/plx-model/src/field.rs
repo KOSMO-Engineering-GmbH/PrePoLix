@@ -71,7 +71,7 @@ impl OutputKind {
     /// `ElementFieldVariable`, `ContactFieldVariable`).
     pub fn choices(self) -> &'static [&'static str] {
         match self {
-            Self::Node => &["RF", "U", "PU", "V", "NT", "PNT", "RFL"],
+            Self::Node => &["RF", "U", "PU", "V", "NT", "PNT", "RFL", "SEN"],
             Self::Element => &[
                 "S", "PHS", "E", "ME", "PEEQ", "ENER", "HFL", "ERR", "HER", "ZZS", "SDV",
             ],
@@ -118,6 +118,7 @@ pub fn output_variable_description(variable: &str) -> &'static str {
         "NT" => "Temperatures.",
         "PNT" => "Temperatures magnitude and phase.",
         "RFL" => "External concentrated heat sources.",
+        "SEN" => "Sensitivities of the design responses (sensitivity steps only).",
         "S" => "Stresses.",
         "PHS" => "Stresses magnitude and phase.",
         "E" => "Total strains.",
@@ -220,6 +221,12 @@ impl FieldOutput {
         outputs[0].variables = ["RF", "U", "V"].map(String::from).to_vec();
         outputs[1].variables = ["S", "E", "ENER"].map(String::from).to_vec();
         outputs
+    }
+
+    /// Field outputs of a new sensitivity step: the sensitivities only, as the step
+    /// computes no displacements or stresses of its own.
+    pub fn sensitivity_defaults() -> Vec<Self> {
+        vec![Self::new("NF-Output-1", OutputKind::Node, &["SEN"])]
     }
 
     /// Field outputs PrePoMax adds to a new coupled temperature-displacement step.

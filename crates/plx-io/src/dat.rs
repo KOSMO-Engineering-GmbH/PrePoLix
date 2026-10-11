@@ -419,6 +419,32 @@ pub fn parse_dat(text: &str) -> DatImport {
             }
             continue;
         }
+        // A sensitivity step lists each design response with its value and the length of
+        // its gradient: "STRAINENERGY  0.67E+01  0.17E-01  STRAINENERGY".
+        if trimmed.starts_with("D E S I G N   R E S P O N S E")
+            && trimmed.ends_with("I N F O R M A T I O N")
+        {
+            let set = format!("STEP_{step}");
+            let row = data.row(step, 1, 0.0);
+            while i < lines.len() {
+                let line = lines[i].trim();
+                let tokens: Vec<&str> = line.split_whitespace().collect();
+                let numbers = (tokens.get(1).and_then(|t| t.parse::<f64>().ok()))
+                    .zip(tokens.get(2).and_then(|t| t.parse::<f64>().ok()));
+                if let Some((value, gradient)) = numbers {
+                    let name = tokens.get(3).unwrap_or(&tokens[0]);
+                    data.add(&set, "DESIGN_RESPONSE", name, name, row, value);
+                    data.add(&set, "GRADIENT_LENGTH", name, name, row, gradient);
+                } else if !(line.is_empty()
+                    || line.starts_with('#')
+                    || line.starts_with("FUNCTION"))
+                {
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
         let modal = [
             (
                 "P A R T I C I P A T I O N   F A C T O R S",

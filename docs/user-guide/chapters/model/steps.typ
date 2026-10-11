@@ -97,7 +97,7 @@ a variable shows what it is.
 #fields(
   [Type], [#ui("Node Output"), #ui("Element Output") or #ui("Contact Output"); chosen when the
     output is created.],
-  [Variables], [Node: `RF U PU V NT PNT RFL`. Element: `S PHS E ME PEEQ ENER HFL ERR HER ZZS SDV`;
+  [Variables], [Node: `RF U PU V NT PNT RFL SEN` (`SEN` in sensitivity steps only). Element: `S PHS E ME PEEQ ENER HFL ERR HER ZZS SDV`;
     `ERR` and `HER` exclude `ZZS`. Contact: `CDIS CSTR CELS PCON`.],
   [Last iterations], [#ui("On") writes every iteration of the last increment, to find out why a
     solution diverges.],
