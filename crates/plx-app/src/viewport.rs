@@ -12,7 +12,8 @@ const ZOOM_PER_DRAG_POINT: f32 = 0.01;
 
 /// The 3D view: owns the GPU renderer and the camera and maps mouse input to camera moves.
 ///
-/// Left drag rotates, right or middle drag pans, the wheel zooms.
+/// The middle button rotates about the model point under the cursor, with Shift it pans and
+/// with Ctrl it zooms; the wheel zooms about the cursor.
 pub struct Viewport {
     render_state: RenderState,
     renderer: ViewportRenderer,
@@ -44,6 +45,10 @@ pub struct Viewport {
     gizmo_state: GizmoState,
     /// Counts scene replacements; section faces have to be rebuilt for each new scene.
     scene_version: u64,
+    /// The point of the model the camera rotates about while the middle button is held; the
+    /// owner sets it from [`ViewportResponse::pivot`]. Without one the camera turns about
+    /// its target.
+    pivot: Option<Vec3>,
 }
 
 /// Lines and points in render coordinates drawn as the hover preview.
@@ -82,6 +87,9 @@ const HOVER_DELAY_SECONDS: f64 = 0.2;
 
 /// PrePoMax's colour of the hover preview.
 const PREVIEW_COLOR: Color32 = Color32::from_rgb(255, 175, 0);
+
+/// Colour of the marker at the rotation pivot.
+const PIVOT_COLOR: Color32 = Color32::from_rgb(220, 30, 30);
 
 /// A click into the scene as a ray in render coordinates.
 #[derive(Clone, Copy, Debug)]
@@ -127,6 +135,9 @@ pub struct ViewportResponse {
     pub path_plots: Vec<crate::path_plot::PlotEvent>,
     /// The legend asked for the colour scale dialog.
     pub edit_legend: bool,
+    /// The middle button was pressed here: the owner answers with
+    /// [`Viewport::set_pivot`] to rotate about the model point under the cursor.
+    pub pivot: Option<Click>,
 }
 
 /// The view entries of the 3D view's context menu.
@@ -222,7 +233,14 @@ impl Viewport {
             gizmo: None,
             gizmo_state: GizmoState::default(),
             scene_version: 0,
+            pivot: None,
         }
+    }
+
+    /// Sets the point the camera rotates about until the middle button is released; `None`
+    /// rotates about the target, e.g. when the cursor points into empty space.
+    pub fn set_pivot(&mut self, pivot: Option<Vec3>) {
+        self.pivot = pivot;
     }
 
     pub fn camera(&self) -> &Camera {
@@ -307,6 +325,24 @@ impl Viewport {
         let free = !self.gizmo_state.dragging();
         let modifiers = ui.input(|i| i.modifiers);
         let ctrl = modifiers.ctrl || modifiers.command;
+        // The rotation pivot is picked when the middle button goes down, before the drag
+        // starts, so the owner can answer in time.
+        let (middle_pressed, middle_down) = ui.input(|i| {
+            (
+                i.pointer.button_pressed(PointerButton::Middle),
+                i.pointer.button_down(PointerButton::Middle),
+            )
+        });
+        if middle_pressed
+            && response.hovered()
+            && let Some(pointer) = ui.input(|i| i.pointer.interact_pos())
+        {
+            self.pivot = None;
+            result.pivot = Some(self.click_at(rect, pointer, modifiers));
+        }
+        if !middle_down && !response.dragged_by(PointerButton::Middle) {
+            self.pivot = None;
+        }
         // PrePoMax's mouse: the middle button rotates, with Shift it pans and with Ctrl it zooms;
         // the left button picks and draws selection boxes, the right one opens the context menu.
         if response.dragged_by(PointerButton::Middle) {
@@ -315,6 +351,8 @@ impl Viewport {
             } else if modifiers.shift {
                 self.camera
                     .pan(delta.x, delta.y, rect.width(), rect.height());
+            } else if let Some(pivot) = self.pivot {
+                self.camera.orbit_about(pivot, delta.x, delta.y);
             } else {
                 self.camera.orbit(delta.x, delta.y);
             }
@@ -383,6 +421,7 @@ impl Viewport {
                 dragged_box = None;
             }
         }
+        let orbiting = response.dragged_by(PointerButton::Middle) && !ctrl && !modifiers.shift;
         result.hover = self.hover(ui, rect, &response);
         result.response = Some(response);
 
@@ -419,6 +458,16 @@ impl Viewport {
         result.annotation = clicked.annotation;
         result.edit_legend = clicked.edit_legend;
         result.path_plots = crate::path_plot::draw(ui, rect, &self.camera, &mut self.path_plots);
+        if let Some(pivot) = self.pivot.filter(|_| orbiting) {
+            // A small marker shows the point the view turns about.
+            let center = overlay::project(&self.camera, rect, pivot);
+            painter.circle(
+                center,
+                4.0,
+                PIVOT_COLOR,
+                egui::Stroke::new(1.5, Color32::WHITE),
+            );
+        }
         if let Some(gizmo) = &self.gizmo {
             self.gizmo_state.draw(&painter, gizmo, &self.camera, rect);
         }

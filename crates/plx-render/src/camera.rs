@@ -110,6 +110,15 @@ impl Camera {
         self.rotation = (yaw * pitch * self.rotation).normalize();
     }
 
+    /// Rotates the view like [`Camera::orbit`], but about `pivot`: the pivot keeps its place
+    /// on the screen, so a detail far from the target stays in view.
+    pub fn orbit_about(&mut self, pivot: Vec3, dx_px: f32, dy_px: f32) {
+        let before = self.rotation;
+        self.orbit(dx_px, dy_px);
+        let turn = self.rotation * before.inverse();
+        self.target = pivot + turn * (self.target - pivot);
+    }
+
     /// Moves the target so that the scene follows a mouse drag in pixels.
     pub fn pan(&mut self, dx_px: f32, dy_px: f32, viewport_width_px: f32, viewport_height_px: f32) {
         let world_per_pixel = self.pixel_size(viewport_width_px, viewport_height_px);
@@ -285,6 +294,20 @@ mod tests {
                 assert!((0.0..=1.0).contains(&ndc.z), "{ndc}");
             }
         }
+    }
+
+    #[test]
+    fn orbit_about_keeps_the_pivot_on_the_screen() {
+        let mut camera = Camera::default();
+        camera.fit(Vec3::new(-15.0, -1.0, -1.0), Vec3::new(15.0, 1.0, 1.0));
+        camera.zoom_at(0.01, 300.0, -40.0, 800.0, 600.0);
+        let pivot = Vec3::new(14.0, 0.5, 0.8);
+        let before = camera.view_proj(1.5).project_point3(pivot);
+        let distance = camera.distance;
+        camera.orbit_about(pivot, 120.0, -45.0);
+        let after = camera.view_proj(1.5).project_point3(pivot);
+        assert!((after.x - before.x).abs() < 1e-3 && (after.y - before.y).abs() < 1e-3);
+        assert_eq!(camera.distance, distance);
     }
 
     #[test]
