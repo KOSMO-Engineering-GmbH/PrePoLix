@@ -1055,3 +1055,236 @@ fn part_names_are_calculix_names() {
     assert!(!is_default_name("SOLID-A"));
     assert!(!is_default_name("OBEN"));
 }
+
+fn extrude_item(faces: Vec<i32>, layers: plx_model::ExtrudeLayers) -> MeshSetupItem {
+    MeshSetupItem {
+        name: "Extrude_Mesh-1".into(),
+        kind: MeshSetupKind::ExtrudeMesh(plx_model::ExtrudeMesh {
+            parts: vec!["SOLID-1".into()],
+            faces,
+            layers,
+            ..Default::default()
+        }),
+    }
+}
+
+/// Checks that the outer element faces are the faces the CAD map records, with their nodes.
+fn check_cad_map(mesh: &FeMesh, display: &GeometryDisplay) {
+    let cad = &mesh.cad;
+    assert_eq!(cad.faces.len(), display.faces);
+    assert_eq!(cad.segments.len(), display.edges);
+    let mut count: HashMap<Vec<NodeId>, usize> = HashMap::new();
+    for element in mesh.elements() {
+        for face in element.faces() {
+            let mut corners: Vec<NodeId> = face.corners.iter().map(|&i| element.nodes[i]).collect();
+            corners.sort_unstable();
+            *count.entry(corners).or_default() += 1;
+        }
+    }
+    let outer = count.values().filter(|&&n| n == 1).count();
+    let on_cad: usize = cad.faces.values().map(Vec::len).sum();
+    assert_eq!(on_cad, outer);
+    for (&tag, faces) in &cad.faces {
+        let nodes: BTreeSet<NodeId> = (faces.iter())
+            .flat_map(|&(e, f)| {
+                let element = mesh.element(e).unwrap();
+                let face = &element.faces()[usize::from(f) - 1];
+                let mids = if element.shape.is_quadratic() {
+                    face.mids
+                } else {
+                    &[]
+                };
+                let local = face.corners.iter().chain(mids);
+                local.map(|&i| element.nodes[i]).collect::<Vec<_>>()
+            })
+            .collect();
+        let recorded: BTreeSet<NodeId> = cad.nodes[&CadEntity::Face(tag)].iter().copied().collect();
+        assert_eq!(nodes, recorded, "Face {tag}");
+    }
+    for (&tag, segments) in &cad.segments {
+        assert!(!segments.is_empty(), "Edge {tag}");
+        // An open edge has a node more than segments, a closed one as many.
+        assert!(
+            cad.nodes[&CadEntity::Edge(tag)].len() >= segments.len(),
+            "Edge {tag}"
+        );
+    }
+    assert!(cad.nodes.keys().any(|e| matches!(e, CadEntity::Vertex(_))));
+}
+
+#[test]
+fn extruded_parts_are_meshed_with_hexahedra_in_layers() {
+    if !gmsh_available() {
+        return;
+    }
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC).unwrap();
+    let mut geometry = import.geometry;
+    geometry.meshing.max_size = 4.0;
+    for second_order in [false, true] {
+        geometry.meshing.second_order = second_order;
+        // The source is found: the face with the hole, swept through the 10 mm.
+        geometry.mesh_items = vec![extrude_item(
+            vec![],
+            plx_model::ExtrudeLayers::NumberOfElements(3),
+        )];
+        let mesh = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+        let (hex, wedge) = if second_order {
+            (ElementShape::Hex20, ElementShape::Wedge15)
+        } else {
+            (ElementShape::Hex8, ElementShape::Wedge6)
+        };
+        assert!(
+            mesh.elements()
+                .iter()
+                .all(|e| e.shape == hex || e.shape == wedge)
+        );
+        let hexes = mesh.elements().iter().filter(|e| e.shape == hex).count();
+        assert!(
+            hexes * 2 > mesh.element_count(),
+            "mostly hexahedra: {hexes}"
+        );
+        assert_eq!(mesh.element_count() % 3, 0);
+        for element in mesh.elements() {
+            let jacobian = element.min_jacobian(&mesh).unwrap();
+            assert!(jacobian > 0.0, "{} {jacobian}", element.id);
+        }
+        // Three layers through the thickness of 10.
+        let mut heights: Vec<f64> = mesh.coords().iter().map(|c| c[2]).collect();
+        heights.sort_by(f64::total_cmp);
+        heights.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+        assert_eq!(
+            heights.len(),
+            if second_order { 7 } else { 4 },
+            "{heights:?}"
+        );
+        check_cad_map(&mesh, &import.display);
+    }
+
+    // Full-quad recombination gives hexahedra only; the layers follow the element size.
+    geometry.meshing.second_order = false;
+    let mut item = extrude_item(vec![], plx_model::ExtrudeLayers::ScaleFactor(0.5));
+    if let MeshSetupKind::ExtrudeMesh(extrude) = &mut item.kind {
+        extrude.recombination = plx_model::Recombination::BlossomFullQuad;
+    }
+    geometry.mesh_items = vec![item];
+    let mesh = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+    assert!(
+        mesh.elements()
+            .iter()
+            .all(|e| e.shape == ElementShape::Hex8)
+    );
+    let mut heights: Vec<f64> = mesh.coords().iter().map(|c| c[2]).collect();
+    heights.sort_by(f64::total_cmp);
+    heights.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
+    assert_eq!(heights.len(), 6, "10 / (0.5 * 4) = 5 layers");
+}
+
+#[test]
+fn source_faces_are_checked_to_be_an_end_of_an_extrusion() {
+    if !gmsh_available() {
+        return;
+    }
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC).unwrap();
+    let mut geometry = import.geometry;
+    geometry.meshing.max_size = 5.0;
+    let display = &import.display;
+    // The faces of the plate by their normal: top and bottom lie in z = const.
+    let flat_in = |axis: usize| -> Vec<i32> {
+        let mut faces = BTreeSet::new();
+        for (element, entity) in display.mesh.elements().iter().zip(&display.entities) {
+            let CadEntity::Face(tag) = entity else {
+                continue;
+            };
+            let p: Vec<[f64; 3]> = (element.nodes.iter())
+                .map(|&n| display.mesh.node(n).unwrap())
+                .collect();
+            if p.iter().all(|q| (q[axis] - p[0][axis]).abs() < 1e-9) {
+                faces.insert(*tag);
+            }
+        }
+        faces.into_iter().collect()
+    };
+    let ends = flat_in(2);
+    let (top, side) = (ends[0], flat_in(1)[0]);
+    geometry.mesh_items = vec![extrude_item(
+        vec![top],
+        plx_model::ExtrudeLayers::NumberOfElements(2),
+    )];
+    let mesh = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+    assert!(
+        mesh.elements()
+            .iter()
+            .all(|e| matches!(e.shape, ElementShape::Hex20 | ElementShape::Wedge15))
+    );
+    // A long side face: the hole goes across the extrusion.
+    geometry.mesh_items = vec![extrude_item(
+        vec![side],
+        plx_model::ExtrudeLayers::NumberOfElements(2),
+    )];
+    let error = generate_part_mesh(&geometry, "SOLID-1")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("not an extrusion"), "{error}");
+    // A later Tetrahedral Gmsh item for the part wins.
+    geometry.mesh_items = vec![
+        extrude_item(vec![top], plx_model::ExtrudeLayers::NumberOfElements(2)),
+        MeshSetupItem {
+            name: "Tetrahedral_Gmsh-1".into(),
+            kind: MeshSetupKind::TetrahedralGmsh {
+                parts: vec!["SOLID-1".into()],
+                algorithm_2d: Algorithm2d::default(),
+                algorithm_3d: Algorithm3d::default(),
+            },
+        },
+    ];
+    let mesh = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+    assert!(
+        mesh.elements()
+            .iter()
+            .all(|e| e.shape == ElementShape::Tet10)
+    );
+}
+
+#[test]
+fn meshing_parameters_find_extrusions_and_keep_tetrahedra_for_the_rest() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
+    geometry.meshing.max_size = 5.0;
+    geometry.meshing.extrude_where_possible = true;
+    let mesh = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+    assert!(
+        (mesh.elements().iter())
+            .all(|e| matches!(e.shape, ElementShape::Hex20 | ElementShape::Wedge15))
+    );
+    // A Tetrahedral Gmsh item for the part keeps it tetrahedral.
+    geometry.mesh_items = vec![MeshSetupItem {
+        name: "Tetrahedral_Gmsh-1".into(),
+        kind: MeshSetupKind::TetrahedralGmsh {
+            parts: vec!["SOLID-1".into()],
+            algorithm_2d: Algorithm2d::default(),
+            algorithm_3d: Algorithm3d::default(),
+        },
+    }];
+    let mesh = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+    assert!(
+        mesh.elements()
+            .iter()
+            .all(|e| e.shape == ElementShape::Tet10)
+    );
+
+    // A shaft with a split face is no extrusion of one face and falls back to tetrahedra.
+    let mut shaft = import_cad(&testdata("welle_mit_teilflaeche.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
+    shaft.meshing.extrude_where_possible = true;
+    let mesh = generate_part_mesh(&shaft, "SOLID-1").unwrap().mesh;
+    assert!(
+        mesh.elements()
+            .iter()
+            .all(|e| e.shape == ElementShape::Tet10)
+    );
+}

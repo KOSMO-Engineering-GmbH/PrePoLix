@@ -4,6 +4,7 @@
 //! prepolix starts and works with meshes without it. Releases ship the library next to the
 //! program; `scripts/fetch_gmsh.py` fetches it for development.
 
+mod extrude;
 mod ffi;
 pub mod gmsh;
 mod step_names;
@@ -658,7 +659,7 @@ fn renumbering(
         .collect()
 }
 
-/// Renumbers the faces and edges of the local mesh sizes after [`renumbering`]; those
+/// Renumbers the faces and edges of the local mesh sizes and extrude meshes after [`renumbering`]; those
 /// without a new tag are dropped.
 fn renumber_mesh_items(
     items: &mut [plx_model::MeshSetupItem],
@@ -676,9 +677,13 @@ fn renumber_mesh_items(
             .collect();
     };
     for item in items {
-        if let plx_model::MeshSetupKind::LocalMeshSize { faces, edges, .. } = &mut item.kind {
-            renumber(2, faces);
-            renumber(1, edges);
+        match &mut item.kind {
+            plx_model::MeshSetupKind::LocalMeshSize { faces, edges, .. } => {
+                renumber(2, faces);
+                renumber(1, edges);
+            }
+            plx_model::MeshSetupKind::ExtrudeMesh(extrude) => renumber(2, &mut extrude.faces),
+            _ => {}
         }
     }
 }
@@ -712,6 +717,22 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
     }
     let file = TempFile::with_contents("brep", &geometry.brep)?;
     with_gmsh(|gmsh| {
+        // With the extrusions found automatically, a part that is none is read again for
+        // the tetrahedra, as the attempt took the solid out of the model.
+        if geometry.extrusion(part).is_none() && geometry.finds_extrusion(part) {
+            let extrude = plx_model::ExtrudeMesh {
+                parts: vec![part.to_string()],
+                ..Default::default()
+            };
+            if let Some(volume) = solid_alone(gmsh, geometry, &file.0, part)? {
+                match extrude::extrude_part_mesh(gmsh, geometry, part, volume, &extrude)? {
+                    Ok(mesh) => return Ok(mesh),
+                    Err(_) => gmsh.clear()?,
+                }
+            } else {
+                gmsh.clear()?;
+            }
+        }
         gmsh.import_shapes(&file.0)?;
         let volumes = gmsh.entities(3)?;
         let Some((dim, tag)) = (parts(gmsh, geometry)?.into_iter())
@@ -733,6 +754,10 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
         if !others.is_empty() {
             gmsh.remove(&others)?;
         }
+        if let Some(extrude) = geometry.extrusion(part) {
+            return extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude)?
+                .map_err(GmshError::Other);
+        }
         let options = MeshOptions::of_part(geometry, part);
         options.apply(gmsh)?;
         let faces: BTreeSet<i32> = gmsh.adjacencies(3, volume)?.1.into_iter().collect();
@@ -745,6 +770,28 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
             warnings: gmsh.warnings()?,
         })
     })
+}
+
+/// Reads the geometry and leaves only the part's solid; `None` if the part is no solid.
+fn solid_alone(
+    gmsh: &Gmsh,
+    geometry: &Geometry,
+    file: &Path,
+    part: &str,
+) -> Result<Option<i32>, GmshError> {
+    gmsh.import_shapes(file)?;
+    let Some(((3, volume), _)) = (parts(gmsh, geometry)?.into_iter()).find(|(_, n)| n == part)
+    else {
+        return Ok(None);
+    };
+    let others: Vec<(i32, i32)> = (gmsh.entities(3)?.into_iter())
+        .filter(|&v| v != volume)
+        .map(|v| (3, v))
+        .collect();
+    if !others.is_empty() {
+        gmsh.remove(&others)?;
+    }
+    Ok(Some(volume))
 }
 
 /// Meshes a face outside the solids with triangles, or mostly quadrilaterals if its meshing
@@ -1153,6 +1200,9 @@ impl MeshOptions {
             Algorithm2d::Automatic => 2.0,
             Algorithm2d::Delaunay => 5.0,
             Algorithm2d::FrontalDelaunay => 6.0,
+            Algorithm2d::FrontalQuads => 8.0,
+            Algorithm2d::PackingOfParallelograms => 9.0,
+            Algorithm2d::QuasiStructuredQuad => 11.0,
         };
         let algorithm_3d = match algorithm_3d {
             Algorithm3d::Delaunay => 1.0,
@@ -1178,6 +1228,8 @@ impl MeshOptions {
             ("Mesh.Optimize", 1.0),
             ("Mesh.OptimizeNetgen", f64::from(u8::from(self.netgen))),
             ("Mesh.RecombineAll", f64::from(u8::from(self.quads))),
+            // Blossom, Gmsh's default; an extrude mesh chooses its own.
+            ("Mesh.RecombinationAlgorithm", 1.0),
             // Quadratic quadrilaterals with 8 nodes, as CalculiX has them.
             ("Mesh.SecondOrderIncomplete", 1.0),
         ] {

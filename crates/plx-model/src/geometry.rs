@@ -54,6 +54,29 @@ impl Geometry {
             .unwrap_or_default()
     }
 
+    /// The extrude mesh of a part: the last Extrude Mesh item naming it, unless a later
+    /// Tetrahedral Gmsh item names it.
+    pub fn extrusion(&self, part: &str) -> Option<&ExtrudeMesh> {
+        (self.mesh_items.iter().rev())
+            .find_map(|item| match &item.kind {
+                MeshSetupKind::ExtrudeMesh(extrude) if names(&extrude.parts, part) => {
+                    Some(Some(extrude))
+                }
+                MeshSetupKind::TetrahedralGmsh { parts, .. } if names(parts, part) => Some(None),
+                _ => None,
+            })
+            .flatten()
+    }
+
+    /// Whether the part is meshed with hexahedra if it turns out to be an extrusion: its
+    /// meshing parameters ask for it and no Tetrahedral Gmsh item names it.
+    pub fn finds_extrusion(&self, part: &str) -> bool {
+        self.parameters(part).extrude_where_possible
+            && !self.mesh_items.iter().any(|item| {
+                matches!(&item.kind, MeshSetupKind::TetrahedralGmsh { parts, .. } if names(parts, part))
+            })
+    }
+
     /// The local mesh sizes as (faces, edges, size).
     pub fn local_sizes(&self) -> impl Iterator<Item = (&[i32], &[i32], f64)> {
         self.mesh_items.iter().filter_map(|item| match &item.kind {
@@ -85,6 +108,9 @@ pub struct MeshingParameters {
     pub optimize: bool,
     /// Faces (2D models and shells) are meshed with mostly quadrilaterals instead of triangles.
     pub quad_dominated: bool,
+    /// Solids that are straight extrusions get an extrude mesh of hexahedra with the
+    /// defaults of the Extrude Mesh item; the others stay tetrahedra.
+    pub extrude_where_possible: bool,
 }
 
 impl Default for MeshingParameters {
@@ -97,6 +123,7 @@ impl Default for MeshingParameters {
             midside_nodes_on_geometry: false,
             optimize: true,
             quad_dominated: false,
+            extrude_where_possible: false,
         }
     }
 }
@@ -139,6 +166,8 @@ pub enum MeshSetupKind {
         algorithm_2d: Algorithm2d,
         algorithm_3d: Algorithm3d,
     },
+    /// Hexahedra and wedges for parts that are extrusions of some of their faces.
+    ExtrudeMesh(ExtrudeMesh),
 }
 
 impl MeshSetupKind {
@@ -148,6 +177,116 @@ impl MeshSetupKind {
             MeshSetupKind::MeshingParameters { .. } => "Meshing_Parameters",
             MeshSetupKind::LocalMeshSize { .. } => "Local_Mesh_Size",
             MeshSetupKind::TetrahedralGmsh { .. } => "Tetrahedral_Gmsh",
+            MeshSetupKind::ExtrudeMesh(_) => "Extrude_Mesh",
+        }
+    }
+
+    /// The parts the item applies to; `None` for a local mesh size, which applies to faces
+    /// and edges of any part.
+    pub fn parts(&self) -> Option<&[String]> {
+        match self {
+            MeshSetupKind::MeshingParameters { parts, .. }
+            | MeshSetupKind::TetrahedralGmsh { parts, .. } => Some(parts),
+            MeshSetupKind::ExtrudeMesh(extrude) => Some(&extrude.parts),
+            MeshSetupKind::LocalMeshSize { .. } => None,
+        }
+    }
+}
+
+/// PrePoMax's Extrude Mesh: the source faces of a part are meshed with Gmsh, mostly with
+/// quadrilaterals, and the mesh is swept straight through the part in layers, so that
+/// quadrilaterals become hexahedra (C3D8, C3D20) and triangles wedges (C3D6, C3D15). The
+/// size of the source mesh comes from the part's meshing parameters and local mesh sizes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtrudeMesh {
+    /// The parts meshed this way.
+    pub parts: Vec<String>,
+    /// The source faces; empty to find for each part a face it is an extrusion of.
+    pub faces: Vec<i32>,
+    pub algorithm_2d: Algorithm2d,
+    pub recombination: Recombination,
+    /// How the extrusion is divided into layers of elements.
+    pub layers: ExtrudeLayers,
+}
+
+impl Default for ExtrudeMesh {
+    fn default() -> Self {
+        Self {
+            parts: Vec::new(),
+            faces: Vec::new(),
+            algorithm_2d: Algorithm2d::FrontalQuads,
+            recombination: Recombination::Blossom,
+            layers: ExtrudeLayers::ScaleFactor(1.0),
+        }
+    }
+}
+
+/// How Gmsh joins the triangles of a face mesh to quadrilaterals.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Recombination {
+    /// Triangles stay, so that an extrusion gives wedges only.
+    None,
+    Simple,
+    #[default]
+    Blossom,
+    /// Quadrilaterals only: the recombined mesh is split once more, halving its size.
+    SimpleFullQuad,
+    BlossomFullQuad,
+}
+
+/// PrePoMax's element size in the extrude direction.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ExtrudeLayers {
+    /// Layers as thick as the part's max. element size times the factor.
+    ScaleFactor(f64),
+    /// This many layers of the same thickness.
+    NumberOfElements(u32),
+    /// Layers of the given relative thicknesses, each divided into its number of elements.
+    MultiLayered { sizes: Vec<f64>, elements: Vec<u32> },
+}
+
+impl ExtrudeLayers {
+    /// The heights of the element layers' tops as fractions of the extrusion length,
+    /// rising to 1; `max_size` is the part's max. element size, `length` the extrusion's.
+    pub fn levels(&self, max_size: f64, length: f64) -> Result<Vec<f64>, String> {
+        let even = |n: u32| (1..=n).map(|k| f64::from(k) / f64::from(n)).collect();
+        match self {
+            ExtrudeLayers::ScaleFactor(factor) => {
+                let size = factor * max_size;
+                if !(size.is_finite() && size > 0.0) {
+                    return Err(
+                        "The element size in the extrude direction must be greater than 0".into(),
+                    );
+                }
+                let n = (length / size).round().clamp(1.0, 100_000.0) as u32;
+                Ok(even(n))
+            }
+            ExtrudeLayers::NumberOfElements(n) if *n > 0 => Ok(even(*n)),
+            ExtrudeLayers::NumberOfElements(_) => {
+                Err("The number of elements must be at least 1".into())
+            }
+            ExtrudeLayers::MultiLayered { sizes, elements } => {
+                if sizes.is_empty() || sizes.len() != elements.len() {
+                    return Err("Give as many elements per layer as relative layer sizes".into());
+                }
+                if sizes.iter().any(|s| !(s.is_finite() && *s > 0.0)) || elements.contains(&0) {
+                    return Err("Layer sizes and elements per layer must be positive".into());
+                }
+                let total: f64 = sizes.iter().sum();
+                let mut levels = Vec::new();
+                let mut bottom = 0.0;
+                for (size, &n) in sizes.iter().zip(elements) {
+                    for k in 1..=n {
+                        levels.push((bottom + size * f64::from(k) / f64::from(n)) / total);
+                    }
+                    bottom += size;
+                }
+                if let Some(last) = levels.last_mut() {
+                    *last = 1.0;
+                }
+                Ok(levels)
+            }
         }
     }
 }
@@ -160,6 +299,10 @@ pub enum Algorithm2d {
     Delaunay,
     #[default]
     FrontalDelaunay,
+    /// Frontal-Delaunay for quadrilaterals, right-angled triangles that recombine well.
+    FrontalQuads,
+    PackingOfParallelograms,
+    QuasiStructuredQuad,
 }
 
 /// Gmsh's algorithm for meshing the volume.
@@ -240,6 +383,68 @@ mod tests {
         assert_eq!(local, vec![(&[3][..], &[][..], 0.5)]);
         geometry.mesh_items.clear();
         assert_eq!(geometry.parameters("SOLID-1").max_size, 5.0);
+    }
+
+    #[test]
+    fn extrude_layers_rise_to_the_top() {
+        let levels = ExtrudeLayers::ScaleFactor(0.5).levels(4.0, 10.0).unwrap();
+        assert_eq!(levels, vec![0.2, 0.4, 0.6, 0.8, 1.0]);
+        assert_eq!(
+            ExtrudeLayers::NumberOfElements(2)
+                .levels(4.0, 10.0)
+                .unwrap(),
+            vec![0.5, 1.0]
+        );
+        let layered = ExtrudeLayers::MultiLayered {
+            sizes: vec![1.0, 3.0],
+            elements: vec![1, 3],
+        };
+        assert_eq!(
+            layered.levels(4.0, 10.0).unwrap(),
+            vec![0.25, 0.5, 0.75, 1.0]
+        );
+        assert!(
+            ExtrudeLayers::NumberOfElements(0)
+                .levels(4.0, 10.0)
+                .is_err()
+        );
+        assert!(ExtrudeLayers::ScaleFactor(0.0).levels(4.0, 10.0).is_err());
+        let unequal = ExtrudeLayers::MultiLayered {
+            sizes: vec![1.0],
+            elements: vec![1, 2],
+        };
+        assert!(unequal.levels(4.0, 10.0).is_err());
+    }
+
+    #[test]
+    fn a_later_tetrahedral_item_takes_a_part_back_from_an_extrusion() {
+        let extrude = |parts: &[&str]| MeshSetupItem {
+            name: "Extrude_Mesh-1".into(),
+            kind: MeshSetupKind::ExtrudeMesh(ExtrudeMesh {
+                parts: parts.iter().map(|p| p.to_string()).collect(),
+                ..ExtrudeMesh::default()
+            }),
+        };
+        let tet = MeshSetupItem {
+            name: "Tetrahedral_Gmsh-1".into(),
+            kind: MeshSetupKind::TetrahedralGmsh {
+                parts: vec!["A".into()],
+                algorithm_2d: Algorithm2d::default(),
+                algorithm_3d: Algorithm3d::default(),
+            },
+        };
+        let mut geometry = Geometry {
+            source: "a.step".into(),
+            brep: String::new(),
+            meshing: MeshingParameters::default(),
+            mesh_items: vec![tet.clone(), extrude(&["A", "B"])],
+            part_names: Vec::new(),
+        };
+        assert!(geometry.extrusion("a").is_some());
+        assert!(geometry.extrusion("C").is_none());
+        geometry.mesh_items.push(tet);
+        assert!(geometry.extrusion("A").is_none());
+        assert!(geometry.extrusion("B").is_some());
     }
 
     #[test]

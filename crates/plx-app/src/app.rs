@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use plx_model::{MeshSetupKind, UnitSystem};
+use plx_model::UnitSystem;
 use plx_render::StandardView;
 use plx_results::hot_spot::{HotSpot, HotSpotPath};
 
@@ -2502,11 +2502,7 @@ impl Workbench {
                 };
                 if remeshes {
                     // A local mesh size is picked on faces and edges: mesh every part.
-                    remesh = Some(match &item.kind {
-                        MeshSetupKind::MeshingParameters { parts, .. }
-                        | MeshSetupKind::TetrahedralGmsh { parts, .. } => Some(parts.clone()),
-                        MeshSetupKind::LocalMeshSize { .. } => None,
-                    });
+                    remesh = Some(item.kind.parts().map(<[String]>::to_vec));
                 }
                 let index = match index.filter(|&i| i < geometry.mesh_items.len()) {
                     Some(index) => {
