@@ -965,6 +965,14 @@ impl eframe::App for PrepolixApp {
             if let Some(command) = response.command {
                 self.workbench.view_command = Some(command);
             }
+            if let Some(click) = response.pivot {
+                // Rotate about the model point under the cursor, or about the view centre
+                // when the cursor points into empty space.
+                let pivot = (self.workbench.shown()).and_then(|model| model.pick_click(&click));
+                self.workbench
+                    .viewport
+                    .set_pivot(pivot.map(|hit| hit.point));
+            }
             if let Some(click) = response.click {
                 self.workbench.click(click);
             }

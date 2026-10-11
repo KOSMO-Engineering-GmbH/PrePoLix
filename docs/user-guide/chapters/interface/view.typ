@@ -9,7 +9,8 @@
   stroke: (x, y) => if y == 0 { (bottom: 0.7pt) } else { (bottom: 0.3pt + luma(200)) },
   inset: (x: 5pt, y: 4pt),
   table.header([*Input*], [*Action*]),
-  [Middle button drag], [Rotate],
+  [Middle button drag], [Rotate about the point of the model under the cursor, marked by a
+    red dot while turning; over empty space about the centre of the view],
   [#key("Shift") + middle button drag], [Pan],
   [Mouse wheel], [Zoom about the cursor, with #key("Ctrl") in finer steps],
   [#key("Ctrl") + middle button drag], [Zoom],
@@ -20,6 +21,12 @@
   [Right click], [Context menu: the menu of the part under the cursor followed by the view
     commands],
 )
+
+Rotating keeps the point you grabbed where it is, so you can look at a small detail at the end
+of a long structure from all sides without it leaving the screen.
+
+#screenshot("rotate-pivot.png", [Turning about the end of a beam: the red dot marks the point
+  the view rotates about])
 
 Keyboard shortcuts of the main window: #key("Ctrl+N") new, #key("Ctrl+O") open,
 #key("Ctrl+S") save, #key("Ctrl+Shift+S") save as, #key("F5") run analysis, #key("Del")
