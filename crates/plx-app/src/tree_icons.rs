@@ -160,6 +160,7 @@ pub enum StepGlyph {
     Buckle,
     HeatTransfer,
     CoupledTempDisp,
+    UncoupledTempDisp,
     Dynamic,
     ModalDynamics,
     SteadyStateDynamics,
@@ -176,6 +177,7 @@ impl StepGlyph {
             StepGlyph::Buckle => "Buckle",
             StepGlyph::HeatTransfer => "Heat Transfer",
             StepGlyph::CoupledTempDisp => "Coupled Temperature-Displacement",
+            StepGlyph::UncoupledTempDisp => "Uncoupled Temperature-Displacement",
             StepGlyph::Dynamic => "Dynamic",
             StepGlyph::ModalDynamics => "Modal Dynamics",
             StepGlyph::SteadyStateDynamics => "Steady State Dynamics",
@@ -193,6 +195,7 @@ impl From<&StepKind> for StepGlyph {
             StepKind::Buckle(_) => StepGlyph::Buckle,
             StepKind::HeatTransfer(_) => StepGlyph::HeatTransfer,
             StepKind::CoupledTempDisp(_) => StepGlyph::CoupledTempDisp,
+            StepKind::UncoupledTempDisp(_) => StepGlyph::UncoupledTempDisp,
             StepKind::Dynamic(_) => StepGlyph::Dynamic,
             StepKind::ModalDynamics(_) => StepGlyph::ModalDynamics,
             StepKind::SteadyStateDynamics(_) => StepGlyph::SteadyStateDynamics,
@@ -307,6 +310,26 @@ fn paint_step_type(painter: &Painter, min: Pos2, glyph: StepGlyph) {
                     .collect::<Vec<_>>();
                 line(&points, RED);
             }
+            painter.rect_filled(
+                Rect::from_min_size(at(1.5, 10.0), vec2(13.0, 3.0)),
+                0.0,
+                BLUE,
+            );
+            line(&[(3.0, 13.5), (3.0, 15.5)], INK);
+            line(&[(13.0, 13.5), (13.0, 15.5)], INK);
+        }
+        // Heat flowing one way into a bar.
+        StepGlyph::UncoupledTempDisp => {
+            for x in [4.0, 8.0] {
+                let points = (0..=10)
+                    .map(|i| {
+                        let t = i as f32 / 10.0;
+                        (x + 1.1 * (t * tau * 1.5).sin(), 8.0 - 7.0 * t)
+                    })
+                    .collect::<Vec<_>>();
+                line(&points, RED);
+            }
+            arrow((12.5, 1.0), (12.5, 8.0), ORANGE);
             painter.rect_filled(
                 Rect::from_min_size(at(1.5, 10.0), vec2(13.0, 3.0)),
                 0.0,
