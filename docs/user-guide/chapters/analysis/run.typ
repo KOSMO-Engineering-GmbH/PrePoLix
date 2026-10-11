@@ -140,5 +140,5 @@ file of the submodel's own analysis.]
 #menu("File", "Export Deformed Mesh (.inp) ...") writes the mesh of the displayed result with its
 nodes moved by the displacements times the current deformation scale factor. A typical use is an
 imperfection for a buckling analysis: show the buckling mode, set #ui("Deformation") to #ui("User
-defined") with the imperfection amplitude as factor, export, and open the file as the mesh of a new
-model. The file contains only the mesh.
+defined") with the imperfection amplitude as factor, export, and import the file into the model with
+#ui("Import Geometry") (@mesh-import). The file contains only the mesh.
