@@ -6,7 +6,8 @@
 #     scripts/build_appimage.sh
 #
 # Needs (Debian/Ubuntu): sudo apt install libasound2-dev libglu1-mesa libxft2 libxcursor1 \
-#                            libxinerama1 libgomp1 python3 curl file zsync xz-utils zstd
+#                            libxinerama1 libgomp1 python3 curl file zsync xz-utils
+# and what scripts/build_ccx.sh needs for CalculiX.
 # The AppImage runs on systems with a glibc at least as new as the build system's, so releases
 # are built on the oldest supported Ubuntu runner.
 #
@@ -39,7 +40,7 @@ version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Car
 
 cargo build --release --locked -p plx-app
 [ -f "$gmsh/libgmsh.so.4.15" ] || python3 scripts/fetch_gmsh.py --platform linux --dest "$gmsh"
-[ -x "$ccx/bin/ccx" ] || python3 scripts/fetch_ccx.py --platform linux --dest "$ccx"
+[ -x "$ccx/bin/ccx" ] || scripts/build_ccx.sh linux
 scripts/build_user_guide.sh html
 
 mkdir -p "$tools"
