@@ -69,6 +69,23 @@ fn nodal_values_and_totals_over_increments() {
 }
 
 #[test]
+fn every_time_gets_a_row_without_step_lines() {
+    // Some CalculiX builds print neither step nor increment lines.
+    let text: String = STATIC
+        .lines()
+        .filter(|l| !l.contains("S T E P") && !l.contains("INCREMENT"))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let import = parse_dat(&text);
+    let set = &import.sets[0];
+    assert_eq!(set.rows, [(0, 1, 0.5), (0, 2, 1.0)]);
+    let u3 = set.field("DISPLACEMENTS").unwrap().component("U3").unwrap();
+    assert_eq!(u3.entries[0].values, [-1.902165E-01, -3.804330E-01]);
+    // Blocks of the same time share their row.
+    assert_eq!(import.sets[1].rows, [(0, 1, 0.5), (0, 2, 1.0)]);
+}
+
+#[test]
 fn element_values_by_integration_point_with_von_mises() {
     let import = parse_dat(STATIC);
     let set = import.sets.iter().find(|s| s.name == "EALL").unwrap();

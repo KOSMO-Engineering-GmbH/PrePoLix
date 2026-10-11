@@ -159,5 +159,12 @@ step. Hovering over a variable shows what it is.
   [Totals], [#ui("Yes") adds the sum over the region, #ui("Only") writes only the sum.],
 )
 
+#screenshot("history-output-dialog.png", [Element history output of picked faces])
+
+CalculiX prints a history output at every increment, so a step gives one row per increment:
+a linear static step one row, a nonlinear step (Nlgeom, contact, plasticity) as many rows as it
+takes increments, a frequency or buckle step one row per mode. A history output also stays in
+effect in the following steps until a step defines history outputs of the same type (node, element or contact) of its own.
+
 When results are opened, the `.dat` file is read too, and the history outputs appear on the
 #ui("Results") tab (@history-outputs).

@@ -159,6 +159,15 @@ impl RegionDraft {
         mesh: &FeMesh,
     ) -> Self {
         let mut draft = Self::new(sources, target);
+        // Picked nodes, faces or CAD entities come from the selection, also where the
+        // dialog lists another source first (whole parts for element regions).
+        if matches!(
+            region,
+            Region::Nodes(_) | Region::Faces(_) | Region::Geometry(_)
+        ) && sources.contains(&Source::Selection)
+        {
+            draft.source = Source::Selection;
+        }
         match region {
             Region::Parts(parts) => {
                 draft.source = Source::Parts;
@@ -3079,22 +3088,32 @@ fn history_output_form(
     ui.end_row();
     ui.label("Variables");
     let choices = output.kind.choices();
-    ui.horizontal_wrapped(|ui| {
-        ui.set_max_width(320.0);
-        for &variable in choices {
-            let mut on = output.variables.iter().any(|v| v == variable);
-            let checkbox = ui
-                .checkbox(&mut on, variable)
-                .on_hover_text(plx_model::output_variable_description(variable));
-            if checkbox.changed() {
-                output.variables.retain(|v| v != variable);
-                if on {
-                    output.variables.push(variable.to_string());
+    // Fixed rows of five in a nested grid; a wrapped layout inside the property grid
+    // overlapped the row below it.
+    let mut changed = false;
+    egui::Grid::new("history variables")
+        .spacing([10.0, 2.0])
+        .show(ui, |ui| {
+            for row in choices.chunks(5) {
+                for &variable in row {
+                    let mut on = output.variables.iter().any(|v| v == variable);
+                    let checkbox = ui
+                        .checkbox(&mut on, variable)
+                        .on_hover_text(plx_model::output_variable_description(variable));
+                    if checkbox.changed() {
+                        changed = true;
+                        output.variables.retain(|v| v != variable);
+                        if on {
+                            output.variables.push(variable.to_string());
+                        }
+                    }
                 }
-                output.normalize_variables();
+                ui.end_row();
             }
-        }
-    });
+        });
+    if changed {
+        output.normalize_variables();
+    }
     ui.end_row();
     ui.label("Totals");
     egui::ComboBox::from_id_salt("history totals")
@@ -4359,6 +4378,11 @@ mod tests {
         let parts = Region::Parts(vec!["A".into(), "B".into()]);
         let draft = RegionDraft::from_region(&parts, ELEMENT_SOURCES, Target::Faces, &mesh);
         assert_eq!(draft.region(), parts);
+        // Element regions list whole parts first; picked faces still reopen as a selection.
+        let faces = Region::Faces(vec![(3, 2)]);
+        let draft = RegionDraft::from_region(&faces, SOLID_SOURCES, Target::Faces, &mesh);
+        assert_eq!(draft.source, Source::Selection);
+        assert_eq!(draft.region(), faces);
     }
 
     #[test]

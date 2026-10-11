@@ -196,7 +196,8 @@ fn kind_of(line: &str) -> Option<&'static Kind> {
 #[derive(Default)]
 struct Collector {
     rows: Vec<(u32, u32, f64)>,
-    row_index: HashMap<(u32, u32), usize>,
+    /// Rows by step, increment and the bits of their time or frequency.
+    row_index: HashMap<(u32, u32, u64), usize>,
     sets: Vec<SetData>,
 }
 
@@ -219,13 +220,21 @@ struct EntryData {
 }
 
 impl Collector {
+    /// The row of a block. The time tells rows apart too: some CalculiX builds print no
+    /// step and increment lines into the `.dat` file, and every time then gets its own
+    /// row, numbered as increments of step 0.
     fn row(&mut self, step: u32, increment: u32, value: f64) -> usize {
-        if let Some(&row) = self.row_index.get(&(step, increment)) {
+        let key = (step, increment, value.to_bits());
+        if let Some(&row) = self.row_index.get(&key) {
             return row;
         }
+        let increment = if step == 0 && increment == 0 {
+            self.rows.iter().filter(|r| r.0 == 0).count() as u32 + 1
+        } else {
+            increment
+        };
         self.rows.push((step, increment, value));
-        self.row_index
-            .insert((step, increment), self.rows.len() - 1);
+        self.row_index.insert(key, self.rows.len() - 1);
         self.rows.len() - 1
     }
 
