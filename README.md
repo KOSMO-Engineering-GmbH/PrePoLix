@@ -161,3 +161,7 @@ _1D beam elements and plotting along paths_
 <img width="2690" height="1570" alt="grafik" src="https://github.com/user-attachments/assets/b59d0f43-fa7a-4231-a45f-3be27e87ce54" />
 
 _moving loads_
+
+<img width="1247" height="735" alt="grafik" src="https://github.com/user-attachments/assets/53403e28-1ae5-487a-8d2b-8bef4ecb7274" />
+
+_hotspot analysis by means of extrapolation_
