@@ -287,13 +287,14 @@ if [ "$platform" = windows ]; then
     ldomp=-fopenmp
     link=(-static)
 else
-    # libgfortran, libquadmath and libgomp linked in: only the C library remains. The archives
-    # are named directly because gfortran before 13 (Ubuntu 22.04, the AppImage job) has no
-    # -static-libquadmath and otherwise links libquadmath.so.
+    # libgfortran, libquadmath, libgomp and libstdc++ linked in: only the C library remains. The
+    # archives are named directly because gfortran before 13 (Ubuntu 22.04, the AppImage job) has
+    # no -static-libquadmath and otherwise links libquadmath.so. libstdc++ is for PaStiX's C++
+    # sort, which before GCC 13 needs std::ios_base::Init from it.
     ldomp=
     link=(-static-libgfortran -static-libgcc "$($FC -print-file-name=libgfortran.a)"
         "$($FC -print-file-name=libquadmath.a)" "$($FC -print-file-name=libgomp.a)"
-        -lpthread -ldl -lrt)
+        "$($CXX -print-file-name=libstdc++.a)" -lpthread -ldl -lrt)
 fi
 make -s -j"$jobs" -f "$root/installer/ccx/Makefile.prepolix" VERSION="$CCX_VERSION" \
     CC="$CC" FC="$FC" AR="$AR" PREFIX="$prefix" LDOMP="$ldomp" LINK="${link[*]}" >"$work/calculix.log" 2>&1 ||
