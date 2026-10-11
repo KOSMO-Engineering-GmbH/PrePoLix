@@ -1751,8 +1751,13 @@ impl Editor {
                     .width(200.0)
                     .show_ui(ui, |ui| {
                         for kind in SectionKind::ALL {
-                            // Shells live in 3D models; 2D elements get a solid section.
-                            if matches!(kind, SectionKind::Shell { .. }) && two_d {
+                            // Shells and membranes live in 3D models; 2D elements get a
+                            // solid section.
+                            if matches!(
+                                kind,
+                                SectionKind::Shell { .. } | SectionKind::Membrane { .. }
+                            ) && two_d
+                            {
                                 continue;
                             }
                             let selected = kind.prefix() == section.kind.prefix();
@@ -1781,6 +1786,7 @@ impl Editor {
                         }
                     });
                 ui.end_row();
+                let membrane = matches!(section.kind, SectionKind::Membrane { .. });
                 match &mut section.kind {
                     SectionKind::Solid => {
                         // Plane stress and plane strain sections have a thickness, as in
@@ -1802,7 +1808,8 @@ impl Editor {
                         ui.end_row();
                     }
                     SectionKind::Beam(beam) => beam_form(ui, beam, units),
-                    SectionKind::Shell { thickness, offset } => {
+                    SectionKind::Shell { thickness, offset }
+                    | SectionKind::Membrane { thickness, offset } => {
                         ui.label("Thickness");
                         ui.add(
                             numeric::quantity(thickness, units, Quantity::Length)
@@ -1818,6 +1825,14 @@ impl Editor {
                         ui.label("");
                         ui.weak("of the thickness: 0.5 puts the mesh on the top face.");
                         ui.end_row();
+                        if membrane {
+                            ui.label("");
+                            ui.weak("Membranes carry in-plane forces only. Give the parts an");
+                            ui.end_row();
+                            ui.label("");
+                            ui.weak("M3D element type: double-click the part under Mesh.");
+                            ui.end_row();
+                        }
                     }
                 }
                 region.ui(ui, model);
@@ -2455,12 +2470,15 @@ impl Editor {
                     return Err("The cross-section area must be greater than 0.".into());
                 }
                 SectionKind::Truss { .. } => {}
-                SectionKind::Shell { thickness, .. }
+                SectionKind::Shell { thickness, .. } | SectionKind::Membrane { thickness, .. }
                     if !(thickness.is_finite() && *thickness > 0.0) =>
                 {
-                    return Err("The shell thickness must be greater than 0.".into());
+                    return Err(format!(
+                        "The {} thickness must be greater than 0.",
+                        section.kind.label().to_ascii_lowercase()
+                    ));
                 }
-                SectionKind::Shell { .. } => {}
+                SectionKind::Shell { .. } | SectionKind::Membrane { .. } => {}
                 SectionKind::Beam(beam) => {
                     if !beam.profile.is_valid() {
                         return Err(

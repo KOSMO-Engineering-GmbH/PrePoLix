@@ -245,9 +245,12 @@ impl Section {
                     return Some("The profile dimensions are invalid".into());
                 }
             }
-            SectionKind::Shell { thickness, .. } => {
+            SectionKind::Shell { thickness, .. } | SectionKind::Membrane { thickness, .. } => {
                 if !(thickness.is_finite() && *thickness > 0.0) {
-                    return Some("The shell thickness must be greater than 0".into());
+                    return Some(format!(
+                        "The {} thickness must be greater than 0",
+                        self.kind.label().to_ascii_lowercase()
+                    ));
                 }
             }
         }

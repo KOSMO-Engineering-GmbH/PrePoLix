@@ -331,8 +331,12 @@ pub fn model_keywords(
                 flux_kinds,
                 amplitudes: &model.amplitudes,
                 pair_surfaces: &pair_surfaces,
-                shells: (model.sections.iter())
-                    .any(|s| matches!(s.kind, SectionKind::Shell { .. })),
+                shells: (model.sections.iter()).any(|s| {
+                    matches!(
+                        s.kind,
+                        SectionKind::Shell { .. } | SectionKind::Membrane { .. }
+                    )
+                }),
                 model,
             };
             write_step(&mut sets, step, &context)
@@ -1049,9 +1053,14 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError
                 let _ = writeln!(out, "*Solid section, Elset={set}, Material={material}");
                 let _ = writeln!(out, "{}", number(*area));
             }
-            SectionKind::Shell { thickness, offset } => {
+            SectionKind::Shell { thickness, offset }
+            | SectionKind::Membrane { thickness, offset } => {
                 let set = sets.element_set(&section.name, &section.region)?;
-                let _ = write!(out, "*Shell section, Elset={set}, Material={material}");
+                let keyword = match section.kind {
+                    SectionKind::Membrane { .. } => "Membrane",
+                    _ => "Shell",
+                };
+                let _ = write!(out, "*{keyword} section, Elset={set}, Material={material}");
                 if *offset != 0.0 {
                     let _ = write!(out, ", Offset={}", number(*offset));
                 }
