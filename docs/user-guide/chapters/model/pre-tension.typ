@@ -36,6 +36,11 @@ corner then hold both sides together and take most of the preload, which is why 
 add a thin layer of wedge elements at the cut (#menu("Model", "Tools", "Boundary Layer")).
 PrePoLix needs no such layer: its own cut separates all of them.]
 
+#note[A bolt split into two parts in the CAD geometry has two meshes that do not share nodes at
+the cut: connect the halves with a #ui("Tie") (@ties) between the two cut faces and put the
+pre-tension load on the faces of one of them. PrePoLix writes the nodes of the cut side as the
+slave of the tie, whichever side you made the master, so the preload passes through it.]
+
 A pre-tension load can follow an #ui("Amplitude") (@amplitudes). The reaction force at the
 pre-tension node is the bolt force; request it with a history output (@history-outputs) of `RF`
 on the load.
