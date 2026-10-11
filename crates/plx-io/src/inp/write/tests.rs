@@ -911,7 +911,7 @@ fn calculix_bends_the_shell_plate_by_a_traction_on_its_edge() {
 }
 
 #[test]
-fn a_pre_tension_load_is_written_like_prepomax_does() {
+fn a_pre_tension_load_cuts_the_mesh_and_ties_the_sides_by_equations() {
     let (mesh, mut model) = pre_tension(1000.0, false);
     // A second step keeps the bolt at its length instead of the force.
     let mut second = model.steps[0].clone();
@@ -923,19 +923,181 @@ fn a_pre_tension_load_is_written_like_prepomax_does() {
     };
     model.steps.push(second);
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(
-        text.contains(
-            "*Pre-tension section, Surface=Internal_Selection-1_Pre_Tension-1_Section, Node=100\n"
-        ),
-        "{text}"
-    );
-    assert_eq!(text.matches("*Pre-tension section").count(), 1);
-    assert!(text.contains("*Cload\n100, 1, 1000\n"), "{text}");
-    assert!(text.contains("*Boundary\n100, 1, 1, 0\n"), "{text}");
-    assert!(
-        text.contains("*Surface, Name=Internal_Selection-1_Pre_Tension-1_Section, Type=Element\n"),
-        "{text}"
-    );
+    // The 9 nodes of the cut get copies 100 to 108, the pre-tension node is 109.
+    assert!(!text.contains("*Pre-tension section"), "{text}");
+    assert_eq!(text.matches("** Name: Pre_Tension-1\n*Equation").count(), 1);
+    assert_eq!(text.matches("*Equation\n").count(), 27);
+    assert!(text.contains("*Equation\n3\n100, 1, 1, "), "{text}");
+    assert_eq!(text.matches(", 109, 1, -1\n").count(), 9);
+    assert!(text.contains("108, 5.00000000E1, "), "{text}");
+    assert!(text.contains("*Cload\n109, 1, 1000\n"), "{text}");
+    assert!(text.contains("*Boundary\n109, 1, 1, 0\n"), "{text}");
+}
+
+/// A bar 100 x 10 x 10 along x of C3D10 tetrahedra, six per cube of 10 x 5 x 5, with node set
+/// FIX at x = 0 and TIP at x = 100, in part EALL.
+fn tet_bar() -> FeMesh {
+    let (nx, ny) = (10i64, 2i64);
+    let (dx, dy) = (10.0, 5.0);
+    let mut mesh = FeMesh::default();
+    // Nodes on the half grid, numbered by position.
+    let id = |i: i64, j: i64, k: i64| (((i * (2 * ny + 1) + j) * (2 * ny + 1) + k) + 1) as u32;
+    let mut used = std::collections::BTreeSet::new();
+    let mut part = plx_mesh::Part {
+        name: "EALL".into(),
+        elements: Vec::new(),
+    };
+    // Kuhn's six tetrahedra around the diagonal 0-6 of a cube, the same split in every cube.
+    const TETS: [[usize; 4]; 6] = [
+        [0, 1, 2, 6],
+        [0, 2, 3, 6],
+        [0, 3, 7, 6],
+        [0, 7, 4, 6],
+        [0, 4, 5, 6],
+        [0, 5, 1, 6],
+    ];
+    let mut element = 0;
+    for i in 0..nx {
+        for j in 0..ny {
+            for k in 0..ny {
+                let c = [
+                    (i, j, k),
+                    (i + 1, j, k),
+                    (i + 1, j + 1, k),
+                    (i, j + 1, k),
+                    (i, j, k + 1),
+                    (i + 1, j, k + 1),
+                    (i + 1, j + 1, k + 1),
+                    (i, j + 1, k + 1),
+                ]
+                .map(|(a, b, c)| (2 * a, 2 * b, 2 * c));
+                for tet in TETS {
+                    let mut p = tet.map(|l| c[l]);
+                    let x = |q: (i64, i64, i64)| {
+                        [
+                            q.0 as f64 * dx / 2.0,
+                            q.1 as f64 * dy / 2.0,
+                            q.2 as f64 * dy / 2.0,
+                        ]
+                    };
+                    let [a, b, cc, d] = p.map(x);
+                    let e = |u: [f64; 3], v: [f64; 3]| [v[0] - u[0], v[1] - u[1], v[2] - u[2]];
+                    let (u, v, w) = (e(a, b), e(a, cc), e(a, d));
+                    let volume = (u[1] * v[2] - u[2] * v[1]) * w[0]
+                        + (u[2] * v[0] - u[0] * v[2]) * w[1]
+                        + (u[0] * v[1] - u[1] * v[0]) * w[2];
+                    if volume < 0.0 {
+                        p.swap(1, 2);
+                    }
+                    let mid = |m: usize, n: usize| {
+                        (
+                            (p[m].0 + p[n].0) / 2,
+                            (p[m].1 + p[n].1) / 2,
+                            (p[m].2 + p[n].2) / 2,
+                        )
+                    };
+                    let all = [
+                        p[0],
+                        p[1],
+                        p[2],
+                        p[3],
+                        mid(0, 1),
+                        mid(1, 2),
+                        mid(2, 0),
+                        mid(0, 3),
+                        mid(1, 3),
+                        mid(2, 3),
+                    ];
+                    for q in all {
+                        if used.insert(q) {
+                            mesh.set_node(id(q.0, q.1, q.2), x(q));
+                        }
+                    }
+                    element += 1;
+                    mesh.add_element(plx_mesh::Element {
+                        id: element,
+                        type_name: "C3D10".into(),
+                        shape: plx_mesh::ElementShape::Tet10,
+                        nodes: all.iter().map(|q| id(q.0, q.1, q.2)).collect(),
+                    })
+                    .unwrap();
+                    part.elements.push(element);
+                }
+            }
+        }
+    }
+    mesh.parts.push(part);
+    for (name, x) in [("FIX", 0.0), ("TIP", 100.0)] {
+        let ids = (mesh.node_ids().iter().copied())
+            .filter(|&n| mesh.node(n).unwrap()[0] == x)
+            .collect();
+        mesh.node_sets.insert(name.into(), ids);
+    }
+    mesh
+}
+
+/// The faces at x = 50 of the tetrahedra left of the cut.
+fn tet_cut_faces(mesh: &FeMesh) -> Vec<(ElementId, u8)> {
+    (mesh.elements().iter())
+        .flat_map(|e| {
+            (1..=4u8).filter_map(move |f| {
+                let corners = e.shape.faces()[usize::from(f) - 1].corners;
+                let at_cut = (corners.iter()).all(|&l| mesh.node(e.nodes[l]).unwrap()[0] == 50.0);
+                let left = (e.nodes.iter()).all(|&n| mesh.node(n).unwrap()[0] <= 50.0);
+                (at_cut && left).then_some((e.id, f))
+            })
+        })
+        .collect()
+}
+
+/// CalculiX's own `*PRE-TENSION SECTION` leaves the tetrahedra that touch the cut with only
+/// an edge or a corner on both sides, and most of the preload goes through them (PrePoMax
+/// users add a thin layer of wedge elements for this). The cut through the mesh carries all
+/// of it, also across a cut whose normal is not along an axis of the bar.
+#[test]
+fn calculix_preloads_a_tetrahedral_bar_across_the_cut() {
+    let force = 1000.0;
+    for (name, direction) in [
+        ("tet-vorspannung", None),
+        ("tet-schraeg", Some([1.0, 0.2, 0.0])),
+    ] {
+        let mesh = tet_bar();
+        let faces = tet_cut_faces(&mesh);
+        assert_eq!(faces.len(), 4 * 2);
+        let (_, mut model) = pre_tension(force, false);
+        model.steps[0].loads[0].region = Region::Faces(faces);
+        model.steps[0].loads[0].kind = LoadKind::PreTension {
+            value: force,
+            by_displacement: false,
+            direction,
+        };
+        model.steps[0].boundary_conditions[1].region = Region::NodeSet("TIP".into());
+        let text = write_inp(&mesh, &model, "").unwrap();
+        let Some(frd) = run_ccx(name, &text) else {
+            return;
+        };
+        let reaction: f64 = (mesh.node_sets["FIX"].iter())
+            .map(|&node| node_value(&frd, "FORC", "F1", node))
+            .sum();
+        let expected = match direction {
+            // The preload opens the cut along the given direction while the sides cannot
+            // slide: the work of the force on the gap is done by the bar's force along x.
+            Some([x, y, z]) => force * f64::hypot(f64::hypot(x, y), z) / x,
+            None => force,
+        };
+        assert!(
+            (reaction.abs() - expected).abs() < 0.02 * expected,
+            "{name}: {reaction}"
+        );
+        if direction.is_none() {
+            for id in (mesh.node_ids().iter().copied())
+                .filter(|&id| (20.0..=80.0).contains(&mesh.node(id).unwrap()[0]))
+            {
+                let s = node_value(&frd, "STRESS", "S11", id);
+                assert!((s - 10.0).abs() < 0.5, "node {id}: {s}");
+            }
+        }
+    }
 }
 
 /// A preload across the middle of the clamped bar puts the whole bar under that tension.
@@ -5353,4 +5515,160 @@ fn calculix_finds_the_disk_frequencies_on_a_sector() {
         .unwrap();
     let rows: Vec<f64> = nd.entries[0].values.clone();
     assert_eq!(rows, [0.0, 0.0, 1.0, 1.0, 2.0, 2.0], "{rows:?}");
+}
+
+/// A steel block of 2 x 2 hexes, 10 x 10 x 10, from z = 10 to 20, standing on a vertical
+/// plate of 2 x 2 elements of the type, 10 x 10 and 1 thick, in the plane x = 5, held at its
+/// bottom. Tie-1 glues the top edges of the plate (S5) to the bottom of the block (S1), and
+/// a pressure of 10 on the block's top pushes 1000 N through the plate.
+fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
+    let mut mesh = FeMesh::default();
+    let block = |i: u32, j: u32, k: u32| 1 + i + 3 * j + 9 * k;
+    for k in 0..2 {
+        for j in 0..3 {
+            for i in 0..3 {
+                let coords = [
+                    5.0 * f64::from(i),
+                    5.0 * f64::from(j),
+                    10.0 + 10.0 * f64::from(k),
+                ];
+                mesh.set_node(block(i, j, k), coords);
+            }
+        }
+    }
+    for j in 0..2 {
+        for i in 0..2 {
+            let mut nodes = Vec::new();
+            for k in 0..2 {
+                nodes.extend([block(i, j, k), block(i + 1, j, k)]);
+                nodes.extend([block(i + 1, j + 1, k), block(i, j + 1, k)]);
+            }
+            mesh.add_element(plx_mesh::Element {
+                id: 1 + i + 2 * j,
+                type_name: "C3D8".into(),
+                shape: plx_mesh::ElementShape::Hex8,
+                nodes,
+            })
+            .unwrap();
+        }
+    }
+    let plate = |j: u32, k: u32| 101 + j + 3 * k;
+    for k in 0..3 {
+        for j in 0..3 {
+            mesh.set_node(plate(j, k), [5.0, 5.0 * f64::from(j), 5.0 * f64::from(k)]);
+        }
+    }
+    for k in 0..2 {
+        for j in 0..2 {
+            mesh.add_element(plx_mesh::Element {
+                id: 201 + j + 2 * k,
+                type_name: plate_type.into(),
+                shape: plx_mesh::ElementShape::Quad4,
+                nodes: vec![
+                    plate(j, k),
+                    plate(j + 1, k),
+                    plate(j + 1, k + 1),
+                    plate(j, k + 1),
+                ],
+            })
+            .unwrap();
+        }
+    }
+    for (name, elements) in [
+        ("BLOCK", vec![1, 2, 3, 4]),
+        ("PLATE", vec![201, 202, 203, 204]),
+    ] {
+        mesh.parts.push(plx_mesh::Part {
+            name: name.into(),
+            elements,
+        });
+    }
+    let mut step = Step::new_static("Step-1");
+    let bc = |name: &str, nodes: Vec<NodeId>, kind| BoundaryCondition {
+        name: name.into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(nodes),
+        kind,
+        amplitude: None,
+    };
+    step.boundary_conditions
+        .push(bc("Fixed-1", (101..=103).collect(), BoundaryKind::Fixed));
+    // A membrane holds the block in its plane only.
+    let sideways = BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, None]);
+    step.boundary_conditions
+        .push(bc("Guided-1", (10..=18).collect(), sideways));
+    step.loads.push(Load {
+        name: "Pressure-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Faces((1..=4).map(|e| (e, 2)).collect()),
+        kind: LoadKind::Pressure(10.0),
+        amplitude: None,
+        factor_amplitude: None,
+    });
+    let mut model = FeModel::default();
+    model.materials.push(Material {
+        name: "Steel".into(),
+        elastic: Some(Elastic {
+            young: 210_000.0,
+            poisson: 0.3,
+        }),
+        ..Default::default()
+    });
+    let plate_kind = if plate_type.starts_with('M') {
+        SectionKind::Membrane {
+            thickness: 1.0,
+            offset: 0.0,
+        }
+    } else {
+        SectionKind::Shell {
+            thickness: 1.0,
+            offset: 0.0,
+        }
+    };
+    for (name, part, kind) in [
+        ("Section-1", "BLOCK", SectionKind::Solid),
+        ("Section-2", "PLATE", plate_kind),
+    ] {
+        model.sections.push(Section {
+            name: name.into(),
+            material: "Steel".into(),
+            region: Region::Parts(vec![part.into()]),
+            thickness: 1.0,
+            kind,
+        });
+    }
+    let mut tie = plx_model::Tie::new("Tie-1");
+    tie.master = Region::Faces((1..=4).map(|e| (e, 1)).collect());
+    tie.slave = Region::Faces(vec![(203, 5), (204, 5)]);
+    model.ties.push(tie);
+    model.steps.push(step);
+    (mesh, model)
+}
+
+#[test]
+fn the_edge_of_a_shell_or_membrane_tied_to_a_solid_carries_its_load() {
+    for plate_type in ["S4", "M3D4"] {
+        let (mesh, model) = block_on_plate(plate_type);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        // CalculiX ties membrane edges by their nodes only.
+        let slave = if plate_type == "S4" {
+            "*Surface, Name=Internal_Selection-1_Tie-1_Slave, Type=Element\n\
+             Internal-1_Internal_Selection-1_Tie-1_Slave_S5, S5\n"
+        } else {
+            "*Surface, Name=Internal_Selection-1_Tie-1_Slave, Type=Node\n\
+             Internal-1_Internal_Selection-1_Tie-1_Slave\n"
+        };
+        assert!(
+            text.contains(slave),
+            "{plate_type}: {slave:?} missing in\n{text}"
+        );
+        let Some(frd) = run_ccx(&format!("edge-tie-{plate_type}"), &text) else {
+            return;
+        };
+        // 1000 N through 10 x 1 of plate 10 long, and the block: about 0.0052 down.
+        let u3 = node_value(&frd, "DISP", "U3", 14);
+        assert!((-0.007..-0.004).contains(&u3), "{plate_type}: U3 = {u3}");
+    }
 }

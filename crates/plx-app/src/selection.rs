@@ -97,6 +97,9 @@ pub enum Target {
     Nodes,
     /// Pressure and surface traction act on element faces.
     Faces,
+    /// Contacts and ties in 3D models: element faces, or the edges of shells, which
+    /// CalculiX takes as faces too.
+    Surfaces,
     /// In 2D models they act on the outline: the edges of the 2D elements, stored as faces.
     Edges,
     /// Edges of 3D parts, e.g. of a shell for a surface traction along it: the element
@@ -147,6 +150,7 @@ impl SelectBy {
     fn label(self, target: Target) -> &'static str {
         match self {
             SelectBy::Geometry if target == Target::Faces => "Faces",
+            SelectBy::Geometry if target == Target::Surfaces => "Faces and shell edges",
             SelectBy::Geometry if matches!(target, Target::Edges | Target::Lines) => "Edges",
             SelectBy::Geometry if target == Target::Point => "Points",
             SelectBy::Geometry => "Faces, edges and points",
@@ -166,7 +170,8 @@ impl SelectBy {
         GEOMETRY_MODES.contains(&self)
     }
 
-    /// Edges and points only make sense for regions of nodes, faces not for edges.
+    /// Edges and points only make sense for regions of nodes or contact surfaces, faces not
+    /// for edges.
     fn allowed(self, target: Target) -> bool {
         match target {
             Target::Nodes | Target::Point => true,
@@ -174,6 +179,8 @@ impl SelectBy {
                 self,
                 SelectBy::Node | SelectBy::Edge | SelectBy::EdgeAngle | SelectBy::GeometryEdgeAngle
             ),
+            // Edges pick the edges of shells.
+            Target::Surfaces => self != SelectBy::Node,
             Target::Edges => !matches!(
                 self,
                 SelectBy::Node
@@ -223,7 +230,7 @@ impl Items {
                     Target::Nodes | Target::Point => {
                         Items::Nodes(mesh.cad_nodes(&entities).into_iter().collect())
                     }
-                    Target::Faces | Target::Edges => {
+                    Target::Faces | Target::Surfaces | Target::Edges => {
                         Items::Faces(mesh.cad_faces(&entities).into_iter().collect())
                     }
                     Target::Lines => Items::Edges(cad_segments(mesh, &entities)),
@@ -369,7 +376,10 @@ impl Picker {
                                             }
                                         }
                                     });
-                                    if matches!(target, Target::Faces | Target::Edges) {
+                                    if matches!(
+                                        target,
+                                        Target::Faces | Target::Surfaces | Target::Edges
+                                    ) {
                                         ui.weak("IDs of elements");
                                     }
                                 });
@@ -487,6 +497,16 @@ impl Picker {
         let angle = self.angle.to_radians();
         let faces: Vec<usize> = match self.select_by {
             SelectBy::Geometry => {
+                if target == Target::Surfaces
+                    && let Some(edge) = picker.edge_near(face, hit.point, precision)
+                {
+                    // A click near a free edge of a shell picks the edge, up to its corners.
+                    let nodes = picker.edge_chain(edge, Some(OUTLINE_ANGLE.to_radians()));
+                    let edges = outline_edges_within(model, Some(hit.part), &nodes);
+                    if !edges.is_empty() {
+                        return Items::Faces(edges);
+                    }
+                }
                 if target == Target::Nodes {
                     if let Some(node) = picker.corner_near(hit.point, precision) {
                         return Items::Nodes(picker.node_ids([node]));
@@ -502,10 +522,15 @@ impl Picker {
             SelectBy::GeometryPart | SelectBy::Part => (0..picker.faces().len()).collect(),
             SelectBy::GeometryEdgeAngle | SelectBy::EdgeAngle | SelectBy::Edge => {
                 let limit = (self.select_by != SelectBy::Edge).then_some(angle);
-                return match picker.nearest_edge(hit.point) {
-                    Some(edge) => Items::Nodes(picker.edge_chain(edge, limit)),
-                    None => Items::Nodes(BTreeSet::new()),
+                let nodes = match picker.nearest_edge(hit.point) {
+                    Some(edge) => picker.edge_chain(edge, limit),
+                    None => BTreeSet::new(),
                 };
+                if target == Target::Surfaces {
+                    // The edges of shells along the picked edge.
+                    return Items::Faces(outline_edges_within(model, Some(hit.part), &nodes));
+                }
+                return Items::Nodes(nodes);
             }
             SelectBy::GeometrySurfaceAngle | SelectBy::FaceAngle => {
                 picker.faces_by_angle(face, angle)
@@ -525,7 +550,7 @@ impl Picker {
             SelectBy::Id => return picker.empty(target),
         };
         match target {
-            Target::Faces | Target::Edges => {
+            Target::Faces | Target::Surfaces | Target::Edges => {
                 Items::Faces(faces.iter().map(|&f| picker.face_id(f)).collect())
             }
             Target::Lines => Items::Edges(BTreeSet::new()),
@@ -713,7 +738,7 @@ impl Picker {
             }
         }
         match target {
-            Target::Faces | Target::Edges => Items::Faces(
+            Target::Faces | Target::Surfaces | Target::Edges => Items::Faces(
                 faces
                     .iter()
                     .map(|&(part, f)| MeshPicker::new(model, part).face_id(f))
@@ -917,6 +942,24 @@ pub fn preview(model: &Model, items: &Items) -> Preview {
             preview.lines = (edges.into_iter())
                 .map(|(a, b)| [model.render_position(a), model.render_position(b)])
                 .collect();
+            // Edges of shells, which have no face of their own on the skin.
+            let shell_edges: BTreeSet<(ElementId, u8)> = (faces.iter())
+                .filter(|&&(e, face)| {
+                    face >= 3 && model.mesh.element(e).is_some_and(|e| e.is_shell())
+                })
+                .copied()
+                .collect();
+            preview
+                .lines
+                .extend(
+                    edge_lines(model, &shell_edges)
+                        .into_iter()
+                        .filter_map(|[a, b]| {
+                            let position =
+                                |id| Some(model.render_position(model.mesh.node_index(id)?));
+                            Some([position(a)?, position(b)?])
+                        }),
+                );
         }
     }
     preview
@@ -1024,7 +1067,7 @@ impl<'a> MeshPicker<'a> {
     fn empty(&self, target: Target) -> Items {
         match target {
             Target::Nodes | Target::Point => Items::Nodes(BTreeSet::new()),
-            Target::Faces | Target::Edges => Items::Faces(BTreeSet::new()),
+            Target::Faces | Target::Surfaces | Target::Edges => Items::Faces(BTreeSet::new()),
             Target::Lines => Items::Edges(BTreeSet::new()),
         }
     }
@@ -1657,6 +1700,11 @@ mod tests {
     /// A 40 x 20 plate of 4 x 2 plane stress elements in the x-y plane, hit from +z at
     /// (x, y).
     fn plate_hit(x: f32, y: f32) -> (Model, Hit) {
+        plate_of_hit("CPS4", x, y)
+    }
+
+    /// A plate of 4 x 2 elements of the type, 40 x 20 in the x-y plane, hit from above.
+    fn plate_of_hit(type_name: &str, x: f32, y: f32) -> (Model, Hit) {
         let mut mesh = plx_mesh::FeMesh::default();
         let id = |i: u32, j: u32| j * 5 + i + 1;
         for j in 0..=2 {
@@ -1673,7 +1721,7 @@ mod tests {
                 let element = j * 4 + i + 1;
                 mesh.add_element(plx_mesh::Element {
                     id: element,
-                    type_name: "CPS4".into(),
+                    type_name: type_name.into(),
                     shape: plx_mesh::ElementShape::Quad4,
                     nodes: vec![id(i, j), id(i + 1, j), id(i + 1, j + 1), id(i, j + 1)],
                 })
@@ -1737,6 +1785,24 @@ mod tests {
             .map(|p| p[2])
             .fold(f64::MIN, f64::max);
         assert_eq!((position[0], position[2]), (100.0, top), "{position:?}");
+    }
+
+    #[test]
+    fn contact_surfaces_pick_edges_of_shells_or_their_faces() {
+        // Near the bottom edge of the shell plate the click picks the edge S3 of the bottom
+        // row of shells, in the middle the face.
+        let (model, hit) = plate_of_hit("S4", 15.0, 1.0);
+        let pick = |mode, hit: &Hit| faces(picker(mode).pick(&model, hit, Target::Surfaces, 2.0));
+        let bottom = BTreeSet::from([(1, 3), (2, 3), (3, 3), (4, 3)]);
+        assert_eq!(pick(SelectBy::Geometry, &hit), bottom);
+        assert_eq!(pick(SelectBy::EdgeAngle, &hit), bottom);
+        // Without an angle the edge runs on around the flat plate's outline.
+        assert_eq!(pick(SelectBy::Edge, &hit).len(), 12);
+        let above = Vec3::new(15.0, 6.0, 50.0) + model.global_origin();
+        let middle = model.pick(above, Vec3::NEG_Z).unwrap();
+        assert_eq!(pick(SelectBy::Geometry, &middle).len(), 8);
+        assert!(SelectBy::Edge.allowed(Target::Surfaces));
+        assert!(!SelectBy::Edge.allowed(Target::Faces));
     }
 
     #[test]

@@ -299,6 +299,15 @@ pub fn model_keywords(
         merged_model = copy;
         (&merged_mesh, &merged_model)
     };
+    // Bolt pre-tension cuts the mesh apart at its faces.
+    let split_mesh;
+    let (mesh, cuts) = match pre_tension::split(mesh, model)? {
+        Some((split, cuts)) => {
+            split_mesh = split;
+            (&split_mesh, cuts)
+        }
+        None => (mesh, BTreeMap::new()),
+    };
     let mut sets = Sets::new(mesh);
     let lines = LineElements::new(mesh, model)?;
     // Regions are resolved first: their sets must precede the materials and steps.
@@ -306,7 +315,7 @@ pub fn model_keywords(
     let mut sections = sections(&mut sets, model)?;
     let mut generated = constraints::springs(&mut sets, model)?;
     let mut constraints = constraints(&mut sets, model, &mut generated)?;
-    let pre_tension_sections = pre_tension_sections(&mut sets, model, &mut generated)?;
+    let pre_tension_sections = pre_tension_sections(&mut sets, model, &cuts, &mut generated);
     constraints.extend(generated.equations);
     sections.extend(generated.sections);
     let mut materials = materials;
@@ -819,6 +828,25 @@ impl<'a> Sets<'a> {
         }
     }
 
+    /// A node surface of the nodes of a region, named like [`Self::surface`].
+    fn node_surface(
+        &mut self,
+        item: &str,
+        side: &str,
+        region: &Region,
+    ) -> Result<String, WriteError> {
+        let ids = region.nodes(self.mesh);
+        if ids.is_empty() {
+            return Err(empty(item, "nodes"));
+        }
+        let postfix = format!("{}_{side}", name(item));
+        let surface = self.free_name("Internal_Selection", &postfix);
+        let set = self.free_name("Internal", &surface);
+        self.node_sets.push((set.clone(), ids));
+        self.surfaces.push((surface.clone(), Surface::Nodes(set)));
+        Ok(surface)
+    }
+
     /// Element sets and face numbers of a face region, for pressure loads.
     fn face_sets(&mut self, item: &str, region: &Region) -> Result<Vec<(String, u8)>, WriteError> {
         match region {
@@ -839,6 +867,16 @@ impl<'a> Sets<'a> {
         }
         Err(empty(item, "element faces"))
     }
+}
+
+/// Whether a face region holds edges (S3 and up) of membrane elements.
+fn membrane_edges(mesh: &FeMesh, region: &Region) -> bool {
+    (region.faces(mesh).iter()).any(|&(element, face)| {
+        face >= 3
+            && mesh.element(element).is_some_and(|e| {
+                e.is_shell() && e.type_name.to_ascii_uppercase().starts_with("M3D")
+            })
+    })
 }
 
 fn materials(model: &FeModel) -> Vec<Keyword> {
@@ -1221,7 +1259,14 @@ fn constraints(
 /// `*Tie` of a slave surface glued to its master.
 fn tie(sets: &mut Sets, tie: &Tie) -> Result<Keyword, WriteError> {
     let master = sets.surface(&tie.name, "Master", &tie.master)?;
-    let slave = sets.surface(&tie.name, "Slave", &tie.slave)?;
+    // CalculiX (2.21 to 2.23) ties the edge faces of membranes to nothing: their expanded
+    // nodes have no active degrees of freedom there, and the model has no stiffness. Their
+    // nodes tie correctly, and a membrane has no rotations to lose.
+    let slave = if membrane_edges(sets.mesh, &tie.slave) {
+        sets.node_surface(&tie.name, "Slave", &tie.slave)?
+    } else {
+        sets.surface(&tie.name, "Slave", &tie.slave)?
+    };
     let mut out = format!("*Tie, Name={}", name(&tie.name));
     if let Some(tolerance) = tie.position_tolerance {
         let _ = write!(out, ", Position tolerance={}", number(tolerance));
@@ -1273,13 +1318,15 @@ fn cyclic_slave_nodes(mesh: &FeMesh, model: &FeModel) -> BTreeSet<NodeId> {
     nodes
 }
 
-/// One `*Pre-tension section` per pre-tension load, with a new node that carries the
-/// preload: loads of the same name in several steps share the section, as the bolt is one.
+/// One cut per pre-tension load, written as the `*Equation`s that tie its two sides to a new
+/// node carrying the preload (see [`pre_tension`]): loads of the same name in several steps
+/// share the cut, as the bolt is one.
 fn pre_tension_sections(
     sets: &mut Sets,
     model: &FeModel,
+    cuts: &BTreeMap<String, pre_tension::Cut>,
     generated: &mut constraints::Generated,
-) -> Result<Vec<Keyword>, WriteError> {
+) -> Vec<Keyword> {
     let mut keywords = Vec::new();
     let mut next_node = (sets.mesh.node_ids().iter().copied())
         .chain(generated.nodes.iter().map(|(id, _)| *id))
@@ -1291,36 +1338,37 @@ fn pre_tension_sections(
         .filter(|s| s.active && s.kind.supports_loads())
     {
         for load in step.loads.iter().filter(|l| l.active) {
-            let LoadKind::PreTension { direction, .. } = load.kind else {
+            let Some(cut) = cuts.get(&load.name) else {
                 continue;
             };
             if sets.pre_tension_nodes.contains_key(&load.name) {
                 continue;
             }
-            let surface = sets.surface(&load.name, "Section", &load.region)?;
             // The node sits at the centre of the cut; CalculiX does not use its position.
-            let nodes = load.region.nodes(sets.mesh);
             let mut centre = [0.0; 3];
-            for coords in nodes.iter().filter_map(|&n| sets.mesh.node(n)) {
+            for coords in cut.pairs.iter().filter_map(|&(n, _)| sets.mesh.node(n)) {
                 for (c, x) in centre.iter_mut().zip(coords) {
-                    *c += x / nodes.len() as f64;
+                    *c += x / cut.pairs.len() as f64;
                 }
             }
             let node = next_node;
             next_node += 1;
             generated.nodes.push((node, centre));
             sets.pre_tension_nodes.insert(load.name.clone(), node);
-            let mut out = format!(
-                "** Name: {}\n*Pre-tension section, Surface={surface}, Node={node}\n",
-                load.name
-            );
-            if let Some([x, y, z]) = direction {
-                let _ = writeln!(out, "{}, {}, {}", number(x), number(y), number(z));
+            let mut out = format!("** Name: {}\n", load.name);
+            for equation in pre_tension::equations(cut, node) {
+                let _ = writeln!(out, "*Equation\n{}", equation.len());
+                let terms: Vec<String> = (equation.iter())
+                    .map(|(node, dof, factor)| format!("{node}, {dof}, {}", number(*factor)))
+                    .collect();
+                for chunk in terms.chunks(4) {
+                    let _ = writeln!(out, "{}", chunk.join(", "));
+                }
             }
             keywords.push(Keyword::generated(out));
         }
     }
-    Ok(keywords)
+    keywords
 }
 
 /// The node ties, listed with the contact pairs.
@@ -2710,5 +2758,6 @@ fn empty(item: &str, what: &'static str) -> WriteError {
 }
 
 mod constraints;
+mod pre_tension;
 #[cfg(test)]
 mod tests;

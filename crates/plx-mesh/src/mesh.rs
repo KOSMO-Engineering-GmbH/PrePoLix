@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use crate::cad::CadMap;
-use crate::element::{ElementShape, FaceTopology};
+use crate::element::{ElementFamily, ElementShape, FaceTopology};
 use crate::fast_map::FastMap;
 
 pub type NodeId = u32;
@@ -28,14 +28,37 @@ impl Element {
             .any(|p| name.len() >= 3 && name[..3].eq_ignore_ascii_case(p.as_bytes()))
     }
 
+    /// Whether this is a shell or membrane element of a 3D model.
+    pub fn is_shell(&self) -> bool {
+        self.shape.family() == ElementFamily::Surface && !self.is_plane()
+    }
+
     /// Faces in CalculiX face order. A 2D element's faces are its edges, as CalculiX numbers
-    /// them in surfaces and distributed loads (S1 = P1 = edge from node 1 to 2).
+    /// them in surfaces and distributed loads (S1 = P1 = edge from node 1 to 2). A shell has
+    /// its bottom (S1, NEG) and top (S2, POS), both in the element's node order, and then
+    /// its edges (S3 = edge from node 1 to 2).
     pub fn faces(&self) -> &'static [FaceTopology] {
         if self.is_plane() {
             self.shape.edges()
+        } else if self.is_shell() {
+            self.shape.shell_faces()
         } else {
             self.shape.faces()
         }
+    }
+
+    /// The faces that are edges of the element, with their CalculiX face numbers: all faces
+    /// of a 2D element, S3 and up of a shell; none of a solid or line element.
+    pub fn edge_faces(&self) -> impl Iterator<Item = (u8, &'static FaceTopology)> {
+        let first = if self.is_shell() { 2 } else { 0 };
+        let faces: &'static [FaceTopology] = if self.is_plane() || self.is_shell() {
+            self.faces()
+        } else {
+            &[]
+        };
+        (faces.iter().enumerate())
+            .skip(first)
+            .map(|(k, face)| (k as u8 + 1, face))
     }
 }
 
@@ -118,6 +141,27 @@ impl FeMesh {
         self.element_lookup.insert(element.id, self.elements.len());
         self.elements.push(element);
         Ok(())
+    }
+
+    /// Separates the mesh along a cut: the given elements get copies of the given nodes, at
+    /// the same place, under the new ids of `copies`, and no longer share them with the rest.
+    pub fn split_nodes(
+        &mut self,
+        elements: &BTreeSet<ElementId>,
+        copies: &BTreeMap<NodeId, NodeId>,
+    ) {
+        for (&node, &copy) in copies {
+            if let Some(coords) = self.node(node) {
+                self.set_node(copy, coords);
+            }
+        }
+        for element in (self.elements.iter_mut()).filter(|e| elements.contains(&e.id)) {
+            for node in &mut element.nodes {
+                if let Some(&copy) = copies.get(node) {
+                    *node = copy;
+                }
+            }
+        }
     }
 
     pub fn node_count(&self) -> usize {

@@ -402,7 +402,7 @@ pub(super) fn node_areas(
 }
 
 /// Nodes of an element face: corners, then midside nodes of quadratic elements.
-fn face_node_ids(mesh: &FeMesh, element: ElementId, face: u8) -> Vec<NodeId> {
+pub(super) fn face_node_ids(mesh: &FeMesh, element: ElementId, face: u8) -> Vec<NodeId> {
     let Some(element) = mesh.element(element) else {
         return Vec::new();
     };
@@ -424,7 +424,7 @@ fn face_node_ids(mesh: &FeMesh, element: ElementId, face: u8) -> Vec<NodeId> {
 
 /// Unit normal of an element face pointing out of a solid element; for a shell, the normal
 /// of its first face.
-fn outward_normal(mesh: &FeMesh, element: ElementId, face: u8) -> Option<[f64; 3]> {
+pub(super) fn outward_normal(mesh: &FeMesh, element: ElementId, face: u8) -> Option<[f64; 3]> {
     let e = mesh.element(element)?;
     let topology = e.faces().get(usize::from(face).checked_sub(1)?)?;
     let corners: Vec<[f64; 3]> = (topology.corners.iter())

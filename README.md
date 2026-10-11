@@ -152,3 +152,12 @@ sources: Gmsh at <https://gitlab.onelab.info/gmsh/gmsh> (tag `gmsh_4_15_2`), Ope
 The bundled font Noto Sans (`crates/plx-app/assets/fonts`, reduced to Latin, Greek and common
 symbols) is licensed under the SIL Open Font License 1.1, see
 [OFL.txt](crates/plx-app/assets/fonts/OFL.txt).
+
+## Gallery
+<img width="2216" height="1127" alt="grafik" src="https://github.com/user-attachments/assets/3ae28812-d691-4c12-97e6-daed26c01e73" />
+
+_1D beam elements and plotting along paths_
+
+<img width="2690" height="1570" alt="grafik" src="https://github.com/user-attachments/assets/b59d0f43-fa7a-4231-a45f-3be27e87ce54" />
+
+_moving loads_

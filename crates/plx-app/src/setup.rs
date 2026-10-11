@@ -5,7 +5,7 @@
 //! need node or element sets for this; the input file writer derives them. Sets can still be
 //! defined in the Mesh branch of the tree, by a selection like any region.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
@@ -179,7 +179,9 @@ impl RegionDraft {
                 draft.parts = PartPicks::from_names(parts.iter().cloned());
             }
             Region::Nodes(nodes) => draft.nodes = History::from_items(nodes.iter().copied()),
-            Region::Faces(faces) if matches!(target, Target::Faces | Target::Edges) => {
+            Region::Faces(faces)
+                if matches!(target, Target::Faces | Target::Surfaces | Target::Edges) =>
+            {
                 draft.faces = History::from_items(faces.iter().copied());
             }
             Region::Edges(edges) if target == Target::Lines => {
@@ -216,7 +218,7 @@ impl RegionDraft {
                 Target::Nodes | Target::Point => {
                     Region::Nodes(self.nodes.items().into_iter().collect())
                 }
-                Target::Faces | Target::Edges => {
+                Target::Faces | Target::Surfaces | Target::Edges => {
                     Region::Faces(self.faces.items().into_iter().collect())
                 }
                 Target::Lines => Region::Edges(self.edges.items().into_iter().collect()),
@@ -234,7 +236,7 @@ impl RegionDraft {
             Source::Selection if self.geometry.can_undo() => self.geometry.items().is_empty(),
             Source::Selection => match self.target {
                 Target::Nodes | Target::Point => self.nodes.items().is_empty(),
-                Target::Faces | Target::Edges => self.faces.items().is_empty(),
+                Target::Faces | Target::Surfaces | Target::Edges => self.faces.items().is_empty(),
                 Target::Lines => self.edges.items().is_empty(),
             },
             Source::Parts => self.parts.is_empty(),
@@ -245,7 +247,7 @@ impl RegionDraft {
     pub(crate) fn count(&self) -> usize {
         match self.target {
             Target::Nodes | Target::Point => self.nodes.items().len(),
-            Target::Faces | Target::Edges => self.faces.items().len(),
+            Target::Faces | Target::Surfaces | Target::Edges => self.faces.items().len(),
             Target::Lines => self.edges.items().len(),
         }
     }
@@ -321,7 +323,7 @@ impl RegionDraft {
             Target::Nodes | Target::Point => {
                 self.nodes = History::from_items(mesh.cad_nodes(&entities))
             }
-            Target::Faces | Target::Edges => {
+            Target::Faces | Target::Surfaces | Target::Edges => {
                 self.faces = History::from_items(mesh.cad_faces(&entities));
             }
             Target::Lines => {
@@ -333,7 +335,7 @@ impl RegionDraft {
     fn ids_can_undo(&self) -> bool {
         match self.target {
             Target::Nodes | Target::Point => self.nodes.can_undo(),
-            Target::Faces | Target::Edges => self.faces.can_undo(),
+            Target::Faces | Target::Surfaces | Target::Edges => self.faces.can_undo(),
             Target::Lines => self.edges.can_undo(),
         }
     }
@@ -383,7 +385,9 @@ impl RegionDraft {
         }
         match (action, self.target) {
             (PickerAction::Undo, Target::Nodes | Target::Point) => self.nodes.undo(),
-            (PickerAction::Undo, Target::Faces | Target::Edges) => self.faces.undo(),
+            (PickerAction::Undo, Target::Faces | Target::Surfaces | Target::Edges) => {
+                self.faces.undo()
+            }
             (PickerAction::Undo, Target::Lines) => self.edges.undo(),
             (PickerAction::All, Target::Lines) => {
                 let all = crate::selection::visible_segments(model);
@@ -401,7 +405,7 @@ impl RegionDraft {
             (PickerAction::All, Target::Nodes | Target::Point) => {
                 self.nodes.push(Operation::Replace, model.visible_nodes());
             }
-            (PickerAction::All, Target::Faces) => {
+            (PickerAction::All, Target::Faces | Target::Surfaces) => {
                 self.faces.push(Operation::Replace, model.visible_faces());
             }
             (PickerAction::Invert, Target::Nodes | Target::Point) => {
@@ -426,7 +430,7 @@ impl RegionDraft {
                 edges.retain(|(element, _)| elements.contains(element));
                 self.faces.push(operation, edges);
             }
-            (PickerAction::Invert, Target::Faces) => {
+            (PickerAction::Invert, Target::Faces | Target::Surfaces) => {
                 let selected = self.faces.items();
                 let mut all = model.visible_faces();
                 all.retain(|f| !selected.contains(f));
@@ -439,7 +443,7 @@ impl RegionDraft {
                     .collect();
                 self.nodes.push(operation, ids);
             }
-            (PickerAction::Ids(operation, ids), Target::Faces) => {
+            (PickerAction::Ids(operation, ids), Target::Faces | Target::Surfaces) => {
                 // Ids of elements: their faces on the surface.
                 let elements: BTreeSet<ElementId> = ids.into_iter().collect();
                 let faces = model
@@ -500,7 +504,7 @@ impl RegionDraft {
                         let geometry = self.geometry.items();
                         let what = match self.target {
                             Target::Nodes | Target::Point => "Nodes",
-                            Target::Faces => "Element faces",
+                            Target::Faces | Target::Surfaces => "Element faces",
                             Target::Edges | Target::Lines => "Element edges",
                         };
                         if !geometry.is_empty() {
@@ -604,6 +608,16 @@ fn visible_edges(model: &Model) -> BTreeSet<(ElementId, u8)> {
         .filter(|(part, _, _)| model.parts[*part].visible)
         .map(|(_, face, _)| face)
         .collect()
+}
+
+/// Contacts and ties are on element faces or edges of shells, in 2D models on the edges of
+/// their elements.
+pub(crate) fn contact_target(fe: &FeModel) -> Target {
+    if fe.properties.space.is_2d() {
+        Target::Edges
+    } else {
+        Target::Surfaces
+    }
 }
 
 /// Pressure and surface traction act on element faces, in 2D models on their edges.
@@ -819,6 +833,30 @@ fn revolution_hint(ui: &mut Ui, axisymmetric: bool) {
     }
 }
 
+/// Element faces of a 3D model as drawn: faces on the skin, the top of a shell on its one
+/// skin face, and the edges of shells as lines.
+pub fn shown_faces(
+    model: &Model,
+    faces: impl IntoIterator<Item = (ElementId, u8)>,
+) -> (HashSet<(ElementId, u8)>, Vec<[NodeId; 2]>) {
+    let mut shown = HashSet::new();
+    let mut edges = BTreeSet::new();
+    for (element, face) in faces {
+        match model.mesh.element(element) {
+            Some(e) if e.is_shell() && face >= 3 => {
+                edges.insert((element, face));
+            }
+            Some(e) if e.is_shell() => {
+                shown.insert((element, 1));
+            }
+            _ => {
+                shown.insert((element, face));
+            }
+        }
+    }
+    (shown, crate::selection::edge_lines(model, &edges))
+}
+
 /// How a region is shown selected in the 3D view.
 pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
     let mut highlight = Highlight::default();
@@ -848,8 +886,8 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
             }
         }
         Region::Faces(_) | Region::Surface(_) => {
-            highlight.faces = region.faces(&model.mesh).into_iter().collect();
-            if highlight.faces.is_empty() {
+            (highlight.faces, highlight.lines) = shown_faces(model, region.faces(&model.mesh));
+            if highlight.faces.is_empty() && highlight.lines.is_empty() {
                 highlight.nodes = region.nodes(&model.mesh);
             }
         }
@@ -1447,12 +1485,12 @@ impl Editor {
                     .unwrap_or_default();
                 Draft::ContactPair(
                     ContactPair::new(next_name("Contact_Pair", existing), interaction),
-                    MasterSlave::new(face_target(fe)),
+                    MasterSlave::new(contact_target(fe)),
                 )
             }
             NewItem::Tie => {
                 let name = next_name("Tie", names(&fe.ties, |t| &t.name));
-                Draft::Tie(Tie::new(name), MasterSlave::new(face_target(fe)))
+                Draft::Tie(Tie::new(name), MasterSlave::new(contact_target(fe)))
             }
             NewItem::NodeTie => {
                 let name = next_name("Node_Tie", names(&fe.node_ties, |t| &t.name));
@@ -1610,13 +1648,13 @@ impl Editor {
             TreeItem::ContactPair(i) => {
                 let pair = fe.contact_pairs.get(i)?.clone();
                 let regions =
-                    MasterSlave::from_regions(&pair.master, &pair.slave, face_target(fe), mesh);
+                    MasterSlave::from_regions(&pair.master, &pair.slave, contact_target(fe), mesh);
                 (Draft::ContactPair(pair, regions), i)
             }
             TreeItem::Tie(i) => {
                 let tie = fe.ties.get(i)?.clone();
                 let regions =
-                    MasterSlave::from_regions(&tie.master, &tie.slave, face_target(fe), mesh);
+                    MasterSlave::from_regions(&tie.master, &tie.slave, contact_target(fe), mesh);
                 (Draft::Tie(tie, regions), i)
             }
             TreeItem::NodeTie(i) => {

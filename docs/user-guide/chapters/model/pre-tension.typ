@@ -20,11 +20,21 @@ pre-tension load does. Create it with #ui("Create ...") on #ui("Loads") of a ste
     selected faces; #ui("Given") takes the components #ui("X"), #ui("Y"), #ui("Z").],
 )
 
-Written as `*PRE-TENSION SECTION, SURFACE=..., NODE=...` with a new node per load that carries
-the preload, then `*CLOAD` with the force or `*BOUNDARY` with the shortening on this node. The
-same load name in a later step reuses the node, so a bolt tightened by a force in the first
-step can be held at its length in the next step with a displacement of 0, like the usual
-"preload, then load" sequence of a bolted joint.
+PrePoLix cuts the mesh apart at the selected faces when it writes the input file: every
+element on their side, also one that only touches the cut with an edge or a corner, gets copies
+of the nodes on the cut. `*Equation`s tie the copies to the other side the way CalculiX's
+`*PRE-TENSION SECTION` does: the gap normal to the cut is the first degree of freedom of a new
+node per load, the sides cannot slide against each other. The preload is a `*CLOAD` with the
+force or a `*BOUNDARY` with the shortening on this node. The same load name in a later step
+reuses the node, so a bolt tightened by a force in the first step can be held at its length in
+the next step with a displacement of 0, like the usual "preload, then load" sequence of a bolted
+joint.
+
+#note[PrePoMax writes `*PRE-TENSION SECTION`, and CalculiX separates only the elements with a
+face on the cut. In a tetrahedral mesh, elements that touch the cut with just an edge or a
+corner then hold both sides together and take most of the preload, which is why PrePoMax users
+add a thin layer of wedge elements at the cut (#menu("Model", "Tools", "Boundary Layer")).
+PrePoLix needs no such layer: its own cut separates all of them.]
 
 A pre-tension load can follow an #ui("Amplitude") (@amplitudes). The reaction force at the
 pre-tension node is the bolt force; request it with a history output (@history-outputs) of `RF`

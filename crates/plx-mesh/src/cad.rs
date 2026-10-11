@@ -131,17 +131,20 @@ impl CadMap {
 
 impl FeMesh {
     /// The CAD faces that element faces make up, if they are whole CAD faces and nothing
-    /// else, so that a region of them can be kept by geometry. The faces of 2D elements are
-    /// their edges, which make up CAD edges.
+    /// else, so that a region of them can be kept by geometry. The faces of 2D elements and
+    /// the edge faces of shells are edges, which make up CAD edges.
     pub fn whole_cad_faces(&self, faces: &[(ElementId, u8)]) -> Option<Vec<CadEntity>> {
         if faces.is_empty() || self.cad.is_empty() {
             return None;
         }
-        let plane = |&(e, _): &(ElementId, u8)| self.element(e).is_some_and(|e| e.is_plane());
-        if faces.iter().all(plane) {
+        let edge = |&(e, face): &(ElementId, u8)| {
+            self.element(e)
+                .is_some_and(|e| e.is_plane() || (e.is_shell() && face >= 3))
+        };
+        if faces.iter().all(edge) {
             return self.whole_cad_edges(faces);
         }
-        if faces.iter().any(plane) {
+        if faces.iter().any(edge) {
             return None;
         }
         let face_of = self.cad.face_of();
@@ -155,8 +158,8 @@ impl FeMesh {
         (covered == given).then(|| tags.into_iter().map(CadEntity::Face).collect())
     }
 
-    /// The CAD edges that edges of 2D elements make up, if they are whole CAD edges and
-    /// nothing else.
+    /// The CAD edges that edges of 2D elements or shells make up, if they are whole CAD
+    /// edges and nothing else.
     fn whole_cad_edges(&self, faces: &[(ElementId, u8)]) -> Option<Vec<CadEntity>> {
         let sorted = |[a, b]: [NodeId; 2]| [a.min(b), a.max(b)];
         let edge_of: BTreeMap<[NodeId; 2], i32> = (self.cad.segments.iter())
@@ -189,7 +192,8 @@ impl FeMesh {
     }
 
     /// Element faces on CAD entities: the faces on CAD faces of solids and shells, and the
-    /// edges of 2D elements (their faces, see [`crate::Element::faces`]) along CAD edges.
+    /// edges of 2D elements and shells (faces too, see [`crate::Element::faces`]) along CAD
+    /// edges.
     pub fn cad_faces(&self, entities: &[CadEntity]) -> Vec<(ElementId, u8)> {
         let mut faces = BTreeSet::new();
         let mut segments: BTreeSet<[NodeId; 2]> = BTreeSet::new();
@@ -210,8 +214,8 @@ impl FeMesh {
             }
         }
         if !segments.is_empty() {
-            for element in self.elements().iter().filter(|e| e.is_plane()) {
-                for (k, edge) in element.faces().iter().enumerate() {
+            for element in self.elements() {
+                for (number, edge) in element.edge_faces() {
                     let (Some(&a), Some(&b)) = (
                         edge.corners.first().and_then(|&i| element.nodes.get(i)),
                         edge.corners.get(1).and_then(|&i| element.nodes.get(i)),
@@ -219,7 +223,7 @@ impl FeMesh {
                         continue;
                     };
                     if segments.contains(&[a.min(b), a.max(b)]) {
-                        faces.insert((element.id, (k + 1) as u8));
+                        faces.insert((element.id, number));
                     }
                 }
             }

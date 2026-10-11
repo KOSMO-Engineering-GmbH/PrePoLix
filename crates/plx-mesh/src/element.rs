@@ -78,6 +78,24 @@ const QUAD_EDGES: [FaceTopology; 4] = [
 const TRI_FACE: [FaceTopology; 1] = [face(&[0, 1, 2], &[3, 4, 5])];
 const QUAD_FACE: [FaceTopology; 1] = [face(&[0, 1, 2, 3], &[4, 5, 6, 7])];
 
+/// Faces of a shell or membrane in CalculiX order: S1 the bottom (NEG) and S2 the top (POS)
+/// of the element, both listed with the element's own node order, then S3 and up its edges.
+const TRI_SHELL_FACES: [FaceTopology; 5] = [
+    TRI_FACE[0],
+    TRI_FACE[0],
+    TRI_EDGES[0],
+    TRI_EDGES[1],
+    TRI_EDGES[2],
+];
+const QUAD_SHELL_FACES: [FaceTopology; 6] = [
+    QUAD_FACE[0],
+    QUAD_FACE[0],
+    QUAD_EDGES[0],
+    QUAD_EDGES[1],
+    QUAD_EDGES[2],
+    QUAD_EDGES[3],
+];
+
 impl ElementShape {
     /// Maps a CalculiX/Abaqus element type name to its shape; `None` for unsupported types.
     pub fn from_type_name(name: &str) -> Option<Self> {
@@ -160,6 +178,16 @@ impl ElementShape {
             Self::Hex8 | Self::Hex20 => &HEX_FACES,
         };
         all
+    }
+
+    /// Faces of a shell or membrane element of this shape in CalculiX order, see
+    /// [`crate::Element::faces`]; other shapes have their [`Self::faces`].
+    pub fn shell_faces(self) -> &'static [FaceTopology] {
+        match self {
+            Self::Tri3 | Self::Tri6 => &TRI_SHELL_FACES,
+            Self::Quad4 | Self::Quad8 => &QUAD_SHELL_FACES,
+            _ => self.faces(),
+        }
     }
 
     /// Edges of a triangle or quadrilateral in CalculiX order, the faces of plane elements;
