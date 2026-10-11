@@ -189,6 +189,8 @@ pub enum MeshItemResult {
     Open,
     /// The item to store at the index, or to add.
     Ok(Option<usize>, MeshSetupItem),
+    /// Like `Ok`, and remesh the parts the item applies to.
+    OkRemesh(Option<usize>, MeshSetupItem),
     Cancel,
 }
 
@@ -310,6 +312,16 @@ impl MeshItemEditor {
                     if ui.button("OK").clicked() {
                         match self.finish() {
                             Ok(item) => result = MeshItemResult::Ok(self.index, item),
+                            Err(error) => self.error = Some(error),
+                        }
+                    }
+                    if ui
+                        .button("OK & Remesh")
+                        .on_hover_text("Apply the item and mesh the parts it applies to again")
+                        .clicked()
+                    {
+                        match self.finish() {
+                            Ok(item) => result = MeshItemResult::OkRemesh(self.index, item),
                             Err(error) => self.error = Some(error),
                         }
                     }

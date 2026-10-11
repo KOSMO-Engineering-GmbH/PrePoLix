@@ -425,6 +425,11 @@ impl Gmsh {
         Ok(self.take_string(name))
     }
 
+    pub fn set_entity_name(&self, dim: i32, tag: i32, name: &str) -> Result<(), GmshError> {
+        let name = c_string(name)?;
+        self.call(|e| unsafe { (self.api.set_entity_name)(dim, tag, name.as_ptr(), e) })
+    }
+
     /// Entities of the next higher and the next lower dimension touching an entity.
     pub fn adjacencies(&self, dim: i32, tag: i32) -> Result<(Vec<i32>, Vec<i32>), GmshError> {
         let (mut up, mut up_len) = (std::ptr::null_mut(), 0);

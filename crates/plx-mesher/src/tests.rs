@@ -982,3 +982,75 @@ fn split_faces_keep_their_outline_on_the_mesh() {
         assert!(on_circle >= 8, "z = {z}: {on_circle} edges");
     }
 }
+
+/// testdata/benannte_teile.step: a STEP file as CAD programs such as Onshape write it, an
+/// assembly "Part Studio 1" with the solids "oben" and "Stütze" (written `\X2\00FC\X0\`) and
+/// the surface part "Membran". Written by Gmsh, the names set in the text afterwards.
+#[test]
+fn parts_keep_the_names_of_the_cad_file() {
+    if !gmsh_available() {
+        return;
+    }
+    let import = import_cad(&testdata("benannte_teile.step"), UnitSystem::MmTonSC).unwrap();
+    let names = ["OBEN", "STUETZE", "MEMBRAN"];
+    assert_eq!(part_names(&import.geometry).unwrap(), names);
+    let shown: Vec<&str> = (import.display.mesh.parts.iter())
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(shown, names);
+    // The names belong to the right bodies: "oben" lies above, the membrane in between.
+    let lowest = |name: &str| {
+        let part = import
+            .display
+            .mesh
+            .parts
+            .iter()
+            .find(|p| p.name == name)
+            .unwrap();
+        (part.elements.iter())
+            .flat_map(|&id| import.display.mesh.element(id).unwrap().nodes.clone())
+            .map(|n| import.display.mesh.node(n).unwrap()[2])
+            .fold(f64::INFINITY, f64::min)
+    };
+    assert!(lowest("OBEN") > 9.0);
+    assert!(lowest("STUETZE") < 1.0);
+    assert!((lowest("MEMBRAN") - 7.5).abs() < 1e-6);
+
+    let mut geometry = import.geometry;
+    geometry.meshing.second_order = false;
+    geometry.meshing.max_size = 5.0;
+    let mesh = generate_mesh(&geometry).unwrap().mesh;
+    let meshed: Vec<&str> = mesh.parts.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(meshed, names);
+
+    // Added to another geometry, the parts keep their names unless one is taken.
+    let blocks = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC).unwrap();
+    let paths = [testdata("benannte_teile.step")];
+    let taken = ["OBEN".to_string()];
+    let addition =
+        add_cad_files(Some(&blocks.geometry), &paths, UnitSystem::MmTonSC, &taken).unwrap();
+    assert_eq!(addition.added, ["OBEN-2", "STUETZE", "MEMBRAN"]);
+    let addition = add_cad_files(None, &paths, UnitSystem::MmTonSC, &taken).unwrap();
+    assert_eq!(addition.added, ["OBEN-2", "STUETZE", "MEMBRAN"]);
+    let shown: Vec<&str> = (addition.import.display.mesh.parts.iter())
+        .map(|p| p.name.as_str())
+        .collect();
+    assert_eq!(shown, ["OBEN-2", "STUETZE", "MEMBRAN"]);
+}
+
+#[test]
+fn part_names_are_calculix_names() {
+    assert_eq!(
+        label_name("Shapes/Part Studio 1/2/Stütze").as_deref(),
+        Some("STUETZE")
+    );
+    assert_eq!(
+        label_name(
+            "Shapes/Open CASCADE STEP translator 7.8 1/1/Open CASCADE STEP translator 7.8 1.1"
+        ),
+        None
+    );
+    assert!(is_default_name("SOLID-12"));
+    assert!(!is_default_name("SOLID-A"));
+    assert!(!is_default_name("OBEN"));
+}

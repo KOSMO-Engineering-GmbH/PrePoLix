@@ -72,17 +72,43 @@ fn range(values: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
     Some((min, max))
 }
 
-/// Draws the diagram into the available space of `ui`.
-pub fn show(ui: &mut Ui, data: &XyData) {
+/// Draws the diagram into the available space of `ui`; returns where.
+pub fn show(ui: &mut Ui, data: &XyData) -> Rect {
     let size = ui.available_size().max(vec2(360.0, 220.0));
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter_at(rect);
+    paint(&painter, rect, response.hover_pos(), data, &Axes::default());
+    rect
+}
+
+/// What a viewport annotation changes of a diagram: the label of the value axis and a fixed
+/// value range.
+#[derive(Default)]
+pub struct Axes<'a> {
+    /// Written above the value axis; empty for none.
+    pub y_label: &'a str,
+    /// Values shown, lowest and highest; `None` follows the data.
+    pub y_range: Option<[f64; 2]>,
+}
+
+/// Smallest and largest value of the curves and guides.
+pub fn extremes(data: &XyData) -> Option<[f64; 2]> {
+    let values = (data.curves.iter().chain(&data.guides)).flat_map(|(_, y)| y.iter().copied());
+    range(values).map(|(min, max)| [min, max])
+}
+
+/// Draws the diagram into `rect` with the value under `hover`.
+pub fn paint(painter: &egui::Painter, rect: Rect, hover: Option<Pos2>, data: &XyData, axes: &Axes) {
+    let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
     painter.rect_filled(rect, 0.0, Color32::WHITE);
     let font = egui::FontId::proportional(12.0);
     let text = Color32::from_gray(40);
     let values = (data.curves.iter().chain(&data.guides)).flat_map(|(_, y)| y.iter().copied());
-    let y_range = match data.y_max {
-        Some(top) if top.is_finite() && top > 0.0 => {
+    let y_range = match (axes.y_range, data.y_max) {
+        (Some([low, high]), _) if low.is_finite() && high.is_finite() && high > low => {
+            Some((low, high))
+        }
+        (_, Some(top)) if top.is_finite() && top > 0.0 => {
             range(values).map(|(min, _)| (min.min(0.0), top))
         }
         _ => range(values),
@@ -97,7 +123,17 @@ pub fn show(ui: &mut Ui, data: &XyData) {
         );
         return;
     };
-    let area = Rect::from_min_max(rect.min + vec2(72.0, 12.0), rect.max - vec2(16.0, 40.0));
+    let top = if axes.y_label.is_empty() { 12.0 } else { 26.0 };
+    let area = Rect::from_min_max(rect.min + vec2(72.0, top), rect.max - vec2(16.0, 40.0));
+    if !axes.y_label.is_empty() {
+        painter.text(
+            pos2(area.left(), rect.top() + 4.0),
+            egui::Align2::LEFT_TOP,
+            axes.y_label,
+            font.clone(),
+            text,
+        );
+    }
     let to_screen = |x: f64, y: f64| {
         pos2(
             area.left() + ((x - x0) / (x1 - x0)) as f32 * area.width(),
@@ -195,7 +231,7 @@ pub fn show(ui: &mut Ui, data: &XyData) {
         flush(&mut segment);
     }
     legend(&painter, area, data, &font);
-    if let Some(hover) = response.hover_pos().filter(|p| area.contains(*p)) {
+    if let Some(hover) = hover.filter(|p| area.contains(*p)) {
         let lines: Vec<_> = data.curves.iter().chain(&data.guides).collect();
         let nearest = (lines.iter().enumerate())
             .flat_map(|(c, (_, values))| {
@@ -296,20 +332,265 @@ fn legend(painter: &egui::Painter, area: Rect, data: &XyData, font: &egui::FontI
     }
 }
 
-/// The diagram in its own window, PrePoMax's diagram view; returns false when it is closed.
-pub fn window(ctx: &egui::Context, data: &XyData) -> bool {
+/// Where the diagram of the window is to be exported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Export {
+    Clipboard,
+    Png,
+    Svg,
+}
+
+/// What the user did in the diagram's window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowResponse {
+    pub closed: bool,
+    /// Show in View or Remove from View was clicked.
+    pub toggle_view: bool,
+    pub export: Option<Export>,
+    /// Where the diagram is drawn, in points.
+    pub plot: Rect,
+}
+
+/// The diagram in its own window, PrePoMax's diagram view; `shown` is whether it is also an
+/// annotation in the 3D view.
+pub fn window(ctx: &egui::Context, data: &XyData, shown: bool) -> WindowResponse {
     let mut open = true;
+    let mut toggle_view = false;
+    let mut export = None;
+    let mut plot = Rect::NOTHING;
     egui::Window::new(format!("Plot: {}", data.title))
         .id(egui::Id::new("history plot"))
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
-        .default_size([640.0, 420.0])
+        .default_size([640.0, 450.0])
         .pivot(egui::Align2::RIGHT_TOP)
         .default_pos(ctx.content_rect().right_top() + vec2(-24.0, 96.0))
-        .min_size([360.0, 240.0])
-        .show(ctx, |ui| show(ui, data));
-    open
+        .min_size([360.0, 270.0])
+        .show(ctx, |ui| {
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                ui.horizontal(|ui| {
+                    let label = if shown {
+                        "Remove from View"
+                    } else {
+                        "Show in View"
+                    };
+                    toggle_view = ui
+                        .button(label)
+                        .on_hover_text(
+                            "Shows the plot as an annotation in the 3D view, where it stays \
+                             after the window is closed. Drag it to move it, drag its corner \
+                             to resize it; right-click it to edit or delete it.",
+                        )
+                        .clicked();
+                    ui.menu_button("Export", |ui| {
+                        for (label, choice) in [
+                            ("Copy to Clipboard", Export::Clipboard),
+                            ("Save as PNG...", Export::Png),
+                            ("Save as SVG...", Export::Svg),
+                        ] {
+                            if ui.button(label).clicked() {
+                                export = Some(choice);
+                                ui.close();
+                            }
+                        }
+                    });
+                });
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    plot = show(ui, data);
+                });
+            });
+        });
+    WindowResponse {
+        closed: !open,
+        toggle_view,
+        export,
+        plot,
+    }
+}
+
+/// The diagram as an SVG image of `width` by `height` points, laid out like the window's.
+pub fn to_svg(data: &XyData, width: f32, height: f32) -> String {
+    use std::fmt::Write;
+    let (width, height) = (width.max(360.0), height.max(220.0));
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"{height}\" \
+         viewBox=\"0 0 {width} {height}\" font-family=\"Noto Sans, Arial, sans-serif\" \
+         font-size=\"12\">\n<rect width=\"100%\" height=\"100%\" fill=\"white\"/>\n"
+    );
+    let values = (data.curves.iter().chain(&data.guides)).flat_map(|(_, y)| y.iter().copied());
+    let y_range = match data.y_max {
+        Some(top) if top.is_finite() && top > 0.0 => {
+            range(values).map(|(min, _)| (min.min(0.0), top))
+        }
+        _ => range(values),
+    };
+    let (Some((x0, x1)), Some((y0, y1))) = (range(data.x.iter().copied()), y_range) else {
+        let _ = writeln!(
+            svg,
+            "<text x=\"{}\" y=\"{}\" text-anchor=\"middle\">No plottable values</text>",
+            width / 2.0,
+            height / 2.0
+        );
+        return svg + "</svg>\n";
+    };
+    let area = Rect::from_min_max(pos2(72.0, 12.0), pos2(width - 16.0, height - 40.0));
+    let to_screen = |x: f64, y: f64| {
+        pos2(
+            area.left() + ((x - x0) / (x1 - x0)) as f32 * area.width(),
+            area.bottom() - ((y - y0) / (y1 - y0)) as f32 * area.height(),
+        )
+    };
+    let ink = "#282828";
+    for y in ticks(y0, y1, (area.height() / 50.0).max(2.0) as usize) {
+        let p = to_screen(x0, y);
+        let _ = writeln!(
+            svg,
+            "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#e1e1e1\"/>\n\
+             <text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"end\" dy=\"0.35em\" \
+             fill=\"{ink}\">{}</text>",
+            area.left(),
+            p.y,
+            area.right(),
+            p.y,
+            area.left() - 6.0,
+            p.y,
+            escape(&format_value(y as f32))
+        );
+    }
+    for x in ticks(x0, x1, (area.width() / 90.0).max(2.0) as usize) {
+        let p = to_screen(x, y0);
+        let _ = writeln!(
+            svg,
+            "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#e1e1e1\"/>\n\
+             <text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" fill=\"{ink}\">{}</text>",
+            p.x,
+            area.top(),
+            p.x,
+            area.bottom(),
+            p.x,
+            area.bottom() + 16.0,
+            escape(&format_value(x as f32))
+        );
+    }
+    let _ = writeln!(
+        svg,
+        "<rect x=\"{:.2}\" y=\"{:.2}\" width=\"{:.2}\" height=\"{:.2}\" fill=\"none\" \
+         stroke=\"#505050\"/>\n<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" \
+         fill=\"{ink}\">{}</text>\n<clipPath id=\"area\"><rect x=\"{:.2}\" y=\"{:.2}\" \
+         width=\"{:.2}\" height=\"{:.2}\"/></clipPath>\n<g clip-path=\"url(#area)\" \
+         fill=\"none\" stroke-linejoin=\"round\">",
+        area.left(),
+        area.top(),
+        area.width(),
+        area.height(),
+        area.center().x,
+        height - 6.0,
+        escape(&data.x_label),
+        area.left(),
+        area.top(),
+        area.width(),
+        area.height(),
+    );
+    // Rows without a value break a line.
+    let pieces = |values: &[f64]| {
+        let mut pieces: Vec<Vec<Pos2>> = vec![Vec::new()];
+        for (&x, &y) in data.x.iter().zip(values) {
+            if x.is_finite() && y.is_finite() {
+                pieces.last_mut().unwrap().push(to_screen(x, y));
+            } else if !pieces.last().unwrap().is_empty() {
+                pieces.push(Vec::new());
+            }
+        }
+        pieces
+    };
+    let points = |piece: &[Pos2]| {
+        (piece.iter())
+            .map(|p| format!("{:.2},{:.2}", p.x, p.y))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for (_, values) in &data.guides {
+        for piece in pieces(values).iter().filter(|p| p.len() > 1) {
+            let _ = writeln!(
+                svg,
+                "<polyline points=\"{}\" stroke=\"{}\" stroke-width=\"1.5\" \
+                 stroke-dasharray=\"8 5\"/>",
+                points(piece),
+                hex(GUIDE)
+            );
+        }
+    }
+    let markers = data.x.len() <= 60;
+    for (index, (_, values)) in data.curves.iter().enumerate() {
+        let color = hex(color(index));
+        for piece in pieces(values) {
+            if piece.len() > 1 {
+                let _ = writeln!(
+                    svg,
+                    "<polyline points=\"{}\" stroke=\"{color}\" stroke-width=\"2\"/>",
+                    points(&piece)
+                );
+            }
+            if markers {
+                for p in &piece {
+                    let _ = writeln!(
+                        svg,
+                        "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"2.5\" fill=\"{color}\"/>",
+                        p.x, p.y
+                    );
+                }
+            }
+        }
+    }
+    svg.push_str("</g>\n");
+    // The legend in the upper right corner; text is not measured, about 7 points per letter.
+    let entries: Vec<(&String, Option<Color32>)> = (data.guides.iter().map(|(n, _)| (n, None)))
+        .chain((data.curves.iter().enumerate()).map(|(i, (n, _))| (n, Some(color(i)))))
+        .collect();
+    if !entries.is_empty() {
+        let longest = (entries.iter()).map(|(n, _)| n.chars().count()).max();
+        let w = longest.unwrap_or(0) as f32 * 7.0 + 30.0;
+        let line = 16.0;
+        let h = line * entries.len() as f32 + 6.0;
+        let (left, top) = (area.right() - w - 8.0, area.top() + 8.0);
+        let _ = writeln!(
+            svg,
+            "<rect x=\"{left:.2}\" y=\"{top:.2}\" width=\"{w:.2}\" height=\"{h:.2}\" rx=\"2\" \
+             fill=\"white\" fill-opacity=\"0.9\" stroke=\"#a0a0a0\"/>"
+        );
+        for (k, (name, color)) in entries.iter().enumerate() {
+            let y = top + 3.0 + line * k as f32 + line / 2.0;
+            let style = match color {
+                Some(c) => format!("stroke=\"{}\" stroke-width=\"2\"", hex(*c)),
+                None => format!(
+                    "stroke=\"{}\" stroke-width=\"1.5\" stroke-dasharray=\"5 3\"",
+                    hex(GUIDE)
+                ),
+            };
+            let _ = writeln!(
+                svg,
+                "<line x1=\"{:.2}\" y1=\"{y:.2}\" x2=\"{:.2}\" y2=\"{y:.2}\" {style}/>\n\
+                 <text x=\"{:.2}\" y=\"{y:.2}\" dy=\"0.35em\">{}</text>",
+                left + 5.0,
+                left + 21.0,
+                left + 26.0,
+                escape(name)
+            );
+        }
+    }
+    svg + "</svg>\n"
+}
+
+fn hex(color: Color32) -> String {
+    format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b())
+}
+
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[cfg(test)]
@@ -324,6 +605,24 @@ mod tests {
         );
         assert_eq!(ticks(-3.0, 17.0, 4), [0.0, 5.0, 10.0, 15.0]);
         assert_eq!(ticks(2.0, 2.0, 4), [2.0]);
+    }
+
+    #[test]
+    fn svg_breaks_curves_at_missing_values() {
+        let data = XyData {
+            title: "T".into(),
+            x_label: "Time <s>".into(),
+            x: vec![0.0, 1.0, 2.0, 3.0, 4.0],
+            curves: vec![("11".into(), vec![1.0, 2.0, f64::NAN, 3.0, 4.0])],
+            guides: Vec::new(),
+            y_max: None,
+        };
+        let svg = to_svg(&data, 640.0, 400.0);
+        assert!(svg.starts_with("<svg") && svg.trim_end().ends_with("</svg>"));
+        assert_eq!(svg.matches("<polyline").count(), 2);
+        assert_eq!(svg.matches("<circle").count(), 4);
+        assert!(svg.contains("Time &lt;s&gt;"));
+        assert!(!svg.contains("NaN"));
     }
 
     #[test]

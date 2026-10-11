@@ -49,7 +49,7 @@ impl FeModel {
             let reason = if !self.materials.iter().any(|m| m.name == section.material) {
                 Some(format!("Material {} does not exist", section.material))
             } else {
-                (section.region.missing_reference(mesh)).or_else(|| section.kind_problem(mesh))
+                section.region.missing_reference(mesh)
             };
             if let Some(reason) = reason {
                 invalid.push(Invalid {

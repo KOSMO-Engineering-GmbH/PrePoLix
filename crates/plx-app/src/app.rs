@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use plx_model::UnitSystem;
+use plx_model::{MeshSetupKind, UnitSystem};
 use plx_render::StandardView;
 use plx_results::hot_spot::{HotSpot, HotSpotPath};
 
@@ -1333,7 +1333,8 @@ impl Workbench {
                             .and_then(|p| p.bound_results.as_ref()?.settings.clone())
                     });
                     if let Some(settings) = &settings {
-                        let warnings = model.restore_results_settings(settings);
+                        let warnings =
+                            model.restore_results_settings(settings, self.moving_load_stations());
                         self.output.extend(warnings);
                         camera = settings.view.camera.map(saved_camera);
                         if let Some(edges) = settings.view.mesh_edges {
@@ -1670,9 +1671,21 @@ impl Workbench {
             self.generate_mesh(ctx, None);
         }
         if let Some(index) = response.mesh_part {
-            let name = (self.geometry.as_ref()).and_then(|g| g.parts.get(index));
-            if let Some(name) = name.map(|p| p.name.clone()) {
-                self.generate_mesh(ctx, Some(vec![name]));
+            // A part among several selected ones meshes them all.
+            let selected = self.tree.selected_parts(view);
+            let indices: Vec<usize> = if selected.contains(&index) {
+                selected.into_iter().collect()
+            } else {
+                vec![index]
+            };
+            let names: Vec<String> = match self.geometry.as_ref() {
+                Some(g) => (indices.iter())
+                    .filter_map(|&i| g.parts.get(i).map(|p| p.name.clone()))
+                    .collect(),
+                None => Vec::new(),
+            };
+            if !names.is_empty() {
+                self.generate_mesh(ctx, Some(names));
             }
         }
         if response.search_contacts {
@@ -1758,6 +1771,7 @@ impl Workbench {
     /// Evaluates the hot spots of the current results file over all increments and writes
     /// the values next to it.
     fn evaluate_hot_spots(&mut self) {
+        let moving_loads = self.moving_load_stations();
         let Some(results) = self.results.get_mut(self.current_result) else {
             return;
         };
@@ -1765,25 +1779,51 @@ impl Workbench {
         let hot_spots = &mut results.hot_spots;
         hot_spots.reports = Vec::new();
         hot_spots.file = None;
-        if reports.is_empty() {
-            self.update_contour();
-            return;
-        }
-        match crate::hot_spots::write(&results.path, &reports) {
-            Ok(file) => {
-                self.output
-                    .push(format!("Hot spots evaluated: {}", file.display()));
-                hot_spots.file = Some(file);
+        if !reports.is_empty() {
+            match crate::hot_spots::write(&results.path, &reports) {
+                Ok(file) => {
+                    self.output
+                        .push(format!("Hot spots evaluated: {}", file.display()));
+                    hot_spots.file = Some(file);
+                }
+                Err(error) => self.output.push(error),
             }
-            Err(error) => self.output.push(error),
+            self.output.extend(crate::hot_spots::summary(&reports));
+            for report in &reports {
+                self.output
+                    .extend(report.warnings.iter().map(|w| format!("Warning: {w}")));
+            }
+            hot_spots.reports = reports.clone();
         }
-        self.output.extend(crate::hot_spots::summary(&reports));
-        for report in &reports {
-            self.output
-                .extend(report.warnings.iter().map(|w| format!("Warning: {w}")));
+        // History outputs of the hot spots follow them.
+        if let Some(view) = &mut results.results
+            && let Some(warnings) = view.set_history_sources(reports, moving_loads, &results.mesh)
+        {
+            (self.output).extend(warnings.into_iter().map(|w| format!("Warning: {w}")));
+            self.history_table = None;
         }
-        hot_spots.reports = reports;
         self.update_contour();
+    }
+
+    /// Takes the moving loads of the FE model as they are now into the current results, for
+    /// the history outputs.
+    fn refresh_moving_loads(&mut self) {
+        let moving_loads = self.moving_load_stations();
+        let Some(results) = self.results.get_mut(self.current_result) else {
+            return;
+        };
+        if let Some(view) = &mut results.results {
+            let reports = view.hot_spot_reports.clone();
+            if let Some(warnings) = view.set_history_sources(reports, moving_loads, &results.mesh) {
+                (self.output).extend(warnings.into_iter().map(|w| format!("Warning: {w}")));
+                self.history_table = None;
+            }
+        }
+    }
+
+    /// Where the moving loads of the FE model stand in the steps of its results.
+    fn moving_load_stations(&self) -> Vec<plx_model::LoadStations> {
+        (self.model.as_ref()).map_or_else(Vec::new, |project| plx_model::load_stations(&project.fe))
     }
 
     fn edit_hot_spot(&mut self, index: usize) {
@@ -2242,6 +2282,7 @@ impl Workbench {
             return;
         }
         if kind == NewItem::ResultHistoryOutput {
+            self.refresh_moving_loads();
             if let Some(view) = self.shown_results_view() {
                 self.history_dialog = Some(HistoryOutputDialog::create(view));
             }
@@ -2449,10 +2490,24 @@ impl Workbench {
             self.mesh_item_editor = None;
             return;
         };
+        let mut remesh = None;
         match editor.show(ctx, geometry, self.geometry.as_ref()) {
             MeshItemResult::Open => return,
             MeshItemResult::Cancel => {}
-            MeshItemResult::Ok(index, item) => {
+            result @ (MeshItemResult::Ok(..) | MeshItemResult::OkRemesh(..)) => {
+                let (index, item, remeshes) = match result {
+                    MeshItemResult::Ok(index, item) => (index, item, false),
+                    MeshItemResult::OkRemesh(index, item) => (index, item, true),
+                    MeshItemResult::Open | MeshItemResult::Cancel => return,
+                };
+                if remeshes {
+                    // A local mesh size is picked on faces and edges: mesh every part.
+                    remesh = Some(match &item.kind {
+                        MeshSetupKind::MeshingParameters { parts, .. }
+                        | MeshSetupKind::TetrahedralGmsh { parts, .. } => Some(parts.clone()),
+                        MeshSetupKind::LocalMeshSize { .. } => None,
+                    });
+                }
                 let index = match index.filter(|&i| i < geometry.mesh_items.len()) {
                     Some(index) => {
                         geometry.mesh_items[index] = item;
@@ -2468,6 +2523,9 @@ impl Workbench {
         }
         self.mesh_item_editor = None;
         self.viewport.preview = Default::default();
+        if let Some(parts) = remesh {
+            self.generate_mesh(ctx, parts);
+        }
     }
 
     /// Meshes the named parts of the geometry, or all with `None`, on a worker thread;
@@ -3154,7 +3212,8 @@ impl Workbench {
         let results = model.bound_results.as_ref();
         match plx_io::project::save_project(&path, geometry, &model.mesh, &model.fe, results) {
             Ok(()) => {
-                self.output.push(format!("{} saved", path.display()));
+                self.output
+                    .push(timestamped(format!("{} saved", path.display())));
                 model.path = path;
             }
             Err(error) => self.output.push(format!("Not saved: {error}")),
@@ -3173,9 +3232,10 @@ impl Workbench {
         };
         let geometry = model.geometry.as_ref();
         match plx_io::project::save_project(&path, geometry, &model.mesh, &model.fe, None) {
-            Ok(()) => self
-                .output
-                .push(format!("{} saved without results", path.display())),
+            Ok(()) => self.output.push(timestamped(format!(
+                "{} saved without results",
+                path.display()
+            ))),
             Err(error) => self.output.push(format!("Not saved: {error}")),
         }
     }
@@ -3788,6 +3848,7 @@ impl Workbench {
     }
 
     fn edit_history_output(&mut self, set: usize) {
+        self.refresh_moving_loads();
         let Some(model) = self.results.get(self.current_result) else {
             return;
         };
@@ -3861,10 +3922,60 @@ impl Workbench {
     }
 
     fn history_table_window(&mut self, ctx: &egui::Context) {
-        if let Some(data) = &self.history_plot
-            && !crate::xy_plot::window(ctx, data)
-        {
-            self.history_plot = None;
+        if let Some(data) = &self.history_plot {
+            let model = match self.tree_view {
+                TreeView::Results => self.results.get_mut(self.current_result),
+                _ => None,
+            };
+            let shown = model
+                .as_ref()
+                .is_some_and(|m| m.path_plots.iter().any(|p| p.is_table(data)));
+            let response = crate::xy_plot::window(ctx, data, shown);
+            // The annotation belongs to the shown results and stays after the window closes.
+            if response.toggle_view
+                && let Some(model) = model
+            {
+                match model.path_plots.iter().position(|p| p.is_table(data)) {
+                    Some(index) => {
+                        model.path_plots.remove(index);
+                    }
+                    None => model.path_plots.push(PathPlot::table(data.clone())),
+                }
+            }
+            match response.export {
+                Some(crate::xy_plot::Export::Clipboard) => {
+                    (self.screenshot).request_region(screenshot::Target::Clipboard, response.plot)
+                }
+                Some(crate::xy_plot::Export::Png) => {
+                    (self.screenshot).request_region(screenshot::Target::File, response.plot)
+                }
+                Some(crate::xy_plot::Export::Svg) => {
+                    let svg =
+                        crate::xy_plot::to_svg(data, response.plot.width(), response.plot.height());
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_title("Save Plot As")
+                        .add_filter("SVG image", &["svg"])
+                        .set_file_name("plot.svg")
+                        .save_file()
+                    {
+                        let path = if path.extension().is_none() {
+                            path.with_extension("svg")
+                        } else {
+                            path
+                        };
+                        self.output.push(match std::fs::write(&path, svg) {
+                            Ok(()) => format!("Plot saved: {}", path.display()),
+                            Err(err) => {
+                                format!("Plot could not be saved ({}): {err}", path.display())
+                            }
+                        });
+                    }
+                }
+                None => {}
+            }
+            if response.closed {
+                self.history_plot = None;
+            }
         }
         let Some(mut table) = self.history_table.take() else {
             return;
@@ -4966,6 +5077,7 @@ impl Workbench {
             path_plot::PlotKind::HotSpot => {
                 hot_spot(&model.hot_spots.definitions, &plot.path).is_some()
             }
+            path_plot::PlotKind::Table => true,
         });
         let boxes = (plots.iter_mut().enumerate())
             .filter_map(|(index, plot)| match plot.kind {
@@ -4977,6 +5089,7 @@ impl Workbench {
                     let hot_spot = hot_spot(&model.hot_spots.definitions, &plot.path)?;
                     plot.hot_spot_box(index, model, &hot_spot)
                 }
+                path_plot::PlotKind::Table => plot.table_box(index),
             })
             .collect();
         model.path_plots = plots;
@@ -5008,6 +5121,7 @@ impl Workbench {
                             index,
                             &plot.placement,
                             extremes,
+                            plot.kind == path_plot::PlotKind::Table,
                         ));
                     }
                 }
@@ -5669,7 +5783,9 @@ impl Workbench {
                 }
                 let data = sound::wav(sound.tones(), sound.export_seconds());
                 match std::fs::write(&path, data) {
-                    Ok(()) => self.output.push(format!("{} saved", path.display())),
+                    Ok(()) => self
+                        .output
+                        .push(timestamped(format!("{} saved", path.display()))),
                     Err(error) => sound.message = Some(format!("Not saved: {error}")),
                 }
             }
@@ -6269,6 +6385,11 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
         event = WindowEvent::Close;
     }
     event
+}
+
+/// Prefixes an output message with the local time, `HH:MM:SS`.
+fn timestamped(message: String) -> String {
+    format!("{} {message}", chrono::Local::now().format("%H:%M:%S"))
 }
 
 #[cfg(test)]

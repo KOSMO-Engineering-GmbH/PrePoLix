@@ -1,6 +1,7 @@
 //! History outputs the user derives from the results, PrePoMax's "Create History Output":
 //! values of field components at nodes over all increments, an equation of other history
-//! outputs, or the size of elements or element faces on the deformed mesh.
+//! outputs, the size of elements or element faces on the deformed mesh, or the values of a
+//! hot spot, optionally beside the position of a moving load.
 //!
 //! A history output gives a set of fields with components; every component has one entry
 //! per node, element or face, with one value per increment.
@@ -10,6 +11,7 @@ use plx_model::Region;
 use serde::{Deserialize, Serialize};
 
 use crate::equation::Equation;
+use crate::hot_spot::{HotSpotReport, IncrementValues};
 use crate::{Increment, field_output};
 
 /// Field and component names PrePoMax gives computed history outputs.
@@ -17,8 +19,27 @@ pub const EQUATION_FIELD: &str = "EQUATION";
 pub const SIZE_FIELD: &str = "ELEMENT_SIZE";
 pub const VOLUME: &str = "VOLUME";
 pub const AREA: &str = "AREA";
+/// Field of a hot spot's values: a component per toe node with the hot spot stress, the
+/// stress at each read-out point and the position of a moving load as its entries, so that
+/// one table holds all of them.
+pub const HOT_SPOT_FIELD: &str = "HOT_SPOT";
+/// Component of the largest hot spot stress of all toe nodes, for a hot spot with several.
+pub const HOT_SPOT_MAX: &str = "MAX";
+/// Entries of the components.
+pub const POSITION: &str = "POSITION";
+pub const HOT_SPOT_STRESS: &str = "S_HS";
+pub const MAX_NODE: &str = "NODE";
 
-/// What the element size measures.
+/// Name of the component of a toe node.
+pub fn node_component(node: plx_mesh::NodeId) -> String {
+    format!("NODE_{node}")
+}
+
+/// Name of the entry of the stress at the read-out point `index` (from 0).
+pub fn readout_entry(index: usize) -> String {
+    format!("S_{}", index + 1)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SizeKind {
     /// Volume of solid elements.
@@ -39,6 +60,22 @@ pub enum HistoryOutputKind {
     FromEquation { equation: String, unit: String },
     /// Volume of the elements or area of the faces of a region, on the deformed mesh.
     ElementSize { region: Region, kind: SizeKind },
+    /// The values of a hot spot of the results by name; with a moving load of the FE model
+    /// also the load's position in each step, to plot the stress over it.
+    FromHotSpot {
+        hot_spot: String,
+        moving_load: Option<String>,
+    },
+}
+
+/// What history outputs are computed from besides the increments: the history computed so
+/// far, which an equation may use, the evaluated hot spots and the moving loads of the FE
+/// model.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Sources<'a> {
+    pub sets: &'a [HistorySet],
+    pub hot_spots: &'a [HotSpotReport],
+    pub moving_loads: &'a [plx_model::LoadStations],
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -103,13 +140,12 @@ fn rows(increments: &[Increment]) -> Vec<(u32, u32, f64)> {
         .collect()
 }
 
-/// Computes a history output. `sets` are the history outputs computed so far, which an
-/// equation may use.
+/// Computes a history output.
 pub fn compute(
     output: &HistoryOutput,
     increments: &[Increment],
     mesh: &FeMesh,
-    sets: &[HistorySet],
+    sources: Sources,
 ) -> Result<HistorySet, String> {
     let fields = match &output.kind {
         HistoryOutputKind::FromField {
@@ -118,10 +154,28 @@ pub fn compute(
             components,
         } => vec![from_field(region, field, components, increments, mesh)?],
         HistoryOutputKind::FromEquation { equation, .. } => {
-            vec![from_equation(&output.name, equation, sets)?]
+            vec![from_equation(&output.name, equation, sources.sets)?]
         }
         HistoryOutputKind::ElementSize { region, kind } => {
             vec![element_size(region, *kind, increments, mesh)?]
+        }
+        HistoryOutputKind::FromHotSpot {
+            hot_spot,
+            moving_load,
+        } => {
+            let report = (sources.hot_spots.iter().find(|r| r.name == *hot_spot))
+                .ok_or_else(|| format!("The hot spot {hot_spot} does not exist."))?;
+            let position = match moving_load {
+                Some(load) => {
+                    let stations = (sources.moving_loads.iter().find(|s| s.load == *load))
+                        .ok_or_else(|| {
+                            format!("The moving load {load} is in no active step of the FE model.")
+                        })?;
+                    Some(moving_load_position(stations, increments))
+                }
+                None => None,
+            };
+            vec![from_hot_spot(report, increments, position)?]
         }
     };
     Ok(HistorySet {
@@ -260,6 +314,101 @@ fn from_equation(own: &str, equation: &str, sets: &[HistorySet]) -> Result<Histo
             entries,
         }],
     })
+}
+
+/// The values of a hot spot per increment: for each toe node the hot spot stress and the
+/// stress at its read-out points, after the position of the moving load if one is given;
+/// increments without stresses have none.
+fn from_hot_spot(
+    report: &HotSpotReport,
+    increments: &[Increment],
+    position: Option<Vec<f64>>,
+) -> Result<HistoryField, String> {
+    if report.paths.is_empty() {
+        return Err(match report.warnings.first() {
+            Some(warning) => format!("The hot spot has no path: {warning}"),
+            None => "The hot spot has no path.".into(),
+        });
+    }
+    if report.increments.is_empty() {
+        return Err("The results contain no stresses (S).".into());
+    }
+    // The evaluated increments are those with stresses, in file order.
+    let mut evaluated = report.increments.iter().peekable();
+    let rows: Vec<Option<&IncrementValues>> = increments
+        .iter()
+        .map(|increment| {
+            evaluated.next_if(|v| {
+                v.step == increment.step
+                    && v.increment == increment.increment
+                    && v.value == increment.value
+            })
+        })
+        .collect();
+    let column = |value: &dyn Fn(&IncrementValues) -> Option<f64>| -> Vec<f64> {
+        (rows.iter())
+            .map(|row| row.and_then(value).unwrap_or(f64::NAN))
+            .collect()
+    };
+    let leading = || {
+        (position.iter())
+            .map(|values| HistoryEntry {
+                name: POSITION.into(),
+                values: values.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut components = Vec::new();
+    if report.paths.len() > 1 {
+        let mut entries = leading();
+        entries.push(HistoryEntry {
+            name: HOT_SPOT_STRESS.into(),
+            values: column(&|r| Some(r.maximum()?.hot_spot)),
+        });
+        entries.push(HistoryEntry {
+            name: MAX_NODE.into(),
+            values: column(&|r| Some(f64::from(r.maximum()?.node))),
+        });
+        components.push(HistoryComponent {
+            name: HOT_SPOT_MAX.into(),
+            entries,
+        });
+    }
+    for (path, toe) in report.paths.iter().enumerate() {
+        let value = |path: usize| move |r: &IncrementValues| r.values.get(path).cloned();
+        let mut entries = leading();
+        entries.push(HistoryEntry {
+            name: HOT_SPOT_STRESS.into(),
+            values: column(&|r| Some(value(path)(r)?.hot_spot)),
+        });
+        for index in 0..report.distances.len() {
+            entries.push(HistoryEntry {
+                name: readout_entry(index),
+                values: column(&|r| value(path)(r)?.readings.get(index).copied()),
+            });
+        }
+        components.push(HistoryComponent {
+            name: node_component(toe.node),
+            entries,
+        });
+    }
+    Ok(HistoryField {
+        name: HOT_SPOT_FIELD.into(),
+        components,
+    })
+}
+
+/// The position of a moving load in the step of every increment; steps without the load
+/// have none.
+fn moving_load_position(stations: &plx_model::LoadStations, increments: &[Increment]) -> Vec<f64> {
+    increments
+        .iter()
+        .map(|increment| {
+            (stations.steps.iter())
+                .find(|(step, _)| *step == increment.step)
+                .map_or(f64::NAN, |(_, station)| *station)
+        })
+        .collect()
 }
 
 /// Area of a polygon given as a closed ring of points, fanned around its centroid; also the
@@ -467,7 +616,7 @@ mod tests {
                 components: vec!["U3".into()],
             },
         };
-        let set = compute(&output, &increments, &mesh, &[]).unwrap();
+        let set = compute(&output, &increments, &mesh, Sources::default()).unwrap();
         let u3 = set.field("DISP").unwrap().component("U3").unwrap();
         let names: Vec<&str> = u3.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["1", "7"]);
@@ -485,7 +634,7 @@ mod tests {
                 kind: SizeKind::Volume,
             },
         };
-        let set = compute(&volume, &increments, &mesh, &[]).unwrap();
+        let set = compute(&volume, &increments, &mesh, Sources::default()).unwrap();
         let values = &set.field(SIZE_FIELD).unwrap().components[0].entries[0].values;
         assert!((values[0] - 1.0).abs() < 1e-12 && (values[1] - 2.0).abs() < 1e-12);
         // Face S3 (nodes 1, 5, 6, 2) is the side y = 0, stretched to height 2.
@@ -496,7 +645,7 @@ mod tests {
                 kind: SizeKind::Area,
             },
         };
-        let set = compute(&area, &increments, &mesh, &[]).unwrap();
+        let set = compute(&area, &increments, &mesh, Sources::default()).unwrap();
         let entry = &set.field(SIZE_FIELD).unwrap().components[0].entries[0];
         assert_eq!(entry.name, "1-S3");
         assert!((entry.values[0] - 1.0).abs() < 1e-12 && (entry.values[1] - 2.0).abs() < 1e-12);
@@ -513,7 +662,7 @@ mod tests {
                 components: vec!["U3".into()],
             },
         };
-        let sets = vec![compute(&first, &increments, &mesh, &[]).unwrap()];
+        let sets = vec![compute(&first, &increments, &mesh, Sources::default()).unwrap()];
         let equation = HistoryOutput {
             name: "Equation-1".into(),
             kind: HistoryOutputKind::FromEquation {
@@ -521,7 +670,16 @@ mod tests {
                 unit: "/".into(),
             },
         };
-        let set = compute(&equation, &increments, &mesh, &sets).unwrap();
+        let set = compute(
+            &equation,
+            &increments,
+            &mesh,
+            Sources {
+                sets: &sets,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let value = set
             .field(EQUATION_FIELD)
             .unwrap()
@@ -538,9 +696,122 @@ mod tests {
                 },
             };
             assert!(
-                compute(&output, &increments, &mesh, &sets).is_err(),
+                compute(
+                    &output,
+                    &increments,
+                    &mesh,
+                    Sources {
+                        sets: &sets,
+                        ..Default::default()
+                    }
+                )
+                .is_err(),
                 "{wrong}"
             );
         }
+    }
+
+    #[test]
+    fn hot_spot_values_beside_the_moving_load_position() {
+        use crate::hot_spot::{HotSpotComponent, HotSpotPath, HotSpotValue, IncrementValues};
+        let (mesh, mut increments) = cube();
+        // Three steps; the first has no stresses and so no hot spot values.
+        (increments[1].step, increments[1].increment) = (2, 1);
+        increments.push(Increment {
+            step: 3,
+            increment: 1,
+            value: 3.0,
+            ..increments[1].clone()
+        });
+        let path = |node| HotSpotPath {
+            node,
+            index: 0,
+            position: [0.0; 3],
+            direction: [1.0, 0.0, 0.0],
+            points: Vec::new(),
+        };
+        let values = |step: u32, value: f64, hot: [f64; 2]| IncrementValues {
+            step,
+            increment: 1,
+            value,
+            values: vec![
+                HotSpotValue {
+                    node: 5,
+                    readings: vec![hot[0] - 1.0, hot[0] - 2.0],
+                    hot_spot: hot[0],
+                },
+                HotSpotValue {
+                    node: 6,
+                    readings: vec![hot[1] - 1.0, hot[1] - 2.0],
+                    hot_spot: hot[1],
+                },
+            ],
+        };
+        let report = HotSpotReport {
+            name: "Hot_Spot-1".into(),
+            component: HotSpotComponent::Perpendicular,
+            method: String::new(),
+            distances: vec![4.0, 10.0],
+            paths: vec![path(5), path(6)],
+            increments: vec![values(2, 2.0, [10.0, 30.0]), values(3, 3.0, [40.0, 20.0])],
+            warnings: Vec::new(),
+        };
+        let stations = plx_model::LoadStations {
+            load: "Moving-1".into(),
+            steps: vec![(2, 100.0), (3, 200.0)],
+        };
+        let output = HistoryOutput {
+            name: "Hot_Spot_History".into(),
+            kind: HistoryOutputKind::FromHotSpot {
+                hot_spot: "Hot_Spot-1".into(),
+                moving_load: Some("Moving-1".into()),
+            },
+        };
+        let sources = Sources {
+            hot_spots: std::slice::from_ref(&report),
+            moving_loads: std::slice::from_ref(&stations),
+            ..Default::default()
+        };
+        let set = compute(&output, &increments, &mesh, sources).unwrap();
+        let hot = set.field(HOT_SPOT_FIELD).unwrap();
+        let values = |component: &str, entry: &str| {
+            let component = hot.component(component).unwrap();
+            let entry = component.entries.iter().find(|e| e.name == entry).unwrap();
+            entry.values.clone()
+        };
+        let names: Vec<&str> = hot.components.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["MAX", "NODE_5", "NODE_6"]);
+        let entries: Vec<&str> = (hot.components[1].entries.iter())
+            .map(|e| e.name.as_str())
+            .collect();
+        assert_eq!(entries, ["POSITION", "S_HS", "S_1", "S_2"]);
+        assert!(values("NODE_5", "S_HS")[0].is_nan());
+        assert_eq!(values("NODE_5", "S_HS")[1..], [10.0, 40.0]);
+        assert_eq!(values("NODE_6", "S_HS")[1..], [30.0, 20.0]);
+        assert_eq!(values("NODE_6", "S_2")[1..], [28.0, 18.0]);
+        assert_eq!(values("MAX", "S_HS")[1..], [30.0, 40.0]);
+        assert_eq!(values("MAX", "NODE")[1..], [6.0, 5.0]);
+        let position = values("NODE_6", "POSITION");
+        assert!(position[0].is_nan());
+        assert_eq!(position[1..], [100.0, 200.0]);
+        assert_eq!(values("MAX", "POSITION")[1..], [100.0, 200.0]);
+
+        // Without a moving load the stresses stand alone.
+        let mut plain = output.clone();
+        plain.kind = HistoryOutputKind::FromHotSpot {
+            hot_spot: "Hot_Spot-1".into(),
+            moving_load: None,
+        };
+        let set = compute(&plain, &increments, &mesh, sources).unwrap();
+        assert_eq!(set.fields[0].components[1].entries[0].name, "S_HS");
+
+        // A hot spot or moving load that is gone is an error.
+        let mut missing = output.clone();
+        missing.kind = HistoryOutputKind::FromHotSpot {
+            hot_spot: "Hot_Spot-1".into(),
+            moving_load: Some("Moving-2".into()),
+        };
+        assert!(compute(&missing, &increments, &mesh, sources).is_err());
+        assert!(compute(&output, &increments, &mesh, Sources::default()).is_err());
     }
 }

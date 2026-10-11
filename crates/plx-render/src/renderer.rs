@@ -9,9 +9,14 @@ use crate::section::ClipPlane;
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SAMPLE_COUNT: u32 = 4;
-/// How far edges are pulled towards the viewer, in pixels. Tied to the pixel size rather than
-/// the model size, so that edges on the back of thin walls stay hidden when zoomed in.
+/// How far surfaces are pushed back behind their edges, in pixels along the surface: the
+/// slope-scaled depth bias moves a face by its depth change over this many pixels. A face seen
+/// head on hardly moves, so the edges on the far side of a thin wall stay hidden however far
+/// the view is zoomed out; a fixed offset in pixels reached through walls thinner than it.
 const EDGE_OFFSET_PX: f32 = 1.5;
+/// Constant part of the surface depth bias, in steps of the depth buffer: covers the rounding
+/// between a line and the triangle it lies on where the face is seen head on.
+const SURFACE_BIAS_CONSTANT: i32 = 2;
 /// Width of [`RenderMesh::wide_edges`] in pixels, as PrePoMax draws a selected part's outline.
 pub const WIDE_EDGE_PX: f32 = 3.0;
 
@@ -27,8 +32,8 @@ struct Globals {
     view_dir: [f32; 4],
     background_top: [f32; 4],
     background_bottom: [f32; 4],
-    /// x: edge depth offset in normalized depth units; y, z: target size in pixels; w: width
-    /// of wide edges in pixels.
+    /// x, y: target size in pixels; z: width of wide edges in pixels; w: their depth offset
+    /// towards the viewer in normalized depth units.
     edge: [f32; 4],
     /// x: number of contour bands, 0 when surfaces show their part colour.
     contour: [f32; 4],
@@ -233,8 +238,8 @@ impl ViewportRenderer {
                 true,
                 wgpu::CompareFunction::Less,
                 wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 1.0,
+                    constant: SURFACE_BIAS_CONSTANT,
+                    slope_scale: EDGE_OFFSET_PX,
                     clamp: 0.0,
                 },
             ),
@@ -385,12 +390,12 @@ impl ViewportRenderer {
             background_top: BACKGROUND_TOP,
             background_bottom: BACKGROUND_BOTTOM,
             edge: [
-                EDGE_OFFSET_PX
-                    * camera.pixel_size(self.targets.width as f32, self.targets.height as f32)
-                    / camera.depth_range(),
                 self.targets.width as f32,
                 self.targets.height as f32,
                 WIDE_EDGE_PX,
+                0.5 * WIDE_EDGE_PX
+                    * camera.pixel_size(self.targets.width as f32, self.targets.height as f32)
+                    / camera.depth_range(),
             ],
             contour: [
                 options.contour.map_or(0.0, |p| p.count as f32),

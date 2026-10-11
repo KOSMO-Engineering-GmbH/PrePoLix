@@ -32,6 +32,9 @@ pub enum Severity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Problem {
     MissingReference,
+    /// A section whose type does not fit its elements, such as a beam section on solids or
+    /// a membrane section on quadratic elements, or whose values CalculiX rejects.
+    InvalidSection,
     NoSection,
     NoElastic,
     NoDensity,
@@ -132,6 +135,7 @@ impl Problem {
     pub fn title(self) -> &'static str {
         match self {
             Problem::MissingReference => "Missing reference",
+            Problem::InvalidSection => "Section does not fit its elements",
             Problem::NoSection => "Elements without material",
             Problem::NoElastic => "Material without elasticity",
             Problem::NoDensity => "Material without density",
@@ -182,6 +186,14 @@ impl Problem {
                 "The item refers to something that no longer exists, for example a \
                  deleted material or a set the mesh no longer has. The input file \
                  cannot be written like this."
+            }
+            Problem::InvalidSection => {
+                "The type of the section and the elements of its region do not go together: \
+                 beams and trusses need line elements, solid sections solid or plane \
+                 elements, shell and membrane sections surface elements of a 3D model. \
+                 Membranes must be linear, since CalculiX computes quadratic membranes \
+                 (M3D6, M3D8) wrongly. Dimensions such as a thickness of 0 are rejected too. \
+                 The input file cannot be written like this."
             }
             Problem::NoSection => {
                 "CalculiX needs a material for every element. Elements that no section \
@@ -411,6 +423,11 @@ impl Problem {
             Problem::MissingReference => {
                 "Edit the item and select an existing selection or an existing \
                  material, or delete it."
+            }
+            Problem::InvalidSection => {
+                "Edit the section and choose the type that fits its elements, or change the \
+                 element type of the part (double-click it under Mesh). For a membrane \
+                 section mesh the part again with Second order off."
             }
             Problem::NoSection => {
                 "Under Sections create a section for the part or extend an existing one \
@@ -742,6 +759,14 @@ impl FeModel {
         let mut findings: Vec<Finding> = (self.invalid_items(mesh).into_iter())
             .map(|i| Finding::new(i.item, Problem::MissingReference, i.reason))
             .collect();
+        for (i, section) in self.sections.iter().enumerate() {
+            let item = ModelItem::Section(i);
+            if !findings.iter().any(|f| f.item == item)
+                && let Some(reason) = section.kind_problem(mesh)
+            {
+                findings.push(Finding::new(item, Problem::InvalidSection, reason));
+            }
+        }
         self.check_materials(&mut findings);
         self.check_sections(mesh, &mut findings);
         for (part, bad) in mesh_check.distorted.iter().enumerate() {
@@ -2344,6 +2369,32 @@ mod tests {
 
     fn problems(findings: &[Finding]) -> Vec<(ModelItem, Problem)> {
         findings.iter().map(|f| (f.item, f.problem)).collect()
+    }
+
+    /// A section that does not fit its elements is its own problem, not a missing reference.
+    #[test]
+    fn a_section_on_the_wrong_elements_is_an_invalid_section() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        model.sections[0].kind = crate::SectionKind::Membrane {
+            thickness: 1.0,
+            offset: 0.0,
+        };
+        let findings = check(&model, &mesh);
+        assert_eq!(
+            problems(&findings),
+            [(ModelItem::Section(0), Problem::InvalidSection)]
+        );
+        assert!(
+            findings[0].detail.contains("triangles or quads"),
+            "{findings:?}"
+        );
+        // A missing material is reported once, as a missing reference.
+        model.sections[0].material = "Gone".into();
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Section(0), Problem::MissingReference)]
+        );
     }
 
     #[test]

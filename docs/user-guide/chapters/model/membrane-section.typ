@@ -9,9 +9,11 @@ flat membrane can take a load across its plane only once it is pretensioned or d
 needs a geometrically nonlinear step (#ui("Nlgeom")). For a plate under a lateral load the
 shell section (@shell-section) stays the right choice.
 
-Create it with #menu("Model", "Create Section ...") and choose #ui("Membrane"). The elements of
-the region must be membranes: double-click the part on the #ui("FE Model") tab and choose `M3D3`
-for triangles or `M3D4`, `M3D4R` for quadrilaterals as its element type (@element-type).
+Create it with #menu("Model", "Create Section ...") and choose #ui("Membrane"). The mesh must
+be linear: mesh the part with #ui("Second order") off (@mesh-setup). Linear shells of the region
+(`S3`, `S4`, `S4R`) are written as the membranes `M3D3`, `M3D4` and `M3D4R`, so the part keeps
+its element type. A membrane type can also be chosen for the part itself: double-click it on
+the #ui("FE Model") tab and pick it in the #ui("Element type") box (@element-type).
 
 #screenshot("membrane-element-type.png", [Choosing a membrane element type for a part])
 
@@ -27,12 +29,10 @@ for triangles or `M3D4`, `M3D4R` for quadrilaterals as its element type (@elemen
 Written as `*MEMBRANE SECTION, ELSET=..., MATERIAL=...` with the thickness on the next line.
 The field outputs are written with `OUTPUT=2D`, as for shells.
 
-The model check reports a membrane section on shell or solid elements, and a shell or solid
-section on membranes, as an invalid section. Membranes have to be linear: CalculiX 2.23
-computes the quadratic membranes `M3D6` and `M3D8` wrongly (in a simple tension test `M3D8` is
-1.7 times too soft and gets softer with a thicker section), so mesh the part with
-#ui("Second order") off. A membrane section on quadratic elements is reported as an invalid
-section.
+Membranes have to be linear: CalculiX 2.23 computes the quadratic membranes `M3D6` and `M3D8`
+wrongly (in a simple tension test `M3D8` is 1.7 times too soft and gets softer with a thicker
+section). The model check reports a membrane section on quadratic or solid elements, and a
+shell or solid section on membranes, as an error #ui("Section does not fit its elements").
 
 A membrane strip of 100 × 10 × 2 stretched by 0.1 in a first step and loaded with a pressure
 in a second one sags at mid-span as a taut string does, $p L^2 / (8 N)$ with the tension $N$

@@ -1,5 +1,6 @@
 //! PrePoMax's "Create History Output" dialog of the Results tree: values of a field at
-//! nodes over all increments, an equation of other history outputs, or element sizes.
+//! nodes over all increments, an equation of other history outputs, element sizes, or the
+//! values of a hot spot beside the position of a moving load.
 
 use egui::{RichText, Ui};
 use plx_model::next_name;
@@ -14,14 +15,16 @@ use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft, SOLID_SOURCES};
 use crate::viewport::{BoxSelect, Preview};
 
 /// The types of the list, in PrePoMax's order, with the prefix of their default names.
-const TYPES: [(&str, &str); 3] = [
+const TYPES: [(&str, &str); 4] = [
     ("From Field Output", "From_Field"),
     ("From History Output by Equation", "From_Equation"),
     ("From Element Size", "From_Element_Size"),
+    ("From Hot Spot", "From_Hot_Spot"),
 ];
 const FROM_FIELD: usize = 0;
 const EQUATION: usize = 1;
 const SIZE: usize = 2;
+const HOT_SPOT: usize = 3;
 
 const NAME: &str = "Name";
 const REGION: &str = "Region";
@@ -30,6 +33,9 @@ const COMPONENTS: &str = "Components";
 const EQUATION_ROW: &str = "Equation";
 const UNIT: &str = "Unit";
 const SIZE_ROW: &str = "Size";
+const HOT_SPOT_ROW: &str = "Hot spot";
+const MOVING_LOAD_ROW: &str = "Moving load";
+const NO_MOVING_LOAD: &str = "None";
 
 fn description(row: &str) -> &'static str {
     match row {
@@ -51,6 +57,16 @@ fn description(row: &str) -> &'static str {
             "Volume of the elements or area of the element faces, per increment on the \
              deformed mesh (true scale)."
         }
+        HOT_SPOT_ROW => {
+            "Hot spot whose values are output over all increments: per toe node the hot spot \
+             stress S_HS and the stresses S_1, S_2, ... at the read-out points; with several \
+             toe nodes also their maximum (MAX)."
+        }
+        MOVING_LOAD_ROW => {
+            "Moving load of the FE model whose position along its path is output as the \
+             first column, one per step, to plot the stress over the position. Steps \
+             without the load have no position."
+        }
         _ => "",
     }
 }
@@ -59,7 +75,7 @@ pub struct HistoryOutputDialog {
     /// Index of the edited output; `None` creates a new one.
     pub edit: Option<usize>,
     kind: usize,
-    names: [String; 3],
+    names: [String; 4],
     nodes: RegionDraft,
     field: String,
     components: Vec<String>,
@@ -67,6 +83,8 @@ pub struct HistoryOutputDialog {
     unit: String,
     size: SizeKind,
     elements: RegionDraft,
+    hot_spot: String,
+    moving_load: Option<String>,
     focus: &'static str,
     pub error: Option<String>,
     picker: Picker,
@@ -75,6 +93,9 @@ pub struct HistoryOutputDialog {
     /// `Set.Field.Component` of the history outputs an equation may use.
     history: Vec<String>,
     taken: Vec<String>,
+    /// Hot spots of the results and moving loads of the FE model, by name.
+    hot_spots: Vec<String>,
+    moving_loads: Vec<String>,
 }
 
 impl HistoryOutputDialog {
@@ -113,6 +134,10 @@ impl HistoryOutputDialog {
             .map(|(f, c)| (f.clone(), vec![c[0].clone()]))
             .unwrap_or_default();
         let names = TYPES.map(|(_, prefix)| next_name(prefix, taken.iter().map(String::as_str)));
+        let hot_spots: Vec<String> = (view.hot_spot_reports.iter())
+            .map(|r| r.name.clone())
+            .collect();
+        let moving_loads = view.moving_loads.iter().map(|m| m.load.clone()).collect();
         Self {
             edit: None,
             kind: FROM_FIELD,
@@ -124,12 +149,16 @@ impl HistoryOutputDialog {
             unit: "/".into(),
             size: SizeKind::Volume,
             elements: RegionDraft::new(SOLID_SOURCES, Target::Faces),
+            hot_spot: hot_spots.first().cloned().unwrap_or_default(),
+            moving_load: None,
             focus: NAME,
             error: None,
             picker: Picker::default(),
             fields,
             history,
             taken,
+            hot_spots,
+            moving_loads,
         }
     }
 
@@ -169,6 +198,14 @@ impl HistoryOutputDialog {
                 };
                 dialog.elements = RegionDraft::from_region(&region, sources, Target::Faces, mesh);
                 SIZE
+            }
+            HistoryOutputKind::FromHotSpot {
+                hot_spot,
+                moving_load,
+            } => {
+                dialog.hot_spot = hot_spot;
+                dialog.moving_load = moving_load;
+                HOT_SPOT
             }
         };
         dialog.names[dialog.kind] = output.name;
@@ -262,6 +299,15 @@ impl HistoryOutputDialog {
                 equation: self.equation.clone(),
                 unit: self.unit.clone(),
             },
+            HOT_SPOT => {
+                if self.hot_spot.is_empty() {
+                    return Err("There are no hot spots. Create one first.".into());
+                }
+                HistoryOutputKind::FromHotSpot {
+                    hot_spot: self.hot_spot.clone(),
+                    moving_load: self.moving_load.clone(),
+                }
+            }
             _ => HistoryOutputKind::ElementSize {
                 region: self.elements.region(),
                 kind: self.size,
@@ -450,6 +496,40 @@ impl HistoryOutputDialog {
                             ui.add(edit).has_focus()
                         });
                     }
+                    HOT_SPOT => {
+                        let hot_spots = &self.hot_spots;
+                        let hot_spot = &mut self.hot_spot;
+                        row(ui, focus, HOT_SPOT_ROW, |ui| {
+                            let shown = if hot_spot.is_empty() {
+                                "(no hot spots)"
+                            } else {
+                                hot_spot.as_str()
+                            };
+                            let response = egui::ComboBox::from_id_salt("history hot spot")
+                                .selected_text(shown)
+                                .width(200.0)
+                                .show_ui(ui, |ui| {
+                                    for name in hot_spots {
+                                        ui.selectable_value(hot_spot, name.clone(), name);
+                                    }
+                                });
+                            response.response.clicked()
+                        });
+                        let moving_loads = &self.moving_loads;
+                        let moving_load = &mut self.moving_load;
+                        row(ui, focus, MOVING_LOAD_ROW, |ui| {
+                            let response = egui::ComboBox::from_id_salt("history moving load")
+                                .selected_text(moving_load.as_deref().unwrap_or(NO_MOVING_LOAD))
+                                .width(200.0)
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(moving_load, None, NO_MOVING_LOAD);
+                                    for name in moving_loads {
+                                        ui.selectable_value(moving_load, Some(name.clone()), name);
+                                    }
+                                });
+                            response.response.clicked()
+                        });
+                    }
                     _ => {
                         let size = &mut self.size;
                         let elements = &mut self.elements;
@@ -560,5 +640,58 @@ mod tests {
         let warnings = view.remove_history_output(0, &mesh);
         assert_eq!(warnings.len(), 1);
         assert!(view.history.is_empty());
+    }
+
+    #[test]
+    fn hot_spot_values_beside_a_moving_load() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/kragbalken_c3d20r.frd");
+        let mut model = crate::model::load(&path, plx_model::UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
+        // A toe on the top face near the fixed end, the paths along the beam.
+        let toe = (model.mesh.node_ids().iter().zip(model.mesh.coords()))
+            .find(|(_, c)| **c == [10.0, 5.0, 10.0])
+            .map(|(id, _)| *id)
+            .unwrap();
+        let mut hot_spot = plx_results::hot_spot::HotSpot::new("Hot_Spot-1");
+        hot_spot.toe = Region::Nodes(vec![toe]);
+        hot_spot.thickness = 10.0;
+        model.hot_spots.definitions.push(hot_spot);
+        let reports = crate::hot_spots::evaluate(&model);
+        let stations = plx_model::LoadStations {
+            load: "Crane-1".into(),
+            steps: vec![(1, 50.0)],
+        };
+        let mesh = model.mesh.clone();
+        let view = model.results.as_mut().unwrap();
+        view.set_history_sources(reports, vec![stations], &mesh);
+
+        let mut dialog = HistoryOutputDialog::create(view);
+        dialog.kind = HOT_SPOT;
+        assert_eq!(dialog.names[HOT_SPOT], "From_Hot_Spot-1");
+        assert_eq!(dialog.hot_spot, "Hot_Spot-1");
+        assert_eq!(dialog.moving_loads, ["Crane-1"]);
+        dialog.moving_load = Some("Crane-1".into());
+        let output = dialog.output().unwrap();
+        view.set_history_output(None, output, &mesh).unwrap();
+        let set = view.history.last().unwrap();
+        let node = &set.field("HOT_SPOT").unwrap().components[0];
+        assert_eq!(node.name, format!("NODE_{toe}"));
+        let (position, s_hs) = (&node.entries[0], &node.entries[1]);
+        assert_eq!(
+            (position.name.as_str(), s_hs.name.as_str()),
+            ("POSITION", "S_HS")
+        );
+        // The tip load bends the top in tension.
+        assert!(s_hs.values.iter().all(|v| *v > 0.0), "{s_hs:?}");
+        assert!(position.values.iter().all(|v| *v == 50.0));
+
+        // Deleting the hot spot breaks the output; editing keeps the choice.
+        let edit = HistoryOutputDialog::edit(view, &mesh, 0).unwrap();
+        assert_eq!(edit.kind, HOT_SPOT);
+        assert_eq!(edit.moving_load.as_deref(), Some("Crane-1"));
+        let warnings = view.set_history_sources(Vec::new(), Vec::new(), &mesh);
+        assert_eq!(warnings.map(|w| w.len()), Some(1));
     }
 }
