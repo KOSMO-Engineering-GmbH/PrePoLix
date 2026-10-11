@@ -6,8 +6,8 @@
 use egui::{RichText, Ui};
 use plx_mesh::FeMesh;
 use plx_model::{
-    ContactMethod, ContactPair, FeModel, Friction, GapConductance, InteractionProperty, Quantity,
-    Region, SurfaceBehavior, SurfaceInteraction, Tie, UnitSystem,
+    ContactMethod, ContactPair, CyclicSymmetry, FeModel, Friction, GapConductance,
+    InteractionProperty, Quantity, Region, SurfaceBehavior, SurfaceInteraction, Tie, UnitSystem,
 };
 
 use crate::icons::{self, Icon};
@@ -143,6 +143,49 @@ pub fn tie_form(ui: &mut Ui, model: &Model, tie: &mut Tie, regions: &mut MasterS
     regions.ui(ui, model);
     color_row(ui, "Master color", &mut tie.master_color);
     color_row(ui, "Slave color", &mut tie.slave_color);
+    if !model.fe.properties.space.is_2d() || tie.cyclic.is_some() {
+        cyclic_symmetry_rows(ui, model, &mut tie.cyclic);
+    }
+}
+
+/// PrePoMax's cyclic symmetry tie: the sector count, the shown sectors and the axis.
+fn cyclic_symmetry_rows(ui: &mut Ui, model: &Model, cyclic: &mut Option<CyclicSymmetry>) {
+    ui.label("");
+    let mut on = cyclic.is_some();
+    ui.checkbox(&mut on, "Cyclic symmetry")
+        .on_hover_text("The slave side is the master side rotated by one sector about the axis.");
+    ui.end_row();
+    if on != cyclic.is_some() {
+        *cyclic = on.then(CyclicSymmetry::default);
+    }
+    let Some(cyclic) = cyclic else {
+        return;
+    };
+    ui.label("Number of sectors");
+    ui.add(egui::DragValue::new(&mut cyclic.sectors).range(2..=10_000));
+    ui.end_row();
+    ui.label("Displayed sectors");
+    ui.add(egui::DragValue::new(&mut cyclic.graph_sectors).range(1..=cyclic.sectors.max(1)))
+        .on_hover_text("Sectors the results are expanded to; all sectors show the whole part.");
+    ui.end_row();
+    let units = model.fe.properties.units;
+    ui.label(RichText::new("Axis point").strong());
+    ui.end_row();
+    for (value, label) in cyclic.axis_point.iter_mut().zip(["X", "Y", "Z"]) {
+        ui.label(label);
+        ui.add(numeric::quantity(value, units, Quantity::Length).speed(1.0));
+        ui.end_row();
+    }
+    ui.label(RichText::new("Axis direction").strong());
+    ui.end_row();
+    for (value, label) in cyclic.axis_direction.iter_mut().zip(["X", "Y", "Z"]) {
+        ui.label(label);
+        ui.add(numeric::drag_value(value).speed(0.1));
+        ui.end_row();
+    }
+    ui.label("");
+    ui.checkbox(&mut cyclic.check_angle, "Check the sector angle");
+    ui.end_row();
 }
 
 pub fn contact_pair_form(

@@ -63,6 +63,8 @@ struct StepHeader {
     step: u32,
     increment: u32,
     mode: Option<u32>,
+    /// Nodal diameter of a cyclic symmetric mode (`1PHID`).
+    nodal_diameter: Option<u32>,
 }
 
 struct Reader<'a> {
@@ -96,6 +98,7 @@ struct ResultBlock<'a> {
     increment: u32,
     kind: AnalysisKind,
     value: f64,
+    nodal_diameter: Option<u32>,
     field_name: String,
     names: Vec<String>,
     /// Bytes per binary float, `None` for ASCII.
@@ -118,6 +121,10 @@ impl<'a> Reader<'a> {
                 self.elements(&line)?;
             } else if line.starts_with("    1PSTEP") {
                 self.pending = Some(step_header(&line));
+            } else if let Some(diameter) = line.strip_prefix("    1PHID") {
+                if let Some(header) = &mut self.pending {
+                    header.nodal_diameter = diameter.trim().parse().ok();
+                }
             } else if let Some(mode) = line.strip_prefix("    1PMODE") {
                 if let Some(header) = &mut self.pending {
                     header.mode = mode.trim().parse().ok();
@@ -156,13 +163,21 @@ impl<'a> Reader<'a> {
                 i.step == block.step && i.increment == block.increment && i.kind == block.kind
             });
             match target {
-                Some(target) => target.fields.push(field),
+                Some(target) => {
+                    // The surface normals of a sensitivity step come without the frequency
+                    // of the first mode.
+                    if target.value == 0.0 {
+                        target.value = block.value;
+                    }
+                    target.fields.push(field);
+                }
                 None => self.import.increments.push(Increment {
                     step: block.step,
                     increment: block.increment,
                     kind: block.kind,
                     value: block.value,
                     fields: vec![field],
+                    nodal_diameter: block.nodal_diameter,
                 }),
             }
         }
@@ -369,19 +384,8 @@ impl<'a> Reader<'a> {
         let step = self.pending.take().unwrap_or(StepHeader {
             step: 1,
             increment: 1,
-            mode: None,
+            ..StepHeader::default()
         });
-        let kind = match int_field(header, 56..58).unwrap_or(0) {
-            0 => AnalysisKind::Static,
-            1 => AnalysisKind::Dynamic,
-            2 => AnalysisKind::Frequency,
-            // CalculiX writes 3 for every other procedure; with a mode number it is a
-            // complex frequency step.
-            3 if step.mode.is_some() => AnalysisKind::ComplexFrequency,
-            4 => AnalysisKind::Buckling,
-            other => AnalysisKind::Other(other),
-        };
-
         let field_line = self
             .next_line()
             .ok_or_else(|| self.error("Result block ends after the header"))?;
@@ -390,6 +394,18 @@ impl<'a> Reader<'a> {
             .nth(1)
             .unwrap_or("UNBEKANNT")
             .to_string();
+        let kind = match int_field(header, 56..58).unwrap_or(0) {
+            0 => AnalysisKind::Static,
+            1 => AnalysisKind::Dynamic,
+            2 => AnalysisKind::Frequency,
+            // CalculiX writes 3 for every other procedure; with a mode number it is a
+            // complex frequency step, with the surface normals and sensitivities a
+            // sensitivity step.
+            3 if step.mode.is_some() => AnalysisKind::ComplexFrequency,
+            3 if field_name == "NORM" || field_name.starts_with("SEN") => AnalysisKind::Sensitivity,
+            4 => AnalysisKind::Buckling,
+            other => AnalysisKind::Other(other),
+        };
         let declared = int_field(&field_line, 13..18).unwrap_or(0).max(0) as usize;
         let mut names = Vec::new();
         for _ in 0..declared {
@@ -420,8 +436,22 @@ impl<'a> Reader<'a> {
         // Steady state dynamics writes increment 0 into every `1PSTEP` line; the frequency
         // points are then only told apart by the increment counter of the block header.
         let increment = match (kind, step.mode) {
+            // Each nodal diameter counts its modes from 1 again; the block header numbers
+            // them on through the step. CalculiX solves for a cosine and a sine part, so
+            // every mode comes twice and only the first of each pair (1, 3, 5) is written.
+            (AnalysisKind::Frequency, Some(_)) if step.nodal_diameter.is_some() => {
+                (int_field(header, 58..63).unwrap_or(1).max(1) as u32).div_ceil(2)
+            }
             (AnalysisKind::Frequency | AnalysisKind::ComplexFrequency, Some(mode)) => mode,
             (AnalysisKind::Buckling, _) => self.buckling_increment(header, step.step, value),
+            // Every eigenfrequency gets a SENFREQ block of increment 1; they become one
+            // increment per mode, as in the frequency step before.
+            (AnalysisKind::Sensitivity, _) if field_name == "SENFREQ" => {
+                let modes = (self.blocks.iter())
+                    .filter(|b| b.step == step.step && b.field_name == "SENFREQ")
+                    .count();
+                modes as u32 + 1
+            }
             _ if step.increment == 0 => int_field(header, 58..63)
                 .map(|n| n.max(0) as u32)
                 .unwrap_or(0),
@@ -433,6 +463,7 @@ impl<'a> Reader<'a> {
             increment,
             kind,
             value,
+            nodal_diameter: step.nodal_diameter,
             field_name,
             names,
             binary,
@@ -561,6 +592,7 @@ fn step_header(line: &str) -> StepHeader {
         increment: number(2).unwrap_or(1),
         step: number(3).unwrap_or(1),
         mode: None,
+        nodal_diameter: None,
     }
 }
 

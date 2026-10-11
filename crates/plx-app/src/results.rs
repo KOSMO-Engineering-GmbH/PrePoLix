@@ -539,7 +539,10 @@ impl ResultsView {
 
     /// Entry of the increment list, "step, increment" as in PrePoMax's results toolbar.
     pub fn increment_label(increment: &Increment) -> String {
-        format!("{}, {}", increment.step, increment.increment)
+        match increment.nodal_diameter {
+            Some(nd) => format!("{}, {} (ND {nd})", increment.step, increment.increment),
+            None => format!("{}, {}", increment.step, increment.increment),
+        }
     }
 
     /// PrePoMax's information block in the top right corner of the 3D view.
@@ -561,10 +564,16 @@ impl ResultsView {
         } else if let Some(inc) = self.current_increment() {
             let value = format_value(inc.value as f32);
             lines.push(match inc.kind {
-                AnalysisKind::Frequency => format!(
-                    "Step: #{}   Mode: #{}   Frequency: {value}",
-                    inc.step, inc.increment
-                ),
+                AnalysisKind::Frequency => match inc.nodal_diameter {
+                    Some(nd) => format!(
+                        "Step: #{}   Mode: #{}   Nodal diameter: {nd}   Frequency: {value}",
+                        inc.step, inc.increment
+                    ),
+                    None => format!(
+                        "Step: #{}   Mode: #{}   Frequency: {value}",
+                        inc.step, inc.increment
+                    ),
+                },
                 AnalysisKind::ComplexFrequency => {
                     let phase = match self.whirl() {
                         Some((phase, _)) => format!("   Phase: {:.0} deg", phase.to_degrees()),
@@ -585,6 +594,11 @@ impl ResultsView {
                     "Step: #{}   Mode: #{}   Buckling factor: {value}",
                     inc.step, inc.increment
                 ),
+                AnalysisKind::Sensitivity if inc.value != 0.0 => format!(
+                    "Step: #{}   Sensitivity   Mode: #{}   Frequency: {value}",
+                    inc.step, inc.increment
+                ),
+                AnalysisKind::Sensitivity => format!("Step: #{}   Sensitivity", inc.step),
                 _ => format!(
                     "Step: #{}   Increment: #{}   Analysis time: {value}",
                     inc.step, inc.increment
@@ -1104,7 +1118,7 @@ pub fn field_unit(field: &str, component: &str, units: UnitSystem) -> Option<Str
     let unit = |quantity| Some(units.unit(quantity).to_string()).filter(|u| !u.is_empty());
     let per = |a, b| Some(format!("{}/{}", unit(a)?, unit(b)?));
     match field.to_ascii_uppercase().as_str() {
-        "DISP" | "DISPR" | "DISPI" | "NORM" => unit(Quantity::Length),
+        "DISP" | "DISPR" | "DISPI" => unit(Quantity::Length),
         "STRESS" | "STRESSR" | "STRESSI" | "ZZSTR" | "ZZSTRR" | "ZZSTRI" => {
             unit(Quantity::Pressure)
         }
@@ -1221,6 +1235,7 @@ mod tests {
         };
         plx_results::add_derived_components(&mut field);
         Increment {
+            nodal_diameter: None,
             step,
             increment: number,
             kind,

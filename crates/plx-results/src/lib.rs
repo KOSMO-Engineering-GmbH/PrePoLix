@@ -99,6 +99,10 @@ pub enum AnalysisKind {
     ComplexFrequency,
     Buckling,
     Dynamic,
+    /// Derivatives of design responses with respect to the design node positions
+    /// (`*SENSITIVITY`): fields `NORM` and `SEN...`. For eigenfrequencies there is one
+    /// increment per mode with its frequency as the value.
+    Sensitivity,
     Other(i32),
 }
 
@@ -108,6 +112,7 @@ impl AnalysisKind {
         match self {
             AnalysisKind::Frequency | AnalysisKind::ComplexFrequency => "Frequency",
             AnalysisKind::Buckling => "Load factor",
+            AnalysisKind::Sensitivity => "Value",
             _ => "Time",
         }
     }
@@ -185,6 +190,8 @@ pub struct Increment {
     /// Time, eigenfrequency or buckling factor, depending on [`Increment::kind`].
     pub value: f64,
     pub fields: Vec<Field>,
+    /// Nodal diameter of a mode of a cyclic symmetric model.
+    pub nodal_diameter: Option<u32>,
 }
 
 impl Increment {

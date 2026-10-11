@@ -39,12 +39,27 @@ To distribute PrePoLix, place `libgmsh.so.4.15` or `gmsh-4.15.dll` and `GMSH-LIC
 executable. Alternatively set the path to an existing library under *Tools > Settings > Gmsh*. On
 Linux the Gmsh library also needs `libGLU` and `libXft`.
 
+## CalculiX
+
+The releases ship CalculiX 2.23 as built by conda-forge (with SPOOLES and ARPACK, plus the
+libraries it needs). `scripts/fetch_ccx.py` downloads the pinned packages, checks their SHA-256 and
+unpacks them into `target/ccx/<platform>`, where builds in `target/<profile>` find it when no
+executable is set:
+
+```sh
+python3 scripts/fetch_ccx.py                        # Linux
+python3 scripts/fetch_ccx.py --platform windows     # Windows
+```
+
+The installer puts it in `ccx` next to `prepolix.exe`, the AppImage in `usr/lib/prepolix/ccx`.
+It needs the `zstd` program (or Python 3.14).
+
 ## Windows installer
 
 The installer (`prepolix-<version>-setup.exe`, NSIS) is built on Linux: `prepolix.exe` is
 cross-compiled with MinGW, plus the Gmsh DLL, the program icon and the license texts. It installs
 to `C:\Program Files\prepolix`, adds a Start menu entry (desktop icon optional), optionally
-associates `.plx` projects and registers for uninstall. CalculiX is not included.
+associates `.plx` projects and registers for uninstall. It includes CalculiX (see above).
 
 ```sh
 sudo apt install gcc-mingw-w64-x86-64 nsis
@@ -63,7 +78,7 @@ with the system libraries it needs that not every distribution has (GLU, Xft, li
 desktop entry, the icon and the `.plx` file type (`installer/linux/`), plus the license texts in
 `usr/share/doc/prepolix`. [linuxdeploy](https://github.com/linuxdeploy/linuxdeploy) collects the
 libraries, [appimagetool](https://github.com/AppImage/appimagetool) packs them; the script downloads
-both (pinned versions) into `target/appimage/tools`. CalculiX is not included.
+both (pinned versions) into `target/appimage/tools`. It includes CalculiX (see above).
 
 ```sh
 sudo apt install libasound2-dev libglu1-mesa libxft2 libxcursor1 libxinerama1 libgomp1 curl file zsync

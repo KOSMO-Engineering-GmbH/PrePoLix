@@ -44,5 +44,27 @@ Rust libraries (compiled into prepolix)
     license. Cargo.lock in the PrePoLix source lists them with versions; the
     license texts are with each package on https://crates.io.
 
-CalculiX is not included. Install the solver ccx yourself and select it under
-Tools > Settings > CalculiX.
+CalculiX ccx 2.23 (in usr/lib/prepolix/ccx of the AppImage)
+    The solver. Copyright (C) 1998-2025 Guido Dhondt. GNU GPL version 2 or
+    later, see ccx/licenses/CalculiX-GPL-2.0.txt. The unmodified Linux
+    package from conda-forge (with SPOOLES and ARPACK); ccx/SOURCE.txt lists
+    the exact packages.
+    Source: http://www.dhondt.de/ccx_2.23.src.tar.bz2 with the fixes and the
+    build recipe at
+    https://github.com/conda-forge/calculix-feedstock/tree/9d06fb5716f31488e18f67d13956164a6857e05c
+
+    It comes with, also unmodified from conda-forge:
+
+    ARPACK-NG 3.9.1 (libarpack.so.2)
+        BSD license, see ccx/licenses/ARPACK-LICENSE.txt.
+        Source: https://github.com/opencollab/arpack-ng
+    BLAS and LAPACK 3.11.0, reference implementation (libblas, liblapack)
+        BSD license, see ccx/licenses/LAPACK-LICENSE.txt.
+        Source: https://github.com/Reference-LAPACK/lapack
+    GCC runtime libraries 16.2 (libgfortran, libgomp, libgcc_s, libquadmath)
+        GNU GPL version 3 with the GCC Runtime Library Exception, see
+        ccx/licenses/GPL-3.0.txt and
+        ccx/licenses/GCC-RUNTIME-LIBRARY-EXCEPTION.txt.
+        Source: https://gcc.gnu.org
+
+    Another CalculiX can be set under Tools > Settings > CalculiX.

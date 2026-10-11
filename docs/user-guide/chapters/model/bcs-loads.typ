@@ -13,7 +13,7 @@ plates (rotations).
   [Fixed], [All degrees of freedom held at zero. In 2D only the two translations are fixed.],
   [Displacement/Rotation], [Prescribed values for the ticked components `U1`, `U2`, `U3`
     (length) and `UR1`, `UR2`, `UR3` (angle in radians). Unticked components are free.],
-  [Temperature], [Prescribed temperature (heat transfer and coupled steps).],
+  [Temperature], [Prescribed temperature (heat transfer, coupled and uncoupled steps).],
   [Submodel], [Displacements taken from the global model (static steps of a submodel,
     @submodel). #ui("Global step") selects the step of the global results, the check boxes the
     components.],

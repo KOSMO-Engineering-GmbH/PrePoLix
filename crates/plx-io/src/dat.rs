@@ -321,6 +321,12 @@ impl Collector {
 }
 
 /// Parses the text of a `.dat` file.
+/// The mode of a row of a cyclic symmetric frequency step, numbered on through the step:
+/// rows 1 and 2 are mode 1, the second of each pair is skipped.
+fn cyclic_mode(row: u32) -> Option<u32> {
+    (row % 2 == 1).then(|| row.div_ceil(2))
+}
+
 pub fn parse_dat(text: &str) -> DatImport {
     let lines: Vec<&str> = text.lines().collect();
     let mut data = Collector::default();
@@ -332,6 +338,12 @@ pub fn parse_dat(text: &str) -> DatImport {
     // frequencies of the step's modes.
     let mut mode: Option<u32> = None;
     let mut frequencies: HashMap<u32, f64> = HashMap::new();
+    // A cyclic symmetric frequency step prints one eigenvalue table per nodal diameter,
+    // each counting its modes from 1; the modes are numbered on through the step, as in
+    // the .frd file. `offset` is the number of rows before the table. Every mode comes
+    // twice, as a cosine and a sine part; only the first of each pair is kept, as the .frd
+    // file does (see `cyclic_mode`).
+    let (mut offset, mut cyclic_modes) = (0u32, 0u32);
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
@@ -345,6 +357,7 @@ pub fn parse_dat(text: &str) -> DatImport {
             increment = 0;
             mode = None;
             frequencies.clear();
+            (offset, cyclic_modes) = (0, 0);
             continue;
         }
         if let Some(n) = trimmed
@@ -361,7 +374,28 @@ pub fn parse_dat(text: &str) -> DatImport {
         if trimmed == "E I G E N V A L U E   O U T P U T" {
             let table = table_after(&lines, &mut i);
             let set = format!("STEP_{step}");
+            offset = cyclic_modes;
             for values in &table {
+                // Nodal diameter, mode, eigenvalue, omega, frequency, imaginary part.
+                if values.len() == 6 {
+                    cyclic_modes += 1;
+                    let Some(m) = cyclic_mode(offset + values[1] as u32) else {
+                        continue;
+                    };
+                    frequencies.insert(m, values[4]);
+                    let row = data.row(step, m, values[4]);
+                    let names = [
+                        "NODAL_DIAMETER",
+                        "EIGENVALUE",
+                        "OMEGA",
+                        "FREQUENCY",
+                        "FREQUENCY_IM",
+                    ];
+                    for (name, value) in names.iter().zip([values[0]].iter().chain(&values[2..])) {
+                        data.add(&set, "EIGENVALUE_OUTPUT", name, name, row, *value);
+                    }
+                    continue;
+                }
                 // A frequency step prints eigenvalue, omega, frequency and imaginary part; a
                 // complex frequency step the real part as omega and frequency, then the
                 // imaginary part of omega, the damping of the whirling mode.
@@ -389,12 +423,25 @@ pub fn parse_dat(text: &str) -> DatImport {
                 let line = lines[i].trim();
                 i += 1;
                 let mut tokens = line.split_whitespace();
-                let Some(m) = tokens.next().and_then(|t| t.parse::<u32>().ok()) else {
-                    if line.is_empty() || line.starts_with("Axis") || line.starts_with("MODE") {
+                let Some(mut m) = tokens.next().and_then(|t| t.parse::<u32>().ok()) else {
+                    let header = ["Axis", "MODE", "NODAL", "DIAMETER"];
+                    if line.is_empty() || header.iter().any(|h| line.starts_with(h)) {
                         continue;
                     }
+                    // The next block, such as the eigenvalues of the next nodal diameter.
+                    i -= 1;
                     break;
                 };
+                // Cyclic symmetry: nodal diameter, then the mode within it.
+                if line.split_whitespace().count() == 3 {
+                    let Some(local) = tokens.next().and_then(|t| t.parse::<u32>().ok()) else {
+                        break;
+                    };
+                    let Some(mode) = cyclic_mode(offset + local) else {
+                        continue;
+                    };
+                    m = mode;
+                }
                 let direction = match tokens.next() {
                     Some("F") => 1.0,
                     Some("B") => -1.0,
@@ -419,6 +466,32 @@ pub fn parse_dat(text: &str) -> DatImport {
             }
             continue;
         }
+        // A sensitivity step lists each design response with its value and the length of
+        // its gradient: "STRAINENERGY  0.67E+01  0.17E-01  STRAINENERGY".
+        if trimmed.starts_with("D E S I G N   R E S P O N S E")
+            && trimmed.ends_with("I N F O R M A T I O N")
+        {
+            let set = format!("STEP_{step}");
+            let row = data.row(step, 1, 0.0);
+            while i < lines.len() {
+                let line = lines[i].trim();
+                let tokens: Vec<&str> = line.split_whitespace().collect();
+                let numbers = (tokens.get(1).and_then(|t| t.parse::<f64>().ok()))
+                    .zip(tokens.get(2).and_then(|t| t.parse::<f64>().ok()));
+                if let Some((value, gradient)) = numbers {
+                    let name = tokens.get(3).unwrap_or(&tokens[0]);
+                    data.add(&set, "DESIGN_RESPONSE", name, name, row, value);
+                    data.add(&set, "GRADIENT_LENGTH", name, name, row, gradient);
+                } else if !(line.is_empty()
+                    || line.starts_with('#')
+                    || line.starts_with("FUNCTION"))
+                {
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
         let modal = [
             (
                 "P A R T I C I P A T I O N   F A C T O R S",
@@ -434,6 +507,14 @@ pub fn parse_dat(text: &str) -> DatImport {
             let set = format!("STEP_{step}");
             for values in table.iter().filter(|v| v.len() == 7) {
                 let m = values[0] as u32;
+                let m = if cyclic_modes > 0 {
+                    let Some(m) = cyclic_mode(offset + m) else {
+                        continue;
+                    };
+                    m
+                } else {
+                    m
+                };
                 let frequency = frequencies.get(&m).copied().unwrap_or(m as f64);
                 let row = data.row(step, m, frequency);
                 let names = [

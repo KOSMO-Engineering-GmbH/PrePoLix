@@ -96,7 +96,9 @@ impl FeModel {
         for step in &mut self.steps {
             match &mut step.kind {
                 StepKind::Static(s) => s.convert_units(&c),
-                StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) => {
+                StepKind::HeatTransfer(h)
+                | StepKind::CoupledTempDisp(h)
+                | StepKind::UncoupledTempDisp(h) => {
                     h.increments.convert_units(&c);
                     c.option(&mut h.deltmx, Quantity::TemperatureDifference);
                 }
@@ -126,6 +128,7 @@ impl FeModel {
                 StepKind::ComplexFrequency(_) => {}
                 // Buckling factors and the accuracy have no unit.
                 StepKind::Buckle(_) => {}
+                StepKind::Sensitivity(s) => c.option(&mut s.filter_radius, Quantity::Length),
             }
             for field in &mut step.defined_fields {
                 if let crate::DefinedFieldKind::Temperature(t) = &mut field.kind {

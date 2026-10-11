@@ -71,6 +71,14 @@ pub enum Problem {
     /// A step that builds on stored eigenmodes (modal dynamics, steady state dynamics,
     /// complex frequency) without a frequency step before it that stores them.
     NoStoredModes,
+    /// A sensitivity step without the static or frequency step before it whose solution
+    /// its design responses need.
+    NoSensitivityBase,
+    /// A later sensitivity step with another design region: CalculiX reads one, the first.
+    DesignRegionIgnored,
+    /// A cyclic symmetry tie CalculiX rejects, or nodal diameters beyond what its sectors
+    /// carry.
+    InvalidCyclicSymmetry,
     /// An initial velocity in a model without a Dynamic step.
     VelocityIgnored,
     /// A Coriolis complex frequency step without a centrifugal load before it.
@@ -87,6 +95,9 @@ pub enum Problem {
     MpcAndSpc,
     /// Found in the solver output only.
     RotationIn2d,
+    /// A keyword of the input file that the configured CalculiX does not know: it skips the
+    /// card with a warning. Found by testing the executable before a run, or in its output.
+    UnknownKeyword,
     /// Any other `*ERROR` of the solver output.
     SolverError,
 }
@@ -107,7 +118,8 @@ impl Problem {
             | Problem::NoRotation
             | Problem::ContactIgnored
             | Problem::ContactWithCoriolis
-            | Problem::WheelOffSurface => Severity::Warning,
+            | Problem::WheelOffSurface
+            | Problem::DesignRegionIgnored => Severity::Warning,
             _ => Severity::Error,
         }
     }
@@ -140,6 +152,9 @@ impl Problem {
             Problem::InvalidPlastic => "Invalid plasticity",
             Problem::NoExpansion => "Temperature without thermal expansion",
             Problem::NoStoredModes => "No stored eigenmodes",
+            Problem::NoSensitivityBase => "No step for the sensitivities",
+            Problem::DesignRegionIgnored => "Design region ignored",
+            Problem::InvalidCyclicSymmetry => "Invalid cyclic symmetry",
             Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
             Problem::NoRotation => "No rotation",
             Problem::ContactIgnored => "Contact ignored",
@@ -148,6 +163,7 @@ impl Problem {
             Problem::NoConvergence => "No convergence",
             Problem::MpcAndSpc => "Degree of freedom bound twice",
             Problem::RotationIn2d => "Rotation in a 2D model",
+            Problem::UnknownKeyword => "Keyword unknown to CalculiX",
             Problem::SolverError => "CalculiX error",
         }
     }
@@ -307,6 +323,22 @@ impl Problem {
                  file. Without it CalculiX stops with \"error opening the eigenvalue file\" \
                  or \"the eigenvalue file does not exist\"."
             }
+            Problem::NoSensitivityBase => {
+                "A Sensitivity step differentiates the solution of the step right before it: \
+                 strain energy needs a Static step, eigenfrequencies a Frequency step that \
+                 stores its eigenmodes, mass either. Otherwise CalculiX stops (\"cannot open \
+                 eigenvalue file\") or computes the wrong responses."
+            }
+            Problem::DesignRegionIgnored => {
+                "CalculiX defines the design variables once for the model. PrePoLix writes \
+                 the design region of the first Sensitivity step; the regions of later ones \
+                 are not used."
+            }
+            Problem::InvalidCyclicSymmetry => {
+                "A cyclic symmetry tie models a whole part by one sector of a 3D mesh. It \
+                 needs at least two sectors and an axis, and a sector of N carries the nodal \
+                 diameters 0 to N/2 only."
+            }
             Problem::VelocityIgnored => {
                 "Only a Dynamic step (time integration) starts from an initial velocity; \
                  static, frequency and thermal steps ignore it without a message."
@@ -344,6 +376,12 @@ impl Problem {
                  CalculiX expands 2D elements internally into solid elements and cannot \
                  prescribe rotations for them; the run aborts with \"mpc of type is \
                  unknown\" or a floating point error."
+            }
+            Problem::UnknownKeyword => {
+                "The configured CalculiX does not know a keyword of the input file, usually \
+                 because it is older than the feature that writes it. CalculiX skips such a \
+                 card with only a warning and carries on without it, so the step, load or \
+                 material it defines is missing from the results."
             }
             Problem::SolverError => {
                 "CalculiX aborted with an error message that PrePoLix does not know. \
@@ -465,6 +503,20 @@ impl Problem {
                  the same supports (for Complex Frequency as a perturbation step after a \
                  static step with the centrifugal load)."
             }
+            Problem::NoSensitivityBase => {
+                "Put a Static step (strain energy, mass) or a Frequency step with \"Store \
+                 eigenmodes (Storage)\" (eigenfrequencies, mass) directly before the \
+                 Sensitivity step, or change its design responses."
+            }
+            Problem::DesignRegionIgnored => {
+                "Give all Sensitivity steps the same design region, or analyse the other \
+                 region in a copy of the model."
+            }
+            Problem::InvalidCyclicSymmetry => {
+                "Edit the tie: check the number of sectors and the axis direction, or untick \
+                 Cyclic symmetry in 2D models. In the Frequency step keep the nodal diameter \
+                 range within 0 to half the number of sectors."
+            }
             Problem::VelocityIgnored => "Add a Dynamic step or deactivate the initial condition.",
             Problem::NoRotation => {
                 "Create a Centrifugal load in the static step before the Frequency step."
@@ -491,6 +543,11 @@ impl Problem {
                 "In 2D models prescribe only U1 and U2; check user *BOUNDARY keywords in \
                  the Keyword Editor."
             }
+            Problem::UnknownKeyword => {
+                "Install a newer CalculiX or select it under Tools > Settings > CalculiX; \
+                 \"Test CalculiX\" there lists the features it supports. Check user \
+                 keywords in the Keyword Editor for typing errors."
+            }
             Problem::SolverError => {
                 "Read the message in the Monitor; \"Check Model\" in the context menu of \
                  the analysis often helps."
@@ -509,6 +566,11 @@ pub struct Finding {
 }
 
 impl Finding {
+    /// Keywords the configured CalculiX does not know, found before the analysis ran.
+    pub fn unknown_keywords(detail: impl Into<String>) -> Self {
+        Self::new(ModelItem::Analysis, Problem::UnknownKeyword, detail)
+    }
+
     fn new(item: ModelItem, problem: Problem, detail: impl Into<String>) -> Self {
         Self {
             item,
@@ -616,6 +678,45 @@ impl MeshCheck {
 
 impl FeModel {
     /// All problems of the model, invalid references included, errors first.
+    /// Cyclic symmetry ties CalculiX rejects and nodal diameters the sectors cannot carry.
+    fn check_cyclic_symmetry(&self, findings: &mut Vec<Finding>) {
+        for (i, tie) in self.ties.iter().enumerate().filter(|(_, t)| t.active) {
+            let Some(cyclic) = &tie.cyclic else { continue };
+            let problem = if self.properties.space.is_2d() {
+                Some("Cyclic symmetry needs a 3D model.".to_string())
+            } else {
+                cyclic.problem()
+            };
+            if let Some(problem) = problem {
+                let detail = format!("{}: {problem}", tie.name);
+                findings.push(Finding::new(
+                    ModelItem::Tie(i),
+                    Problem::InvalidCyclicSymmetry,
+                    detail,
+                ));
+            }
+        }
+        let Some(highest) = self.cyclic_symmetry().map(|c| c.highest_nodal_diameter()) else {
+            return;
+        };
+        for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
+            if let StepKind::Frequency(f) = &step.kind
+                && let Some([min, max]) = f.nodal_diameters
+                && (min > max || max > highest)
+            {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::InvalidCyclicSymmetry,
+                    format!(
+                        "{} asks for nodal diameters {min} to {max}, the sectors carry 0 to \
+                         {highest}",
+                        step.name
+                    ),
+                ));
+            }
+        }
+    }
+
     pub fn check(&self, mesh: &FeMesh, mesh_check: &MeshCheck) -> Vec<Finding> {
         let mut findings: Vec<Finding> = (self.invalid_items(mesh).into_iter())
             .map(|i| Finding::new(i.item, Problem::MissingReference, i.reason))
@@ -649,6 +750,7 @@ impl FeModel {
                 ));
             }
         }
+        self.check_cyclic_symmetry(&mut findings);
         let trusses = Trusses::new(self, mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             self.check_step(s, mesh, mesh_check, &trusses, &mut findings);
@@ -661,7 +763,39 @@ impl FeModel {
                     format!("{} needs the eigenmodes of a Frequency step", step.name),
                 ));
             }
-            if let StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) = &step.kind
+            if let StepKind::Sensitivity(settings) = &step.kind {
+                let previous = (self.steps[..s].iter()).rev().find(|p| p.active);
+                let fits = match previous.map(|p| &p.kind) {
+                    Some(StepKind::Static(_)) => !settings.eigenfrequency,
+                    // CalculiX reads the eigenmodes from the .eig file.
+                    Some(StepKind::Frequency(f)) => {
+                        !settings.strain_energy && (f.storage || !settings.eigenfrequency)
+                    }
+                    _ => false,
+                };
+                if !fits {
+                    findings.push(Finding::new(
+                        ModelItem::Step(s),
+                        Problem::NoSensitivityBase,
+                        format!("{} has no fitting step before it", step.name),
+                    ));
+                }
+                let first = (self.steps[..s].iter().filter(|p| p.active))
+                    .find_map(|p| p.kind.design_region());
+                if first.is_some_and(|r| *r != settings.design_region) {
+                    findings.push(Finding::new(
+                        ModelItem::Step(s),
+                        Problem::DesignRegionIgnored,
+                        format!(
+                            "{} uses the design region of the first sensitivity step",
+                            step.name
+                        ),
+                    ));
+                }
+            }
+            if let StepKind::HeatTransfer(h)
+            | StepKind::CoupledTempDisp(h)
+            | StepKind::UncoupledTempDisp(h) = &step.kind
                 && !h.steady_state
                 && !initial_temperature
             {
@@ -704,7 +838,9 @@ impl FeModel {
         let mechanical = active().any(|s| s.kind.is_mechanical());
         let thermal = active().any(|s| s.kind.is_thermal());
         let transient = active().any(|s| match &s.kind {
-            StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) => !h.steady_state,
+            StepKind::HeatTransfer(h)
+            | StepKind::CoupledTempDisp(h)
+            | StepKind::UncoupledTempDisp(h) => !h.steady_state,
             _ => false,
         });
         // Eigenfrequencies and inertia need the mass.
@@ -1197,7 +1333,10 @@ impl FeModel {
         // A buckle step solves the static state of its loads first.
         let static_mechanical = matches!(
             step.kind,
-            StepKind::Static(_) | StepKind::Buckle(_) | StepKind::CoupledTempDisp(_)
+            StepKind::Static(_)
+                | StepKind::Buckle(_)
+                | StepKind::CoupledTempDisp(_)
+                | StepKind::UncoupledTempDisp(_)
         );
         if static_mechanical && !constrained_by_keywords {
             self.check_rigid_body(s, mesh, check, trusses, &fixed, &skewed_supports, findings);
@@ -1991,6 +2130,26 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             );
         }
     }
+    // " *WARNING in calinput. Card image cannot be interpreted:", then the card in a later
+    // line, upper case without blanks.
+    let mut unknown: Vec<&str> = Vec::new();
+    for (at, _) in (lines.iter().enumerate()).filter(|(_, l)| l.contains("cannot be interpreted")) {
+        let card = (lines[at + 1..].iter().take(3))
+            .map(|l| l.trim())
+            .find(|l| l.starts_with('*') && !l.starts_with("*WARNING"));
+        if let Some(card) = card.map(|c| c.split(',').next().unwrap_or(c))
+            && !unknown.contains(&card)
+        {
+            unknown.push(card);
+        }
+    }
+    if !unknown.is_empty() {
+        add(
+            &mut findings,
+            Problem::UnknownKeyword,
+            format!("CalculiX skipped {}", unknown.join(", ")),
+        );
+    }
     if findings.is_empty()
         && let Some(line) = lines.iter().find(|l| l.contains("*ERROR"))
     {
@@ -2138,6 +2297,37 @@ mod tests {
     }
 
     #[test]
+    fn cyclic_symmetry_needs_valid_sectors_and_nodal_diameters() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        let mut tie = crate::Tie::new("Tie-1");
+        tie.cyclic = Some(crate::CyclicSymmetry {
+            sectors: 1,
+            ..Default::default()
+        });
+        model.ties.push(tie);
+        let mut frequency = Step::new_frequency("Step-2");
+        frequency.boundary_conditions = model.steps[0].boundary_conditions.clone();
+        if let StepKind::Frequency(f) = &mut frequency.kind {
+            f.nodal_diameters = Some([0, 7]);
+        }
+        model.steps.push(frequency);
+        let cyclic = |model: &FeModel| -> Vec<ModelItem> {
+            (check(model, &mesh).iter())
+                .filter(|f| f.problem == Problem::InvalidCyclicSymmetry)
+                .map(|f| f.item)
+                .collect()
+        };
+        // One sector, and nodal diameters beyond the 0 sectors / 2 it carries.
+        assert_eq!(cyclic(&model), [ModelItem::Tie(0), ModelItem::Step(1)]);
+        // Twelve sectors carry up to 6.
+        model.ties[0].cyclic.as_mut().unwrap().sectors = 12;
+        assert_eq!(cyclic(&model), [ModelItem::Step(1)]);
+        model.ties[0].cyclic.as_mut().unwrap().sectors = 14;
+        assert_eq!(cyclic(&model), []);
+    }
+
+    #[test]
     fn a_held_and_loaded_model_has_no_findings() {
         let mesh = cubes(2, true);
         assert_eq!(check(&model(&mesh), &mesh), []);
@@ -2165,6 +2355,60 @@ mod tests {
         assert_eq!(
             problems(&check(&model, &mesh)),
             [(ModelItem::Step(0), Problem::NoLoad)]
+        );
+    }
+
+    #[test]
+    fn a_sensitivity_step_needs_the_fitting_step_before_it() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        let design = crate::SensitivityStep {
+            design_region: Region::Nodes(vec![2, 3]),
+            ..Default::default()
+        };
+        model.steps.push(Step {
+            kind: StepKind::Sensitivity(design.clone()),
+            ..Step::new_sensitivity("Step-2")
+        });
+        // Mass and strain energy after the static step.
+        assert_eq!(check(&model, &mesh), []);
+        // Strain energy has nothing to differentiate after a frequency step.
+        model.steps[0].kind = StepKind::Frequency(Default::default());
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Step(1), Problem::NoSensitivityBase)]
+        );
+        // Eigenfrequencies need the stored modes.
+        model.steps[1].kind = StepKind::Sensitivity(crate::SensitivityStep {
+            mass: false,
+            strain_energy: false,
+            eigenfrequency: true,
+            ..design.clone()
+        });
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Step(1), Problem::NoSensitivityBase)]
+        );
+        let StepKind::Frequency(frequency) = &mut model.steps[0].kind else {
+            unreachable!()
+        };
+        frequency.storage = true;
+        assert_eq!(check(&model, &mesh), []);
+        // A second sensitivity step cannot have a design region of its own.
+        model.steps.push(Step {
+            kind: StepKind::Sensitivity(crate::SensitivityStep {
+                design_region: Region::Nodes(vec![2]),
+                eigenfrequency: false,
+                ..design
+            }),
+            ..Step::new_sensitivity("Step-3")
+        });
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [
+                (ModelItem::Step(2), Problem::NoSensitivityBase),
+                (ModelItem::Step(2), Problem::DesignRegionIgnored),
+            ]
         );
     }
 
@@ -2892,6 +3136,17 @@ mod tests {
                 (ModelItem::Part(1), Problem::DistortedElements),
             ]
         );
+        let skipped = [
+            " *WARNING in calinput. Card image cannot be interpreted:",
+            " *WARNING reading the input file. Card image:",
+            "          *CYCLICSYMMETRYMODEL,N=12",
+            " *ERROR in something: new message",
+        ]
+        .map(String::from);
+        let findings = diagnose_solver_output(&skipped, &mesh);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].problem, Problem::UnknownKeyword);
+        assert_eq!(findings[0].detail, "CalculiX skipped *CYCLICSYMMETRYMODEL");
         let unknown = [" *ERROR in something: new message".to_string()];
         assert_eq!(
             diagnose_solver_output(&unknown, &mesh)[0].problem,

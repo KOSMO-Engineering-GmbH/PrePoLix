@@ -12,6 +12,18 @@ exactly what is listed under it in the tree.]
 
 #screenshot("step.png", [Static step])
 
+=== Step types in the tree
+
+Every step shows a pictogram of its type in front of its name, so that you can tell the steps
+apart whatever you named them. Hover over the pictogram or the name to read the type.
+
+#screenshot("step-types.png", [Static, frequency, complex frequency, buckle, heat transfer,
+  coupled, dynamic, modal dynamics, steady state dynamics and sensitivity steps])
+
+#screenshot("step-type-tooltip.png", [Tooltip of a step])
+
+A deactivated step shows the red no-entry sign instead; its tooltip still names the type.
+
 === Order of the steps
 
 CalculiX runs the steps in the order of the list, and a step starts from the state at the end of
@@ -28,10 +40,11 @@ results refer to the order at the time of the run.
 
 === Solver
 
-All step types have a #ui("Solver") field: #ui("Default (Pardiso if available)"),
+All step types have a #ui("Solver") field: #ui("Default (Pardiso or PaStiX if available)"),
 #ui("Pardiso"), #ui("Spooles"), #ui("PaStiX"), #ui("Iterative scaling") or
 #ui("Iterative Cholesky"). #ui("Default") uses Pardiso if the CalculiX executable contains it,
-otherwise the default of CalculiX. Frequency and buckle steps need a direct solver.
+otherwise PaStiX if it contains that, otherwise the default of CalculiX (SPOOLES in the
+CalculiX shipped with PrePoLix). Frequency and buckle steps need a direct solver.
 
 === Static
 
@@ -53,6 +66,8 @@ Computes eigenfrequencies and mode shapes (`*FREQUENCY`). A frequency step takes
   [Number of eigenfrequencies], [Default 10.],
   [Lower / Upper frequency bound], [Optional range of frequencies to compute.],
   [Store matrices and eigenmodes], [Writes the `.eig` file (`STORAGE=YES`).],
+  [Nodal diameter range], [Only in cyclic symmetric models (@cyclic-symmetry): the nodal
+    diameters to compute.],
 )
 
 Materials need a density in a frequency step.
@@ -69,10 +84,18 @@ load: the critical load is the buckling factor times these loads.
   [Accuracy], [Convergence tolerance of the eigenvalue solver (default 1e-4).],
 )
 
-=== Heat Transfer and Coupled Temperature-Displacement
+=== Heat Transfer, Coupled and Uncoupled Temperature-Displacement
 
-#ui("Heat Transfer") computes temperatures only (`*HEAT TRANSFER`), #ui("Coupled
-Temperature-Displacement") computes temperatures and displacements together.
+#ui("Heat Transfer") computes temperatures only (`*HEAT TRANSFER`). #ui("Coupled
+Temperature-Displacement") computes temperatures and displacements together in one system of
+equations (`*COUPLED TEMPERATURE-DISPLACEMENT`). #ui("Uncoupled Temperature-Displacement")
+(`*UNCOUPLED TEMPERATURE-DISPLACEMENT`) solves the temperatures first and then the displacements
+from them in each increment. It is faster and suits thermal stresses as long as the deformation
+does not change the heat flow, for example through a contact that opens. The step takes the same
+boundary conditions and loads as the coupled step: temperatures, heat fluxes, films and radiation
+together with supports and mechanical loads.
+
+#screenshot("uncoupled-step.png", [Creating an uncoupled temperature-displacement step])
 
 #fields(
   [Steady state], [Steady-state solution (default on). Switch it off for a transient
@@ -80,7 +103,7 @@ Temperature-Displacement") computes temperatures and displacements together.
     temperature.],
   [Max. temperature change], [Largest temperature change per increment in a transient analysis
     (`DELTMX`).],
-  [Nonlinear geometry], [Coupled steps only.],
+  [Nonlinear geometry], [Coupled steps only, as in PrePoMax.],
 )
 
 Incrementation and solver fields are the same as for a static step.
@@ -96,7 +119,7 @@ a variable shows what it is.
 #fields(
   [Type], [#ui("Node Output"), #ui("Element Output") or #ui("Contact Output"); chosen when the
     output is created.],
-  [Variables], [Node: `RF U PU V NT PNT RFL`. Element: `S PHS E ME PEEQ ENER HFL ERR HER ZZS SDV`;
+  [Variables], [Node: `RF U PU V NT PNT RFL SEN` (`SEN` in sensitivity steps only). Element: `S PHS E ME PEEQ ENER HFL ERR HER ZZS SDV`;
     `ERR` and `HER` exclude `ZZS`. Contact: `CDIS CSTR CELS PCON`.],
   [Last iterations], [#ui("On") writes every iteration of the last increment, to find out why a
     solution diverges.],

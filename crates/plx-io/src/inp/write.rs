@@ -16,8 +16,8 @@ use plx_model::{
     GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
     ModelSpace, MovingFrame, NodeTie, OutputDimension, OutputKind, Region, Section, SectionKind,
-    StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie,
-    Totals, UserKeyword, line_tangent, symmetry_dofs, symmetry_plane,
+    SensitivityStep, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior,
+    SurfaceInteraction, Tie, Totals, UserKeyword, line_tangent, symmetry_dofs, symmetry_plane,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -311,8 +311,10 @@ pub fn model_keywords(
     let (mut contact_pairs, pair_surfaces) = contact_pairs(&mut sets, model)?;
     contact_pairs.extend(node_ties(&mut sets, model, &lines)?);
     let initial_conditions = initial_conditions(&mut sets, model)?;
+    let design_variables = design_variables(&mut sets, model)?;
     let amplitudes = amplitudes(model)?;
     let flux_kinds = FluxKinds::of(model);
+    let cyclic_slaves = cyclic_slave_nodes(mesh, model);
     let steps = model
         .steps
         .iter()
@@ -320,6 +322,8 @@ pub fn model_keywords(
         .map(|(s, step)| {
             let context = StepContext {
                 stored_perturbation: stored_perturbation(&model.steps[..s]),
+                cyclic: (model.ties.iter()).any(|t| t.active && t.cyclic.is_some()),
+                cyclic_slaves: &cyclic_slaves,
                 extra_boundary: generated.boundary.as_ref(),
                 space,
                 lines: &lines,
@@ -396,8 +400,11 @@ pub fn model_keywords(
         Keyword::title("Contact pairs", contact_pairs),
         Keyword::title("Amplitudes", amplitudes),
         Keyword::title("Initial conditions", initial_conditions),
-        Keyword::title("Steps", steps),
     ]);
+    if !design_variables.is_empty() {
+        tree.push(Keyword::title("Design variables", design_variables));
+    }
+    tree.push(Keyword::title("Steps", steps));
     Ok(tree)
 }
 
@@ -1200,8 +1207,48 @@ fn tie(sets: &mut Sets, tie: &Tie) -> Result<Keyword, WriteError> {
     if !tie.adjust {
         out.push_str(", Adjust=No");
     }
+    if tie.cyclic.is_some() {
+        out.push_str(", Cyclic symmetry");
+    }
     let _ = writeln!(out, "\n{slave}, {master}");
+    if let Some(cyclic) = &tie.cyclic {
+        // As PrePoMax's CalCyclicSymmetry: the axis by a point and a second point on it.
+        let _ = write!(
+            out,
+            "*Cyclic symmetry model, N={}, Tie={}",
+            cyclic.sectors,
+            name(&tie.name)
+        );
+        if cyclic.graph_sectors != 1 {
+            let _ = write!(out, ", Ngraph={}", cyclic.graph_sectors);
+        }
+        if !cyclic.check_angle {
+            out.push_str(", Check=No");
+        }
+        let [x, y, z] = cyclic.axis_point;
+        let [dx, dy, dz] = cyclic.axis_direction;
+        let points = [x, y, z, x + dx, y + dy, z + dz].map(number);
+        let _ = writeln!(out, "\n{}", points.join(", "));
+    }
     Ok(Keyword::generated(out))
+}
+
+/// Nodes on the slave side of an active cyclic symmetry and not on its master side (the
+/// axis). CalculiX computes them from the master side and stops when a boundary condition
+/// prescribes them too ("dependent side of a MPC and a SPC"), so boundary conditions leave
+/// them out; they follow the prescribed master nodes anyway.
+fn cyclic_slave_nodes(mesh: &FeMesh, model: &FeModel) -> BTreeSet<NodeId> {
+    let mut nodes = BTreeSet::new();
+    for tie in model.ties.iter().filter(|t| t.active && t.cyclic.is_some()) {
+        let master: BTreeSet<NodeId> = tie.master.nodes(mesh).into_iter().collect();
+        nodes.extend(
+            tie.slave
+                .nodes(mesh)
+                .into_iter()
+                .filter(|n| !master.contains(n)),
+        );
+    }
+    nodes
 }
 
 /// One `*Pre-tension section` per pre-tension load, with a new node that carries the
@@ -1454,6 +1501,10 @@ struct StepContext<'a> {
     stored_perturbation: bool,
     /// The model, for the coordinate systems of moving loads.
     model: &'a FeModel,
+    /// The model is a cyclic symmetric sector: frequency steps select the nodal diameters.
+    cyclic: bool,
+    /// See [`cyclic_slave_nodes`].
+    cyclic_slaves: &'a BTreeSet<NodeId>,
 }
 
 /// The perturbation flag of the last active frequency step with storage among `before`.
@@ -1591,13 +1642,21 @@ fn step_block<'f>(
         pair_surfaces,
         shells,
         stored_perturbation,
+        cyclic,
+        cyclic_slaves,
         ..
     } = context;
     // Nodes of 2D models move in the x-y plane only; CalculiX fails on rotations there.
     let dofs = if space.is_2d() { 2 } else { 6 };
     let (header, procedure) = match &step.kind {
         StepKind::Static(settings) => static_step(settings),
-        StepKind::Frequency(settings) => frequency_step(settings),
+        StepKind::Frequency(settings) => {
+            let (header, mut procedure) = frequency_step(settings, cyclic);
+            if cyclic {
+                procedure.push_str(&select_cyclic_symmetry_modes(settings));
+            }
+            (header, procedure)
+        }
         StepKind::ComplexFrequency(settings) => {
             complex_frequency_step(settings, stored_perturbation)
         }
@@ -1606,14 +1665,18 @@ fn step_block<'f>(
         StepKind::CoupledTempDisp(settings) => {
             heat_transfer_step(settings, "*Coupled temperature-displacement", true)
         }
+        StepKind::UncoupledTempDisp(settings) => {
+            heat_transfer_step(settings, "*Uncoupled temperature-displacement", false)
+        }
         StepKind::Dynamic(settings) => dynamic_step(settings),
         StepKind::ModalDynamics(settings) => modal_dynamics_step(settings),
         StepKind::SteadyStateDynamics(settings) => steady_state_dynamics_step(settings),
+        StepKind::Sensitivity(settings) => sensitivity_step(sets, &step.name, settings)?,
     };
     // A modal step keeps the supports of the frequency step that stored the modes;
     // CalculiX refuses new ones ("in a modal dynamic step new SPCs are not allowed"), and
     // the reset would make the same supports new. Writing them again is accepted.
-    let mut boundaries = if step.kind.uses_stored_modes() {
+    let mut boundaries = if step.kind.uses_stored_modes() || step.kind.keeps_previous_boundaries() {
         Vec::new()
     } else {
         vec![Keyword::generated("*Boundary, op=New\n".into())]
@@ -1631,7 +1694,17 @@ fn step_block<'f>(
         } else {
             dofs
         };
-        let set = sets.node_set(&bc.name, &bc.region)?;
+        let set = if cyclic_slaves.is_empty() {
+            sets.node_set(&bc.name, &bc.region)?
+        } else {
+            let nodes = bc.region.nodes(sets.mesh);
+            if nodes.iter().any(|n| cyclic_slaves.contains(n)) {
+                let free = nodes.into_iter().filter(|n| !cyclic_slaves.contains(n));
+                sets.node_set(&bc.name, &Region::Nodes(free.collect()))?
+            } else {
+                sets.node_set(&bc.name, &bc.region)?
+            }
+        };
         // The rotations of a rigid body are the displacements of its rotation node.
         let rotation_node = match bc.region.reference_point() {
             Some(point) => Some(sets.reference_nodes(&bc.name, point)?.rotation),
@@ -1977,9 +2050,11 @@ fn deactivated_step(step: &Step) -> Keyword {
         StepKind::Buckle(_) => "BuckleStep",
         StepKind::HeatTransfer(_) => "HeatTransferStep",
         StepKind::CoupledTempDisp(_) => "CoupledTempDispStep",
+        StepKind::UncoupledTempDisp(_) => "UncoupledTempDispStep",
         StepKind::Dynamic(_) => "DynamicStep",
         StepKind::ModalDynamics(_) => "ModalDynamicsStep",
         StepKind::SteadyStateDynamics(_) => "SteadyStateDynamicsStep",
+        StepKind::Sensitivity(_) => "SensitivityStep",
     };
     fn all<'a>(names: impl Iterator<Item = &'a str>) -> Vec<Keyword> {
         names.map(deactivated).collect()
@@ -2124,6 +2199,50 @@ fn static_step(settings: &StaticStep) -> (String, String) {
         let _ = write!(keyword, ", Solver={solver}");
     }
     incremented_step(settings, keyword, settings.nlgeom)
+}
+
+/// The `*Step` line and the procedure of a sensitivity step: one `*Design response` per
+/// response, named like it, on all elements of the model, then the optional filter.
+fn sensitivity_step(
+    sets: &mut Sets,
+    step: &str,
+    settings: &SensitivityStep,
+) -> Result<(String, String), WriteError> {
+    let mut procedure = String::from("*Sensitivity\n");
+    let responses = settings.responses();
+    if responses.iter().any(|r| *r != "EIGENFREQUENCY") {
+        let parts = sets.mesh.parts.iter().map(|p| p.name.clone()).collect();
+        let elements = sets.element_set(step, &Region::Parts(parts))?;
+        for response in &responses {
+            let _ = writeln!(
+                procedure,
+                "*Design response, Name={response}\n{response}, {elements}"
+            );
+        }
+    } else {
+        for response in &responses {
+            let _ = writeln!(procedure, "*Design response, Name={response}\n{response}");
+        }
+    }
+    if let Some(radius) = settings.filter_radius {
+        let _ = writeln!(procedure, "*Filter, Type=Linear\n{}", number(radius));
+    }
+    Ok(("*Step\n".into(), procedure))
+}
+
+/// The design variables of the model (`*Design variables`): the design region of the first
+/// active sensitivity step. CalculiX reads them before the steps.
+fn design_variables(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+    let Some((name, region)) = (model.steps.iter())
+        .filter(|s| s.active)
+        .find_map(|s| Some((&s.name, s.kind.design_region()?)))
+    else {
+        return Ok(Vec::new());
+    };
+    let set = sets.node_set(&format!("{name}_Design"), region)?;
+    Ok(vec![Keyword::generated(format!(
+        "*Design variables, Type=Coordinate\n{set}\n"
+    ))])
 }
 
 /// The `*Step` line and the procedure keyword of a heat transfer or coupled step, as
@@ -2293,8 +2412,10 @@ fn incremented_step(settings: &StaticStep, keyword: String, nlgeom: bool) -> (St
 }
 
 /// The `*Step` line and the procedure keyword of a frequency step, as PrePoMax writes them:
-/// the lower bound is written as 0 when only an upper bound is given.
-fn frequency_step(settings: &FrequencyStep) -> (String, String) {
+/// the lower bound is written as 0 when only an upper bound is given. In a cyclic symmetric
+/// model CalculiX finds every mode twice, as a cosine and a sine part, so it is asked for
+/// twice the number of eigenfrequencies per nodal diameter.
+fn frequency_step(settings: &FrequencyStep, cyclic: bool) -> (String, String) {
     let mut header = String::from("*Step");
     if settings.perturbation {
         header.push_str(", Perturbation");
@@ -2307,7 +2428,8 @@ fn frequency_step(settings: &FrequencyStep) -> (String, String) {
     if settings.storage {
         procedure.push_str(", Storage=Yes");
     }
-    let _ = write!(procedure, "\n{}", settings.num_frequencies);
+    let count = settings.num_frequencies * if cyclic { 2 } else { 1 };
+    let _ = write!(procedure, "\n{count}");
     match (settings.lower_frequency, settings.upper_frequency) {
         (None, None) => {}
         (lower, None) => {
@@ -2320,6 +2442,15 @@ fn frequency_step(settings: &FrequencyStep) -> (String, String) {
     }
     procedure.push('\n');
     (header, procedure)
+}
+
+/// `*Select cyclic symmetry modes` of a frequency step in a cyclic symmetric model, with the
+/// range of nodal diameters if one is set.
+fn select_cyclic_symmetry_modes(settings: &FrequencyStep) -> String {
+    match settings.nodal_diameters {
+        Some([min, max]) => format!("*Select cyclic symmetry modes, Nmin={min}, Nmax={max}\n"),
+        None => "*Select cyclic symmetry modes\n".into(),
+    }
 }
 
 /// The `*Step` line and the procedure keyword of a complex frequency step, as PrePoMax's

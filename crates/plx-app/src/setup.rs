@@ -11,14 +11,14 @@ use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     AXIS_LABELS, Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition,
-    BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, DefinedField,
-    DefinedFieldKind, DynamicProcedure, DynamicStep, Elastic, EquationSolver, FeModel, FieldOutput,
-    FrequencyStep, GLOBAL, Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
-    InitialCondition, InitialConditionKind, Load, LoadKind, Material, MeshSet, ModalDamping,
-    ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie, OutputDimension, OutputKind,
-    PlasticPoint, Quantity, Region, Section, SectionKind, SetKind, StaticStep,
-    SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction, SymmetryError, Tie, UnitSystem,
-    Wheel, next_name, symmetry_plane,
+    BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CyclicSymmetry,
+    DefinedField, DefinedFieldKind, DynamicProcedure, DynamicStep, Elastic, EquationSolver,
+    FeModel, FieldOutput, FrequencyStep, GLOBAL, Hardening, HeatTransferStep, HistoryKind,
+    HistoryOutput, Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind,
+    Material, MeshSet, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad,
+    NodeTie, OutputDimension, OutputKind, PlasticPoint, Quantity, Region, Section, SectionKind,
+    SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
+    SurfaceInteraction, SymmetryError, Tie, UnitSystem, Wheel, next_name, symmetry_plane,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
@@ -820,7 +820,8 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
 enum Draft {
     Material(Material),
     Section(Section, RegionDraft),
-    Step(Step),
+    /// The step with the design region of a sensitivity step.
+    Step(Step, RegionDraft),
     BoundaryCondition(usize, BoundaryCondition, RegionDraft),
     Load(usize, Load, RegionDraft),
     InitialCondition(InitialCondition, RegionDraft),
@@ -853,6 +854,7 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         Draft::Constraint(c) => Some(c.region()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
+        Draft::Step(step, r) if step.kind.design_region().is_some() => Some(r),
         _ => None,
     }
 }
@@ -869,6 +871,7 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         Draft::Constraint(c) => Some(c.region_mut()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
+        Draft::Step(step, r) if step.kind.design_region().is_some() => Some(r),
         _ => None,
     }
 }
@@ -1286,7 +1289,7 @@ impl Editor {
             NewItem::Step => {
                 let mut step = Step::new_static(next_name("Step", names(&fe.steps, |s| &s.name)));
                 step.kind = StepKind::Static(previous_static(fe));
-                Draft::Step(step)
+                Draft::Step(step, RegionDraft::new(NODE_SOURCES, face_target(fe)))
             }
             NewItem::BoundaryCondition(step) => {
                 let target = fe.steps.get(step)?;
@@ -1466,7 +1469,16 @@ impl Editor {
                     RegionDraft::from_region(&section.region, ELEMENT_SOURCES, Target::Faces, mesh);
                 (Draft::Section(section, region), i)
             }
-            TreeItem::Step(i) => (Draft::Step(fe.steps.get(i)?.clone()), i),
+            TreeItem::Step(i) => {
+                let step = fe.steps.get(i)?.clone();
+                let design = step
+                    .kind
+                    .design_region()
+                    .cloned()
+                    .unwrap_or(Region::Nodes(Vec::new()));
+                let region = RegionDraft::from_region(&design, NODE_SOURCES, face_target(fe), mesh);
+                (Draft::Step(step, region), i)
+            }
             TreeItem::BoundaryCondition(s, i) => {
                 let bc = fe.steps.get(s)?.boundary_conditions.get(i)?.clone();
                 let region =
@@ -1553,7 +1565,7 @@ impl Editor {
         let (kind, name): (&str, &str) = match &self.draft {
             Draft::Material(m) => ("Material", &m.name),
             Draft::Section(s, _) => ("Section", &s.name),
-            Draft::Step(s) => ("Step", &s.name),
+            Draft::Step(s, _) => ("Step", &s.name),
             Draft::BoundaryCondition(_, b, _) => ("Boundary Condition", &b.name),
             Draft::Load(_, l, _) => ("Load", &l.name),
             Draft::InitialCondition(c, _) => ("Initial Condition", &c.name),
@@ -1799,7 +1811,15 @@ impl Editor {
                 }
                 region.ui(ui, model);
             }
-            Draft::Step(step) => step_form(ui, step, self.index.is_none(), &model.fe),
+            Draft::Step(step, region) => {
+                step_form(ui, step, self.index.is_none(), &model.fe);
+                if step.kind.design_region().is_some() {
+                    region.ui_labeled(ui, model, "Design region", "design region", true);
+                    ui.label("");
+                    ui.weak("Surface nodes that may move; CalculiX ignores inner nodes.");
+                    ui.end_row();
+                }
+            }
             Draft::BoundaryCondition(step, bc, region) => {
                 name_row(ui, &mut bc.name);
                 ui.label("Type");
@@ -2346,7 +2366,7 @@ impl Editor {
         let mut siblings = match &self.draft {
             Draft::Material(_) => names(&fe.materials, |m| &m.name),
             Draft::Section(..) => names(&fe.sections, |s| &s.name),
-            Draft::Step(_) => names(&fe.steps, |s| &s.name),
+            Draft::Step(..) => names(&fe.steps, |s| &s.name),
             Draft::BoundaryCondition(step, ..) => {
                 names(&fe.steps[*step].boundary_conditions, |b| &b.name)
             }
@@ -2374,7 +2394,7 @@ impl Editor {
         let name = match &self.draft {
             Draft::Material(m) => &m.name,
             Draft::Section(s, _) => &s.name,
-            Draft::Step(s) => &s.name,
+            Draft::Step(s, _) => &s.name,
             Draft::BoundaryCondition(_, b, _) => &b.name,
             Draft::Load(_, l, _) => &l.name,
             Draft::InitialCondition(c, _) => &c.name,
@@ -2452,7 +2472,12 @@ impl Editor {
                 contacts::validate_contact_pair(pair, fe)?;
                 regions.validate()?;
             }
-            Draft::Tie(_, regions) => regions.validate()?,
+            Draft::Tie(tie, regions) => {
+                regions.validate()?;
+                if let Some(problem) = tie.cyclic.as_ref().and_then(CyclicSymmetry::problem) {
+                    return Err(problem);
+                }
+            }
             Draft::SurfaceInteraction(interaction, _) => {
                 contacts::validate_interaction(interaction)?;
             }
@@ -2481,12 +2506,17 @@ impl Editor {
                 return Err("Select at least one degree of freedom.".into());
             }
         }
-        if let Draft::Step(step) = &self.draft {
+        if let Draft::Step(step, _) = &self.draft {
             match &step.kind {
                 StepKind::Frequency(settings) => validate_frequency_step(settings)?,
                 StepKind::Buckle(settings) => validate_buckle_step(settings)?,
-                StepKind::HeatTransfer(settings) | StepKind::CoupledTempDisp(settings) => {
-                    validate_heat_transfer_step(settings)?
+                StepKind::HeatTransfer(settings)
+                | StepKind::CoupledTempDisp(settings)
+                | StepKind::UncoupledTempDisp(settings) => validate_heat_transfer_step(settings)?,
+                StepKind::Sensitivity(settings) => {
+                    if let Some(problem) = settings.problem() {
+                        return Err(problem);
+                    }
                 }
                 StepKind::Dynamic(settings) => {
                     if let Some(problem) = settings.problem() {
@@ -2595,18 +2625,22 @@ impl Editor {
                 section.region = region.region();
                 put(&mut fe.sections, index, section);
             }
-            Draft::Step(step) => match index.and_then(|i| fe.steps.get_mut(i)) {
-                // The dialog edits the settings; the step's items stay.
-                Some(existing) => {
-                    existing.name = step.name;
-                    existing.kind = step.kind;
+            Draft::Step(mut step, region) => {
+                if let Some(design) = step.kind.design_region_mut() {
+                    *design = region.region();
                 }
-                None => {
-                    let mut step = step;
-                    copy_items_of_last_step(fe, &mut step);
-                    fe.steps.push(step);
+                match index.and_then(|i| fe.steps.get_mut(i)) {
+                    // The dialog edits the settings; the step's items stay.
+                    Some(existing) => {
+                        existing.name = step.name;
+                        existing.kind = step.kind;
+                    }
+                    None => {
+                        copy_items_of_last_step(fe, &mut step);
+                        fe.steps.push(step);
+                    }
                 }
-            },
+            }
             // Switching an item on or off while its dialog is open is kept.
             Draft::BoundaryCondition(s, mut bc, region) => {
                 bc.region = region.region();
@@ -3538,7 +3572,7 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
 /// outputs, in PrePoMax's order.
-fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 9] {
+fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 11] {
     let heat = HeatTransferStep::default();
     [
         (
@@ -3583,8 +3617,18 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 9] {
         ),
         (
             COUPLED_LABEL,
-            StepKind::CoupledTempDisp(heat),
+            StepKind::CoupledTempDisp(heat.clone()),
             FieldOutput::coupled_defaults(),
+        ),
+        (
+            UNCOUPLED_LABEL,
+            StepKind::UncoupledTempDisp(heat),
+            FieldOutput::coupled_defaults(),
+        ),
+        (
+            SENSITIVITY_LABEL,
+            StepKind::Sensitivity(SensitivityStep::default()),
+            FieldOutput::sensitivity_defaults(),
         ),
     ]
 }
@@ -3593,11 +3637,13 @@ const STATIC_LABEL: &str = "Static";
 const FREQUENCY_LABEL: &str = "Frequency";
 const HEAT_TRANSFER_LABEL: &str = "Heat Transfer";
 const COUPLED_LABEL: &str = "Coupled Temperature-Displacement";
+const UNCOUPLED_LABEL: &str = "Uncoupled Temperature-Displacement";
 const DYNAMIC_LABEL: &str = "Dynamic (time integration)";
 const MODAL_DYNAMICS_LABEL: &str = "Modal Dynamics (from stored modes)";
 const STEADY_STATE_LABEL: &str = "Steady State Dynamics (frequency response)";
 const COMPLEX_FREQUENCY_LABEL: &str = "Complex Frequency (rotating, Coriolis)";
 const BUCKLE_LABEL: &str = "Buckle";
+const SENSITIVITY_LABEL: &str = "Sensitivity (shape)";
 
 fn step_kind_label(kind: &StepKind) -> &'static str {
     match kind {
@@ -3610,6 +3656,8 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
         StepKind::Buckle(_) => BUCKLE_LABEL,
         StepKind::HeatTransfer(_) => HEAT_TRANSFER_LABEL,
         StepKind::CoupledTempDisp(_) => COUPLED_LABEL,
+        StepKind::UncoupledTempDisp(_) => UNCOUPLED_LABEL,
+        StepKind::Sensitivity(_) => SENSITIVITY_LABEL,
     }
 }
 
@@ -3638,7 +3686,7 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
     let units = fe.properties.units;
     match &mut step.kind {
         StepKind::Static(settings) => static_form(ui, settings, units),
-        StepKind::Frequency(settings) => frequency_form(ui, settings, units),
+        StepKind::Frequency(settings) => frequency_form(ui, settings, units, fe.cyclic_symmetry()),
         StepKind::Dynamic(settings) => dynamic_form(ui, settings, units),
         StepKind::ModalDynamics(settings) => modal_dynamics_form(ui, settings, units),
         StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
@@ -3646,7 +3694,53 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
         StepKind::Buckle(settings) => buckle_form(ui, settings),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::CoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, true),
+        // PrePoMax offers no NLGEOM for the uncoupled step.
+        StepKind::UncoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, false),
+        StepKind::Sensitivity(settings) => sensitivity_form(ui, settings, units),
     }
+}
+
+/// Settings of a sensitivity step: the design responses and the filter. The design region
+/// follows below the form.
+fn sensitivity_form(ui: &mut Ui, settings: &mut SensitivityStep, units: UnitSystem) {
+    ui.label("");
+    ui.weak("Derivatives of the responses below with respect to the positions of the");
+    ui.end_row();
+    ui.label("");
+    ui.weak("design nodes, from the solution of the previous static or frequency step.");
+    ui.end_row();
+    ui.label("Design responses");
+    ui.vertical(|ui| {
+        ui.checkbox(&mut settings.mass, "Mass")
+            .on_hover_text("Mass of all elements (MASS); needs a density.");
+        ui.checkbox(&mut settings.strain_energy, "Strain energy")
+            .on_hover_text(
+                "Strain energy of all elements under the loads of the previous static step \
+                 (STRAINENERGY): the lower, the stiffer.",
+            );
+        ui.checkbox(&mut settings.eigenfrequency, "Eigenfrequencies")
+            .on_hover_text(
+                "Every eigenfrequency of the previous frequency step (EIGENFREQUENCY). \
+                 CalculiX takes no other response together with it.",
+            );
+    });
+    ui.end_row();
+    let mut filter = settings.filter_radius.is_some();
+    if ui.checkbox(&mut filter, "Filter radius").changed() {
+        settings.filter_radius = filter.then_some(1.0);
+    }
+    let mut radius = settings.filter_radius.unwrap_or(1.0);
+    let field = ui.add_enabled(
+        filter,
+        numeric::quantity(&mut radius, units, Quantity::Length).speed(0.1),
+    );
+    if filter && field.changed() {
+        settings.filter_radius = Some(radius);
+    }
+    ui.end_row();
+    ui.label("");
+    ui.weak("The filter smooths the sensitivities over the given distance (*FILTER).");
+    ui.end_row();
 }
 
 /// Settings of a heat transfer or coupled step: steady state or transient, then the
@@ -3930,7 +4024,12 @@ fn solver_row(ui: &mut Ui, solver: &mut EquationSolver, eigenvalues: bool) {
     ui.end_row();
 }
 
-fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep, units: UnitSystem) {
+fn frequency_form(
+    ui: &mut Ui,
+    settings: &mut FrequencyStep,
+    units: UnitSystem,
+    cyclic: Option<&CyclicSymmetry>,
+) {
     ui.label("");
     ui.checkbox(
         &mut settings.perturbation,
@@ -3963,8 +4062,36 @@ fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep, units: UnitSystem) 
         "Store matrices and eigenmodes (Storage, .eig)",
     );
     ui.end_row();
+    if let Some(cyclic) = cyclic {
+        nodal_diameter_rows(ui, &mut settings.nodal_diameters, cyclic);
+    }
     ui.label("");
     ui.weak("Loads have no effect in a frequency step; only the boundary conditions count.");
+    ui.end_row();
+}
+
+/// The nodal diameters a cyclic symmetric model is solved for, PrePoMax's minimum and
+/// maximum cyclic symmetry mode; unchecked, CalculiX solves all of them.
+fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, cyclic: &CyclicSymmetry) {
+    let highest = cyclic.highest_nodal_diameter();
+    let mut set = range.is_some();
+    ui.checkbox(&mut set, "Nodal diameter range")
+        .on_hover_text(format!(
+            "Cyclic symmetry: the eigenfrequencies are computed for each nodal diameter \
+             from 0 to {highest}, or only for this range. The number of eigenfrequencies \
+             counts per nodal diameter."
+        ));
+    let mut values = range.unwrap_or([0, highest]);
+    ui.add_enabled_ui(set, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("from");
+            ui.add(egui::DragValue::new(&mut values[0]).range(0..=highest));
+            ui.label("to");
+            let low = values[0];
+            ui.add(egui::DragValue::new(&mut values[1]).range(low..=highest));
+        });
+    });
+    *range = set.then_some(values);
     ui.end_row();
 }
 
@@ -4084,7 +4211,7 @@ fn increments_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem, me
 
 fn solver_label(solver: EquationSolver) -> &'static str {
     match solver {
-        EquationSolver::Default => "Default (Pardiso if available)",
+        EquationSolver::Default => "Default (Pardiso or PaStiX if available)",
         EquationSolver::Pardiso => "Pardiso",
         EquationSolver::Spooles => "Spooles",
         EquationSolver::PaStiX => "PaStiX",
@@ -4237,7 +4364,7 @@ mod tests {
             factor_amplitude: None,
         });
         let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
-        if let Draft::Step(step) = &mut editor.draft {
+        if let Draft::Step(step, _) = &mut editor.draft {
             step.kind = StepKind::Frequency(FrequencyStep {
                 lower_frequency: Some(100.0),
                 upper_frequency: Some(50.0),
@@ -4245,19 +4372,25 @@ mod tests {
             });
         }
         assert!(editor.validate(&fe).is_err(), "bounds the wrong way round");
-        if let Draft::Step(Step {
-            kind: StepKind::Frequency(settings),
-            ..
-        }) = &mut editor.draft
+        if let Draft::Step(
+            Step {
+                kind: StepKind::Frequency(settings),
+                ..
+            },
+            _,
+        ) = &mut editor.draft
         {
             settings.upper_frequency = None;
             settings.solver = EquationSolver::IterativeCholesky;
         }
         assert!(editor.validate(&fe).is_err(), "iterative solver");
-        if let Draft::Step(Step {
-            kind: StepKind::Frequency(settings),
-            ..
-        }) = &mut editor.draft
+        if let Draft::Step(
+            Step {
+                kind: StepKind::Frequency(settings),
+                ..
+            },
+            _,
+        ) = &mut editor.draft
         {
             settings.solver = EquationSolver::Default;
         }
@@ -4285,7 +4418,7 @@ mod tests {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
-        if let Draft::Step(step) = &mut editor.draft {
+        if let Draft::Step(step, _) = &mut editor.draft {
             step.kind = StepKind::CoupledTempDisp(HeatTransferStep::default());
         }
         editor.apply(&mut fe);
@@ -4333,7 +4466,7 @@ mod tests {
         ];
         // A heat transfer step after it keeps the temperature and the film only.
         let mut editor = Editor::create(NewItem::Step, &fe).unwrap();
-        if let Draft::Step(step) = &mut editor.draft {
+        if let Draft::Step(step, _) = &mut editor.draft {
             step.kind = StepKind::HeatTransfer(HeatTransferStep::default());
         }
         editor.apply(&mut fe);

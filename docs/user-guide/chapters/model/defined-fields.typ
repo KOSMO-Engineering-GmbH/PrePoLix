@@ -5,7 +5,7 @@
 A defined field prescribes the temperature of the model in a mechanical step, for thermal
 expansion or temperature-dependent materials, like PrePoMax's defined temperature field. Create
 it with #ui("Create ...") on #ui("Defined Fields") of a step or #menu("Model", "Create Defined
-Field ..."). Heat transfer and coupled steps solve for the temperatures and take no defined
+Field ..."). Heat transfer, coupled and uncoupled steps solve for the temperatures and take no defined
 fields.
 
 #screenshot("defined-field.png", [Defined temperature field by value])

@@ -83,7 +83,7 @@ has no mesh yet opens on the #ui("Geometry") tab, opening a result file switches
   more entries: #ui("Material Library ...") on #ui("Materials"), #ui("Default Mesh Parameters
   ...") and #ui("Mesh All Parts") on #ui("Mesh Setup"), #ui("Create Tie ...") and
   #ui("Create Node Tie ...") on #ui("Contact Pairs"), #ui("Search Contact Pairs ...") on #ui("Constraints") and
-  #ui("Contact Pairs"), #ui("Show Table") on #ui("Hot Spot Stresses"). A container that cannot
+  #ui("Contact Pairs"). A container that cannot
   take items explains why in a tooltip, for example "A frequency step has no loads."
 / Items: #ui("Edit ..."), #ui("Activate")/#ui("Deactivate"), #ui("Swap Master/Slave") (ties,
   spring connections and contact pairs), #ui("Delete").
