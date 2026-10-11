@@ -20,6 +20,8 @@
     would (@export-inp).],
   [Export Deformed Mesh (.inp) ...], [Writes the displayed deformed mesh of the current result
     as a mesh-only input file (@export-deformed).],
+  [Export VTU ... / Export VTK ...], [Write the current results, one increment or a time
+    series, for ParaView and other VTK programs (@export-vtk).],
   [Exit], [Closes PrePoLix. There is no prompt for unsaved changes.],
 )
 

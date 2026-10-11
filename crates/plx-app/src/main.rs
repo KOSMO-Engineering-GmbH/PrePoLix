@@ -48,6 +48,7 @@ mod tree_icons;
 mod undo;
 mod viewport;
 mod virtual_table;
+mod vtk_export_dialog;
 mod xy_plot;
 
 fn main() -> eframe::Result {
