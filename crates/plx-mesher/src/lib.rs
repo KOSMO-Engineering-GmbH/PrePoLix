@@ -6,6 +6,7 @@
 
 mod ffi;
 pub mod gmsh;
+mod step_names;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -121,15 +122,22 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         return Err(GmshError::Other("No file selected".into()));
     }
     let brep_file = TempFile::new("brep");
-    let (diagonal, warnings) = with_gmsh(|gmsh| {
+    let (diagonal, warnings, part_names) = with_gmsh(|gmsh| {
         read_files(gmsh, paths, units)?;
+        let read = part_boxes(gmsh, default_parts(gmsh)?)?;
         gmsh.write(&brep_file.0)?;
         let (min, max) = gmsh.bounding_box()?;
         let diagonal = (0..3)
             .map(|k| (max[k] - min[k]).powi(2))
             .sum::<f64>()
             .sqrt();
-        Ok((diagonal, gmsh.warnings()?))
+        let warnings = gmsh.warnings()?;
+        // A BREP file keeps no names: the parts Gmsh reads from it are named after the
+        // parts of the CAD files where they lie.
+        gmsh.clear()?;
+        gmsh.import_shapes(&brep_file.0)?;
+        let part_names = names_by_place(part_boxes(gmsh, default_parts(gmsh)?)?, read);
+        Ok((diagonal, warnings, part_names))
     })?;
     let brep = std::fs::read_to_string(&brep_file.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", brep_file.0.display())))?;
@@ -138,7 +146,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         brep,
         meshing: MeshingParameters::for_diagonal(diagonal),
         mesh_items: Vec::new(),
-        part_names: Vec::new(),
+        part_names,
     };
     let display = tessellate(&geometry)?;
     Ok(CadImport {
@@ -164,10 +172,95 @@ fn read_files(gmsh: &Gmsh, paths: &[PathBuf], units: UnitSystem) -> Result<(), G
                 path.display()
             )));
         }
+        if is_step_file(path) {
+            name_step_bodies(gmsh, path, &shapes)?;
+        }
         Ok(())
     });
     gmsh.set_string("Geometry.OCCTargetUnit", "MM")?;
     imported
+}
+
+fn is_step_file(path: &Path) -> bool {
+    (path.extension().and_then(|e| e.to_str()))
+        .is_some_and(|e| e.eq_ignore_ascii_case("step") || e.eq_ignore_ascii_case("stp"))
+}
+
+/// Names the solids and free faces Gmsh read from a STEP file after the bodies of the file,
+/// where OpenCASCADE left them without a name: the faces of surface parts and the solids of
+/// parts with several bodies. Bodies and parts are matched by their order, and only if
+/// their numbers agree and every name OpenCASCADE gave is the one of its body; otherwise the
+/// parts keep what Gmsh gave them.
+fn name_step_bodies(gmsh: &Gmsh, path: &Path, shapes: &[Entity]) -> Result<(), GmshError> {
+    let Ok(text) = std::fs::read(path) else {
+        return Ok(());
+    };
+    let bodies = step_names::step_bodies(&String::from_utf8_lossy(&text));
+    let mut volumes: Vec<i32> = (shapes.iter())
+        .filter(|(dim, _)| *dim == 3)
+        .map(|&(_, tag)| tag)
+        .collect();
+    volumes.sort_unstable();
+    let free: BTreeSet<i32> = free_faces(gmsh)?.into_iter().collect();
+    let mut faces: Vec<i32> = (shapes.iter())
+        .filter(|&&(dim, tag)| dim == 2 && free.contains(&tag))
+        .map(|&(_, tag)| tag)
+        .collect();
+    faces.sort_unstable();
+    let solids: Vec<&str> = (bodies.iter())
+        .filter(|b| b.faces.is_none())
+        .map(|b| b.name.as_str())
+        .collect();
+    let surfaces: Vec<&str> = (bodies.iter())
+        .flat_map(|b| std::iter::repeat_n(b.name.as_str(), b.faces.unwrap_or(0)))
+        .collect();
+    if solids.len() != volumes.len() {
+        return Ok(());
+    }
+    let mut unnamed = Vec::new();
+    for (&volume, &body) in volumes.iter().zip(&solids) {
+        let label = gmsh.entity_name(3, volume)?;
+        if label.is_empty() {
+            unnamed.push((3, volume, body));
+        } else if label_name(&label) != label_name(body) {
+            log::info!("STEP names not matched: volume {volume} is {label}, body {body}");
+            return Ok(());
+        }
+    }
+    if surfaces.len() == faces.len() {
+        unnamed.extend(
+            faces
+                .iter()
+                .zip(&surfaces)
+                .map(|(&face, &body)| (2, face, body)),
+        );
+    }
+    for (dim, tag, body) in unnamed {
+        if label_name(body).is_some() && gmsh.entity_name(dim, tag)?.is_empty() {
+            gmsh.set_entity_name(dim, tag, &body.replace('/', "-"))?;
+        }
+    }
+    Ok(())
+}
+
+/// The names of `parts` after those of `named` that lie where they do; the others keep
+/// theirs.
+fn names_by_place(
+    parts: Vec<(Entity, String, BoundingBox)>,
+    named: Vec<(Entity, String, BoundingBox)>,
+) -> Vec<String> {
+    let mut named: Vec<_> = named.into_iter().map(Some).collect();
+    (parts.into_iter())
+        .map(|((dim, _), name, bounds)| {
+            let found = named.iter_mut().find(|n| {
+                n.as_ref()
+                    .is_some_and(|((d, _), _, b)| *d == dim && same_box(b, &bounds))
+            });
+            found
+                .and_then(Option::take)
+                .map_or(name, |(_, name, _)| name)
+        })
+        .collect()
 }
 
 /// The files' names, for [`Geometry::source`].
@@ -207,9 +300,23 @@ pub fn add_cad_files(
 ) -> Result<CadAddition, GmshError> {
     let Some(geometry) = geometry else {
         let mut import = import_cad_files(paths, units)?;
-        let taken = taken.iter().cloned().collect();
-        let added = fresh_names(&default_part_kinds(&import.geometry)?, taken);
-        import.geometry.part_names.clone_from(&added);
+        let mut used: BTreeSet<String> = taken.iter().cloned().collect();
+        let kinds = default_part_kinds(&import.geometry)?;
+        let added: Vec<String> = (kinds.iter().zip(&import.geometry.part_names))
+            .map(|(&dim, name)| {
+                let name = if is_default_name(name) {
+                    fresh_name(dim, &used)
+                } else {
+                    unique_name(name, &used)
+                };
+                used.insert(name.clone());
+                name
+            })
+            .collect();
+        if added != import.geometry.part_names {
+            import.geometry.part_names.clone_from(&added);
+            import.display = tessellate(&import.geometry)?;
+        }
         return Ok(CadAddition {
             import,
             renumbered: BTreeMap::new(),
@@ -221,13 +328,14 @@ pub fn add_cad_files(
     }
     let file = TempFile::with_contents("brep", &geometry.brep)?;
     let combined = TempFile::new("brep");
-    let (old_parts, old_boxes, warnings) = with_gmsh(|gmsh| {
+    let (old_parts, old_boxes, read, warnings) = with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
         let parts = part_boxes(gmsh, parts(gmsh, geometry)?)?;
         let boxes = entity_boxes(gmsh)?;
         read_files(gmsh, paths, units)?;
+        let read = part_boxes(gmsh, default_parts(gmsh)?)?;
         gmsh.write(&combined.0)?;
-        Ok((parts, boxes, gmsh.warnings()?))
+        Ok((parts, boxes, read, gmsh.warnings()?))
     })?;
     let brep = std::fs::read_to_string(&combined.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", combined.0.display())))?;
@@ -235,14 +343,16 @@ pub fn add_cad_files(
         gmsh.import_shapes(&combined.0)?;
         Ok((part_boxes(gmsh, default_parts(gmsh)?)?, entity_boxes(gmsh)?))
     })?;
-    // The old parts are found again by where they lie, the new ones are numbered on.
+    // The old parts are found again by where they lie, the new ones keep the names of the
+    // file or are numbered on.
+    let read_names = names_by_place(new_parts.clone(), read);
     let mut used: BTreeSet<String> = (old_parts.iter().map(|(_, n, _)| n.clone()))
         .chain(taken.iter().cloned())
         .collect();
     let mut old_parts: Vec<_> = old_parts.into_iter().map(Some).collect();
     let mut names = Vec::with_capacity(new_parts.len());
     let mut added = Vec::new();
-    for ((dim, _), _, bounds) in &new_parts {
+    for (((dim, _), _, bounds), read_name) in new_parts.iter().zip(&read_names) {
         let found = old_parts.iter_mut().find(|old| {
             old.as_ref()
                 .is_some_and(|((d, _), _, b)| d == dim && same_box(b, bounds))
@@ -251,7 +361,11 @@ pub fn add_cad_files(
             names.push(name);
             continue;
         }
-        let name = fresh_name(*dim, &used);
+        let name = if is_default_name(read_name) {
+            fresh_name(*dim, &used)
+        } else {
+            unique_name(read_name, &used)
+        };
         used.insert(name.clone());
         names.push(name.clone());
         added.push(name);
@@ -368,13 +482,12 @@ fn default_parts(gmsh: &Gmsh) -> Result<Vec<(Entity, String)>, GmshError> {
     let volumes = gmsh.entities(3)?;
     let faces = free_faces(gmsh)?;
     let edges = free_edges(gmsh)?;
-    let mut names = solid_names(gmsh, &volumes)?;
-    names.extend(shell_names(gmsh, &faces)?);
-    names.extend(line_names(gmsh, &edges)?);
-    let entities = (volumes.iter().map(|&v| (3, v)))
+    let entities: Vec<Entity> = (volumes.iter().map(|&v| (3, v)))
         .chain(faces.iter().map(|&f| (2, f)))
-        .chain(edges.iter().map(|&e| (1, e)));
-    Ok(entities.zip(names).collect())
+        .chain(edges.iter().map(|&e| (1, e)))
+        .collect();
+    let names = entity_part_names(gmsh, &entities)?;
+    Ok(entities.into_iter().zip(names).collect())
 }
 
 /// Edges that bound no face, the line parts of a geometry: wires of a STEP file that become
@@ -466,6 +579,28 @@ fn entity_boxes(gmsh: &Gmsh) -> Result<Vec<(Entity, BoundingBox)>, GmshError> {
     Ok(boxes)
 }
 
+/// Whether a part name is a numbered default, as "SOLID-2", rather than one from the file.
+fn is_default_name(name: &str) -> bool {
+    ["SOLID-", "SHELL-", "LINE-"].iter().any(|prefix| {
+        name.strip_prefix(prefix)
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    })
+}
+
+/// `name`, or with "-2", "-3" … appended if it is used.
+fn unique_name(name: &str, used: &BTreeSet<String>) -> String {
+    (1..)
+        .map(|n| {
+            if n == 1 {
+                name.to_owned()
+            } else {
+                format!("{name}-{n}")
+            }
+        })
+        .find(|candidate| !used.contains(candidate))
+        .unwrap_or_default()
+}
+
 /// The first "SOLID-n", "SHELL-n" or "LINE-n" for a part of dimension `dim` not yet used.
 fn fresh_name(dim: i32, used: &BTreeSet<String>) -> String {
     let prefix = match dim {
@@ -477,17 +612,6 @@ fn fresh_name(dim: i32, used: &BTreeSet<String>) -> String {
         .map(|n| format!("{prefix}-{n}"))
         .find(|name| !used.contains(name))
         .unwrap_or_default()
-}
-
-/// Names for parts of the given dimensions that `used` does not have yet.
-fn fresh_names(dims: &[i32], mut used: BTreeSet<String>) -> Vec<String> {
-    (dims.iter())
-        .map(|&dim| {
-            let name = fresh_name(dim, &used);
-            used.insert(name.clone());
-            name
-        })
-        .collect()
 }
 
 /// The dimension of each part of the geometry, in the order of [`parts`].
@@ -1234,74 +1358,64 @@ fn cad_map(
     Ok(map)
 }
 
-/// Part names from the names in the CAD file, else "SOLID-n"; upper case and unique, as
-/// CalculiX names are case-insensitive.
-fn solid_names(gmsh: &Gmsh, volumes: &[i32]) -> Result<Vec<String>, GmshError> {
-    let mut names = Vec::with_capacity(volumes.len());
+/// Part names from the names in the CAD file, else "SOLID-n", "SHELL-n" or "LINE-n" after
+/// the dimension; upper case and unique among all parts, as CalculiX names are
+/// case-insensitive and solids, shells and lines share them.
+fn entity_part_names(gmsh: &Gmsh, entities: &[Entity]) -> Result<Vec<String>, GmshError> {
+    let mut names = Vec::with_capacity(entities.len());
     let mut used = BTreeSet::new();
-    for (index, &volume) in volumes.iter().enumerate() {
-        let label = gmsh.entity_name(3, volume)?;
-        let base = calculix_name(label.rsplit('/').next().unwrap_or_default())
-            .unwrap_or_else(|| format!("SOLID-{}", index + 1));
-        let mut name = base.clone();
-        let mut n = 2;
-        while !used.insert(name.clone()) {
-            name = format!("{base}-{n}");
-            n += 1;
-        }
+    let mut counts = [0; 4];
+    for &(dim, tag) in entities {
+        counts[dim as usize] += 1;
+        let base = label_name(&gmsh.entity_name(dim, tag)?).unwrap_or_else(|| {
+            let prefix = match dim {
+                3 => "SOLID",
+                2 => "SHELL",
+                _ => "LINE",
+            };
+            format!("{prefix}-{}", counts[dim as usize])
+        });
+        let name = unique_name(&base, &used);
+        used.insert(name.clone());
         names.push(name);
     }
     Ok(names)
 }
 
-/// Names of the shell parts like [`solid_names`], "SHELL-n" where the file names none.
-fn shell_names(gmsh: &Gmsh, faces: &[i32]) -> Result<Vec<String>, GmshError> {
-    let mut names = Vec::with_capacity(faces.len());
-    let mut used = BTreeSet::new();
-    for (index, &face) in faces.iter().enumerate() {
-        let label = gmsh.entity_name(2, face)?;
-        let base = calculix_name(label.rsplit('/').next().unwrap_or_default())
-            .unwrap_or_else(|| format!("SHELL-{}", index + 1));
-        let mut name = base.clone();
-        let mut n = 2;
-        while !used.insert(name.clone()) {
-            name = format!("{base}-{n}");
-            n += 1;
-        }
-        names.push(name);
+/// The part name for the name Gmsh gives an entity read from a CAD file, a path of labels
+/// such as "Shapes/Assembly/1/Bracket": [`calculix_name`] of its last label. OpenCASCADE's
+/// own "Open CASCADE STEP translator 7.8 1.2" is no name.
+fn label_name(label: &str) -> Option<String> {
+    let last = label.rsplit('/').next().unwrap_or_default().trim();
+    if last.starts_with("Open CASCADE STEP translator") {
+        return None;
     }
-    Ok(names)
-}
-
-/// Names of the line parts like [`solid_names`], "LINE-n" where the file names none.
-fn line_names(gmsh: &Gmsh, edges: &[i32]) -> Result<Vec<String>, GmshError> {
-    let mut names = Vec::with_capacity(edges.len());
-    let mut used = BTreeSet::new();
-    for (index, &edge) in edges.iter().enumerate() {
-        let label = gmsh.entity_name(1, edge)?;
-        let base = calculix_name(label.rsplit('/').next().unwrap_or_default())
-            .unwrap_or_else(|| format!("LINE-{}", index + 1));
-        let mut name = base.clone();
-        let mut n = 2;
-        while !used.insert(name.clone()) {
-            name = format!("{base}-{n}");
-            n += 1;
-        }
-        names.push(name);
-    }
-    Ok(names)
+    calculix_name(last)
 }
 
 /// A name CalculiX accepts: letters, digits, `-` and `_`, upper case, at most 60 characters.
+/// German umlauts are written out, as "Ä" as "AE".
 fn calculix_name(label: &str) -> Option<String> {
     let name: String = label
         .trim()
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
+        .flat_map(|c| {
+            let written: &[char] = match c {
+                'ä' | 'Ä' => &['A', 'E'],
+                'ö' | 'Ö' => &['O', 'E'],
+                'ü' | 'Ü' => &['U', 'E'],
+                'ß' | 'ẞ' => &['S', 'S'],
+                _ => &[],
+            };
+            let one = if c.is_ascii_alphanumeric() || c == '-' {
                 c.to_ascii_uppercase()
             } else {
                 '_'
+            };
+            if written.is_empty() {
+                vec![one]
+            } else {
+                written.to_vec()
             }
         })
         .take(60)
