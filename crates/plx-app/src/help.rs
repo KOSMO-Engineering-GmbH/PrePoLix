@@ -1,5 +1,5 @@
 //! Help > User Guide: opens the offline HTML guide shipped with the program in the default
-//! browser, or the release page with the PDF guide when no local copy exists (e.g. a binary
+//! browser, or the online guide on GitHub Pages when no local copy exists (e.g. a binary
 //! built with `cargo install`).
 
 use std::io::{BufRead, BufReader, Write};
@@ -28,13 +28,9 @@ fn find_guide(exe_dir: &Path) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// The release page of this version, which carries the user guide as PDF.
+/// The user guide on GitHub Pages (.github/workflows/pages.yml).
 pub fn online_url() -> String {
-    format!(
-        "{}/releases/tag/v{}",
-        env!("CARGO_PKG_REPOSITORY"),
-        env!("CARGO_PKG_VERSION")
-    )
+    "https://kwentin-ui.github.io/PrePoLix/".to_owned()
 }
 
 /// Opens the guide and returns a line for the output pane.
@@ -46,8 +42,7 @@ pub fn open_user_guide() -> String {
         },
         None => (
             online_url(),
-            "No offline user guide installed, opening the release page with the PDF guide"
-                .to_owned(),
+            "No offline user guide installed, opening the online user guide".to_owned(),
         ),
     };
     match open::that_detached(&target) {
@@ -147,10 +142,8 @@ mod tests {
     }
 
     #[test]
-    fn online_url_points_to_this_release() {
-        let url = online_url();
-        assert!(url.starts_with("https://github.com/"));
-        assert!(url.ends_with(&format!("/releases/tag/v{}", env!("CARGO_PKG_VERSION"))));
+    fn online_url_points_to_github_pages() {
+        assert_eq!(online_url(), "https://kwentin-ui.github.io/PrePoLix/");
     }
 
     #[test]
