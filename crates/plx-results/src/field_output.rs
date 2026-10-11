@@ -431,6 +431,7 @@ mod tests {
 
     fn increment(step: u32, mises: [f32; 3]) -> Increment {
         Increment {
+            nodal_diameter: None,
             step,
             increment: 1,
             kind: AnalysisKind::Static,
@@ -570,6 +571,7 @@ mod tests {
         let stress: Vec<(&str, [f32; 3])> = stress.collect();
         let disp = [("U1", [1.0; 3]), ("U2", [2.0; 3]), ("U3", [3.0; 3])];
         let mut incs = vec![Increment {
+            nodal_diameter: None,
             step: 1,
             increment: 1,
             kind: AnalysisKind::Static,

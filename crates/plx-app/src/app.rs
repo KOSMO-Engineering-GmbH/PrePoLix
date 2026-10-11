@@ -4514,7 +4514,7 @@ impl Workbench {
             let selected = is_selected(TreeItem::Load(index, i));
             if step.active && load.active && (load.visible || selected) && !replaced(true, i) {
                 items.push(symbols::Item {
-                    kind: symbols::Kind::Load(load.kind),
+                    kind: symbols::Kind::Load(load.kind.clone()),
                     region: load.region.clone(),
                     selected,
                 });
@@ -5914,6 +5914,7 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent 
                         for (kind, label) in [
                             (AnimationKind::ScaleFactor, "Scale factor"),
                             (AnimationKind::Increments, "Step increments"),
+                            (AnimationKind::Steps, "Steps"),
                         ] {
                             if ui.radio(animation.kind == kind, label).clicked()
                                 && animation.kind != kind

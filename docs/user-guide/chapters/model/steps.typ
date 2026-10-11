@@ -12,6 +12,18 @@ exactly what is listed under it in the tree.]
 
 #screenshot("step.png", [Static step])
 
+=== Step types in the tree
+
+Every step shows a pictogram of its type in front of its name, so that you can tell the steps
+apart whatever you named them. Hover over the pictogram or the name to read the type.
+
+#screenshot("step-types.png", [Static, frequency, complex frequency, buckle, heat transfer,
+  coupled, dynamic, modal dynamics, steady state dynamics and sensitivity steps])
+
+#screenshot("step-type-tooltip.png", [Tooltip of a step])
+
+A deactivated step shows the red no-entry sign instead; its tooltip still names the type.
+
 === Order of the steps
 
 CalculiX runs the steps in the order of the list, and a step starts from the state at the end of
@@ -54,6 +66,8 @@ Computes eigenfrequencies and mode shapes (`*FREQUENCY`). A frequency step takes
   [Number of eigenfrequencies], [Default 10.],
   [Lower / Upper frequency bound], [Optional range of frequencies to compute.],
   [Store matrices and eigenmodes], [Writes the `.eig` file (`STORAGE=YES`).],
+  [Nodal diameter range], [Only in cyclic symmetric models (@cyclic-symmetry): the nodal
+    diameters to compute.],
 )
 
 Materials need a density in a frequency step.

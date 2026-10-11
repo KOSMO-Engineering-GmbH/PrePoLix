@@ -190,6 +190,8 @@ pub struct Increment {
     /// Time, eigenfrequency or buckling factor, depending on [`Increment::kind`].
     pub value: f64,
     pub fields: Vec<Field>,
+    /// Nodal diameter of a mode of a cyclic symmetric model.
+    pub nodal_diameter: Option<u32>,
 }
 
 impl Increment {

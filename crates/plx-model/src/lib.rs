@@ -18,6 +18,7 @@ mod geometry;
 mod history;
 pub mod library;
 mod mesh_set;
+mod moving_load;
 mod properties;
 mod region;
 mod section;
@@ -32,8 +33,8 @@ pub use constraint::{
     CompressionOnly, NodeTie, PointSpring, RigidBody, SurfaceSpring, SurfaceToSurfaceSpring,
 };
 pub use contact::{
-    Constraint, ContactMethod, ContactPair, DEFAULT_SURFACE_COLOR, Friction, GapConductance,
-    InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
+    Constraint, ContactMethod, ContactPair, CyclicSymmetry, DEFAULT_SURFACE_COLOR, Friction,
+    GapConductance, InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
 };
 pub use element_type::{PartElementType, element_type_options};
 pub use features::{
@@ -47,6 +48,7 @@ pub use geometry::{
 pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use library::MaterialLibrary;
 pub use mesh_set::{MeshSet, SetKind};
+pub use moving_load::{AXIS_LABELS, MovingFrame, MovingLoad, Wheel};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
 pub use section::{
@@ -119,6 +121,12 @@ pub struct FeModel {
 }
 
 impl FeModel {
+    /// The cyclic symmetry of the first active tie that has one; Frequency steps then
+    /// compute the modes by nodal diameter.
+    pub fn cyclic_symmetry(&self) -> Option<&CyclicSymmetry> {
+        (self.ties.iter().filter(|t| t.active)).find_map(|t| t.cyclic.as_ref())
+    }
+
     /// Replaces [`EquationSolver::Default`] in all steps by `solver`, the solver the
     /// installed CalculiX should use by default.
     pub fn resolve_default_solver(&mut self, solver: EquationSolver) {
@@ -675,6 +683,10 @@ impl StepKind {
 
     /// Whether a load of this kind acts in the step, PrePoMax's `IsLoadTypeSupported`.
     pub fn supports_load(&self, kind: &LoadKind) -> bool {
+        // Each position of a moving load is a static step of its own.
+        if matches!(kind, LoadKind::Moving(_)) {
+            return matches!(self, StepKind::Static(_));
+        }
         self.supports_loads()
             && if kind.is_thermal() {
                 self.is_thermal()
@@ -815,6 +827,11 @@ pub struct FrequencyStep {
     /// stiffening by a preload (`*STEP, PERTURBATION`).
     pub perturbation: bool,
     pub solver: EquationSolver,
+    /// Lowest and highest nodal diameter of a cyclic symmetric model
+    /// (`*SELECT CYCLIC SYMMETRY MODES, NMIN=, NMAX=`); `None` is CalculiX's 0 and the
+    /// highest one the sectors allow.
+    #[serde(default)]
+    pub nodal_diameters: Option<[u32; 2]>,
 }
 
 /// Settings of a `*DYNAMIC` step, with PrePoMax's defaults; like PrePoMax's `DynamicStep` it
@@ -1096,6 +1113,7 @@ impl Default for FrequencyStep {
             storage: false,
             perturbation: false,
             solver: EquationSolver::Default,
+            nodal_diameters: None,
         }
     }
 }
@@ -1447,7 +1465,7 @@ pub struct Load {
     pub factor_amplitude: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum LoadKind {
     /// Force applied at every node of the region, as CalculiX's `*CLOAD` on a node set.
     ConcentratedForce([f64; 3]),
@@ -1491,6 +1509,9 @@ pub enum LoadKind {
         axis: [f64; 3],
         speed: f64,
     },
+    /// Wheel loads that travel over a surface region, one static step per position; see
+    /// [`MovingLoad`].
+    Moving(MovingLoad),
 }
 
 impl LoadKind {
@@ -1514,6 +1535,7 @@ impl LoadKind {
                 | LoadKind::PreTension { .. }
                 | LoadKind::Gravity(_)
                 | LoadKind::Centrifugal { .. }
+                | LoadKind::Moving(_)
         )
     }
 

@@ -8,7 +8,9 @@ The animation button on the results toolbar opens the animation window.
 
 #fields(
   [Type], [#ui("Scale factor") grows the displayed increment from undeformed to deformed; a mode
-    swings between −1 and +1. #ui("Step increments") plays the increments of the step.],
+    swings between −1 and +1. #ui("Step increments") plays the increments of the step,
+    #ui("Steps") the last increment of every step of the same kind, e.g. the positions of a
+    moving load (@moving-load).],
   [Frames], [Number of frames of a scale factor animation (default 15).],
   [Frames per second], [Playback speed (default 15).],
   [Playback], [#ui("Once"), #ui("Loop") or #ui("Swing") (forth and back, default).],

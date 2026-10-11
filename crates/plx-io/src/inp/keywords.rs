@@ -80,6 +80,7 @@ pub const WRITTEN_KEYWORDS: &[(&str, &str)] = &[
     ("*VISCO", "Visco step"),
     ("*CREEP", "Creep material"),
     ("*CYCLIC SYMMETRY MODEL", "Cyclic symmetry"),
+    ("*SELECT CYCLIC SYMMETRY MODES", "Cyclic symmetry"),
     ("*SENSITIVITY", "Sensitivity step"),
     ("*DESIGN VARIABLES", "Sensitivity step"),
     ("*DESIGN RESPONSE", "Sensitivity step"),

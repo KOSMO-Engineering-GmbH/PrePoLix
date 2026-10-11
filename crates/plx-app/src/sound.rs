@@ -850,6 +850,7 @@ mod tests {
 
     fn mode(step: u32, number: u32, kind: AnalysisKind, frequency: f64) -> Increment {
         Increment {
+            nodal_diameter: None,
             step,
             increment: number,
             kind,
@@ -981,6 +982,7 @@ mod tests {
         add_derived_components(&mut disp_field);
         add_derived_components(&mut stress_field);
         Increment {
+            nodal_diameter: None,
             step,
             increment: number,
             kind: AnalysisKind::Frequency,
