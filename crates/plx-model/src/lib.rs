@@ -372,6 +372,42 @@ pub struct Material {
     /// Rate-independent plasticity (`*PLASTIC`) with a tabular hardening curve.
     #[serde(default)]
     pub plastic: Option<Plastic>,
+    /// Creep by Norton's law (`*CREEP`), which acts in Visco steps.
+    #[serde(default)]
+    pub creep: Option<Creep>,
+}
+
+/// Norton's creep law (`*CREEP, LAW=NORTON`): the equivalent creep strain rate is
+/// `a * stress^n * time^m`, in the units of the model.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Creep {
+    pub a: f64,
+    pub n: f64,
+    pub m: f64,
+}
+
+impl Default for Creep {
+    /// A steel creeping about 1 % in 1000 s at 100 MPa (mm, ton, s units).
+    fn default() -> Self {
+        Self {
+            a: 1e-15,
+            n: 5.0,
+            m: 0.0,
+        }
+    }
+}
+
+impl Creep {
+    /// Why CalculiX would reject the constants.
+    pub fn problem(&self) -> Option<&'static str> {
+        if self.a <= 0.0 {
+            Some("The creep constant A must be positive.")
+        } else if self.n <= 0.0 {
+            Some("The stress exponent n must be positive.")
+        } else {
+            None
+        }
+    }
 }
 
 /// How the yield surface grows with plastic strain (`*PLASTIC, HARDENING=`).
@@ -524,6 +560,8 @@ pub enum StepKind {
     UncoupledTempDisp(HeatTransferStep),
     /// Displacements over time with inertia and damping (`*DYNAMIC`).
     Dynamic(DynamicStep),
+    /// Creep over time of materials with a creep law (`*VISCO`), otherwise a static step.
+    Visco(ViscoStep),
     /// Response over time as a superposition of the stored eigenmodes (`*MODAL DYNAMICS`).
     ModalDynamics(ModalDynamicsStep),
     /// Harmonic response over a frequency range from the stored eigenmodes
@@ -547,6 +585,7 @@ impl StepKind {
             | StepKind::CoupledTempDisp(settings)
             | StepKind::UncoupledTempDisp(settings) => Some(&mut settings.increments.solver),
             StepKind::Dynamic(settings) => Some(&mut settings.increments.solver),
+            StepKind::Visco(settings) => Some(&mut settings.increments.solver),
             StepKind::ModalDynamics(settings) => Some(&mut settings.solver),
             StepKind::SteadyStateDynamics(settings) => Some(&mut settings.solver),
             StepKind::Sensitivity(_) => None,
@@ -1110,6 +1149,32 @@ impl Default for BuckleStep {
     }
 }
 
+/// Settings of a `*VISCO` step: the increments of a static step over the creep time, and
+/// the creep strain tolerance (`CETOL`) that limits the automatic increments.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ViscoStep {
+    pub increments: StaticStep,
+    /// Largest difference of the creep strain increment computed from the rates at the
+    /// start and at the end of an increment (`CETOL`).
+    pub creep_tolerance: f64,
+}
+
+impl Default for ViscoStep {
+    fn default() -> Self {
+        Self {
+            increments: StaticStep {
+                incrementation: Incrementation::Automatic,
+                max_increments: 1000,
+                initial_increment: 1.0,
+                time_period: 1000.0,
+                ..StaticStep::default()
+            },
+            creep_tolerance: 1e-4,
+        }
+    }
+}
+
 /// Settings of a `*SENSITIVITY` step: the design region whose surface nodes may move
 /// (`*DESIGN VARIABLES, TYPE=COORDINATE`) and the design responses whose derivatives with
 /// respect to these node positions CalculiX computes.
@@ -1194,6 +1259,14 @@ impl Step {
             field_outputs: FieldOutput::complex_frequency_defaults(),
             defined_fields: Vec::new(),
         }
+    }
+
+    /// A visco step with the static step's field outputs and the creep strain (`PEEQ`).
+    pub fn new_visco(name: impl Into<String>) -> Self {
+        let mut step = Self::new_static(name);
+        step.kind = StepKind::Visco(ViscoStep::default());
+        step.field_outputs = FieldOutput::visco_defaults();
+        step
     }
 
     /// A static step with PrePoMax's default field outputs.
