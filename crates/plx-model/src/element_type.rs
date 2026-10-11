@@ -26,14 +26,17 @@ impl PartElementType {
 
 /// The CalculiX types an element of the shape can have in the model space, as PrePoMax offers
 /// them: the same nodes in another formulation. Line elements get their type from their beam
-/// or truss section and have none to choose from.
+/// or truss section and have none to choose from. Linear surface elements of a 3D model can
+/// be shells or membranes; a 2D model has no membranes. CalculiX 2.23 computes quadratic
+/// membranes wrongly (M3D8 is 1.7 times too soft in a tension test, M3D8R has hourglass
+/// modes, M3D6 is off by a factor of 5), so they are not offered.
 pub fn element_type_options(shape: ElementShape, space: ModelSpace) -> Vec<String> {
     use ElementShape::*;
     let names: &[&str] = match shape {
         Line2 | Line3 => &[],
-        Tri3 => &["S3"],
+        Tri3 => &["S3", "M3D3"],
         Tri6 => &["S6"],
-        Quad4 => &["S4", "S4R"],
+        Quad4 => &["S4", "S4R", "M3D4", "M3D4R"],
         Quad8 => &["S8", "S8R"],
         Tet4 => &["C3D4"],
         Tet10 => &["C3D10", "C3D10T"],
@@ -44,6 +47,7 @@ pub fn element_type_options(shape: ElementShape, space: ModelSpace) -> Vec<Strin
     };
     // Shells become the plane elements of a 2D model space.
     (names.iter())
+        .filter(|name| !space.is_2d() || !name.starts_with("M3D"))
         .map(|name| space.element_type(name, shape))
         .collect()
 }
@@ -186,7 +190,7 @@ mod tests {
         );
         assert_eq!(
             element_type_options(Quad4, ModelSpace::ThreeD),
-            ["S4", "S4R"]
+            ["S4", "S4R", "M3D4", "M3D4R"]
         );
         assert!(element_type_options(Line3, ModelSpace::ThreeD).is_empty());
         for space in ModelSpace::ALL {

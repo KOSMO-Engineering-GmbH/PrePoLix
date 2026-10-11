@@ -39,6 +39,7 @@ pub const WRITTEN_KEYWORDS: &[(&str, &str)] = &[
     ),
     ("*SUBMODEL", "Submodel"),
     ("*SHELL SECTION", "Shell sections"),
+    ("*MEMBRANE SECTION", "Membrane sections"),
     ("*BEAM SECTION", "Beam sections"),
     ("*SPRING", "Springs"),
     ("*GAP", "Compression only support"),

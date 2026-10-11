@@ -50,11 +50,13 @@ A part with several element types has one box per type.
   [Hexahedra], [`C3D8`, `C3D8R` (reduced integration), `C3D8I` (incompatible modes);
     `C3D20`, `C3D20R`],
   [Tetrahedra], [`C3D4`; `C3D10`, `C3D10T`],
-  [Quadrilaterals], [`S4`, `S4R`; `S8`, `S8R` in 3D models, the same as `CPS`, `CPE` or `CAX`
-    elements in 2D models],
+  [Quadrilaterals], [`S4`, `S4R`, the membranes `M3D4`, `M3D4R`; `S8`, `S8R` in 3D models, the
+    same as `CPS`, `CPE` or `CAX` elements in 2D models],
+  [Triangles], [`S3` or the membrane `M3D3`; `S6` in 3D models],
 )
 
-Triangles and wedges have one type only, which is shown as text. Lines get their type from
+Membranes need a membrane section (@membrane-section). Quadratic triangles and wedges have
+one type only, which is shown as text, as do linear triangles in 2D models. Lines get their type from
 their section (@sections). The choice is kept with the part: meshing the part again gives the
 new elements the same type, and in a 2D model a new model space keeps the reduced integration
 (`CPS8R` becomes `CAX8R`).

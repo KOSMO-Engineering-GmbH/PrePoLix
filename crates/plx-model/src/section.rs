@@ -45,14 +45,23 @@ pub enum SectionKind {
     /// section: the thickness and the offset of the reference surface from the mid-surface
     /// as a fraction of the thickness.
     Shell { thickness: f64, offset: f64 },
+    /// Surface elements of a 3D model as membranes (`*MEMBRANE SECTION`): like a shell, but
+    /// carrying in-plane forces only, without bending stiffness or rotations. The elements
+    /// must be linear membranes, `M3D3`, `M3D4` or `M3D4R`, chosen as the part's element
+    /// type; see [`crate::element_type_options`] for why quadratic ones are refused.
+    Membrane { thickness: f64, offset: f64 },
 }
 
 impl SectionKind {
-    pub const ALL: [SectionKind; 4] = [
+    pub const ALL: [SectionKind; 5] = [
         SectionKind::Solid,
         SectionKind::Truss { area: 1.0 },
         SectionKind::Beam(BeamSection::DEFAULT),
         SectionKind::Shell {
+            thickness: 1.0,
+            offset: 0.0,
+        },
+        SectionKind::Membrane {
             thickness: 1.0,
             offset: 0.0,
         },
@@ -66,6 +75,7 @@ impl SectionKind {
             SectionKind::Truss { .. } => "Truss_Section",
             SectionKind::Beam(_) => "Beam_Section",
             SectionKind::Shell { .. } => "Shell_Section",
+            SectionKind::Membrane { .. } => "Membrane_Section",
         }
     }
 
@@ -76,6 +86,7 @@ impl SectionKind {
             SectionKind::Truss { .. } => "Truss",
             SectionKind::Beam(_) => "Beam",
             SectionKind::Shell { .. } => "Shell",
+            SectionKind::Membrane { .. } => "Membrane",
         }
     }
 
@@ -89,7 +100,9 @@ impl SectionKind {
     /// line is written with its end nodes only. Pipe and box profiles need `B32R`.
     pub fn element_type(&self, shape: ElementShape) -> Option<&'static str> {
         match (self, shape) {
-            (SectionKind::Solid | SectionKind::Shell { .. }, _) => None,
+            (SectionKind::Solid | SectionKind::Shell { .. } | SectionKind::Membrane { .. }, _) => {
+                None
+            }
             (SectionKind::Truss { .. }, ElementShape::Line2 | ElementShape::Line3) => Some("T3D2"),
             (SectionKind::Beam(_), ElementShape::Line2) => Some("B31"),
             (SectionKind::Beam(beam), ElementShape::Line3) => {
@@ -106,32 +119,54 @@ impl SectionKind {
     /// Why the section cannot be written for an element of the region, if it cannot.
     pub fn rejects(&self, element: &Element) -> Option<String> {
         let line = element.shape.family() == ElementFamily::Line;
+        let surface = element.shape.family() == ElementFamily::Surface;
+        let upper = element.type_name.to_ascii_uppercase();
+        // Plane elements of a 2D model take a solid section; surface elements of a 3D model
+        // are shells (S3 to S8R) or membranes (M3D3 to M3D8R) and need their thickness.
+        let membrane = surface && upper.starts_with("M3D");
+        let shell = surface && upper.starts_with('S');
         match self {
             SectionKind::Solid if line => Some(format!(
                 "Element {} is a line element; lines need a Beam or Truss \
                  Section",
                 element.id
             )),
-            // Plane elements of a 2D model take a solid section; shells of a 3D model are
-            // typed S3 to S8R and need their thickness.
-            SectionKind::Solid
-                if element.shape.family() == ElementFamily::Surface
-                    && element.type_name.to_ascii_uppercase().starts_with('S') =>
+            SectionKind::Solid if shell => Some(format!(
+                "Element {} is a shell element; shells need a Shell Section",
+                element.id
+            )),
+            SectionKind::Solid if membrane => Some(format!(
+                "Element {} is a membrane element; membranes need a Membrane Section",
+                element.id
+            )),
+            SectionKind::Solid => None,
+            SectionKind::Shell { .. } | SectionKind::Membrane { .. } if !surface => Some(format!(
+                "Element {} is not a surface element; a {} section needs triangles or \
+                     quads",
+                element.id,
+                self.label().to_ascii_lowercase()
+            )),
+            SectionKind::Shell { .. } if membrane => Some(format!(
+                "Element {} is a membrane element ({}); a Shell Section needs shell \
+                 elements, choose an S element type for its part",
+                element.id, element.type_name
+            )),
+            SectionKind::Shell { .. } => None,
+            SectionKind::Membrane { .. }
+                if matches!(element.shape, ElementShape::Tri6 | ElementShape::Quad8) =>
             {
                 Some(format!(
-                    "Element {} is a shell element; shells need a Shell Section",
+                    "Element {} is quadratic; CalculiX computes quadratic membranes \
+                     wrongly, mesh the part with linear elements",
                     element.id
                 ))
             }
-            SectionKind::Solid => None,
-            SectionKind::Shell { .. } if element.shape.family() != ElementFamily::Surface => {
-                Some(format!(
-                    "Element {} is not a surface element; a shell section needs triangles or \
-                     quads",
-                    element.id
-                ))
-            }
-            SectionKind::Shell { .. } => None,
+            SectionKind::Membrane { .. } if !membrane => Some(format!(
+                "Element {} is a {} element; a Membrane Section needs membrane \
+                 elements, choose an M3D element type for its part",
+                element.id, element.type_name
+            )),
+            SectionKind::Membrane { .. } => None,
             _ if !line => Some(format!("Element {} is not a line element", element.id)),
             SectionKind::Beam(beam)
                 if beam.profile.needs_reduced_integration()
@@ -369,6 +404,51 @@ mod tests {
             }
             .is_valid()
         );
+    }
+
+    #[test]
+    fn membranes_and_shells_need_their_own_section() {
+        let element = |type_name: &str, shape| Element {
+            id: 1,
+            type_name: type_name.into(),
+            shape,
+            nodes: Vec::new(),
+        };
+        let membrane = SectionKind::Membrane {
+            thickness: 1.0,
+            offset: 0.0,
+        };
+        let shell = SectionKind::Shell {
+            thickness: 1.0,
+            offset: 0.0,
+        };
+        for type_name in ["M3D3", "M3D4", "M3D4R"] {
+            let shape = ElementShape::from_type_name(type_name).unwrap();
+            assert_eq!(membrane.rejects(&element(type_name, shape)), None);
+            assert!(shell.rejects(&element(type_name, shape)).is_some());
+            assert!(
+                SectionKind::Solid
+                    .rejects(&element(type_name, shape))
+                    .is_some()
+            );
+        }
+        assert!(
+            membrane
+                .rejects(&element("S4", ElementShape::Quad4))
+                .is_some()
+        );
+        assert!(
+            membrane
+                .rejects(&element("C3D8", ElementShape::Hex8))
+                .is_some()
+        );
+        // CalculiX gets quadratic membranes wrong.
+        assert!(
+            membrane
+                .rejects(&element("M3D8", ElementShape::Quad8))
+                .is_some()
+        );
+        assert_eq!(shell.rejects(&element("S8R", ElementShape::Quad8)), None);
     }
 
     #[test]

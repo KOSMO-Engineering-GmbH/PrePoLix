@@ -304,6 +304,90 @@ fn shell_plate() -> (FeMesh, FeModel) {
     (mesh, model)
 }
 
+/// A rectangle of linear shells in the x-y plane, `nx` by `ny` quads `S4` or, with
+/// `triangles`, each quad split into two `S3`; one part PLATE.
+fn linear_rectangle(width: f64, height: f64, nx: u32, ny: u32, triangles: bool) -> FeMesh {
+    let mut mesh = FeMesh::default();
+    let id = |i: u32, j: u32| j * (nx + 1) + i + 1;
+    for j in 0..=ny {
+        for i in 0..=nx {
+            let (x, y) = (
+                width * f64::from(i) / f64::from(nx),
+                height * f64::from(j) / f64::from(ny),
+            );
+            mesh.set_node(id(i, j), [x, y, 0.0]);
+        }
+    }
+    let mut part = plx_mesh::Part {
+        name: "PLATE".into(),
+        elements: Vec::new(),
+    };
+    let mut next = 1;
+    for j in 0..ny {
+        for i in 0..nx {
+            let corners = [id(i, j), id(i + 1, j), id(i + 1, j + 1), id(i, j + 1)];
+            let elements: Vec<(&str, plx_mesh::ElementShape, Vec<NodeId>)> = if triangles {
+                vec![
+                    (
+                        "S3",
+                        plx_mesh::ElementShape::Tri3,
+                        vec![corners[0], corners[1], corners[2]],
+                    ),
+                    (
+                        "S3",
+                        plx_mesh::ElementShape::Tri3,
+                        vec![corners[0], corners[2], corners[3]],
+                    ),
+                ]
+            } else {
+                vec![("S4", plx_mesh::ElementShape::Quad4, corners.to_vec())]
+            };
+            for (type_name, shape, nodes) in elements {
+                mesh.add_element(plx_mesh::Element {
+                    id: next,
+                    type_name: type_name.into(),
+                    shape,
+                    nodes,
+                })
+                .unwrap();
+                part.elements.push(next);
+                next += 1;
+            }
+        }
+    }
+    mesh.parts.push(part);
+    mesh
+}
+
+/// A membrane strip of 100 x 10 x 2 in the x-y plane, held at x = 0 and pulled by a force
+/// of 1 along x at x = 100. Membranes carry no lateral load, so all nodes are held in z.
+fn membrane_strip(type_name: &str) -> (FeMesh, FeModel) {
+    let (length, width) = (100.0, 10.0);
+    let mesh = linear_rectangle(length, width, 20, 2, type_name == "M3D3");
+    let tip = nodes_at(&mesh, 0, length);
+    let force = 1.0 / tip.len() as f64;
+    let mut model = plane_model(
+        ModelSpace::ThreeD,
+        1.0,
+        vec![
+            (nodes_at(&mesh, 0, 0.0), FIX_X),
+            (vec![1], FIX_Y),
+            (
+                mesh.node_ids().to_vec(),
+                [None, None, Some(0.0), None, None, None],
+            ),
+        ],
+        LoadKind::ConcentratedForce([force, 0.0, 0.0]),
+        Region::Nodes(tip),
+    );
+    model.sections[0].kind = SectionKind::Membrane {
+        thickness: 2.0,
+        offset: 0.0,
+    };
+    model.set_element_type("PLATE", type_name);
+    (mesh, model)
+}
+
 /// The cantilever with its tip face as a rigid body driven by reference point RP-1 at the
 /// centre of the face, and the load or boundary condition given on the point.
 fn rigid_tip(load: Option<Load>, bc: Option<BoundaryCondition>) -> (FeMesh, FeModel) {
@@ -592,6 +676,140 @@ fn a_shell_section_is_written_like_prepomax_does() {
         write_inp(&solid_mesh, &solid, ""),
         Err(WriteError::InvalidSection { .. })
     ));
+}
+
+#[test]
+fn a_membrane_section_is_written_for_membrane_elements() {
+    let (mesh, mut model) = membrane_strip("M3D4R");
+    model.sections[0].kind = SectionKind::Membrane {
+        thickness: 2.0,
+        offset: 0.5,
+    };
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Element, Type=M3D4R, Elset=PLATE\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "*Membrane section, Elset=Internal_Selection-1_Section-1, Material=Steel, \
+             Offset=0.5\n2\n"
+        ),
+        "{text}"
+    );
+    // Results at the membrane nodes, as for shells.
+    assert!(text.contains("*Node file, Output=2D\nRF, U\n"), "{text}");
+    // Shell elements under a membrane section, and membranes under a shell or solid
+    // section, are refused before CalculiX would be.
+    model.element_types.clear();
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidSection { .. })
+    ));
+    for kind in [
+        SectionKind::Solid,
+        SectionKind::Shell {
+            thickness: 2.0,
+            offset: 0.0,
+        },
+    ] {
+        let (mesh, mut model) = membrane_strip("M3D4");
+        model.sections[0].kind = kind;
+        assert!(matches!(
+            write_inp(&mesh, &model, ""),
+            Err(WriteError::InvalidSection { .. })
+        ));
+    }
+}
+
+/// A membrane strip under tension stretches by F L / (E A) at mid-length, away from the
+/// unevenly loaded tip, with each membrane element type a part can have.
+#[test]
+fn calculix_stretches_a_membrane_strip() {
+    for type_name in ["M3D3", "M3D4", "M3D4R"] {
+        let (mesh, model) = membrane_strip(type_name);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        assert!(text.contains(&format!("Type={type_name},")), "{text}");
+        let name = format!("membran-{}", type_name.to_ascii_lowercase());
+        let Some(frd) = run_ccx(&name, &text) else {
+            return;
+        };
+        let expected = 50.0 / (210_000.0 * 10.0 * 2.0);
+        for node in nodes_at(&mesh, 0, 50.0) {
+            let u = node_value(&frd, "DISP", "U1", node);
+            assert!(
+                (u - expected).abs() < 0.01 * expected,
+                "{type_name}: {u} != {expected}"
+            );
+        }
+    }
+}
+
+/// A membrane has no bending stiffness: stretched first, it carries a lateral pressure like
+/// a taut string, sagging by p L^2 / (8 N) at mid-span with the tension N per width, in a
+/// geometrically nonlinear analysis.
+#[test]
+fn calculix_carries_pressure_on_a_pretensioned_membrane() {
+    let (length, width, thickness) = (100.0, 10.0, 2.0);
+    let mesh = linear_rectangle(length, width, 20, 2, false);
+    let (start, end) = (nodes_at(&mesh, 0, 0.0), nodes_at(&mesh, 0, length));
+    let stretch = 0.1;
+    let pressure = 0.01;
+    // Held across the strip everywhere, so it is in plane strain along y.
+    let hold_y = (
+        mesh.node_ids().to_vec(),
+        [None, Some(0.0), None, None, None, None],
+    );
+    let mut model = plane_model(
+        ModelSpace::ThreeD,
+        1.0,
+        vec![
+            (
+                start.clone(),
+                [Some(0.0), None, Some(0.0), None, None, None],
+            ),
+            (
+                end.clone(),
+                [Some(stretch), None, Some(0.0), None, None, None],
+            ),
+            hold_y,
+        ],
+        LoadKind::Pressure(pressure),
+        Region::Faces(mesh.elements().iter().map(|e| (e.id, 1)).collect()),
+    );
+    model.sections[0].kind = SectionKind::Membrane {
+        thickness,
+        offset: 0.0,
+    };
+    model.set_element_type("PLATE", "M3D4");
+    // Step 1 stretches the flat strip, which has no lateral stiffness yet; step 2 adds the
+    // pressure.
+    let mut stretch_step = model.steps[0].clone();
+    stretch_step.name = "Step-0".into();
+    stretch_step.loads.clear();
+    for step in [&mut stretch_step, &mut model.steps[0]] {
+        if let StepKind::Static(s) = &mut step.kind {
+            s.nlgeom = true;
+        }
+    }
+    model.steps.insert(0, stretch_step);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let Some(frd) = run_ccx("membran-vorgespannt", &text) else {
+        return;
+    };
+    let (e, nu) = (210_000.0, 0.3);
+    let tension = e / (1.0 - nu * nu) * stretch / length * thickness;
+    let expected = pressure * length * length / (8.0 * tension);
+    let middle = nodes_at(&mesh, 0, length / 2.0);
+    let sag: f64 = middle
+        .iter()
+        .map(|&n| node_value(&frd, "DISP", "U3", n))
+        .sum::<f64>()
+        / middle.len() as f64;
+    assert!(
+        (sag.abs() - expected).abs() < 0.05 * expected,
+        "{sag} != {expected}"
+    );
 }
 
 /// The shell plate bends like a beam: F L^3 / (3 E I) at the tip.
