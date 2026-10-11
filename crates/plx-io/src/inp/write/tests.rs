@@ -2329,6 +2329,59 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
     model
 }
 
+/// A bolt split into two parts and tied at its cut: the preload goes through the tie, whichever
+/// side of it the pre-tension faces are on. A tie to the faces of the cut side would bind the
+/// other part to the copies of the cut nodes and bypass the preload.
+#[test]
+fn calculix_preloads_a_bolt_split_into_two_tied_parts() {
+    let force = 1000.0;
+    for cut_is_master in [true, false] {
+        let (mesh, lower, upper) = two_blocks(0.0);
+        let mut model = stacked_blocks(&mesh);
+        let ends: Vec<NodeId> = (mesh.node_ids().iter().zip(mesh.coords()))
+            .filter(|(_, c)| c[2] == 0.0 || c[2] == 20.0)
+            .map(|(&id, _)| id)
+            .collect();
+        let step = &mut model.steps[0];
+        step.boundary_conditions[0].region = Region::Nodes(ends.clone());
+        step.loads = vec![Load {
+            name: "Pre_Tension-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(lower.clone()),
+            kind: LoadKind::PreTension {
+                value: force,
+                by_displacement: false,
+                direction: None,
+            },
+            amplitude: None,
+            factor_amplitude: None,
+        }];
+        let mut tie = plx_model::Tie::new("Tie-1");
+        (tie.master, tie.slave) = if cut_is_master {
+            (Region::Faces(lower), Region::Faces(upper))
+        } else {
+            (Region::Faces(upper), Region::Faces(lower))
+        };
+        model.ties.push(tie);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        // The cut nodes 19 to 27 of the lower block are the slave nodes.
+        assert!(text.contains("Slave, Type=Node\n"), "{text}");
+        let name = format!("geteilt-{cut_is_master}");
+        let Some(frd) = run_ccx(&name, &text) else {
+            return;
+        };
+        let reaction: f64 = (ends.iter())
+            .filter(|&&n| mesh.node(n).unwrap()[2] == 0.0)
+            .map(|&node| node_value(&frd, "FORC", "F3", node))
+            .sum();
+        assert!(
+            (reaction.abs() - force).abs() < 1e-3 * force,
+            "{name}: {reaction}"
+        );
+    }
+}
+
 #[test]
 fn a_tie_writes_its_surfaces_slave_first() {
     let (mesh, lower, upper) = two_blocks(0.0);

@@ -127,7 +127,7 @@ the shell (S3 and up). For a contact on a shell edge use #ui("Surface to surface
 Hover over a method in the list to see a short description. The Search Contact Pairs window shows
 the same texts.
 
-=== Ties
+=== Ties <ties>
 
 #menu("Interaction", "Create Tie ...") or #ui("Create Tie ...") in the context menu of
 #ui("Contact Pairs") glues a slave surface to a master surface (`*TIE`). Ties are listed under

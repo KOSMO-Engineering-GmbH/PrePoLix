@@ -309,6 +309,9 @@ pub fn model_keywords(
         None => (mesh, BTreeMap::new()),
     };
     let mut sets = Sets::new(mesh);
+    sets.cut_originals = (cuts.values())
+        .flat_map(|cut| cut.pairs.iter().map(|&(original, copy)| (copy, original)))
+        .collect();
     let lines = LineElements::new(mesh, model)?;
     // Regions are resolved first: their sets must precede the materials and steps.
     let materials = materials(model);
@@ -624,6 +627,8 @@ struct Sets<'a> {
     surface_sets: BTreeMap<String, (Vec<(String, u8)>, String)>,
     /// The pre-tension node of each pre-tension load, by the load's name.
     pre_tension_nodes: BTreeMap<String, NodeId>,
+    /// The original node of each copy a pre-tension cut made.
+    cut_originals: BTreeMap<NodeId, NodeId>,
     /// Node sets of submodel boundary conditions, with the first boundary condition naming
     /// each; `*SUBMODEL` lists them.
     submodel_sets: Vec<(String, String)>,
@@ -662,6 +667,7 @@ impl<'a> Sets<'a> {
             surface_sets: BTreeMap::new(),
             reference_nodes: BTreeMap::new(),
             pre_tension_nodes: BTreeMap::new(),
+            cut_originals: BTreeMap::new(),
             submodel_sets: Vec::new(),
             transforms: Vec::new(),
         };
@@ -1258,14 +1264,32 @@ fn constraints(
 
 /// `*Tie` of a slave surface glued to its master.
 fn tie(sets: &mut Sets, tie: &Tie) -> Result<Keyword, WriteError> {
-    let master = sets.surface(&tie.name, "Master", &tie.master)?;
+    // A bolt split into two parts is tied at its pre-tension cut. The faces on the cut side
+    // belong to the copies of the cut nodes then, and a tie to them would bypass the preload:
+    // the original nodes, which the cut's equations hold apart from the copies, become the
+    // slave nodes instead, tied to the faces of the other part.
+    let at_cut = |region: &Region| {
+        (region.nodes(sets.mesh).iter()).any(|n| sets.cut_originals.contains_key(n))
+    };
+    let (master_at_cut, slave_at_cut) = (at_cut(&tie.master), at_cut(&tie.slave));
+    let (slave_region, master_region) = if master_at_cut && !slave_at_cut {
+        (&tie.master, &tie.slave)
+    } else {
+        (&tie.slave, &tie.master)
+    };
+    let master = sets.surface(&tie.name, "Master", master_region)?;
     // CalculiX (2.21 to 2.23) ties the edge faces of membranes to nothing: their expanded
     // nodes have no active degrees of freedom there, and the model has no stiffness. Their
     // nodes tie correctly, and a membrane has no rotations to lose.
-    let slave = if membrane_edges(sets.mesh, &tie.slave) {
-        sets.node_surface(&tie.name, "Slave", &tie.slave)?
+    let slave = if master_at_cut || slave_at_cut {
+        let originals = (slave_region.nodes(sets.mesh).iter())
+            .map(|n| sets.cut_originals.get(n).copied().unwrap_or(*n))
+            .collect::<Vec<_>>();
+        sets.node_surface(&tie.name, "Slave", &Region::Nodes(originals))?
+    } else if membrane_edges(sets.mesh, slave_region) {
+        sets.node_surface(&tie.name, "Slave", slave_region)?
     } else {
-        sets.surface(&tie.name, "Slave", &tie.slave)?
+        sets.surface(&tie.name, "Slave", slave_region)?
     };
     let mut out = format!("*Tie, Name={}", name(&tie.name));
     if let Some(tolerance) = tie.position_tolerance {
