@@ -266,15 +266,18 @@ pub fn model_keywords(
 ) -> Result<Vec<Keyword>, WriteError> {
     // The faces of 2D elements are their edges; a mesh whose surface elements are still
     // typed as shells is written as the model space types them. Parts get the element
-    // types the user chose for them.
+    // types the user chose for them, and linear shells of membrane sections are written as
+    // membranes.
     let space = model.properties.space;
     let retyped;
     let mesh = if !model.element_types.is_empty()
+        || (model.sections.iter()).any(|s| matches!(s.kind, SectionKind::Membrane { .. }))
         || (mesh.elements().iter())
             .any(|e| space.element_type(&e.type_name, e.shape) != e.type_name)
     {
         let mut copy = mesh.clone();
         model.apply_element_types(&mut copy);
+        model.apply_membrane_sections(&mut copy);
         space.convert_mesh(&mut copy);
         retyped = copy;
         &retyped

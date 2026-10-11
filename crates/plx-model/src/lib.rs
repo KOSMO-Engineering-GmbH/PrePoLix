@@ -52,7 +52,8 @@ pub use moving_load::{AXIS_LABELS, MovingFrame, MovingLoad, Wheel};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
 pub use section::{
-    BeamOrientation, BeamProfile, BeamSection, Section, SectionKind, line_tangent, unit_thickness,
+    BeamOrientation, BeamProfile, BeamSection, Section, SectionKind, line_tangent, membrane_type,
+    unit_thickness,
 };
 pub use symmetry::{SymmetryError, SymmetryPlane, symmetry_dofs, symmetry_plane};
 pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, UnitSystem};
