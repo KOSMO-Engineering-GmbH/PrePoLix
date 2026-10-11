@@ -79,7 +79,22 @@ for tool in "${tools[@]}"; do
 done
 export CC CXX FC AR RANLIB
 
-step() { echo "== $*"; }
+# Announces a part. The compilers write to log files, so a line every minute shows on CI that
+# the build is still running (OpenBLAS alone takes several minutes).
+heartbeat=
+step() {
+    [ -n "$heartbeat" ] && kill "$heartbeat" 2>/dev/null
+    echo "== $*"
+    (
+        minutes=0
+        while sleep 60 >/dev/null 2>&1; do
+            minutes=$((minutes + 1))
+            echo "   $* läuft seit $minutes min"
+        done
+    ) &
+    heartbeat=$!
+}
+trap '[ -n "$heartbeat" ] && kill "$heartbeat" 2>/dev/null' EXIT
 done_marker() { [ -f "$work/.done-$1" ]; }
 mark_done() { touch "$work/.done-$1"; }
 
