@@ -85,6 +85,9 @@ pub enum Problem {
     MpcAndSpc,
     /// Found in the solver output only.
     RotationIn2d,
+    /// A keyword of the input file that the configured CalculiX does not know: it skips the
+    /// card with a warning. Found by testing the executable before a run, or in its output.
+    UnknownKeyword,
     /// Any other `*ERROR` of the solver output.
     SolverError,
 }
@@ -144,6 +147,7 @@ impl Problem {
             Problem::NoConvergence => "No convergence",
             Problem::MpcAndSpc => "Degree of freedom bound twice",
             Problem::RotationIn2d => "Rotation in a 2D model",
+            Problem::UnknownKeyword => "Keyword unknown to CalculiX",
             Problem::SolverError => "CalculiX error",
         }
     }
@@ -335,6 +339,12 @@ impl Problem {
                  prescribe rotations for them; the run aborts with \"mpc of type is \
                  unknown\" or a floating point error."
             }
+            Problem::UnknownKeyword => {
+                "The configured CalculiX does not know a keyword of the input file, usually \
+                 because it is older than the feature that writes it. CalculiX skips such a \
+                 card with only a warning and carries on without it, so the step, load or \
+                 material it defines is missing from the results."
+            }
             Problem::SolverError => {
                 "CalculiX aborted with an error message that PrePoLix does not know. \
                  The exact text is shown in the Monitor."
@@ -476,6 +486,11 @@ impl Problem {
                 "In 2D models prescribe only U1 and U2; check user *BOUNDARY keywords in \
                  the Keyword Editor."
             }
+            Problem::UnknownKeyword => {
+                "Install a newer CalculiX or select it under Tools > Settings > CalculiX; \
+                 \"Test CalculiX\" there lists the features it supports. Check user \
+                 keywords in the Keyword Editor for typing errors."
+            }
             Problem::SolverError => {
                 "Read the message in the Monitor; \"Check Model\" in the context menu of \
                  the analysis often helps."
@@ -494,6 +509,11 @@ pub struct Finding {
 }
 
 impl Finding {
+    /// Keywords the configured CalculiX does not know, found before the analysis ran.
+    pub fn unknown_keywords(detail: impl Into<String>) -> Self {
+        Self::new(ModelItem::Analysis, Problem::UnknownKeyword, detail)
+    }
+
     fn new(item: ModelItem, problem: Problem, detail: impl Into<String>) -> Self {
         Self {
             item,
@@ -1952,6 +1972,26 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             );
         }
     }
+    // " *WARNING in calinput. Card image cannot be interpreted:", then the card in a later
+    // line, upper case without blanks.
+    let mut unknown: Vec<&str> = Vec::new();
+    for (at, _) in (lines.iter().enumerate()).filter(|(_, l)| l.contains("cannot be interpreted")) {
+        let card = (lines[at + 1..].iter().take(3))
+            .map(|l| l.trim())
+            .find(|l| l.starts_with('*') && !l.starts_with("*WARNING"));
+        if let Some(card) = card.map(|c| c.split(',').next().unwrap_or(c))
+            && !unknown.contains(&card)
+        {
+            unknown.push(card);
+        }
+    }
+    if !unknown.is_empty() {
+        add(
+            &mut findings,
+            Problem::UnknownKeyword,
+            format!("CalculiX skipped {}", unknown.join(", ")),
+        );
+    }
     if findings.is_empty()
         && let Some(line) = lines.iter().find(|l| l.contains("*ERROR"))
     {
@@ -2853,6 +2893,17 @@ mod tests {
                 (ModelItem::Part(1), Problem::DistortedElements),
             ]
         );
+        let skipped = [
+            " *WARNING in calinput. Card image cannot be interpreted:",
+            " *WARNING reading the input file. Card image:",
+            "          *CYCLICSYMMETRYMODEL,N=12",
+            " *ERROR in something: new message",
+        ]
+        .map(String::from);
+        let findings = diagnose_solver_output(&skipped, &mesh);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].problem, Problem::UnknownKeyword);
+        assert_eq!(findings[0].detail, "CalculiX skipped *CYCLICSYMMETRYMODEL");
         let unknown = [" *ERROR in something: new message".to_string()];
         assert_eq!(
             diagnose_solver_output(&unknown, &mesh)[0].problem,

@@ -106,6 +106,11 @@ references (a deleted material, part or set that an item still uses). Warnings i
 only by contact, conflicting boundary conditions, loads on fixed nodes, rotations without effect
 and steps without load.
 
+When a run starts, PrePoLix also checks that the configured CalculiX knows every keyword of the
+input file (see #ui("Test CalculiX") in @settings). An unknown keyword, for example of a step
+type that an older CalculiX lacks, appears as error "Keyword unknown to CalculiX" on the
+analysis and in the monitor, with the feature that needs it.
+
 The checks do not stop a run; their errors are listed at the top of the monitor. Missing
 references do stop it, because the input file cannot be written.
 

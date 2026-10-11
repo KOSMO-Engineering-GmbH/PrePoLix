@@ -39,9 +39,19 @@ user (`~/.local/share/prepolix` on Linux, `%APPDATA%\prepolix\data` on Windows).
   [Equation solvers], [The direct solvers found in the CalculiX executable, for example
     PARDISO. Steps with the solver #ui("Default") use Pardiso when it is available.],
   [Test CalculiX], [Starts CalculiX, computes a cantilever under a tip load and under pressure,
-    compares the results with beam theory and checks which solvers are available. Each test shows
-    OK or an error.],
+    compares the results with beam theory, checks which solvers are available and whether
+    CalculiX knows every keyword PrePoLix writes. Each test shows OK or an error.],
 )
+
+#screenshot("calculix-test.png", [Result of #ui("Test CalculiX")])
+
+*Keywords.* Older CalculiX versions lack keywords of newer features, for example
+`*COMPLEX FREQUENCY` (complex frequency step) or `*CYCLIC SYMMETRY MODEL`. CalculiX does not stop
+at an unknown keyword: it skips the card with a warning and computes without it. The test
+therefore reads each keyword PrePoLix can write on its own and lists the unknown ones by the
+feature that needs them, e.g. `Complex frequency step (*COMPLEX FREQUENCY)`. Every analysis
+checks the keywords of its own input file in the same way, including those of the keyword editor
+(@model-check).
 
 === Gmsh
 
