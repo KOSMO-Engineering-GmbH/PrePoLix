@@ -343,12 +343,14 @@ impl Gmsh {
         origin: [f64; 3],
         size: [f64; 2],
         radius: f64,
-    ) -> Result<(), GmshError> {
+    ) -> Result<i32, GmshError> {
         let ([x, y, z], [dx, dy]) = (origin, size);
-        self.call(|e| unsafe {
-            (self.api.occ_add_rectangle)(x, y, z, dx, dy, -1, radius, e);
+        let mut tag = 0;
+        self.call(|e| {
+            tag = unsafe { (self.api.occ_add_rectangle)(x, y, z, dx, dy, -1, radius, e) };
         })?;
-        self.synchronize()
+        self.synchronize()?;
+        Ok(tag)
     }
 
     /// Adds a point; returns its tag. Points are the ends of lines, see [`Self::add_line`].
@@ -400,6 +402,203 @@ impl Gmsh {
         let mut mass = 0.0;
         self.call(|e| unsafe { (self.api.occ_get_mass)(dim, tag, &mut mass, e) })?;
         Ok(mass)
+    }
+
+    /// Centre of mass of an entity of the OpenCASCADE model.
+    pub fn center_of_mass(&self, dim: i32, tag: i32) -> Result<[f64; 3], GmshError> {
+        let [mut x, mut y, mut z] = [0.0; 3];
+        self.call(|e| unsafe {
+            (self.api.occ_get_center_of_mass)(dim, tag, &mut x, &mut y, &mut z, e);
+        })?;
+        Ok([x, y, z])
+    }
+
+    /// Bounds of the parameters of a curve (one) or surface (two).
+    pub fn parameter_bounds(&self, dim: i32, tag: i32) -> Result<(Vec<f64>, Vec<f64>), GmshError> {
+        let (mut min, mut min_len) = (std::ptr::null_mut(), 0);
+        let (mut max, mut max_len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.get_parametrization_bounds)(
+                dim,
+                tag,
+                &mut min,
+                &mut min_len,
+                &mut max,
+                &mut max_len,
+                e,
+            );
+        })?;
+        Ok((self.take_vec(min, min_len), self.take_vec(max, max_len)))
+    }
+
+    /// Points of a curve or surface at parameters, flat (one or two values per point).
+    pub fn values(
+        &self,
+        dim: i32,
+        tag: i32,
+        parameters: &[f64],
+    ) -> Result<Vec<[f64; 3]>, GmshError> {
+        let (mut coords, mut len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.get_value)(
+                dim,
+                tag,
+                parameters.as_ptr(),
+                parameters.len(),
+                &mut coords,
+                &mut len,
+                e,
+            );
+        })?;
+        Ok(self.take_vec(coords, len).as_chunks::<3>().0.to_vec())
+    }
+
+    /// The point of a curve or surface closest to a point.
+    pub fn closest_point(
+        &self,
+        dim: i32,
+        tag: i32,
+        point: [f64; 3],
+    ) -> Result<[f64; 3], GmshError> {
+        Ok(self.projection(dim, tag, point)?.0)
+    }
+
+    /// The closest point on an entity, with its parametric coordinates.
+    pub fn projection(
+        &self,
+        dim: i32,
+        tag: i32,
+        point: [f64; 3],
+    ) -> Result<([f64; 3], Vec<f64>), GmshError> {
+        let (mut coords, mut len) = (std::ptr::null_mut(), 0);
+        let (mut parametric, mut parametric_len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.get_closest_point)(
+                dim,
+                tag,
+                point.as_ptr(),
+                3,
+                &mut coords,
+                &mut len,
+                &mut parametric,
+                &mut parametric_len,
+                e,
+            );
+        })?;
+        let parametric = self.take_vec(parametric, parametric_len);
+        match self.take_vec(coords, len)[..] {
+            [x, y, z] => Ok(([x, y, z], parametric)),
+            _ => Err(GmshError::Other(format!("No closest point on {dim}/{tag}"))),
+        }
+    }
+
+    /// Whether parametric coordinates lie inside an entity, within its trimming bounds.
+    pub fn is_inside(&self, dim: i32, tag: i32, parametric: &[f64]) -> Result<bool, GmshError> {
+        let mut inside = 0;
+        self.call(|e| unsafe {
+            inside = (self.api.is_inside)(dim, tag, parametric.as_ptr(), parametric.len(), 1, e);
+        })?;
+        Ok(inside > 0)
+    }
+
+    /// Shows or hides entities with what bounds them; meshing can be limited to the shown
+    /// ones with the option `Mesh.MeshOnlyVisible`.
+    pub fn set_visibility(&self, entities: &[(i32, i32)], visible: bool) -> Result<(), GmshError> {
+        let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
+        self.call(|e| unsafe {
+            (self.api.set_visibility)(flat.as_ptr(), flat.len(), c_int::from(visible), 1, e);
+        })
+    }
+
+    /// Moves entities by an affine transformation, the rows of a 3 x 4 matrix.
+    pub fn affine_transform(
+        &self,
+        entities: &[(i32, i32)],
+        matrix: &[f64; 12],
+    ) -> Result<(), GmshError> {
+        let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
+        self.call(|e| unsafe {
+            (self.api.occ_affine_transform)(flat.as_ptr(), flat.len(), matrix.as_ptr(), 12, e);
+        })?;
+        self.synchronize()
+    }
+
+    /// The common part of the objects and the tools; the tools stay.
+    pub fn intersect(
+        &self,
+        objects: &[(i32, i32)],
+        tools: &[(i32, i32)],
+    ) -> Result<Vec<(i32, i32)>, GmshError> {
+        let objects: Vec<c_int> = objects.iter().flat_map(|&(d, t)| [d, t]).collect();
+        let tools: Vec<c_int> = tools.iter().flat_map(|&(d, t)| [d, t]).collect();
+        let (mut out, mut out_len) = (std::ptr::null_mut(), 0);
+        let (mut map, mut map_lens, mut map_len) =
+            (std::ptr::null_mut(), std::ptr::null_mut(), 0usize);
+        self.call(|e| unsafe {
+            (self.api.occ_intersect)(
+                objects.as_ptr(),
+                objects.len(),
+                tools.as_ptr(),
+                tools.len(),
+                &mut out,
+                &mut out_len,
+                &mut map,
+                &mut map_lens,
+                &mut map_len,
+                -1,
+                1,
+                0,
+                e,
+            );
+        })?;
+        // The map of which input gave which output is not needed.
+        let maps: Vec<*mut c_int> = self.take_vec(map, map_len);
+        for pointer in maps {
+            self.take_vec(pointer, 0);
+        }
+        self.take_vec(map_lens, map_len);
+        let out = self.take_vec(out, out_len);
+        self.synchronize()?;
+        Ok(pairs(&out))
+    }
+
+    /// Revolves entities about an axis through a point by an angle in radians; returns the
+    /// new entities.
+    pub fn revolve(
+        &self,
+        entities: &[(i32, i32)],
+        point: [f64; 3],
+        axis: [f64; 3],
+        angle: f64,
+    ) -> Result<Vec<(i32, i32)>, GmshError> {
+        let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
+        let (mut out, mut out_len) = (std::ptr::null_mut(), 0);
+        let [x, y, z] = point;
+        let [ax, ay, az] = axis;
+        self.call(|e| unsafe {
+            (self.api.occ_revolve)(
+                flat.as_ptr(),
+                flat.len(),
+                x,
+                y,
+                z,
+                ax,
+                ay,
+                az,
+                angle,
+                &mut out,
+                &mut out_len,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                e,
+            );
+        })?;
+        let out = self.take_vec(out, out_len);
+        self.synchronize()?;
+        Ok(pairs(&out))
     }
 
     /// Adds a mesh size field of a type such as `Constant` or `Min`; returns its tag.

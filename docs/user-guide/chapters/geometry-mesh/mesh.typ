@@ -92,9 +92,10 @@ values and meshes at once.
   [Optimize mesh (Netgen)], [Improves the element quality after meshing (default on).],
   [Quad-dominated surface mesh], [Creates mainly quadrilaterals on faces: plane elements of 2D
     models and shells of 3D models.],
-  [Hexahedra for extruded parts], [Meshes every solid that is a straight extrusion of one of its
-    faces with hexahedra, as an Extrude Mesh item with its defaults would (@extrude-mesh); the
-    other solids keep tetrahedra (default off).],
+  [Hexahedra where possible], [Meshes every solid that is a straight extrusion of one of its
+    faces, as an Extrude Mesh item with its defaults would (@extrude-mesh), or a body of
+    revolution with hexahedra (@revolve-mesh); the other solids keep tetrahedra (default
+    off).],
 )
 
 === Mesh setup items
@@ -150,9 +151,31 @@ end. The element type can be changed afterwards in the part's properties (@eleme
 example to `C3D8I`, which bends without the locking of `C3D8`. A later #ui("Tetrahedral Gmsh")
 item for the same part meshes it with tetrahedra again.
 
-Without an item, #ui("Hexahedra for extruded parts") in the meshing parameters runs the same
+Without an item, #ui("Hexahedra where possible") in the meshing parameters runs the same
 automatic search for every part they cover. A part where no source face is found is meshed with
 tetrahedra without an error; a #ui("Tetrahedral Gmsh") item naming a part keeps it tetrahedral.
+
+=== Bodies of revolution <revolve-mesh>
+
+#ui("Hexahedra where possible") also finds parts that are a section turned about an axis:
+rings, flanges, hubs and segments of them. Their edges are circles about one common axis and
+profile curves in planes through it. prepolix meshes the section with quadrilaterals and turns
+that mesh about the axis in steps of about the max element size at the largest radius, at least
+16 steps for a full turn. A segment is turned from one of its end faces to the other; a closed
+ring gets a section cut through it and ends where it started. The result is hexahedra, with
+wedges where the section mesh has triangles (@fig-revolve-mesh). Faces, edges and vertices of
+the geometry stay selectable on the mesh.
+
+#figure(
+  image("../../images/revolve-mesh.png", width: 70%),
+  caption: [A 270° segment of a ring with a rounded section, meshed with #ui("Hexahedra where
+    possible").],
+) <fig-revolve-mesh>
+
+A part counts as a body of revolution only if its volume is that of its section turned about
+the axis. Parts that reach the axis, such as solid shafts, keep tetrahedra: their elements at the
+axis would have to be pyramids, which CalculiX lacks. A part that is both an extrusion and a body
+of revolution, a plain ring for example, is meshed as an extrusion.
 
 == Using an existing mesh
 

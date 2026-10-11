@@ -68,10 +68,10 @@ impl Geometry {
             .flatten()
     }
 
-    /// Whether the part is meshed with hexahedra if it turns out to be an extrusion: its
-    /// meshing parameters ask for it and no Tetrahedral Gmsh item names it.
-    pub fn finds_extrusion(&self, part: &str) -> bool {
-        self.parameters(part).extrude_where_possible
+    /// Whether the part is meshed with hexahedra if it turns out to be an extrusion or a body
+    /// of revolution: its meshing parameters ask for it and no Tetrahedral Gmsh item names it.
+    pub fn finds_hexahedra(&self, part: &str) -> bool {
+        self.parameters(part).hexahedra_where_possible
             && !self.mesh_items.iter().any(|item| {
                 matches!(&item.kind, MeshSetupKind::TetrahedralGmsh { parts, .. } if names(parts, part))
             })
@@ -108,9 +108,11 @@ pub struct MeshingParameters {
     pub optimize: bool,
     /// Faces (2D models and shells) are meshed with mostly quadrilaterals instead of triangles.
     pub quad_dominated: bool,
-    /// Solids that are straight extrusions get an extrude mesh of hexahedra with the
-    /// defaults of the Extrude Mesh item; the others stay tetrahedra.
-    pub extrude_where_possible: bool,
+    /// Solids that are straight extrusions or bodies of revolution get a swept mesh of
+    /// hexahedra, with the defaults of the Extrude Mesh item for extrusions; the others stay
+    /// tetrahedra.
+    #[serde(alias = "extrude_where_possible")]
+    pub hexahedra_where_possible: bool,
 }
 
 impl Default for MeshingParameters {
@@ -123,7 +125,7 @@ impl Default for MeshingParameters {
             midside_nodes_on_geometry: false,
             optimize: true,
             quad_dominated: false,
-            extrude_where_possible: false,
+            hexahedra_where_possible: false,
         }
     }
 }
@@ -414,6 +416,13 @@ mod tests {
             elements: vec![1, 2],
         };
         assert!(unequal.levels(4.0, 10.0).is_err());
+    }
+
+    #[test]
+    fn projects_from_before_revolutions_keep_their_hexahedra_setting() {
+        let parameters: MeshingParameters =
+            ron::from_str("(extrude_where_possible: true)").unwrap();
+        assert!(parameters.hexahedra_where_possible);
     }
 
     #[test]

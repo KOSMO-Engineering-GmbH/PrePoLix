@@ -1254,7 +1254,7 @@ fn meshing_parameters_find_extrusions_and_keep_tetrahedra_for_the_rest() {
         .unwrap()
         .geometry;
     geometry.meshing.max_size = 5.0;
-    geometry.meshing.extrude_where_possible = true;
+    geometry.meshing.hexahedra_where_possible = true;
     let mesh = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
     assert!(
         (mesh.elements().iter())
@@ -1276,15 +1276,87 @@ fn meshing_parameters_find_extrusions_and_keep_tetrahedra_for_the_rest() {
             .all(|e| e.shape == ElementShape::Tet10)
     );
 
-    // A shaft with a split face is no extrusion of one face and falls back to tetrahedra.
+    // A shaft with a split face is no extrusion of one face, and no body of revolution
+    // without elements collapsing on its axis: it falls back to tetrahedra.
     let mut shaft = import_cad(&testdata("welle_mit_teilflaeche.step"), UnitSystem::MmTonSC)
         .unwrap()
         .geometry;
-    shaft.meshing.extrude_where_possible = true;
+    shaft.meshing.hexahedra_where_possible = true;
     let mesh = generate_part_mesh(&shaft, "SOLID-1").unwrap().mesh;
     assert!(
         mesh.elements()
             .iter()
             .all(|e| e.shape == ElementShape::Tet10)
     );
+}
+
+/// A rectangle in the x-y plane, with corners rounded by `radius`, turned about the y axis.
+fn revolved(origin: [f64; 3], size: [f64; 2], radius: f64, angle: f64) -> Geometry {
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        let face = gmsh.add_rectangle(origin, size, radius)?;
+        gmsh.revolve(&[(2, face)], [0.0; 3], [0.0, 1.0, 0.0], angle)?;
+        if angle >= std::f64::consts::TAU {
+            // The rectangle is left inside the closed ring.
+            gmsh.remove(&[(2, face)])?;
+        }
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    Geometry {
+        source: "ring.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+    }
+}
+
+#[test]
+fn bodies_of_revolution_are_meshed_with_hexahedra_turned_about_their_axis() {
+    if !gmsh_available() {
+        return;
+    }
+    use std::f64::consts::{FRAC_PI_2, TAU};
+    // The sharp rings are extrusions as well; the rounded ones only bodies of revolution.
+    for (angle, radius) in [(TAU, 0.0), (FRAC_PI_2, 0.0), (FRAC_PI_2, 2.0), (TAU, 2.0)] {
+        let mut geometry = revolved([10.0, 0.0, 0.0], [10.0, 30.0], radius, angle);
+        assert_eq!(
+            part_names(&geometry).unwrap(),
+            ["SOLID-1"],
+            "{angle} {radius}"
+        );
+        let display = tessellate(&geometry).unwrap();
+        geometry.meshing.max_size = 3.0;
+        geometry.meshing.hexahedra_where_possible = true;
+        for second_order in [false, true] {
+            geometry.meshing.second_order = second_order;
+            let mesh = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+            let (hex, wedge) = if second_order {
+                (ElementShape::Hex20, ElementShape::Wedge15)
+            } else {
+                (ElementShape::Hex8, ElementShape::Wedge6)
+            };
+            assert!(
+                (mesh.elements().iter()).all(|e| e.shape == hex || e.shape == wedge),
+                "{angle} {radius}"
+            );
+            let hexes = mesh.elements().iter().filter(|e| e.shape == hex).count();
+            assert!(
+                hexes * 2 > mesh.element_count(),
+                "mostly hexahedra: {hexes}"
+            );
+            for element in mesh.elements() {
+                let jacobian = element.min_jacobian(&mesh).unwrap();
+                assert!(jacobian > 0.0, "{angle} {radius} {} {jacobian}", element.id);
+            }
+            // Every node lies in the ring; midside nodes of an extrusion's circles may sit
+            // on their chords.
+            for c in mesh.coords() {
+                let r = c[0].hypot(c[2]);
+                assert!((9.5..=20.0 + 1e-6).contains(&r), "{angle} {radius} {c:?}");
+            }
+            check_cad_map(&mesh, &display);
+        }
+    }
 }
