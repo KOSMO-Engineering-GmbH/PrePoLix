@@ -8,8 +8,8 @@ use std::time::Instant;
 use plx_mesh::{ElementShape, NodeId};
 use plx_mesher::{CadEntity, GeneratedMesh};
 use plx_model::{
-    Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters, Quantity,
-    UnitSystem, next_name,
+    Algorithm2d, Algorithm3d, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem, MeshSetupKind,
+    MeshingParameters, Quantity, Recombination, UnitSystem, next_name,
 };
 
 use crate::model::{Highlight, Hit, Model};
@@ -123,13 +123,19 @@ impl MeshSetupWindow {
 }
 
 /// The item types of PrePoMax's "Create Mesh Setup Item" that prepolix supports.
-const TYPES: [&str; 3] = ["Meshing Parameters", "Local Mesh Size", "Tetrahedral Gmsh"];
+const TYPES: [&str; 4] = [
+    "Meshing Parameters",
+    "Local Mesh Size",
+    "Tetrahedral Gmsh",
+    "Extrude Mesh",
+];
 
 fn type_index(kind: &MeshSetupKind) -> usize {
     match kind {
         MeshSetupKind::MeshingParameters { .. } => 0,
         MeshSetupKind::LocalMeshSize { .. } => 1,
         MeshSetupKind::TetrahedralGmsh { .. } => 2,
+        MeshSetupKind::ExtrudeMesh(_) => 3,
     }
 }
 
@@ -145,11 +151,12 @@ fn new_kind(index: usize, geometry: &Geometry) -> MeshSetupKind {
             edges: Vec::new(),
             size: geometry.meshing.max_size / 4.0,
         },
-        _ => MeshSetupKind::TetrahedralGmsh {
+        2 => MeshSetupKind::TetrahedralGmsh {
             parts: Vec::new(),
             algorithm_2d: Algorithm2d::default(),
             algorithm_3d: Algorithm3d::default(),
         },
+        _ => MeshSetupKind::ExtrudeMesh(ExtrudeMesh::default()),
     }
 }
 
@@ -159,6 +166,54 @@ const ALGORITHMS_2D: [(Algorithm2d, &str); 4] = [
     (Algorithm2d::MeshAdapt, "MeshAdapt"),
     (Algorithm2d::Automatic, "Automatic"),
 ];
+
+/// The surface algorithms for an extrude mesh, those for quadrilaterals first.
+const EXTRUDE_ALGORITHMS_2D: [(Algorithm2d, &str); 7] = [
+    (Algorithm2d::FrontalQuads, "Frontal-Delaunay for quads"),
+    (
+        Algorithm2d::PackingOfParallelograms,
+        "Packing of parallelograms",
+    ),
+    (Algorithm2d::QuasiStructuredQuad, "Quasi-structured quad"),
+    (Algorithm2d::FrontalDelaunay, "Frontal-Delaunay"),
+    (Algorithm2d::Delaunay, "Delaunay"),
+    (Algorithm2d::MeshAdapt, "MeshAdapt"),
+    (Algorithm2d::Automatic, "Automatic"),
+];
+
+const RECOMBINATIONS: [(Recombination, &str); 5] = [
+    (Recombination::None, "None (wedges)"),
+    (Recombination::Simple, "Simple"),
+    (Recombination::Blossom, "Blossom"),
+    (Recombination::SimpleFullQuad, "Simple full-quad"),
+    (Recombination::BlossomFullQuad, "Blossom full-quad"),
+];
+
+const LAYER_TYPES: [&str; 3] = ["Scale factor", "Number of elements", "Multi-layered"];
+
+fn layer_type(layers: &ExtrudeLayers) -> usize {
+    match layers {
+        ExtrudeLayers::ScaleFactor(_) => 0,
+        ExtrudeLayers::NumberOfElements(_) => 1,
+        ExtrudeLayers::MultiLayered { .. } => 2,
+    }
+}
+
+/// Numbers separated by semicolons or spaces, as PrePoMax writes layer sizes.
+fn list_text<T: ToString>(values: &[T]) -> String {
+    values
+        .iter()
+        .map(|v| format!("{};", v.to_string()))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_list<T: std::str::FromStr>(text: &str) -> Option<Vec<T>> {
+    (text.split([';', ' ']))
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| t.trim().replace(',', ".").parse().ok())
+        .collect()
+}
 
 const ALGORITHMS_3D: [(Algorithm3d, &str); 3] = [
     (Algorithm3d::Delaunay, "Delaunay"),
@@ -183,6 +238,12 @@ pub struct MeshItemEditor {
     error: Option<String>,
     /// Unit system of the model, the unit of the sizes.
     units: UnitSystem,
+    /// An extrude mesh's source faces are picked, not found for whole parts.
+    source_faces: bool,
+    /// An extrude mesh's relative layer sizes and elements per layer as typed.
+    layer_text: [String; 2],
+    /// The parts of the picked source faces, for the faces they were found for.
+    face_parts: (BTreeSet<CadEntity>, Vec<String>),
 }
 
 pub enum MeshItemResult {
@@ -208,6 +269,9 @@ impl MeshItemEditor {
             picker: Picker::default(),
             error: None,
             units,
+            source_faces: false,
+            layer_text: ["0.2; 0.6; 0.2;".into(), "2; 4; 2;".into()],
+            face_parts: Default::default(),
         }
     }
 
@@ -222,15 +286,25 @@ impl MeshItemEditor {
                 (faces.iter().map(|&f| CadEntity::Face(f)))
                     .chain(edges.iter().map(|&e| CadEntity::Edge(e))),
             ),
+            MeshSetupKind::ExtrudeMesh(extrude) => {
+                History::from_items(extrude.faces.iter().map(|&f| CadEntity::Face(f)))
+            }
             _ => History::default(),
         };
         let parts = match &draft.kind {
-            MeshSetupKind::MeshingParameters { parts, .. }
-            | MeshSetupKind::TetrahedralGmsh { parts, .. } => {
-                PartPicks::from_names(parts.iter().cloned())
+            MeshSetupKind::ExtrudeMesh(extrude) if !extrude.faces.is_empty() => {
+                PartPicks::default()
             }
-            MeshSetupKind::LocalMeshSize { .. } => PartPicks::default(),
+            kind => PartPicks::from_names(kind.parts().unwrap_or_default().iter().cloned()),
         };
+        let mut layer_text = ["0.2; 0.6; 0.2;".to_string(), "2; 4; 2;".to_string()];
+        let mut source_faces = false;
+        if let MeshSetupKind::ExtrudeMesh(extrude) = &draft.kind {
+            source_faces = !extrude.faces.is_empty();
+            if let ExtrudeLayers::MultiLayered { sizes, elements } = &extrude.layers {
+                layer_text = [list_text(sizes), list_text(elements)];
+            }
+        }
         Some(Self {
             draft,
             index: Some(index),
@@ -240,6 +314,9 @@ impl MeshItemEditor {
             picker: Picker::default(),
             error: None,
             units,
+            source_faces,
+            layer_text,
+            face_parts: Default::default(),
         })
     }
 
@@ -263,6 +340,9 @@ impl MeshItemEditor {
     ) -> MeshItemResult {
         let mut result = MeshItemResult::Open;
         let mut open = true;
+        if let Some(view) = view {
+            self.update_face_parts(view);
+        }
         let window = egui::Window::new(self.title())
             .id(egui::Id::new("mesh item editor"))
             .open(&mut open)
@@ -290,6 +370,7 @@ impl MeshItemEditor {
                                         self.others.iter().map(String::as_str),
                                     );
                                     self.picks.clear();
+                                    self.source_faces = false;
                                     self.sync_parts();
                                 }
                             }
@@ -345,16 +426,54 @@ impl MeshItemEditor {
 
     /// Whether the item is made of whole parts.
     fn has_parts(&self) -> bool {
-        !matches!(self.draft.kind, MeshSetupKind::LocalMeshSize { .. })
+        match self.draft.kind {
+            MeshSetupKind::LocalMeshSize { .. } => false,
+            MeshSetupKind::ExtrudeMesh(_) => !self.source_faces,
+            _ => true,
+        }
+    }
+
+    /// Whether clicks pick faces or edges rather than parts.
+    fn picks_entities(&self) -> bool {
+        !self.has_parts()
     }
 
     /// Writes the picked parts to the draft.
     fn sync_parts(&mut self) {
-        if let MeshSetupKind::MeshingParameters { parts, .. }
-        | MeshSetupKind::TetrahedralGmsh { parts, .. } = &mut self.draft.kind
-        {
-            *parts = self.parts.names().into_iter().collect();
+        let source_faces = self.source_faces;
+        match &mut self.draft.kind {
+            MeshSetupKind::MeshingParameters { parts, .. }
+            | MeshSetupKind::TetrahedralGmsh { parts, .. } => {
+                *parts = self.parts.names().into_iter().collect();
+            }
+            MeshSetupKind::ExtrudeMesh(extrude) if source_faces => {
+                extrude.parts = self.face_parts.1.clone();
+            }
+            MeshSetupKind::ExtrudeMesh(extrude) => {
+                extrude.parts = self.parts.names().into_iter().collect();
+            }
+            MeshSetupKind::LocalMeshSize { .. } => {}
         }
+    }
+
+    /// Finds the parts of the picked source faces once they change.
+    fn update_face_parts(&mut self, view: &Model) {
+        if !matches!(self.draft.kind, MeshSetupKind::ExtrudeMesh(_)) {
+            return;
+        }
+        let picked = self.picks.items();
+        if picked == self.face_parts.0 && !picked.is_empty() {
+            return;
+        }
+        let faces: BTreeSet<i32> = (picked.iter())
+            .filter_map(|e| match e {
+                CadEntity::Face(tag) => Some(*tag),
+                _ => None,
+            })
+            .collect();
+        let parts = parts_of_faces(view, &faces);
+        self.face_parts = (picked, parts);
+        self.sync_parts();
     }
 
     fn form(&mut self, ui: &mut egui::Ui) {
@@ -412,6 +531,127 @@ impl MeshItemEditor {
                 algorithm_combo(ui, "algorithm 3d", algorithm_3d, &ALGORITHMS_3D);
                 ui.end_row();
             }
+            MeshSetupKind::ExtrudeMesh(extrude) => {
+                ui.label("Source faces").on_hover_text(
+                    "Automatic finds for each part a face it is a straight extrusion of. \
+                     Selected: click the faces at one end of the parts.",
+                );
+                let mut selected = self.source_faces;
+                egui::ComboBox::from_id_salt("extrude source")
+                    .selected_text(if selected {
+                        "Selected faces"
+                    } else {
+                        "Automatic"
+                    })
+                    .width(160.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut selected, false, "Automatic");
+                        ui.selectable_value(&mut selected, true, "Selected faces");
+                    });
+                ui.end_row();
+                if selected != self.source_faces {
+                    self.source_faces = selected;
+                    self.picks.clear();
+                    self.parts.clear();
+                    self.face_parts = Default::default();
+                }
+                if self.source_faces {
+                    ui.label("Faces");
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            let faces = self.picks.items().len();
+                            if faces == 0 {
+                                ui.label("Empty");
+                            } else {
+                                ui.label(format!("{faces} faces"));
+                            }
+                            if ui.button("Clear Selection").clicked() {
+                                self.picks.clear();
+                            }
+                            if ui
+                                .add_enabled(self.picks.can_undo(), egui::Button::new("Undo"))
+                                .clicked()
+                            {
+                                self.picks.undo();
+                            }
+                        });
+                        if !self.face_parts.1.is_empty() {
+                            ui.weak(format!("Parts: {}", self.face_parts.1.join(", ")));
+                        }
+                        ui.weak("Click the faces at one end of the parts.");
+                        ui.weak("Shift: add, Ctrl: remove");
+                    });
+                    ui.end_row();
+                } else {
+                    parts_ui(ui, &mut self.parts);
+                }
+                ui.label("Surface algorithm");
+                algorithm_combo(
+                    ui,
+                    "extrude algorithm 2d",
+                    &mut extrude.algorithm_2d,
+                    &EXTRUDE_ALGORITHMS_2D,
+                );
+                ui.end_row();
+                ui.label("Recombine algorithm").on_hover_text(
+                    "How triangles are joined to quadrilaterals, which become hexahedra; \
+                     triangles become wedges. Full-quad gives quadrilaterals only.",
+                );
+                algorithm_combo(
+                    ui,
+                    "extrude recombination",
+                    &mut extrude.recombination,
+                    &RECOMBINATIONS,
+                );
+                ui.end_row();
+                ui.label("Layers defined by")
+                    .on_hover_text("The element size in the extrude direction.");
+                let mut kind = layer_type(&extrude.layers);
+                egui::ComboBox::from_id_salt("extrude layers")
+                    .selected_text(LAYER_TYPES[kind])
+                    .width(160.0)
+                    .show_ui(ui, |ui| {
+                        for (index, label) in LAYER_TYPES.into_iter().enumerate() {
+                            ui.selectable_value(&mut kind, index, label);
+                        }
+                    });
+                ui.end_row();
+                if kind != layer_type(&extrude.layers) {
+                    extrude.layers = match kind {
+                        0 => ExtrudeLayers::ScaleFactor(1.0),
+                        1 => ExtrudeLayers::NumberOfElements(4),
+                        _ => ExtrudeLayers::MultiLayered {
+                            sizes: Vec::new(),
+                            elements: Vec::new(),
+                        },
+                    };
+                }
+                match &mut extrude.layers {
+                    ExtrudeLayers::ScaleFactor(factor) => {
+                        ui.label("Scale factor").on_hover_text(
+                            "Element size in the extrude direction as a multiple of the \
+                             part's max. element size.",
+                        );
+                        ui.add(numeric::drag_value(factor).range(0.0..=1000.0));
+                        ui.end_row();
+                    }
+                    ExtrudeLayers::NumberOfElements(n) => {
+                        ui.label("Number of elements");
+                        ui.add(egui::DragValue::new(n).range(1..=10_000));
+                        ui.end_row();
+                    }
+                    ExtrudeLayers::MultiLayered { .. } => {
+                        ui.label("Relative layer sizes")
+                            .on_hover_text("For example 0.2; 0.6; 0.2;");
+                        ui.text_edit_singleline(&mut self.layer_text[0]);
+                        ui.end_row();
+                        ui.label("Elements per layer")
+                            .on_hover_text("For example 2; 4; 2;");
+                        ui.text_edit_singleline(&mut self.layer_text[1]);
+                        ui.end_row();
+                    }
+                }
+            }
         }
         self.sync_parts();
     }
@@ -444,6 +684,36 @@ impl MeshItemEditor {
                     return Err("No part selected.".into());
                 }
             }
+            MeshSetupKind::ExtrudeMesh(extrude) => {
+                extrude.faces = if self.source_faces {
+                    (self.picks.items().iter())
+                        .filter_map(|e| match e {
+                            CadEntity::Face(tag) => Some(*tag),
+                            _ => None,
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                if self.source_faces && extrude.faces.is_empty() {
+                    return Err("No source face selected.".into());
+                }
+                if extrude.parts.is_empty() {
+                    return Err("No part selected.".into());
+                }
+                if let ExtrudeLayers::MultiLayered { sizes, elements } = &mut extrude.layers {
+                    let parsed = (parse_list::<f64>(&self.layer_text[0]))
+                        .zip(parse_list::<u32>(&self.layer_text[1]));
+                    let Some((s, e)) = parsed else {
+                        return Err("Not all layer sizes or element counts are numbers.".into());
+                    };
+                    (*sizes, *elements) = (s, e);
+                }
+                extrude
+                    .layers
+                    .levels(1.0, 1.0)
+                    .map_err(|e| format!("{e}."))?;
+            }
             MeshSetupKind::LocalMeshSize { faces, edges, size } => {
                 let picked = self.picks.items();
                 *faces = (picked.iter())
@@ -469,25 +739,29 @@ impl MeshItemEditor {
         Ok(item)
     }
 
-    /// A click on the geometry: picks the clicked part, or the face or edge for a local mesh
-    /// size.
+    /// A click on the geometry: picks the clicked part, the face or edge for a local mesh
+    /// size, or the source face of an extrude mesh.
     pub fn click(&mut self, view: &Model, pick: Option<(&Hit, f32)>, operation: Operation) {
-        match &mut self.draft.kind {
-            MeshSetupKind::MeshingParameters { .. } | MeshSetupKind::TetrahedralGmsh { .. } => {
-                self.parts.click(view, pick.map(|(hit, _)| hit), operation);
-                self.sync_parts();
-            }
-            MeshSetupKind::LocalMeshSize { .. } => match pick {
-                Some((hit, precision)) => {
-                    if let Some(entity) = cad_pick(view, hit, precision) {
-                        self.picks.push(operation, BTreeSet::from([entity]));
-                    }
+        if self.has_parts() {
+            self.parts.click(view, pick.map(|(hit, _)| hit), operation);
+            self.sync_parts();
+            return;
+        }
+        match pick {
+            Some((hit, precision)) => {
+                let entity = match self.draft.kind {
+                    MeshSetupKind::ExtrudeMesh(_) => face_pick(view, hit),
+                    _ => cad_pick(view, hit, precision),
+                };
+                if let Some(entity) = entity {
+                    self.picks.push(operation, BTreeSet::from([entity]));
+                    self.update_face_parts(view);
                 }
-                // As in the selection of the FE model, a plain click into empty space
-                // clears the selection.
-                None if operation == Operation::Replace => self.picks.clear(),
-                None => {}
-            },
+            }
+            // As in the selection of the FE model, a plain click into empty space clears the
+            // selection.
+            None if operation == Operation::Replace => self.picks.clear(),
+            None => {}
         }
     }
 
@@ -502,18 +776,22 @@ impl MeshItemEditor {
     /// What a click at the hit would select, for the hover preview.
     pub fn preview(&self, view: &Model, hit: &Hit, precision: f32) -> Preview {
         match self.draft.kind {
-            MeshSetupKind::LocalMeshSize { .. } => cad_pick(view, hit, precision)
+            _ if self.has_parts() => PartPicks::preview(view, hit),
+            MeshSetupKind::ExtrudeMesh(_) => face_pick(view, hit)
                 .map(|entity| entity_preview(view, entity))
                 .unwrap_or_default(),
-            _ => PartPicks::preview(view, hit),
+            _ => cad_pick(view, hit, precision)
+                .map(|entity| entity_preview(view, entity))
+                .unwrap_or_default(),
         }
     }
 
     /// The parts, faces and edges of the item, shown red on the geometry.
     pub fn highlight(&self, view: &Model) -> Highlight {
-        match &self.draft.kind {
-            MeshSetupKind::LocalMeshSize { .. } => entities_highlight(view, &self.picks.items()),
-            kind => item_highlight(view, kind),
+        if self.picks_entities() {
+            entities_highlight(view, &self.picks.items())
+        } else {
+            item_highlight(view, &self.draft.kind)
         }
     }
 }
@@ -542,6 +820,31 @@ fn algorithm_combo<T: Copy + PartialEq>(
                 ui.selectable_value(value, choice, label);
             }
         });
+}
+
+/// The CAD face under the hit point.
+fn face_pick(view: &Model, hit: &Hit) -> Option<CadEntity> {
+    if hit.line {
+        return None;
+    }
+    let face = view.skin(hit.part).faces.get(hit.face)?;
+    view.cad_entity(view.mesh.elements()[face.element].id)
+        .filter(|e| matches!(e, CadEntity::Face(_)))
+}
+
+/// Names of the parts the CAD faces lie on.
+fn parts_of_faces(view: &Model, faces: &BTreeSet<i32>) -> Vec<String> {
+    if faces.is_empty() {
+        return Vec::new();
+    }
+    (view.mesh.parts.iter().zip(&view.parts))
+        .filter(|(part, _)| {
+            part.elements.iter().any(
+                |&id| matches!(view.cad_entity(id), Some(CadEntity::Face(tag)) if faces.contains(&tag)),
+            )
+        })
+        .map(|(_, info)| info.name.clone())
+        .collect()
 }
 
 /// The CAD edge near the hit point, else the CAD face under it.
@@ -665,6 +968,17 @@ pub fn item_highlight(view: &Model, kind: &MeshSetupKind) -> Highlight {
                 .collect();
             entities_highlight(view, &entities)
         }
+        MeshSetupKind::ExtrudeMesh(extrude) if !extrude.faces.is_empty() => {
+            let entities = extrude.faces.iter().map(|&f| CadEntity::Face(f)).collect();
+            entities_highlight(view, &entities)
+        }
+        MeshSetupKind::ExtrudeMesh(extrude) => Highlight {
+            parts: (view.parts.iter().enumerate())
+                .filter(|(_, p)| extrude.parts.contains(&p.name))
+                .map(|(i, _)| i)
+                .collect(),
+            ..Highlight::default()
+        },
     }
 }
 
@@ -773,6 +1087,80 @@ mod tests {
         assert_eq!(size, geometry.meshing.max_size / 4.0);
         editor.click(&view, None, Operation::Replace);
         assert!(editor.finish().is_err(), "a click into empty space clears");
+    }
+
+    #[test]
+    fn extrude_meshes_pick_source_faces_or_parts() {
+        let Some((geometry, view)) = geometry_view() else {
+            return;
+        };
+        let mut editor = MeshItemEditor::create(&geometry, UnitSystem::MmTonSC);
+        editor.draft.kind = new_kind(3, &geometry);
+        // Automatic: the part is clicked.
+        let top = hit(&view, -30.0, 0.0);
+        editor.click(&view, Some((&top, 0.5)), Operation::Replace);
+        let item = editor.finish().unwrap();
+        let MeshSetupKind::ExtrudeMesh(extrude) = &item.kind else {
+            panic!("{item:?}");
+        };
+        assert_eq!(
+            (extrude.parts.as_slice(), extrude.faces.len()),
+            (&["SOLID-1".to_string()][..], 0)
+        );
+
+        // Selected faces: the top face, also when clicked close to an edge; its part follows.
+        editor.source_faces = true;
+        editor.parts.clear();
+        editor.update_face_parts(&view);
+        editor.sync_parts();
+        assert!(editor.finish().is_err(), "no face yet");
+        let near_edge = hit(&view, -30.0, -19.8);
+        editor.click(&view, Some((&near_edge, 0.5)), Operation::Replace);
+        assert!(!editor.preview(&view, &top, 0.5).lines.is_empty());
+        let item = editor.finish().unwrap();
+        let MeshSetupKind::ExtrudeMesh(extrude) = &item.kind else {
+            panic!("{item:?}");
+        };
+        assert_eq!(
+            extrude.faces,
+            vec![
+                cad_pick(&view, &top, 0.5)
+                    .map(|e| match e {
+                        CadEntity::Face(tag) => tag,
+                        _ => 0,
+                    })
+                    .unwrap()
+            ]
+        );
+        assert_eq!(extrude.parts, vec!["SOLID-1".to_string()]);
+        assert!(!editor.highlight(&view).faces.is_empty());
+
+        // Multi-layered sizes are typed as PrePoMax writes them.
+        if let MeshSetupKind::ExtrudeMesh(extrude) = &mut editor.draft.kind {
+            extrude.layers = ExtrudeLayers::MultiLayered {
+                sizes: Vec::new(),
+                elements: Vec::new(),
+            };
+        }
+        editor.layer_text = ["0,2; 0.8".into(), "1; 3;".into()];
+        let item = editor.finish().unwrap();
+        let MeshSetupKind::ExtrudeMesh(extrude) = &item.kind else {
+            panic!("{item:?}");
+        };
+        assert_eq!(
+            extrude.layers,
+            ExtrudeLayers::MultiLayered {
+                sizes: vec![0.2, 0.8],
+                elements: vec![1, 3]
+            }
+        );
+        editor.layer_text[1] = "1; x".into();
+        assert!(editor.finish().is_err());
+        let mut with_item = geometry.clone();
+        with_item.mesh_items.push(item);
+        let edited = MeshItemEditor::edit(&with_item, 0, UnitSystem::MmTonSC).unwrap();
+        assert!(edited.source_faces);
+        assert_eq!(edited.layer_text[0], "0.2; 0.8;");
     }
 
     #[test]

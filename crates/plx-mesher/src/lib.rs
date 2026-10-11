@@ -4,6 +4,7 @@
 //! prepolix starts and works with meshes without it. Releases ship the library next to the
 //! program; `scripts/fetch_gmsh.py` fetches it for development.
 
+mod extrude;
 mod ffi;
 pub mod gmsh;
 mod step_names;
@@ -658,7 +659,7 @@ fn renumbering(
         .collect()
 }
 
-/// Renumbers the faces and edges of the local mesh sizes after [`renumbering`]; those
+/// Renumbers the faces and edges of the local mesh sizes and extrude meshes after [`renumbering`]; those
 /// without a new tag are dropped.
 fn renumber_mesh_items(
     items: &mut [plx_model::MeshSetupItem],
@@ -676,9 +677,13 @@ fn renumber_mesh_items(
             .collect();
     };
     for item in items {
-        if let plx_model::MeshSetupKind::LocalMeshSize { faces, edges, .. } = &mut item.kind {
-            renumber(2, faces);
-            renumber(1, edges);
+        match &mut item.kind {
+            plx_model::MeshSetupKind::LocalMeshSize { faces, edges, .. } => {
+                renumber(2, faces);
+                renumber(1, edges);
+            }
+            plx_model::MeshSetupKind::ExtrudeMesh(extrude) => renumber(2, &mut extrude.faces),
+            _ => {}
         }
     }
 }
@@ -732,6 +737,9 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
             .collect();
         if !others.is_empty() {
             gmsh.remove(&others)?;
+        }
+        if let Some(extrude) = geometry.extrusion(part) {
+            return extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude);
         }
         let options = MeshOptions::of_part(geometry, part);
         options.apply(gmsh)?;
@@ -1153,6 +1161,9 @@ impl MeshOptions {
             Algorithm2d::Automatic => 2.0,
             Algorithm2d::Delaunay => 5.0,
             Algorithm2d::FrontalDelaunay => 6.0,
+            Algorithm2d::FrontalQuads => 8.0,
+            Algorithm2d::PackingOfParallelograms => 9.0,
+            Algorithm2d::QuasiStructuredQuad => 11.0,
         };
         let algorithm_3d = match algorithm_3d {
             Algorithm3d::Delaunay => 1.0,
@@ -1178,6 +1189,8 @@ impl MeshOptions {
             ("Mesh.Optimize", 1.0),
             ("Mesh.OptimizeNetgen", f64::from(u8::from(self.netgen))),
             ("Mesh.RecombineAll", f64::from(u8::from(self.quads))),
+            // Blossom, Gmsh's default; an extrude mesh chooses its own.
+            ("Mesh.RecombinationAlgorithm", 1.0),
             // Quadratic quadrilaterals with 8 nodes, as CalculiX has them.
             ("Mesh.SecondOrderIncomplete", 1.0),
         ] {

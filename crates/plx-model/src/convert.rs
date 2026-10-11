@@ -354,7 +354,7 @@ impl Geometry {
             match &mut item.kind {
                 MeshSetupKind::MeshingParameters { parameters, .. } => parameters.convert_units(c),
                 MeshSetupKind::LocalMeshSize { size, .. } => c.value(size, Quantity::Length),
-                MeshSetupKind::TetrahedralGmsh { .. } => {}
+                MeshSetupKind::TetrahedralGmsh { .. } | MeshSetupKind::ExtrudeMesh(_) => {}
             }
         }
     }

@@ -43,7 +43,8 @@ pub use features::{
 };
 pub use field::{FieldOutput, OutputDimension, OutputKind, output_variable_description};
 pub use geometry::{
-    Algorithm2d, Algorithm3d, Geometry, MeshSetupItem, MeshSetupKind, MeshingParameters,
+    Algorithm2d, Algorithm3d, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem, MeshSetupKind,
+    MeshingParameters, Recombination,
 };
 pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use library::MaterialLibrary;

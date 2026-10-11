@@ -67,6 +67,9 @@ gmsh_api! {
         *mut c_double, *mut c_double, *mut c_double,
         Ierr,
     );
+    get_value = "gmshModelGetValue":
+        fn(c_int, c_int, *const c_double, usize, *mut *mut c_double, *mut usize, Ierr);
+    occ_get_mass = "gmshModelOccGetMass": fn(c_int, c_int, *mut c_double, Ierr);
     occ_import_shapes = "gmshModelOccImportShapes":
         fn(*const c_char, *mut *mut c_int, *mut usize, c_int, *const c_char, Ierr);
     occ_add_box = "gmshModelOccAddBox":

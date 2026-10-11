@@ -339,6 +339,18 @@ mod tests {
                         algorithm_3d: Algorithm3d::Hxt,
                     },
                 },
+                MeshSetupItem {
+                    name: "Extrude_Mesh-1".into(),
+                    kind: MeshSetupKind::ExtrudeMesh(plx_model::ExtrudeMesh {
+                        parts: vec!["SOLID-1".into()],
+                        faces: vec![2],
+                        layers: plx_model::ExtrudeLayers::MultiLayered {
+                            sizes: vec![0.2, 0.8],
+                            elements: vec![1, 3],
+                        },
+                        ..Default::default()
+                    }),
+                },
             ],
             part_names: vec!["SOLID-1".into()],
         };

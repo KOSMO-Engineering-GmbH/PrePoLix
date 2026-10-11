@@ -375,6 +375,33 @@ impl Gmsh {
         self.synchronize()
     }
 
+    /// Removes entities given as (dimension, tag) and nothing else, so that the faces of a
+    /// removed solid stay.
+    pub fn remove_only(&self, entities: &[(i32, i32)]) -> Result<(), GmshError> {
+        let flat: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
+        self.call(|e| unsafe { (self.api.occ_remove)(flat.as_ptr(), flat.len(), 0, e) })?;
+        self.synchronize()
+    }
+
+    /// Coordinates of a point entity.
+    pub fn point(&self, tag: i32) -> Result<[f64; 3], GmshError> {
+        let (mut coords, mut len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.get_value)(0, tag, std::ptr::null(), 0, &mut coords, &mut len, e);
+        })?;
+        match self.take_vec(coords, len)[..] {
+            [x, y, z] => Ok([x, y, z]),
+            _ => Err(GmshError::Other(format!("Point {tag} has no coordinates"))),
+        }
+    }
+
+    /// Length of a curve, area of a surface or volume of a solid of the OpenCASCADE model.
+    pub fn mass(&self, dim: i32, tag: i32) -> Result<f64, GmshError> {
+        let mut mass = 0.0;
+        self.call(|e| unsafe { (self.api.occ_get_mass)(dim, tag, &mut mass, e) })?;
+        Ok(mass)
+    }
+
     /// Adds a mesh size field of a type such as `Constant` or `Min`; returns its tag.
     pub fn add_field(&self, kind: &str) -> Result<i32, GmshError> {
         let kind = c_string(kind)?;
