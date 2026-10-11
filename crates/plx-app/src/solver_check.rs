@@ -152,7 +152,8 @@ pub fn by_feature(keywords: &[String]) -> Vec<String> {
 /// CalculiX cannot list its keywords, so each one is read alone from an input file: an unknown
 /// keyword gives the warning "Card image cannot be interpreted", a known one another message
 /// (it is out of place there) or none. A keyword whose test does not run is left out; `None`
-/// if CalculiX does not start.
+/// if CalculiX does not start. A few keywords crash CalculiX when they stand alone and get the
+/// context they need first, see [`keyword_test_input`].
 pub fn known_keywords(
     solver: &plx_job::Solver,
     work_dir: &Path,
@@ -161,7 +162,7 @@ pub fn known_keywords(
     let dir = work_dir.join("Keywordtest");
     let mut known = BTreeMap::new();
     for keyword in keywords {
-        let Ok(mut job) = Job::start(solver, &dir, "Keyword", &format!("{keyword}\n")) else {
+        let Ok(mut job) = Job::start(solver, &dir, "Keyword", &keyword_test_input(keyword)) else {
             let _ = std::fs::remove_dir_all(&dir);
             return None;
         };
@@ -184,6 +185,39 @@ pub fn known_keywords(
     let _ = std::fs::remove_dir_all(&dir);
     Some(known)
 }
+
+/// The input file that tests `keyword`: the keyword alone, or, where CalculiX 2.23 crashes on
+/// that, after the model it reads. `*CYCLIC SYMMETRY MODEL` needs nodes and a cyclic tie; with
+/// them CalculiX stops with an error instead of a segmentation fault (on Windows a crash
+/// report window).
+fn keyword_test_input(keyword: &str) -> String {
+    use plx_io::inp::keywords::normalized;
+    if normalized(keyword) == normalized("*CYCLIC SYMMETRY MODEL") {
+        format!("{CYCLIC_SYMMETRY_MODEL}{keyword}, N=4, TIE=T\n0, 0, 0, 0, 0, 1\n")
+    } else {
+        format!("{keyword}\n")
+    }
+}
+
+/// One element with the two surfaces and the cyclic tie `*CYCLIC SYMMETRY MODEL` refers to.
+const CYCLIC_SYMMETRY_MODEL: &str = "*Node
+1, 0, 0, 0
+2, 1, 0, 0
+3, 1, 1, 0
+4, 0, 1, 0
+5, 0, 0, 1
+6, 1, 0, 1
+7, 1, 1, 1
+8, 0, 1, 1
+*Element, Type=C3D8, Elset=E
+1, 1, 2, 3, 4, 5, 6, 7, 8
+*Surface, Name=A, Type=Node
+1
+*Surface, Name=B, Type=Node
+2
+*Tie, Name=T, Cyclic symmetry
+A, B
+";
 
 /// Direct solvers a CalculiX build may or may not include; the iterative ones are always there.
 const OPTIONAL_SOLVERS: [EquationSolver; 3] = [
@@ -610,6 +644,29 @@ mod tests {
         assert_eq!(known.len(), 3, "{known:?}");
         let unknown = unknown_of(&known, keywords.iter().map(String::as_str));
         assert_eq!(unknown, ["*NOT A KEYWORD"]);
+    }
+
+    #[test]
+    fn cyclic_symmetry_test_does_not_crash_calculix() {
+        if Command::new("ccx").arg("-v").output().is_err() {
+            eprintln!("ccx not found, test skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("plx-cyclictest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = keyword_test_input("*Cyclic symmetry model");
+        std::fs::write(dir.join("Keyword.inp"), input).unwrap();
+        let output = Command::new("ccx")
+            .arg("Keyword")
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let text = String::from_utf8_lossy(&output.stdout);
+        // Alone the keyword ends in a segmentation fault; here CalculiX stops with an error.
+        assert!(output.status.code().is_some(), "{text}");
+        assert!(text.contains("*ERROR"), "{text}");
+        assert!(!text.contains("cannot be interpreted"), "{text}");
     }
 
     #[test]
