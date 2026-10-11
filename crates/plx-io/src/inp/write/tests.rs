@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use plx_mesh::CadEntity;
 use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, DefinedField, DefinedFieldKind,
     DynamicStep, Elastic, EquationSolver, Hardening, Load, Material, ModalDamping,
@@ -2335,8 +2336,26 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
 #[test]
 fn calculix_preloads_a_bolt_split_into_two_tied_parts() {
     let force = 1000.0;
-    for cut_is_master in [true, false] {
-        let (mesh, lower, upper) = two_blocks(0.0);
+    // Faces picked on the FE mesh, and on the CAD geometry, whose nodes are the original ones.
+    for (cut_is_master, on_geometry) in [(true, false), (false, false), (true, true), (false, true)]
+    {
+        let (mut mesh, lower, upper) = two_blocks(0.0);
+        for (face, faces) in [(1, &lower), (2, &upper)] {
+            let nodes: BTreeSet<NodeId> = (faces.iter())
+                .flat_map(|&(e, f)| constraints::face_node_ids(&mesh, e, f))
+                .collect();
+            mesh.cad.faces.insert(face, faces.clone());
+            mesh.cad
+                .nodes
+                .insert(CadEntity::Face(face), nodes.into_iter().collect());
+        }
+        let side = |face: i32, faces: &Faces| {
+            if on_geometry {
+                Region::Geometry(vec![CadEntity::Face(face)])
+            } else {
+                Region::Faces(faces.clone())
+            }
+        };
         let mut model = stacked_blocks(&mesh);
         let ends: Vec<NodeId> = (mesh.node_ids().iter().zip(mesh.coords()))
             .filter(|(_, c)| c[2] == 0.0 || c[2] == 20.0)
@@ -2359,15 +2378,15 @@ fn calculix_preloads_a_bolt_split_into_two_tied_parts() {
         }];
         let mut tie = plx_model::Tie::new("Tie-1");
         (tie.master, tie.slave) = if cut_is_master {
-            (Region::Faces(lower), Region::Faces(upper))
+            (side(1, &lower), side(2, &upper))
         } else {
-            (Region::Faces(upper), Region::Faces(lower))
+            (side(2, &upper), side(1, &lower))
         };
         model.ties.push(tie);
         let text = write_inp(&mesh, &model, "").unwrap();
         // The cut nodes 19 to 27 of the lower block are the slave nodes.
         assert!(text.contains("Slave, Type=Node\n"), "{text}");
-        let name = format!("geteilt-{cut_is_master}");
+        let name = format!("geteilt-{cut_is_master}-{on_geometry}");
         let Some(frd) = run_ccx(&name, &text) else {
             return;
         };
