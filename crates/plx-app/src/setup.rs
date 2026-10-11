@@ -2317,9 +2317,9 @@ impl Editor {
             match &step.kind {
                 StepKind::Frequency(settings) => validate_frequency_step(settings)?,
                 StepKind::Buckle(settings) => validate_buckle_step(settings)?,
-                StepKind::HeatTransfer(settings) | StepKind::CoupledTempDisp(settings) => {
-                    validate_heat_transfer_step(settings)?
-                }
+                StepKind::HeatTransfer(settings)
+                | StepKind::CoupledTempDisp(settings)
+                | StepKind::UncoupledTempDisp(settings) => validate_heat_transfer_step(settings)?,
                 StepKind::Sensitivity(settings) => {
                     if let Some(problem) = settings.problem() {
                         return Err(problem);
@@ -3379,7 +3379,7 @@ fn copy_items_of_last_step(fe: &FeModel, step: &mut Step) {
 
 /// The step kinds of the dialog: label, the kind with its settings and its default field
 /// outputs, in PrePoMax's order.
-fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 10] {
+fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 11] {
     let heat = HeatTransferStep::default();
     [
         (
@@ -3424,7 +3424,12 @@ fn step_kinds(fe: &FeModel) -> [(&'static str, StepKind, Vec<FieldOutput>); 10] 
         ),
         (
             COUPLED_LABEL,
-            StepKind::CoupledTempDisp(heat),
+            StepKind::CoupledTempDisp(heat.clone()),
+            FieldOutput::coupled_defaults(),
+        ),
+        (
+            UNCOUPLED_LABEL,
+            StepKind::UncoupledTempDisp(heat),
             FieldOutput::coupled_defaults(),
         ),
         (
@@ -3439,6 +3444,7 @@ const STATIC_LABEL: &str = "Static";
 const FREQUENCY_LABEL: &str = "Frequency";
 const HEAT_TRANSFER_LABEL: &str = "Heat Transfer";
 const COUPLED_LABEL: &str = "Coupled Temperature-Displacement";
+const UNCOUPLED_LABEL: &str = "Uncoupled Temperature-Displacement";
 const DYNAMIC_LABEL: &str = "Dynamic (time integration)";
 const MODAL_DYNAMICS_LABEL: &str = "Modal Dynamics (from stored modes)";
 const STEADY_STATE_LABEL: &str = "Steady State Dynamics (frequency response)";
@@ -3457,6 +3463,7 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
         StepKind::Buckle(_) => BUCKLE_LABEL,
         StepKind::HeatTransfer(_) => HEAT_TRANSFER_LABEL,
         StepKind::CoupledTempDisp(_) => COUPLED_LABEL,
+        StepKind::UncoupledTempDisp(_) => UNCOUPLED_LABEL,
         StepKind::Sensitivity(_) => SENSITIVITY_LABEL,
     }
 }
@@ -3494,6 +3501,8 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
         StepKind::Buckle(settings) => buckle_form(ui, settings),
         StepKind::HeatTransfer(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::CoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, true),
+        // PrePoMax offers no NLGEOM for the uncoupled step.
+        StepKind::UncoupledTempDisp(settings) => heat_transfer_form(ui, settings, units, false),
         StepKind::Sensitivity(settings) => sensitivity_form(ui, settings, units),
     }
 }
