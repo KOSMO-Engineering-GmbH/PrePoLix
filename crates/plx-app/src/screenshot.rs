@@ -55,7 +55,7 @@ impl Screenshot {
 }
 
 /// The part of the window image covered by `rect`, clamped to the image.
-fn crop(image: &ColorImage, rect: Rect, pixels_per_point: f32) -> ColorImage {
+pub fn crop(image: &ColorImage, rect: Rect, pixels_per_point: f32) -> ColorImage {
     let [width, height] = image.size;
     let px = |v: f32, max: usize| ((v * pixels_per_point).round().max(0.0) as usize).min(max);
     let (x0, y0) = (px(rect.min.x, width), px(rect.min.y, height));

@@ -8,6 +8,7 @@ use plx_results::hot_spot::{HotSpot, HotSpotPath};
 
 use crate::analysis::{Analysis, MonitorEvent};
 use crate::animation::{AnimationKind, ColorLimits, Playback};
+use crate::animation_export::{self, Format};
 use crate::contact_search::{ContactSearchDialog, SearchResult};
 use crate::exploded::{ExplodedDialog, ExplodedResult};
 use crate::features::{FeatureDialog, FeatureKind, FeatureResult};
@@ -138,6 +139,10 @@ struct Workbench {
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
     screenshot: Screenshot,
+    /// Animation export taking its frames from the 3D view.
+    recording: Option<animation_export::Recording>,
+    /// Exported animation being encoded, with its file name.
+    animation_encoding: Option<(String, animation_export::Encoder)>,
     /// Open dialog of a hot spot definition of the current results.
     hot_spot_dialog: Option<HotSpotDialog>,
     /// Hot spot whose paths are shown, edited or selected, with the results file and its
@@ -258,6 +263,8 @@ impl PrepolixApp {
                 findings_window: None,
                 open_results: None,
                 screenshot: Screenshot::default(),
+                recording: None,
+                animation_encoding: None,
                 hot_spot_dialog: None,
                 hot_spot_preview: None,
                 hot_spot_plotted: None,
@@ -721,6 +728,23 @@ impl PrepolixApp {
             (Some(path), _) => {
                 ui.spinner();
                 ui.label(format!("Loading {} …", path.display()));
+            }
+            (None, _) if self.workbench.recording.is_some() => {
+                if let Some(recording) = &self.workbench.recording {
+                    let (done, all) = recording.progress();
+                    ui.spinner();
+                    ui.label(format!(
+                        "Recording {}: frame {} of {all} (Esc cancels)",
+                        recording.file,
+                        (done + 1).min(all)
+                    ));
+                }
+            }
+            (None, _) if self.workbench.animation_encoding.is_some() => {
+                if let Some((file, _)) = &self.workbench.animation_encoding {
+                    ui.spinner();
+                    ui.label(format!("Writing {file} …"));
+                }
             }
             (None, _) if self.workbench.meshing.is_some() => {
                 ui.spinner();
@@ -5508,14 +5532,52 @@ impl Workbench {
 
     /// Plays the animation and shows its window; marks the scene for rebuilding.
     fn animate(&mut self, ctx: &egui::Context) {
+        if let Some((file, encoder)) = &self.animation_encoding
+            && let Some(result) = encoder.poll()
+        {
+            self.output
+                .push(result.unwrap_or_else(|err| format!("{file}: {err}")));
+            self.animation_encoding = None;
+        }
         let model = match self.tree_view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
             TreeView::FeModel => self.model.as_mut(),
         };
-        let Some(view) = model.and_then(|m| m.results.as_mut()) else {
+        let Some(view) = model
+            .and_then(|m| m.results.as_mut())
+            .filter(|view| view.animation.is_some())
+        else {
+            if self.recording.take().is_some() {
+                self.output.push("Animation export cancelled".into());
+            }
             return;
         };
+        if let Some(recording) = self.recording.take() {
+            let ((frame, playing), file) = (recording.restore, recording.file.clone());
+            let (recording, step) = recording.update(ctx, self.viewport.rect);
+            self.recording = recording;
+            let shown = match step {
+                animation_export::Step::Wait => return,
+                animation_export::Step::Show(frame) => frame,
+                animation_export::Step::Finished(encoder) => {
+                    self.animation_encoding = Some((file, encoder));
+                    frame
+                }
+                animation_export::Step::Cancelled => {
+                    self.output.push("Animation export cancelled".into());
+                    frame
+                }
+            };
+            if let Some(animation) = &mut view.animation {
+                animation.go_to(shown);
+                // Back to the state from before once the recording ended.
+                animation.playing = self.recording.is_none() && playing;
+            }
+            view.show_animation_frame();
+            self.frame_changed = true;
+            return;
+        }
         let Some(animation) = &mut view.animation else {
             return;
         };
@@ -5527,8 +5589,22 @@ impl Workbench {
             }
             ctx.request_repaint();
         }
-        match animation_window(ctx, view) {
+        match animation_window(ctx, view, self.animation_encoding.is_some()) {
             WindowEvent::None => {}
+            WindowEvent::Export(format) => {
+                let ffmpeg = animation_export::ffmpeg_executable(&self.settings.post.ffmpeg);
+                if let Some(recording) =
+                    start_animation_export(view, format, ffmpeg, &mut self.output)
+                {
+                    let first = recording.first_frame();
+                    self.recording = Some(recording);
+                    if let Some(animation) = &mut view.animation {
+                        animation.go_to(first);
+                    }
+                    view.show_animation_frame();
+                    self.frame_changed = true;
+                }
+            }
             WindowEvent::Frame => {
                 view.show_animation_frame();
                 self.frame_changed = true;
@@ -5997,12 +6073,63 @@ enum WindowEvent {
     Frame,
     /// Settings changed that affect every frame.
     Settings,
+    /// Export of the animation as a file of this format.
+    Export(Format),
     Close,
+}
+
+/// Asks for the file and starts recording the frames of the animation of `view` in the order
+/// of its playback; `None` when cancelled or FFmpeg is missing for a video.
+fn start_animation_export(
+    view: &mut ResultsView,
+    format: Format,
+    ffmpeg: PathBuf,
+    output: &mut Vec<String>,
+) -> Option<animation_export::Recording> {
+    let animation = view.animation.as_mut()?;
+    if format.needs_ffmpeg()
+        && let Err(err) = animation_export::ffmpeg_version(&ffmpeg)
+    {
+        output.push(format!(
+            "{err}. Exporting {} needs FFmpeg: install it or set its path under Tools > \
+             Settings > Post-processing; GIF works without it.",
+            format.extension().to_uppercase()
+        ));
+        return None;
+    }
+    let path = rfd::FileDialog::new()
+        .set_title("Export Animation")
+        .add_filter(format.filter_name(), &[format.extension()])
+        .set_file_name(format!("animation.{}", format.extension()))
+        .save_file()?;
+    let path = if path.extension().is_none() {
+        path.with_extension(format.extension())
+    } else {
+        path
+    };
+    let file = path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let restore = (animation.frame, animation.playing);
+    animation.playing = false;
+    let sequence = animation_export::frame_sequence(animation.frame_count(), animation.playback);
+    let encoder = animation_export::Encoder::start(animation_export::Job {
+        format,
+        path,
+        fps: animation.fps,
+        repeat: animation.playback != Playback::Once,
+        ffmpeg,
+    });
+    Some(animation_export::Recording::new(
+        sequence, encoder, file, restore,
+    ))
 }
 
 /// PrePoMax's animation dialog: kind, frames, speed, playback mode, colour limits and the
 /// player controls.
-fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent {
+/// `exporting` greys out the export button while an exported animation is being written.
+fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool) -> WindowEvent {
     let mut event = WindowEvent::None;
     let mut open = true;
     let mut restart = None;
@@ -6112,6 +6239,20 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView) -> WindowEvent 
                 }
                 ui.add_space(8.0);
                 ui.label(format!("Frame {} of {}", frame + 1, last + 1));
+                ui.add_space(8.0);
+                let tip = if exporting {
+                    "Export Animation (the last export is still being written)"
+                } else {
+                    "Export Animation"
+                };
+                let export = icons::button(ui, Icon::Save, tip, !exporting, false);
+                egui::Popup::menu(&export).show(|ui| {
+                    for format in Format::ALL {
+                        if ui.button(format.menu_label()).clicked() {
+                            event = WindowEvent::Export(format);
+                        }
+                    }
+                });
                 if let Some(target) = target {
                     animation.playing = false;
                     if animation.go_to(target) && matches!(event, WindowEvent::None) {

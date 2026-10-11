@@ -26,6 +26,8 @@ user (`~/.local/share/prepolix` on Linux, `%APPDATA%\prepolix\data` on Windows).
     results.],
   [Color levels], [Number of colour bands of the legend for newly opened results (2 to 24,
     default 9).],
+  [FFmpeg executable], [FFmpeg for exporting animations as MP4 or MKV (@animation-export);
+    empty for `ffmpeg` on the `PATH`.],
 )
 
 === CalculiX
