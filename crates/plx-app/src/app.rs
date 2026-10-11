@@ -3171,7 +3171,8 @@ impl Workbench {
         let results = model.bound_results.as_ref();
         match plx_io::project::save_project(&path, geometry, &model.mesh, &model.fe, results) {
             Ok(()) => {
-                self.output.push(format!("{} saved", path.display()));
+                self.output
+                    .push(timestamped(format!("{} saved", path.display())));
                 model.path = path;
             }
             Err(error) => self.output.push(format!("Not saved: {error}")),
@@ -3190,9 +3191,10 @@ impl Workbench {
         };
         let geometry = model.geometry.as_ref();
         match plx_io::project::save_project(&path, geometry, &model.mesh, &model.fe, None) {
-            Ok(()) => self
-                .output
-                .push(format!("{} saved without results", path.display())),
+            Ok(()) => self.output.push(timestamped(format!(
+                "{} saved without results",
+                path.display()
+            ))),
             Err(error) => self.output.push(format!("Not saved: {error}")),
         }
     }
@@ -5686,7 +5688,9 @@ impl Workbench {
                 }
                 let data = sound::wav(sound.tones(), sound.export_seconds());
                 match std::fs::write(&path, data) {
-                    Ok(()) => self.output.push(format!("{} saved", path.display())),
+                    Ok(()) => self
+                        .output
+                        .push(timestamped(format!("{} saved", path.display()))),
                     Err(error) => sound.message = Some(format!("Not saved: {error}")),
                 }
             }
@@ -6286,6 +6290,11 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
         event = WindowEvent::Close;
     }
     event
+}
+
+/// Prefixes an output message with the local time, `HH:MM:SS`.
+fn timestamped(message: String) -> String {
+    format!("{} {message}", chrono::Local::now().format("%H:%M:%S"))
 }
 
 #[cfg(test)]
