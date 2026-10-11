@@ -816,6 +816,25 @@ impl<'a> Sets<'a> {
         }
     }
 
+    /// A node surface of the nodes of a region, named like [`Self::surface`].
+    fn node_surface(
+        &mut self,
+        item: &str,
+        side: &str,
+        region: &Region,
+    ) -> Result<String, WriteError> {
+        let ids = region.nodes(self.mesh);
+        if ids.is_empty() {
+            return Err(empty(item, "nodes"));
+        }
+        let postfix = format!("{}_{side}", name(item));
+        let surface = self.free_name("Internal_Selection", &postfix);
+        let set = self.free_name("Internal", &surface);
+        self.node_sets.push((set.clone(), ids));
+        self.surfaces.push((surface.clone(), Surface::Nodes(set)));
+        Ok(surface)
+    }
+
     /// Element sets and face numbers of a face region, for pressure loads.
     fn face_sets(&mut self, item: &str, region: &Region) -> Result<Vec<(String, u8)>, WriteError> {
         match region {
@@ -836,6 +855,16 @@ impl<'a> Sets<'a> {
         }
         Err(empty(item, "element faces"))
     }
+}
+
+/// Whether a face region holds edges (S3 and up) of membrane elements.
+fn membrane_edges(mesh: &FeMesh, region: &Region) -> bool {
+    (region.faces(mesh).iter()).any(|&(element, face)| {
+        face >= 3
+            && mesh.element(element).is_some_and(|e| {
+                e.is_shell() && e.type_name.to_ascii_uppercase().starts_with("M3D")
+            })
+    })
 }
 
 fn materials(model: &FeModel) -> Vec<Keyword> {
@@ -1218,7 +1247,14 @@ fn constraints(
 /// `*Tie` of a slave surface glued to its master.
 fn tie(sets: &mut Sets, tie: &Tie) -> Result<Keyword, WriteError> {
     let master = sets.surface(&tie.name, "Master", &tie.master)?;
-    let slave = sets.surface(&tie.name, "Slave", &tie.slave)?;
+    // CalculiX (2.21 to 2.23) ties the edge faces of membranes to nothing: their expanded
+    // nodes have no active degrees of freedom there, and the model has no stiffness. Their
+    // nodes tie correctly, and a membrane has no rotations to lose.
+    let slave = if membrane_edges(sets.mesh, &tie.slave) {
+        sets.node_surface(&tie.name, "Slave", &tie.slave)?
+    } else {
+        sets.surface(&tie.name, "Slave", &tie.slave)?
+    };
     let mut out = format!("*Tie, Name={}", name(&tie.name));
     if let Some(tolerance) = tie.position_tolerance {
         let _ = write!(out, ", Position tolerance={}", number(tolerance));

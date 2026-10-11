@@ -5250,3 +5250,159 @@ fn calculix_finds_the_disk_frequencies_on_a_sector() {
     let rows: Vec<f64> = nd.entries[0].values.clone();
     assert_eq!(rows, [0.0, 0.0, 1.0, 1.0, 2.0, 2.0], "{rows:?}");
 }
+
+/// A steel block of 2 x 2 hexes, 10 x 10 x 10, from z = 10 to 20, standing on a vertical
+/// plate of 2 x 2 elements of the type, 10 x 10 and 1 thick, in the plane x = 5, held at its
+/// bottom. Tie-1 glues the top edges of the plate (S5) to the bottom of the block (S1), and
+/// a pressure of 10 on the block's top pushes 1000 N through the plate.
+fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
+    let mut mesh = FeMesh::default();
+    let block = |i: u32, j: u32, k: u32| 1 + i + 3 * j + 9 * k;
+    for k in 0..2 {
+        for j in 0..3 {
+            for i in 0..3 {
+                let coords = [
+                    5.0 * f64::from(i),
+                    5.0 * f64::from(j),
+                    10.0 + 10.0 * f64::from(k),
+                ];
+                mesh.set_node(block(i, j, k), coords);
+            }
+        }
+    }
+    for j in 0..2 {
+        for i in 0..2 {
+            let mut nodes = Vec::new();
+            for k in 0..2 {
+                nodes.extend([block(i, j, k), block(i + 1, j, k)]);
+                nodes.extend([block(i + 1, j + 1, k), block(i, j + 1, k)]);
+            }
+            mesh.add_element(plx_mesh::Element {
+                id: 1 + i + 2 * j,
+                type_name: "C3D8".into(),
+                shape: plx_mesh::ElementShape::Hex8,
+                nodes,
+            })
+            .unwrap();
+        }
+    }
+    let plate = |j: u32, k: u32| 101 + j + 3 * k;
+    for k in 0..3 {
+        for j in 0..3 {
+            mesh.set_node(plate(j, k), [5.0, 5.0 * f64::from(j), 5.0 * f64::from(k)]);
+        }
+    }
+    for k in 0..2 {
+        for j in 0..2 {
+            mesh.add_element(plx_mesh::Element {
+                id: 201 + j + 2 * k,
+                type_name: plate_type.into(),
+                shape: plx_mesh::ElementShape::Quad4,
+                nodes: vec![
+                    plate(j, k),
+                    plate(j + 1, k),
+                    plate(j + 1, k + 1),
+                    plate(j, k + 1),
+                ],
+            })
+            .unwrap();
+        }
+    }
+    for (name, elements) in [
+        ("BLOCK", vec![1, 2, 3, 4]),
+        ("PLATE", vec![201, 202, 203, 204]),
+    ] {
+        mesh.parts.push(plx_mesh::Part {
+            name: name.into(),
+            elements,
+        });
+    }
+    let mut step = Step::new_static("Step-1");
+    let bc = |name: &str, nodes: Vec<NodeId>, kind| BoundaryCondition {
+        name: name.into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(nodes),
+        kind,
+        amplitude: None,
+    };
+    step.boundary_conditions
+        .push(bc("Fixed-1", (101..=103).collect(), BoundaryKind::Fixed));
+    // A membrane holds the block in its plane only.
+    let sideways = BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, None]);
+    step.boundary_conditions
+        .push(bc("Guided-1", (10..=18).collect(), sideways));
+    step.loads.push(Load {
+        name: "Pressure-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Faces((1..=4).map(|e| (e, 2)).collect()),
+        kind: LoadKind::Pressure(10.0),
+        amplitude: None,
+        factor_amplitude: None,
+    });
+    let mut model = FeModel::default();
+    model.materials.push(Material {
+        name: "Steel".into(),
+        elastic: Some(Elastic {
+            young: 210_000.0,
+            poisson: 0.3,
+        }),
+        ..Default::default()
+    });
+    let plate_kind = if plate_type.starts_with('M') {
+        SectionKind::Membrane {
+            thickness: 1.0,
+            offset: 0.0,
+        }
+    } else {
+        SectionKind::Shell {
+            thickness: 1.0,
+            offset: 0.0,
+        }
+    };
+    for (name, part, kind) in [
+        ("Section-1", "BLOCK", SectionKind::Solid),
+        ("Section-2", "PLATE", plate_kind),
+    ] {
+        model.sections.push(Section {
+            name: name.into(),
+            material: "Steel".into(),
+            region: Region::Parts(vec![part.into()]),
+            thickness: 1.0,
+            kind,
+        });
+    }
+    let mut tie = plx_model::Tie::new("Tie-1");
+    tie.master = Region::Faces((1..=4).map(|e| (e, 1)).collect());
+    tie.slave = Region::Faces(vec![(203, 5), (204, 5)]);
+    model.ties.push(tie);
+    model.steps.push(step);
+    (mesh, model)
+}
+
+#[test]
+fn the_edge_of_a_shell_or_membrane_tied_to_a_solid_carries_its_load() {
+    for plate_type in ["S4", "M3D4"] {
+        let (mesh, model) = block_on_plate(plate_type);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        // CalculiX ties membrane edges by their nodes only.
+        let slave = if plate_type == "S4" {
+            "*Surface, Name=Internal_Selection-1_Tie-1_Slave, Type=Element\n\
+             Internal-1_Internal_Selection-1_Tie-1_Slave_S5, S5\n"
+        } else {
+            "*Surface, Name=Internal_Selection-1_Tie-1_Slave, Type=Node\n\
+             Internal-1_Internal_Selection-1_Tie-1_Slave\n"
+        };
+        assert!(
+            text.contains(slave),
+            "{plate_type}: {slave:?} missing in\n{text}"
+        );
+        let Some(frd) = run_ccx(&format!("edge-tie-{plate_type}"), &text) else {
+            return;
+        };
+        // 1000 N through 10 x 1 of plate 10 long, and the block: about 0.0052 down.
+        let u3 = node_value(&frd, "DISP", "U3", 14);
+        assert!((-0.007..-0.004).contains(&u3), "{plate_type}: U3 = {u3}");
+    }
+}

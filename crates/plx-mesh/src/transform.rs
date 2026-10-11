@@ -136,12 +136,18 @@ impl Element {
         let new_faces: Vec<BTreeSet<NodeId>> = (self.faces().iter())
             .map(|f| f.corners.iter().map(|&i| self.nodes[i]).collect())
             .collect();
-        (old_faces.iter())
+        let mut moved: Vec<u8> = (old_faces.iter())
             .map(|old| {
                 let position = new_faces.iter().position(|new| new == old);
                 position.map_or(0, |p| p as u8 + 1)
             })
-            .collect()
+            .collect();
+        // The bottom and the top of a shell have the same nodes; turned over, they swap.
+        if self.is_shell() {
+            moved[0] = 2;
+            moved[1] = 1;
+        }
+        moved
     }
 }
 

@@ -79,6 +79,12 @@ surface.
   [Master / Slave], [The two surfaces, picked with their #ui("...") buttons.],
 )
 
+In 3D models the master and slave regions can also be edges of shells and membranes, where a
+shell meets a solid face edge on: a click near a free edge of a shell picks the edge, and so do
+#ui("Edge angle") and, under #ui("More"), #ui("Edge"). CalculiX takes such an edge as a face of
+the shell (S3 and up). For a contact on a shell edge use #ui("Surface to surface") with a
+#ui("Tied") surface behavior; CalculiX needs a #ui("Stick slope") under #ui("Friction") for it.
+
 === Ties
 
 #menu("Interaction", "Create Tie ...") or #ui("Create Tie ...") in the context menu of
@@ -90,8 +96,9 @@ surface.
   [Position tolerance], [The largest distance at which slave nodes are tied.],
   [Adjust], [#ui("Move slave nodes onto master (Adjust)") projects the slave nodes onto the
     master surface.],
-  [Master / Slave], [The two surfaces, picked with their #ui("...") buttons. Choose the finer
-    mesh as slave.],
+  [Master / Slave], [The two surfaces, picked with their #ui("...") buttons, also edges of
+    shells as for contact pairs. Choose the finer mesh as slave, and an edge of a shell as slave
+    of the face it stands on.],
   [Cyclic symmetry], [Ties the two cut faces of a sector of a rotationally repeating part, see
     @cyclic-symmetry.],
 )
@@ -115,15 +122,27 @@ creates ties or contact pairs for them.
   [Angle], [Largest angle between the surface normals (default 35°).],
   [Group by], [#ui("None"): one pair per touching surface pair. #ui("Parts") (default): one pair
     per pair of parts. #ui("Graph"): merges surfaces so that each node is slave only once.],
-  [Geometry Filter], [Which geometry is searched: solids (3D), element edges (2D), #ui("Line
-    end") for beam and truss ends at the same point, and whether hidden parts are ignored.],
+  [Geometry Filter], [Which geometry is searched: in 3D the faces of #ui("Solid") parts, the top
+    and bottom of #ui("Shell") and membrane parts, and their free edges (#ui("Shell edge")); in
+    2D the element edges. #ui("Line end") finds beam and truss ends at the same point;
+    #ui("Ignore hidden parts") leaves out hidden parts.],
   [Type], [#ui("Tie") or #ui("Contact"), for contacts with #ui("Surface Interaction") and
     #ui("Method").],
   [Adjust mesh], [Writes the pairs with adjust.],
 )
 
-#ui("Search") fills the table. Each row can be edited and switched off with its check box; select
+#ui("Search") fills the table; its #ui("Geometry") column tells what touches, e.g.
+#ui("Solid-Shell edge") where the edge of a shell or membrane stands on a solid. Each row can be edited and switched off with its check box; select
 several rows to edit them together. The context menu of a row has #ui("Swap Master/Slave") and
 #ui("Merge by Master/Slave"). PrePoLix chooses the coarser mesh as master, then the stiffer
-material, then the larger surface. #ui("OK") creates the checked pairs, all under
-#ui("Contact Pairs"); line ends become node ties. Surfaces that are whole CAD faces are stored by geometry and survive remeshing.
+material, then the larger surface; an edge of a shell is always the slave of a face. A shell
+touches with the side facing the other part: CalculiX ties its top (S2) or bottom (S1). #ui("OK") creates the checked pairs, all under
+#ui("Contact Pairs"); line ends become node ties. Surfaces that are whole CAD faces or edges are stored by geometry and
+survive remeshing.
+
+#screenshot("contact-search-shell-edge.png", [A tie found by the search between the bottom of a
+  block (master, red) and the top edge of a shell standing under it (slave, violet)])
+
+CalculiX ties the edge faces of membranes to nothing (the solver stops with a singular stiffness
+matrix), so PrePoLix writes the slave side of a tie on membrane edges as a node surface of the
+edge's nodes; a membrane has no rotations that would need more.

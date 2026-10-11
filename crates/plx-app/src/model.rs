@@ -1043,8 +1043,9 @@ impl Model {
             .collect()
     }
 
-    /// Edges of 2D elements on the outline of their part, the faces of 2D models, as
-    /// (part, (element, edge number), corner and midside nodes).
+    /// Edges of 2D elements and shells on the outline of their part, as (part, (element,
+    /// CalculiX face number), corner and midside nodes): the faces of 2D models, and the
+    /// free edges of shells.
     pub fn outline_edges(&self) -> Vec<(usize, (ElementId, u8), Vec<NodeId>)> {
         let mut edges = Vec::new();
         for (index, part) in self.mesh.parts.iter().enumerate() {
@@ -1052,17 +1053,14 @@ impl Model {
                 std::collections::HashMap::new();
             let mut found = Vec::new();
             for element in part.elements.iter().filter_map(|&id| self.mesh.element(id)) {
-                if !element.is_plane() {
-                    continue;
-                }
-                for (k, edge) in element.faces().iter().enumerate() {
+                for (number, edge) in element.edge_faces() {
                     let [a, b] = [edge.corners[0], edge.corners[1]].map(|l| element.nodes[l]);
                     *count.entry((a.min(b), a.max(b))).or_default() += 1;
                     let mut nodes = vec![a, b];
                     if element.shape.is_quadratic() {
                         nodes.extend(edge.mids.iter().map(|&l| element.nodes[l]));
                     }
-                    found.push(((element.id, k as u8 + 1), nodes));
+                    found.push(((element.id, number), nodes));
                 }
             }
             for (face, nodes) in found {

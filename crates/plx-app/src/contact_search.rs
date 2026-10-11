@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use egui::Ui;
 use plx_mesh::{
-    CadEntity, ElementId, GroupBy, LineJoint, MasterSlaveItem, SearchParameters,
+    CadEntity, ElementId, GeometryFilter, GroupBy, LineJoint, MasterSlaveItem, SearchParameters,
     find_contact_pairs, find_line_joints, surface_faces,
 };
 use plx_model::{
@@ -17,6 +17,7 @@ use plx_model::{
 use crate::model::{Highlight, Model};
 use crate::numeric;
 use crate::selection::edge_lines;
+use crate::setup::shown_faces;
 
 /// What a pair found becomes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,14 +62,13 @@ struct Row {
 }
 
 impl Row {
-    /// What touches, as in PrePoMax's table: solids, the edges of a 2D model, or line ends.
-    fn geometry(&self, plane: bool) -> &'static str {
+    /// What touches, as in PrePoMax's table: solids, shells, their edges, the edges of a 2D
+    /// model, or line ends.
+    fn geometry(&self) -> String {
         if self.joint.is_some() {
-            "Line end-Line end"
-        } else if plane {
-            "Shell edge-Shell edge"
+            "Line end-Line end".into()
         } else {
-            "Solid-Solid"
+            self.item.geometry()
         }
     }
 
@@ -100,6 +100,8 @@ pub struct ContactSearchDialog {
     angle: f64,
     group_by: GroupBy,
     ignore_hidden: bool,
+    /// Which surfaces are searched; in 2D models always the edges.
+    filter: GeometryFilter,
     /// Also searches the ends of beams and trusses meeting at a point.
     line_ends: bool,
     kind: PairType,
@@ -131,6 +133,7 @@ impl ContactSearchDialog {
             angle: 35.0,
             group_by: GroupBy::Parts,
             ignore_hidden: true,
+            filter: GeometryFilter::default(),
             line_ends: true,
             kind: PairType::Tie,
             interaction: (fe.surface_interactions.first())
@@ -171,10 +174,14 @@ impl ContactSearchDialog {
                 ..Highlight::default()
             };
         }
+        let (faces, lines) = shown_faces(model, master);
+        let (secondary_faces, secondary_lines) = shown_faces(model, slave);
         Highlight {
             nodes,
-            faces: master.into_iter().collect(),
-            secondary_faces: slave.into_iter().collect(),
+            faces,
+            secondary_faces,
+            lines,
+            secondary_lines,
             ..Highlight::default()
         }
     }
@@ -185,6 +192,15 @@ impl ContactSearchDialog {
             angle_deg: self.angle,
             group_by: self.group_by,
             stiffness: part_stiffness(model),
+            filter: if self.plane {
+                GeometryFilter {
+                    solid: false,
+                    shell: false,
+                    shell_edge: true,
+                }
+            } else {
+                self.filter
+            },
         };
         let searched: Vec<bool> = (model.parts.iter())
             .map(|p| p.visible || !self.ignore_hidden)
@@ -324,19 +340,27 @@ impl ContactSearchDialog {
                 });
             });
             group(ui, "Geometry Filter", |ui| {
-                // Solids are searched in 3D models, the edges of the elements in 2D ones.
-                let (mut solid, mut shell, mut edge) = (!self.plane, false, self.plane);
-                let unsupported = "Shell elements are not searched yet.";
-                ui.add_enabled(false, egui::Checkbox::new(&mut solid, "Solid"));
-                ui.add_enabled(false, egui::Checkbox::new(&mut shell, "Shell"))
-                    .on_disabled_hover_text(unsupported);
-                let edges = ui.add_enabled(false, egui::Checkbox::new(&mut edge, "Shell edge"));
                 if self.plane {
-                    edges.on_disabled_hover_text(
-                        "In a 2D model the element edges are the surfaces.",
-                    );
+                    // The edges of the elements are the surfaces of a 2D model.
+                    let (mut solid, mut shell, mut edge) = (false, false, true);
+                    let why = "In a 2D model the element edges are the surfaces.";
+                    ui.add_enabled(false, egui::Checkbox::new(&mut solid, "Solid"))
+                        .on_disabled_hover_text(why);
+                    ui.add_enabled(false, egui::Checkbox::new(&mut shell, "Shell"))
+                        .on_disabled_hover_text(why);
+                    ui.add_enabled(false, egui::Checkbox::new(&mut edge, "Shell edge"))
+                        .on_disabled_hover_text(why);
                 } else {
-                    edges.on_disabled_hover_text(unsupported);
+                    let filter = &mut self.filter;
+                    ui.checkbox(&mut filter.solid, "Solid")
+                        .on_hover_text("Faces of solid parts");
+                    ui.checkbox(&mut filter.shell, "Shell")
+                        .on_hover_text("Top and bottom of shell and membrane parts");
+                    ui.checkbox(&mut filter.shell_edge, "Shell edge")
+                        .on_hover_text(
+                            "Free edges of shell and membrane parts, e.g. where a shell meets a \
+                         solid face",
+                        );
                 }
                 ui.checkbox(&mut self.line_ends, "Line end")
                     .on_hover_text("Ends of beams and trusses that lie on one point");
@@ -451,7 +475,7 @@ impl ContactSearchDialog {
                     let contact = row.kind == PairType::Contact;
                     let cells = [
                         row.name.clone(),
-                        row.geometry(self.plane).to_string(),
+                        row.geometry(),
                         row.type_label().to_string(),
                         if contact {
                             row.interaction.clone()

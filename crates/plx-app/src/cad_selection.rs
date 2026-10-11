@@ -96,7 +96,8 @@ impl CadIndex {
 }
 
 /// What a click selects by geometry on a mesh generated from CAD geometry: the vertex or
-/// edge near the click for regions of nodes, else the face under it; for the edges of 2D
+/// edge near the click for regions of nodes, the edge of a shell near the click for contact
+/// surfaces, else the face under it; for the edges of 2D
 /// models the nearest edge of the face. `None` where the mesh has no CAD entities.
 pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<CadEntity> {
     let index = model.cad_index();
@@ -111,7 +112,7 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
         {
             return Some(CadEntity::Vertex(vertex));
         }
-        return (target != Target::Faces).then_some(entity);
+        return (!matches!(target, Target::Faces | Target::Surfaces)).then_some(entity);
     }
     let skin_face = model.skin(hit.part).faces.get(hit.face)?;
     let element = model.mesh.elements()[skin_face.element].id;
@@ -124,6 +125,15 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
     };
     match target {
         Target::Faces => Some(CadEntity::Face(face)),
+        // An edge of a shell near the click, else the face.
+        Target::Surfaces => match nearest_edge() {
+            Some((edge, d))
+                if d <= precision && !model.mesh.cad_faces(&[CadEntity::Edge(edge)]).is_empty() =>
+            {
+                Some(CadEntity::Edge(edge))
+            }
+            _ => Some(CadEntity::Face(face)),
+        },
         Target::Edges => nearest_edge().map(|(edge, _)| CadEntity::Edge(edge)),
         Target::Nodes | Target::Point => {
             let vertices: BTreeSet<i32> = (edges.iter())
