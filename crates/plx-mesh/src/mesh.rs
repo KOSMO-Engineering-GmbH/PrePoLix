@@ -120,6 +120,27 @@ impl FeMesh {
         Ok(())
     }
 
+    /// Separates the mesh along a cut: the given elements get copies of the given nodes, at
+    /// the same place, under the new ids of `copies`, and no longer share them with the rest.
+    pub fn split_nodes(
+        &mut self,
+        elements: &BTreeSet<ElementId>,
+        copies: &BTreeMap<NodeId, NodeId>,
+    ) {
+        for (&node, &copy) in copies {
+            if let Some(coords) = self.node(node) {
+                self.set_node(copy, coords);
+            }
+        }
+        for element in (self.elements.iter_mut()).filter(|e| elements.contains(&e.id)) {
+            for node in &mut element.nodes {
+                if let Some(&copy) = copies.get(node) {
+                    *node = copy;
+                }
+            }
+        }
+    }
+
     pub fn node_count(&self) -> usize {
         self.node_ids.len()
     }
