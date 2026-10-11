@@ -3,6 +3,7 @@
 mod amplitude_dialog;
 mod analysis;
 mod animation;
+mod animation_export;
 mod app;
 mod cad_selection;
 mod campbell;

@@ -16,6 +16,7 @@ eframe.workspace = true
 egui.workspace = true
 egui-wgpu.workspace = true
 env_logger.workspace = true
+gif.workspace = true
 glam.workspace = true
 log.workspace = true
 open.workspace = true
