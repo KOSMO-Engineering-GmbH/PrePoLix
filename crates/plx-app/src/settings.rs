@@ -78,6 +78,8 @@ pub struct Solver {
     pub work_dir: String,
     /// Optional solvers found in the executable; probed again when it changes.
     pub detected: Option<DetectedSolvers>,
+    /// Keywords tested on the executable; tested again when it changes.
+    pub keywords: Option<DetectedKeywords>,
 }
 
 /// Result of [`crate::solver_check::available_solvers`] for one executable.
@@ -87,6 +89,16 @@ pub struct DetectedSolvers {
     pub solvers: Vec<EquationSolver>,
 }
 
+/// Result of [`crate::solver_check::known_keywords`] for one executable, by normalized
+/// keyword, collected over the self test and the analyses run with it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct DetectedKeywords {
+    pub executable: String,
+    /// The version the executable reported, so that an update is tested again.
+    pub version: Option<String>,
+    pub known: std::collections::BTreeMap<String, bool>,
+}
+
 impl Default for Solver {
     fn default() -> Self {
         Self {
@@ -94,6 +106,7 @@ impl Default for Solver {
             threads: 1,
             work_dir: String::new(),
             detected: None,
+            keywords: None,
         }
     }
 }
@@ -122,6 +135,45 @@ impl Solver {
             Some(solvers) if solvers.contains(&EquationSolver::Pardiso) => EquationSolver::Pardiso,
             _ => EquationSolver::Default,
         }
+    }
+
+    /// Those of `keywords` the executable does not know. Keywords not tested on it yet are
+    /// tested now, a few hundredths of a second each.
+    pub fn unknown_keywords(&mut self, keywords: &[String]) -> Vec<String> {
+        use plx_io::inp::keywords::normalized;
+        let solver = plx_job::Solver {
+            executable: clean_path(&self.executable).into(),
+            threads: 1,
+        };
+        let version = crate::solver_check::version_text(&solver.executable);
+        if (self.keywords.as_ref())
+            .is_none_or(|k| k.executable != self.executable || k.version != version)
+        {
+            self.keywords = Some(DetectedKeywords {
+                executable: self.executable.clone(),
+                version,
+                known: Default::default(),
+            });
+        }
+        let Some(detected) = self.keywords.as_mut() else {
+            return Vec::new();
+        };
+        let untested = (keywords.iter())
+            .filter(|k| !detected.known.contains_key(&normalized(k)))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !untested.is_empty() {
+            let work_dir = self.work_dir();
+            if let Some(known) = crate::solver_check::known_keywords(&solver, &work_dir, &untested)
+                && let Some(detected) = self.keywords.as_mut()
+            {
+                detected.known.extend(known);
+            }
+        }
+        let known = self.keywords.as_ref().map(|k| &k.known);
+        known.map_or_else(Vec::new, |known| {
+            crate::solver_check::unknown_of(known, keywords.iter().map(String::as_str))
+        })
     }
 
     /// The detected solvers, if they belong to the current executable.
@@ -503,6 +555,13 @@ impl SettingsWindow {
                     solvers,
                 });
             }
+            if let Some(known) = report.keywords {
+                self.draft.solver.keywords = Some(DetectedKeywords {
+                    executable: self.draft.solver.executable.clone(),
+                    version: report.version,
+                    known,
+                });
+            }
             self.solver_check = SolverCheck::Done(report.checks);
         }
         let running = matches!(self.solver_check, SolverCheck::Running(_));
@@ -510,7 +569,7 @@ impl SettingsWindow {
             let button = ui
                 .add_enabled(!running, egui::Button::new("Test CalculiX"))
                 .on_hover_text(
-                    "Starts the executable, solves small cantilevers whose results are compared with beam theory, and checks which equation solvers are available.",
+                    "Starts the executable, solves small cantilevers whose results are compared with beam theory, checks which equation solvers are available and whether it knows every keyword PrePoLix writes.",
                 );
             if button.clicked() {
                 let (sender, receiver) = std::sync::mpsc::channel();
@@ -555,6 +614,37 @@ impl SettingsWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_keywords_are_remembered() {
+        if std::process::Command::new("ccx")
+            .arg("-v")
+            .output()
+            .is_err()
+        {
+            eprintln!("ccx not found, test skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("plx-keywords-{}", std::process::id()));
+        let mut solver = Solver {
+            work_dir: dir.display().to_string(),
+            ..Solver::default()
+        };
+        let keywords = ["*STATIC".to_string(), "*NOT A KEYWORD".into()];
+        assert_eq!(solver.unknown_keywords(&keywords), ["*NOT A KEYWORD"]);
+        let detected = solver.keywords.clone().unwrap();
+        assert!(detected.version.is_some());
+        assert_eq!(detected.known.get("*NOTAKEYWORD"), Some(&false));
+        // Tested keywords are not tested again: a cached verdict stands.
+        solver
+            .keywords
+            .as_mut()
+            .unwrap()
+            .known
+            .insert("*STATIC".into(), false);
+        assert_eq!(solver.unknown_keywords(&keywords[..1]), ["*STATIC"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn missing_fields_take_their_defaults() {

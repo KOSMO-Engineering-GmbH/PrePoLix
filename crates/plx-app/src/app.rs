@@ -2988,8 +2988,28 @@ impl Workbench {
                     },
                     self.settings.solver.work_dir().display()
                 ));
-                self.analysis = Some(analysis);
                 self.solver_findings.clear();
+                // CalculiX skips keywords it does not know with only a warning; tested on
+                // the executable while it already runs.
+                let unknown = self.settings.solver.unknown_keywords(analysis.keywords());
+                if !unknown.is_empty() {
+                    let finding = plx_model::Finding::unknown_keywords(format!(
+                        "CalculiX {}does not know {}",
+                        (self.settings.solver.keywords.as_ref())
+                            .and_then(|k| k.version.as_deref())
+                            .map_or_else(String::new, |v| format!("{v} ")),
+                        crate::solver_check::by_feature(&unknown).join("; ")
+                    ));
+                    let note = format!(
+                        "Model check: {}: {}",
+                        finding.problem.title(),
+                        finding.detail
+                    );
+                    analysis.note(note.clone());
+                    self.output.push(note);
+                    self.solver_findings.push(finding);
+                }
+                self.analysis = Some(analysis);
             }
             Err(error) => self.output.push(error),
         }

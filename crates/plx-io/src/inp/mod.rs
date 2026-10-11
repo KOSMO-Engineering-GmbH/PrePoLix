@@ -3,6 +3,7 @@
 //! The reader currently takes the mesh: nodes, elements, node and element sets, and surfaces.
 //! Every other keyword is skipped and reported in [`InpImport::skipped_keywords`].
 
+pub mod keywords;
 mod lines;
 mod write;
 
