@@ -68,6 +68,15 @@ impl Geometry {
             .flatten()
     }
 
+    /// Whether the part is meshed with hexahedra if it turns out to be an extrusion: its
+    /// meshing parameters ask for it and no Tetrahedral Gmsh item names it.
+    pub fn finds_extrusion(&self, part: &str) -> bool {
+        self.parameters(part).extrude_where_possible
+            && !self.mesh_items.iter().any(|item| {
+                matches!(&item.kind, MeshSetupKind::TetrahedralGmsh { parts, .. } if names(parts, part))
+            })
+    }
+
     /// The local mesh sizes as (faces, edges, size).
     pub fn local_sizes(&self) -> impl Iterator<Item = (&[i32], &[i32], f64)> {
         self.mesh_items.iter().filter_map(|item| match &item.kind {
@@ -99,6 +108,9 @@ pub struct MeshingParameters {
     pub optimize: bool,
     /// Faces (2D models and shells) are meshed with mostly quadrilaterals instead of triangles.
     pub quad_dominated: bool,
+    /// Solids that are straight extrusions get an extrude mesh of hexahedra with the
+    /// defaults of the Extrude Mesh item; the others stay tetrahedra.
+    pub extrude_where_possible: bool,
 }
 
 impl Default for MeshingParameters {
@@ -111,6 +123,7 @@ impl Default for MeshingParameters {
             midside_nodes_on_geometry: false,
             optimize: true,
             quad_dominated: false,
+            extrude_where_possible: false,
         }
     }
 }

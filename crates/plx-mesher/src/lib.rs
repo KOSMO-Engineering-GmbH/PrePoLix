@@ -717,6 +717,22 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
     }
     let file = TempFile::with_contents("brep", &geometry.brep)?;
     with_gmsh(|gmsh| {
+        // With the extrusions found automatically, a part that is none is read again for
+        // the tetrahedra, as the attempt took the solid out of the model.
+        if geometry.extrusion(part).is_none() && geometry.finds_extrusion(part) {
+            let extrude = plx_model::ExtrudeMesh {
+                parts: vec![part.to_string()],
+                ..Default::default()
+            };
+            if let Some(volume) = solid_alone(gmsh, geometry, &file.0, part)? {
+                match extrude::extrude_part_mesh(gmsh, geometry, part, volume, &extrude)? {
+                    Ok(mesh) => return Ok(mesh),
+                    Err(_) => gmsh.clear()?,
+                }
+            } else {
+                gmsh.clear()?;
+            }
+        }
         gmsh.import_shapes(&file.0)?;
         let volumes = gmsh.entities(3)?;
         let Some((dim, tag)) = (parts(gmsh, geometry)?.into_iter())
@@ -739,7 +755,8 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
             gmsh.remove(&others)?;
         }
         if let Some(extrude) = geometry.extrusion(part) {
-            return extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude);
+            return extrude::extrude_part_mesh(gmsh, geometry, part, volume, extrude)?
+                .map_err(GmshError::Other);
         }
         let options = MeshOptions::of_part(geometry, part);
         options.apply(gmsh)?;
@@ -753,6 +770,28 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
             warnings: gmsh.warnings()?,
         })
     })
+}
+
+/// Reads the geometry and leaves only the part's solid; `None` if the part is no solid.
+fn solid_alone(
+    gmsh: &Gmsh,
+    geometry: &Geometry,
+    file: &Path,
+    part: &str,
+) -> Result<Option<i32>, GmshError> {
+    gmsh.import_shapes(file)?;
+    let Some(((3, volume), _)) = (parts(gmsh, geometry)?.into_iter()).find(|(_, n)| n == part)
+    else {
+        return Ok(None);
+    };
+    let others: Vec<(i32, i32)> = (gmsh.entities(3)?.into_iter())
+        .filter(|&v| v != volume)
+        .map(|v| (3, v))
+        .collect();
+    if !others.is_empty() {
+        gmsh.remove(&others)?;
+    }
+    Ok(Some(volume))
 }
 
 /// Meshes a face outside the solids with triangles, or mostly quadrilaterals if its meshing

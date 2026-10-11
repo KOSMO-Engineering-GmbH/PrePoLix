@@ -47,6 +47,14 @@ fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem
         ui.checkbox(&mut d.optimize, "Optimize mesh (Netgen)");
         ui.checkbox(&mut d.quad_dominated, "Quad-dominated surface mesh")
             .on_hover_text("Mesh faces (2D models and shells) mostly with quadrilaterals.");
+        ui.checkbox(
+            &mut d.extrude_where_possible,
+            "Hexahedra for extruded parts",
+        )
+        .on_hover_text(
+            "Parts that are straight extrusions of a face get an extrude mesh of \
+                 hexahedra; the others stay tetrahedra.",
+        );
     });
     ui.end_row();
 }

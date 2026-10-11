@@ -92,6 +92,9 @@ values and meshes at once.
   [Optimize mesh (Netgen)], [Improves the element quality after meshing (default on).],
   [Quad-dominated surface mesh], [Creates mainly quadrilaterals on faces: plane elements of 2D
     models and shells of 3D models.],
+  [Hexahedra for extruded parts], [Meshes every solid that is a straight extrusion of one of its
+    faces with hexahedra, as an Extrude Mesh item with its defaults would (@extrude-mesh); the
+    other solids keep tetrahedra (default off).],
 )
 
 === Mesh setup items
@@ -146,6 +149,10 @@ meshing fails with a message naming the part; mesh it with tetrahedra or select 
 end. The element type can be changed afterwards in the part's properties (@element-type), for
 example to `C3D8I`, which bends without the locking of `C3D8`. A later #ui("Tetrahedral Gmsh")
 item for the same part meshes it with tetrahedra again.
+
+Without an item, #ui("Hexahedra for extruded parts") in the meshing parameters runs the same
+automatic search for every part they cover. A part where no source face is found is meshed with
+tetrahedra without an error; a #ui("Tetrahedral Gmsh") item naming a part keeps it tetrahedral.
 
 == Using an existing mesh
 

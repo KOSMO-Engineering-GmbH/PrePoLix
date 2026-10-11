@@ -288,8 +288,8 @@ impl Topology {
 
 /// The source faces for an item: its faces on the part, else the first face, by most edges,
 /// that the part is an extrusion of.
-fn find_sweep(topology: &Topology, extrude: &ExtrudeMesh, part: &str) -> Result<Sweep, GmshError> {
-    let error = |reason: String| GmshError::Other(format!("{part}: {reason}"));
+fn find_sweep(topology: &Topology, extrude: &ExtrudeMesh, part: &str) -> Result<Sweep, String> {
+    let error = |reason: String| format!("{part}: {reason}");
     let chosen: Vec<i32> = (extrude.faces.iter())
         .filter(|f| topology.faces.contains(f))
         .copied()
@@ -329,16 +329,20 @@ struct SourceElement {
 }
 
 /// Meshes a solid as an extrusion of its source faces. The other solids are gone from the
-/// Gmsh model already.
+/// Gmsh model already. The inner error says why the part is no extrusion of the source; the
+/// Gmsh model may then have lost the solid.
 pub(crate) fn extrude_part_mesh(
     gmsh: &Gmsh,
     geometry: &Geometry,
     part: &str,
     volume: i32,
     extrude: &ExtrudeMesh,
-) -> Result<GeneratedMesh, GmshError> {
+) -> Result<Result<GeneratedMesh, String>, GmshError> {
     let topology = Topology::read(gmsh, volume)?;
-    let sweep = find_sweep(&topology, extrude, part)?;
+    let sweep = match find_sweep(&topology, extrude, part) {
+        Ok(sweep) => sweep,
+        Err(reason) => return Ok(Err(reason)),
+    };
     let part_volume = gmsh.mass(3, volume)?;
     let source_area: f64 = (sweep.source.iter())
         .map(|&f| gmsh.mass(2, f))
@@ -427,7 +431,7 @@ pub(crate) fn extrude_part_mesh(
     if planar && let Some(normal) = planar_normal {
         let expected = source_area * dot(normal, sweep.vector).abs();
         if (expected - part_volume).abs() > 1e-3 * part_volume.abs().max(f64::MIN_POSITIVE) {
-            return Err(GmshError::Other(format!(
+            return Ok(Err(format!(
                 "{part}: The part is not a straight extrusion of its source faces (volume \
                  {part_volume:.6e}, area times height {expected:.6e}). Mesh it with tetrahedra."
             )));
@@ -484,10 +488,10 @@ pub(crate) fn extrude_part_mesh(
     }
     mesh.parts.push(part_elements);
     mesh.cad = builder.cad_map(gmsh, &mesh, &elements)?;
-    Ok(GeneratedMesh {
+    Ok(Ok(GeneratedMesh {
         mesh,
         warnings: gmsh.warnings()?,
-    })
+    }))
 }
 
 /// Makes the nodes of the swept mesh, numbered from 1, level by level.

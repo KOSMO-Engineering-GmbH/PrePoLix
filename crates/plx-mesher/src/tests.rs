@@ -1243,3 +1243,47 @@ fn source_faces_are_checked_to_be_an_end_of_an_extrusion() {
             .all(|e| e.shape == ElementShape::Tet10)
     );
 }
+
+#[test]
+fn meshing_parameters_find_extrusions_and_keep_tetrahedra_for_the_rest() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
+    geometry.meshing.max_size = 5.0;
+    geometry.meshing.extrude_where_possible = true;
+    let mesh = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+    assert!(
+        (mesh.elements().iter())
+            .all(|e| matches!(e.shape, ElementShape::Hex20 | ElementShape::Wedge15))
+    );
+    // A Tetrahedral Gmsh item for the part keeps it tetrahedral.
+    geometry.mesh_items = vec![MeshSetupItem {
+        name: "Tetrahedral_Gmsh-1".into(),
+        kind: MeshSetupKind::TetrahedralGmsh {
+            parts: vec!["SOLID-1".into()],
+            algorithm_2d: Algorithm2d::default(),
+            algorithm_3d: Algorithm3d::default(),
+        },
+    }];
+    let mesh = generate_part_mesh(&geometry, "SOLID-1").unwrap().mesh;
+    assert!(
+        mesh.elements()
+            .iter()
+            .all(|e| e.shape == ElementShape::Tet10)
+    );
+
+    // A shaft with a split face is no extrusion of one face and falls back to tetrahedra.
+    let mut shaft = import_cad(&testdata("welle_mit_teilflaeche.step"), UnitSystem::MmTonSC)
+        .unwrap()
+        .geometry;
+    shaft.meshing.extrude_where_possible = true;
+    let mesh = generate_part_mesh(&shaft, "SOLID-1").unwrap().mesh;
+    assert!(
+        mesh.elements()
+            .iter()
+            .all(|e| e.shape == ElementShape::Tet10)
+    );
+}
