@@ -48,6 +48,8 @@ pub struct PartInfo {
     /// Whether the part takes part in the colour scale of results (PrePoMax: colour
     /// contours on); a part without them is plain grey and leaves the legend range alone.
     pub contours: bool,
+    /// Dimension of the CAD shape of a geometry part: 3 solid, 2 face, 1 edge.
+    pub dimension: Option<u8>,
 }
 
 /// A loaded input file with everything the GUI shows about it.
@@ -398,10 +400,13 @@ impl Model {
         })
     }
 
-    /// Takes saved settings of bound results; returns the outputs that failed.
+    /// Takes saved settings of bound results; returns the outputs that failed. History
+    /// outputs may put the positions of `moving_loads`, those of the FE model, beside their
+    /// values.
     pub fn restore_results_settings(
         &mut self,
         settings: &plx_results::ResultsSettings,
+        moving_loads: Vec<plx_model::LoadStations>,
     ) -> Vec<String> {
         self.fe.reference_points = settings.reference_points.clone();
         self.fe.coordinate_systems = settings.coordinate_systems.clone();
@@ -418,8 +423,14 @@ impl Model {
             .map(crate::path_plot::PathPlot::from_saved)
             .collect();
         self.set_contours(&settings.plain_parts, false);
+        // History outputs of hot spots need their values first.
+        let reports = crate::hot_spots::evaluate(self);
         match &mut self.results {
-            Some(view) => view.restore(settings, &self.mesh),
+            Some(view) => {
+                view.hot_spot_reports = reports;
+                view.moving_loads = moving_loads;
+                view.restore(settings, &self.mesh)
+            }
             None => Vec::new(),
         }
     }
@@ -453,6 +464,7 @@ impl Model {
                 bounds: None,
                 visible: true,
                 contours: true,
+                dimension: None,
             });
         }
         let mut model = Self {
@@ -512,6 +524,9 @@ impl Model {
             .collect();
         let mut model = Self::with_skins(path, mesh, skins);
         model.is_geometry = true;
+        for (part, dimension) in model.parts.iter_mut().zip(display.part_dimensions) {
+            part.dimension = Some(dimension);
+        }
         model.cad_entities = display.entities;
         model.geometry_solids = display.solids;
         model
@@ -2038,6 +2053,15 @@ mod tests {
                 path_plots: vec![
                     crate::path_plot::PathPlot::new("Path-1".into()).saved(),
                     crate::path_plot::PathPlot::hot_spot("Hot_Spot-1".into()).saved(),
+                    crate::path_plot::PathPlot::table(crate::xy_plot::XyData {
+                        title: "SP_A.STRESSES.MISES".into(),
+                        x_label: "Increment".into(),
+                        x: vec![1.0, 2.0],
+                        curves: vec![("12_1".into(), vec![0.5, 1.5])],
+                        guides: Vec::new(),
+                        y_max: None,
+                    })
+                    .saved(),
                 ],
                 // Camera and mesh edges belong to the 3D view, not to the results.
                 camera: None,
@@ -2046,7 +2070,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            model.restore_results_settings(&settings),
+            model.restore_results_settings(&settings, Vec::new()),
             Vec::<String>::new()
         );
         assert!(!model.parts[0].contours);

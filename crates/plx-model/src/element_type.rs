@@ -116,6 +116,29 @@ impl FeModel {
         !changes.is_empty()
     }
 
+    /// Writes the linear shells of membrane sections as membranes, see
+    /// [`crate::membrane_type`]; true when any changed. The user need not choose an M3D
+    /// element type for a part with a membrane section.
+    pub fn apply_membrane_sections(&self, mesh: &mut FeMesh) -> bool {
+        let mut changes = Vec::new();
+        for section in &self.sections {
+            if !matches!(section.kind, crate::SectionKind::Membrane { .. }) {
+                continue;
+            }
+            for element in
+                (section.region.elements(mesh).into_iter()).filter_map(|id| mesh.element(id))
+            {
+                if let Some(type_name) = crate::membrane_type(&element.type_name) {
+                    changes.push((element.id, type_name.to_string()));
+                }
+            }
+        }
+        for (id, type_name) in &changes {
+            mesh.set_element_type(*id, type_name.clone());
+        }
+        !changes.is_empty()
+    }
+
     /// Follows a renamed part with the element types chosen for it. Merged parts keep the
     /// choices of the part merged into.
     pub(crate) fn rename_element_types(&mut self, old: &str, new: &str) {

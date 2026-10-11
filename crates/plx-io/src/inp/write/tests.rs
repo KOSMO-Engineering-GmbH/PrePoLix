@@ -699,11 +699,21 @@ fn a_membrane_section_is_written_for_membrane_elements() {
     );
     // Results at the membrane nodes, as for shells.
     assert!(text.contains("*Node file, Output=2D\nRF, U\n"), "{text}");
-    // Shell elements under a membrane section, and membranes under a shell or solid
-    // section, are refused before CalculiX would be.
+    // Linear shells under a membrane section are written as membranes without choosing an
+    // element type; the mesh keeps its shells.
     model.element_types.clear();
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Element, Type=M3D4, Elset=PLATE\n"),
+        "{text}"
+    );
+    assert!(mesh.elements().iter().all(|e| e.type_name == "S4"));
+    // Quadratic shells under a membrane section, and membranes under a shell or solid
+    // section, are refused before CalculiX would be.
+    let (quadratic, mut plate) = shell_plate();
+    plate.sections[0].kind = model.sections[0].kind.clone();
     assert!(matches!(
-        write_inp(&mesh, &model, ""),
+        write_inp(&quadratic, &plate, ""),
         Err(WriteError::InvalidSection { .. })
     ));
     for kind in [
@@ -726,11 +736,17 @@ fn a_membrane_section_is_written_for_membrane_elements() {
 /// unevenly loaded tip, with each membrane element type a part can have.
 #[test]
 fn calculix_stretches_a_membrane_strip() {
-    for type_name in ["M3D3", "M3D4", "M3D4R"] {
-        let (mesh, model) = membrane_strip(type_name);
+    // S4R is written as M3D4R.
+    for (chosen, type_name) in [
+        ("M3D3", "M3D3"),
+        ("M3D4", "M3D4"),
+        ("M3D4R", "M3D4R"),
+        ("S4R", "M3D4R"),
+    ] {
+        let (mesh, model) = membrane_strip(chosen);
         let text = write_inp(&mesh, &model, "").unwrap();
         assert!(text.contains(&format!("Type={type_name},")), "{text}");
-        let name = format!("membran-{}", type_name.to_ascii_lowercase());
+        let name = format!("membran-{}", chosen.to_ascii_lowercase());
         let Some(frd) = run_ccx(&name, &text) else {
             return;
         };
@@ -4815,6 +4831,33 @@ fn a_moving_load_off_its_faces_is_left_out() {
     assert!(
         last.contains("** Name: Moving-1: No wheel on the region\n"),
         "{last}"
+    );
+}
+
+#[test]
+fn moving_load_stations_follow_the_steps_the_writer_gives() {
+    let (mesh, mut model) = moving_cantilever();
+    // A plain step before, a deactivated one in between and one after the moving load.
+    let mut moving = model.steps.remove(0);
+    let mut plain = moving.clone();
+    plain
+        .loads
+        .retain(|l| !matches!(l.kind, LoadKind::Moving(_)));
+    let mut off = plain.clone();
+    off.name = "Off".into();
+    off.active = false;
+    moving.name = "Step-2".into();
+    let mut last = plain.clone();
+    last.name = "Step-3".into();
+    model.steps = vec![plain, off, moving, last];
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("\n*Step").count(), 7, "{text}");
+    let stations = plx_model::load_stations(&model);
+    assert_eq!(stations.len(), 1);
+    assert_eq!(stations[0].load, "Moving-1");
+    assert_eq!(
+        stations[0].steps,
+        [(2, 10.0), (3, 30.0), (4, 50.0), (5, 70.0), (6, 90.0)]
     );
 }
 

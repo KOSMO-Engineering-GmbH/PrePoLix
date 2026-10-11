@@ -56,6 +56,8 @@ transformations.
 / From Field Output: values of a field at selected nodes, one row per increment.
 / From History Output by Equation: a formula of other history outputs.
 / From Element Size: volume of elements or area of faces in every increment.
+/ From Hot Spot: the values of a hot spot (@hot-spots) in every increment, optionally beside the
+  position of a moving load (@hot-spot-history).
 
 A double-click on a component opens its table. Click column headers to select them
 (#key("Ctrl") adds, #key("Shift") selects a range) or drag over cells. #ui("Copy")
@@ -63,6 +65,22 @@ A double-click on a component opens its table. Click column headers to select th
 the selected columns over the first one.
 
 #screenshot("history-table.png", [Eigenfrequencies from the `.dat` file])
+
+#ui("Export") in the plot window copies the plot to the clipboard as an image (#ui("Copy to
+Clipboard")) or saves it as a PNG or SVG file. The SVG file is vector graphics with the curves,
+grid and legend, for reports in good print quality.
+
+#screenshot("table-plot-export.png", [The Export menu of a plot window])
+
+#ui("Show in View") in the plot window puts the plot into the 3D view as an annotation, like a
+path plot (see @paths): it stays after the window is closed and appears in screenshots. Drag the box
+to move it and its bottom right corner to resize it. #ui("Edit...") in its context menu, or a
+double-click, opens #ui("Edit Annotation") for the title, the axis labels and a fixed value range;
+#ui("Delete"), or #ui("Remove from View") in the plot window, removes it. The plot keeps the values
+it was made from; with results bound to a project (@bind-result) it is saved with them.
+
+#screenshot("table-plot-in-view.png", [Displacements of two nodes over time, plotted from their
+  table and shown in the 3D view])
 
 == Paths <paths>
 
@@ -161,6 +179,44 @@ draws the curve, the read-out points and the extrapolation onto the path in the 
 The evaluation runs for all increments and writes `<result>_hot_spots.csv` next to the result
 file, with one row per toe node and increment; the output pane lists the highest value of each hot
 spot. A hot spot is deleted with the #key("Del") key or #ui("Delete") in its context menu.
+
+=== Hot spot stress over all steps <hot-spot-history>
+
+#ui("Create History Output") with the type #ui("From Hot Spot") writes the values of a hot spot
+into a history output, one row per increment, so the hot spot stress can be followed through all
+steps, for example while a crane drives over a girder with a moving load (@moving-load).
+
+#screenshot("hot-spot-history-dialog.png", [A history output of a hot spot beside the position
+  of the crane])
+
+#fields(
+  [Hot spot], [The hot spot of the results whose values are written.],
+  [Moving load], [#ui("None"), or a moving load of the FE model. Its position along the path
+    (the position of the vehicle's reference point, between #ui("Start") and #ui("End")) is
+    written as the first column, one value per step. Increments of steps without the load have
+    no position.],
+)
+
+The history output has the field `HOT_SPOT` with one component per toe node, `NODE_<id>`. Its
+table holds all values of the node side by side: the position of the moving load (`POSITION`, if
+one is chosen), the hot spot stress `S_HS` and the stresses at the read-out points `S_1`, `S_2`,
+... (nearest first). A hot spot on an edge with several toe nodes also gets the component `MAX`
+with the largest hot spot stress of all toe nodes in each increment and its `NODE`. Increments
+without stresses have no values.
+
+To plot the stress over the position, double-click the component, select the column `POSITION`
+and then `S_HS` (#key("Ctrl")-click), and choose #ui("Plot") (#key("Ctrl+P")).
+
+#screenshot("hot-spot-history-plot.png", [The table of a toe node near the fixed end of a
+  cantilever and its hot spot stress plotted over the position of a wheel load driving out])
+
+The history output follows its hot spot: when the hot spot is changed, it is computed again; when
+the hot spot is deleted or renamed, or the moving load is no longer in an active step of the FE
+model, it reports an error in the output pane and has no data until it is edited.
+
+#note[The position is that of the step. Within a step with several increments the loads are
+ramped from the previous step, so the intermediate increments show the same position as the end
+of their step.]
 
 == Query <query>
 
