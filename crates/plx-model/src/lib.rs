@@ -144,6 +144,7 @@ impl FeModel {
                 (step.boundary_conditions.iter().map(|b| &b.region))
                     .chain(step.loads.iter().map(|l| &l.region))
                     .chain(step.history_outputs.iter().filter_map(|h| h.kind.region()))
+                    .chain(step.kind.design_region())
             }))
     }
 
@@ -240,6 +241,7 @@ impl FeModel {
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
                     .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
                     .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
+                    .chain(step.kind.design_region_mut())
             }))
     }
 
@@ -321,6 +323,7 @@ impl FeModel {
                     .chain(step.loads.iter_mut().map(|l| &mut l.region))
                     .chain(step.defined_fields.iter_mut().map(|f| &mut f.region))
                     .chain((step.history_outputs.iter_mut()).filter_map(|h| h.kind.region_mut()))
+                    .chain(step.kind.design_region_mut())
             }));
         for region in regions {
             match region {
@@ -526,6 +529,9 @@ pub enum StepKind {
     /// Harmonic response over a frequency range from the stored eigenmodes
     /// (`*STEADY STATE DYNAMICS`).
     SteadyStateDynamics(SteadyStateDynamicsStep),
+    /// How strongly mass, stiffness or an eigenfrequency react to moving the surface nodes
+    /// of a design region (`*SENSITIVITY`), from the state of the step before it.
+    Sensitivity(SensitivityStep),
 }
 
 impl StepKind {
@@ -543,6 +549,7 @@ impl StepKind {
             StepKind::Dynamic(settings) => Some(&mut settings.increments.solver),
             StepKind::ModalDynamics(settings) => Some(&mut settings.solver),
             StepKind::SteadyStateDynamics(settings) => Some(&mut settings.solver),
+            StepKind::Sensitivity(_) => None,
         }
     }
 
@@ -557,7 +564,31 @@ impl StepKind {
     /// Whether the step takes loads. A frequency step has none, as in PrePoMax; preloads
     /// come from the previous step with [`FrequencyStep::perturbation`].
     pub fn supports_loads(&self) -> bool {
-        !matches!(self, StepKind::Frequency(_) | StepKind::ComplexFrequency(_))
+        !matches!(
+            self,
+            StepKind::Frequency(_) | StepKind::ComplexFrequency(_) | StepKind::Sensitivity(_)
+        )
+    }
+
+    /// The design region of a sensitivity step.
+    pub fn design_region(&self) -> Option<&Region> {
+        match self {
+            StepKind::Sensitivity(settings) => Some(&settings.design_region),
+            _ => None,
+        }
+    }
+
+    pub fn design_region_mut(&mut self) -> Option<&mut Region> {
+        match self {
+            StepKind::Sensitivity(settings) => Some(&mut settings.design_region),
+            _ => None,
+        }
+    }
+
+    /// Whether the step keeps the supports of the step before it. A sensitivity step
+    /// evaluates that step's solution, so it takes no boundary conditions of its own.
+    pub fn keeps_previous_boundaries(&self) -> bool {
+        matches!(self, StepKind::Sensitivity(_))
     }
 
     /// Whether the step computes eigenmodes, whose shapes are scaled arbitrarily.
@@ -569,7 +600,7 @@ impl StepKind {
     /// instead of taking them, as in PrePoMax, and a step that superposes stored eigenmodes
     /// only takes the loads CalculiX allows there (forces, pressures, base motion).
     pub fn supports_defined_fields(&self) -> bool {
-        !self.is_thermal() && !self.uses_stored_modes()
+        !self.is_thermal() && !self.uses_stored_modes() && !self.keeps_previous_boundaries()
     }
 
     /// Whether the step solves for displacements.
@@ -592,7 +623,9 @@ impl StepKind {
     /// mechanical ones.
     pub fn supports_boundary(&self, kind: &BoundaryKind) -> bool {
         // PrePoMax drives submodels in static steps only.
-        if let BoundaryKind::Submodel { .. } = kind {
+        if self.keeps_previous_boundaries() {
+            false
+        } else if let BoundaryKind::Submodel { .. } = kind {
             matches!(self, StepKind::Static(_))
         } else if kind.is_thermal() {
             self.is_thermal()
@@ -1077,7 +1110,78 @@ impl Default for BuckleStep {
     }
 }
 
+/// Settings of a `*SENSITIVITY` step: the design region whose surface nodes may move
+/// (`*DESIGN VARIABLES, TYPE=COORDINATE`) and the design responses whose derivatives with
+/// respect to these node positions CalculiX computes.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SensitivityStep {
+    /// Nodes that may move, usually picked faces. CalculiX keeps only surface nodes.
+    pub design_region: Region,
+    /// Mass of the model (`MASS`).
+    pub mass: bool,
+    /// Strain energy (`STRAINENERGY`), the compliance under the loads of the previous
+    /// static step: less strain energy means a stiffer part.
+    pub strain_energy: bool,
+    /// The eigenfrequencies of the previous frequency step (`EIGENFREQUENCY`). CalculiX
+    /// takes no other response together with it.
+    pub eigenfrequency: bool,
+    /// Radius of the linear filter that smooths the sensitivities (`*FILTER`).
+    pub filter_radius: Option<f64>,
+}
+
+impl Default for SensitivityStep {
+    fn default() -> Self {
+        Self {
+            design_region: Region::Nodes(Vec::new()),
+            mass: true,
+            strain_energy: true,
+            eigenfrequency: false,
+            filter_radius: None,
+        }
+    }
+}
+
+impl SensitivityStep {
+    /// The design responses as CalculiX names them (`*DESIGN RESPONSE`).
+    pub fn responses(&self) -> Vec<&'static str> {
+        let mut responses = Vec::new();
+        if self.eigenfrequency {
+            responses.push("EIGENFREQUENCY");
+        }
+        if self.mass {
+            responses.push("MASS");
+        }
+        if self.strain_energy {
+            responses.push("STRAINENERGY");
+        }
+        responses
+    }
+
+    /// Why CalculiX would reject the settings.
+    pub fn problem(&self) -> Option<String> {
+        if self.responses().is_empty() {
+            Some("Select at least one design response.".into())
+        } else if self.eigenfrequency && (self.mass || self.strain_energy) {
+            Some("CalculiX takes the eigenfrequency only as the single design response.".into())
+        } else if self.filter_radius.is_some_and(|r| r <= 0.0) {
+            Some("The filter radius must be positive.".into())
+        } else {
+            None
+        }
+    }
+}
+
 impl Step {
+    /// A sensitivity step: its node output holds the sensitivities (`SEN`).
+    pub fn new_sensitivity(name: impl Into<String>) -> Self {
+        Self {
+            kind: StepKind::Sensitivity(SensitivityStep::default()),
+            field_outputs: FieldOutput::sensitivity_defaults(),
+            ..Self::new_static(name)
+        }
+    }
+
     /// A complex frequency step with PrePoMax's default field outputs.
     pub fn new_complex_frequency(name: impl Into<String>) -> Self {
         Self {

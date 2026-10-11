@@ -9,7 +9,9 @@
 mod definition;
 mod grid;
 
-pub use definition::{Extrapolation, HotSpot, HotSpotComponent, extrapolation_weights};
+pub use definition::{
+    Extrapolation, HotSpot, HotSpotComponent, extrapolated, extrapolation_weights,
+};
 
 use plx_mesh::{FeMesh, NodeId, SkinFace};
 
@@ -43,6 +45,8 @@ pub struct HotSpotPath {
     /// Index of the toe node in [`FeMesh::coords`].
     pub index: usize,
     pub position: [f64; 3],
+    /// Unit direction of the straight path, along the surface away from the weld.
+    pub direction: [f64; 3],
     pub points: Vec<ReadoutPoint>,
 }
 
@@ -97,6 +101,82 @@ struct Triangle {
     normal: [f64; 3],
 }
 
+/// The surface triangles near some points, to place read-out points on.
+struct Surface {
+    triangles: Vec<Triangle>,
+    grid: Grid,
+}
+
+impl Surface {
+    /// The triangles of `faces` within `margin` of the box around `points`.
+    fn around<'a>(
+        coords: &[[f64; 3]],
+        faces: impl IntoIterator<Item = &'a SkinFace>,
+        points: &[[f64; 3]],
+        margin: f64,
+    ) -> Self {
+        let (mut low, mut high) = bounds(points);
+        for k in 0..3 {
+            low[k] -= margin;
+            high[k] += margin;
+        }
+        let mut triangles = Vec::new();
+        for face in faces {
+            let nodes = face.corners.iter().chain(&face.mids);
+            let outside = (0..3).any(|k| {
+                nodes.clone().all(|&n| coords[n][k] < low[k])
+                    || nodes.clone().all(|&n| coords[n][k] > high[k])
+            });
+            if !outside {
+                triangulate(coords, face, &mut triangles);
+            }
+        }
+        let grid = Grid::new(
+            &triangles
+                .iter()
+                .map(|t| bounds(&t.corners))
+                .collect::<Vec<_>>(),
+        );
+        Self { triangles, grid }
+    }
+
+    fn closest(&self, point: [f64; 3]) -> Option<(&Triangle, [f64; 3])> {
+        closest(&self.triangles, &self.grid, point)
+    }
+
+    /// The read-out point on the surface nearest to `distance` along `along` from `start`,
+    /// with its distance from the straight path relative to `distance`.
+    fn place(
+        &self,
+        start: [f64; 3],
+        along: [f64; 3],
+        distance: f64,
+    ) -> Option<(ReadoutPoint, f64)> {
+        let target = add(start, scale(along, distance));
+        let (triangle, [u, v, w]) = self.closest(target)?;
+        let [a, b, c] = triangle.corners;
+        let position = add(add(scale(a, u), scale(b, v)), scale(c, w));
+        let gap = length(sub(position, target)) / distance.max(1e-300);
+        let mut weights: Vec<(usize, f64)> = Vec::new();
+        for (vertex, factor) in triangle.weights.iter().zip([u, v, w]) {
+            for &(n, weight) in vertex {
+                match weights.iter_mut().find(|(m, _)| *m == n) {
+                    Some((_, total)) => *total += factor * weight,
+                    None => weights.push((n, factor * weight)),
+                }
+            }
+        }
+        weights.retain(|(_, w)| w.abs() > 1e-12);
+        let point = ReadoutPoint {
+            distance,
+            position,
+            direction: in_plane(along, triangle.normal).unwrap_or(along),
+            weights,
+        };
+        Some((point, gap))
+    }
+}
+
 /// The paths of a definition on the surface given by `faces`, with the warnings found while
 /// placing them.
 pub fn hot_spot_paths<'a>(
@@ -126,33 +206,8 @@ pub fn hot_spot_paths<'a>(
         return (Vec::new(), warnings);
     }
     // Only faces near the toe can carry read-out points.
-    let margin = 1.5 * reach;
-    let (mut low, mut high) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
-    for &(_, index) in &toe {
-        for k in 0..3 {
-            low[k] = low[k].min(coords[index][k] - margin);
-            high[k] = high[k].max(coords[index][k] + margin);
-        }
-    }
-    let mut triangles = Vec::new();
-    for face in faces {
-        let nodes = face.corners.iter().chain(&face.mids);
-        let outside = (0..3).any(|k| {
-            nodes.clone().all(|&n| coords[n][k] < low[k])
-                || nodes.clone().all(|&n| coords[n][k] > high[k])
-        });
-        if !outside {
-            triangulate(coords, face, &mut triangles);
-        }
-    }
-    let triangle_grid = Grid::new(
-        &triangles
-            .iter()
-            .map(|t| bounds(&t.corners))
-            .collect::<Vec<_>>(),
-    );
-    let closest = |point| closest(&triangles, &triangle_grid, point);
     let toe_points: Vec<[f64; 3]> = toe.iter().map(|&(_, index)| coords[index]).collect();
+    let surface = Surface::around(coords, faces, &toe_points, 1.5 * reach);
     let toe_grid = Grid::new(&toe_points.iter().map(|&p| (p, p)).collect::<Vec<_>>());
 
     let mut paths = Vec::new();
@@ -166,35 +221,17 @@ pub fn hot_spot_paths<'a>(
             along = normalize(sub(along, scale(tangent, dot(along, tangent)))).unwrap_or(along);
         }
         // Into the plate surface, which the first read-out point lies on.
-        if let Some((triangle, _)) = closest(add(start, scale(along, distances[0]))) {
+        if let Some((triangle, _)) = surface.closest(add(start, scale(along, distances[0]))) {
             along = in_plane(along, triangle.normal).unwrap_or(along);
         }
         let mut points = Vec::with_capacity(distances.len());
         let mut gap: f64 = 0.0;
         for &distance in &distances {
-            let target = add(start, scale(along, distance));
-            let Some((triangle, [u, v, w])) = closest(target) else {
+            let Some((point, off)) = surface.place(start, along, distance) else {
                 break;
             };
-            let [a, b, c] = triangle.corners;
-            let position = add(add(scale(a, u), scale(b, v)), scale(c, w));
-            gap = gap.max(length(sub(position, target)) / distance);
-            let mut weights: Vec<(usize, f64)> = Vec::new();
-            for (vertex, factor) in triangle.weights.iter().zip([u, v, w]) {
-                for &(n, weight) in vertex {
-                    match weights.iter_mut().find(|(m, _)| *m == n) {
-                        Some((_, total)) => *total += factor * weight,
-                        None => weights.push((n, factor * weight)),
-                    }
-                }
-            }
-            weights.retain(|(_, w)| w.abs() > 1e-12);
-            points.push(ReadoutPoint {
-                distance,
-                position,
-                direction: in_plane(along, triangle.normal).unwrap_or(along),
-                weights,
-            });
+            gap = gap.max(off);
+            points.push(point);
         }
         if points.len() < distances.len() {
             warnings.push(format!(
@@ -215,10 +252,42 @@ pub fn hot_spot_paths<'a>(
             node,
             index,
             position: start,
+            direction: along,
             points,
         });
     }
     (paths, warnings)
+}
+
+/// `count` points evenly along a path from its toe to `reach`, to plot the stress along it:
+/// the first is the toe node itself, the others lie on the surface like read-out points.
+pub fn path_curve<'a>(
+    mesh: &FeMesh,
+    faces: impl IntoIterator<Item = &'a SkinFace>,
+    path: &HotSpotPath,
+    reach: f64,
+    count: usize,
+) -> Vec<ReadoutPoint> {
+    let count = count.max(2);
+    if !(reach > 0.0 && reach.is_finite()) {
+        return Vec::new();
+    }
+    let surface = Surface::around(mesh.coords(), faces, &[path.position], 1.5 * reach);
+    let mut points = vec![ReadoutPoint {
+        distance: 0.0,
+        position: path.position,
+        direction: path.direction,
+        weights: vec![(path.index, 1.0)],
+    }];
+    for i in 1..count {
+        let distance = reach * i as f64 / (count - 1) as f64;
+        // Points that left the plate are no stress on the path.
+        match surface.place(path.position, path.direction, distance) {
+            Some((point, gap)) if gap <= GAP_WARNING => points.push(point),
+            _ => break,
+        }
+    }
+    points
 }
 
 /// Evaluates every definition for every increment with stresses. `faces` are the surface
@@ -277,24 +346,11 @@ pub fn evaluate_increment(
     weights: &[f64],
     increment: &Increment,
 ) -> Option<Vec<HotSpotValue>> {
-    let field = increment.field("STRESS")?;
-    let columns = STRESS_COMPONENTS.map(|name| field.component(name).map(|c| &c.values));
-    let columns: Vec<&Vec<f32>> = columns.into_iter().collect::<Option<_>>()?;
+    let columns = stress_columns(increment)?;
     let values = paths
         .iter()
         .map(|path| {
-            let readings: Vec<f64> = path
-                .points
-                .iter()
-                .map(|point| {
-                    let tensor: [f64; 6] = std::array::from_fn(|k| {
-                        (point.weights.iter())
-                            .map(|&(n, w)| w * columns[k].get(n).map_or(f64::NAN, |&v| v as f64))
-                            .sum()
-                    });
-                    stress(tensor, component, point.direction)
-                })
-                .collect();
+            let readings = read(&columns, &path.points, component);
             let hot_spot = readings.iter().zip(weights).map(|(s, w)| s * w).sum();
             HotSpotValue {
                 node: path.node,
@@ -304,6 +360,35 @@ pub fn evaluate_increment(
         })
         .collect();
     Some(values)
+}
+
+/// The chosen stress at `points` in one increment; `None` without stresses.
+pub fn readings(
+    points: &[ReadoutPoint],
+    component: HotSpotComponent,
+    increment: &Increment,
+) -> Option<Vec<f64>> {
+    Some(read(&stress_columns(increment)?, points, component))
+}
+
+fn stress_columns(increment: &Increment) -> Option<Vec<&Vec<f32>>> {
+    let field = increment.field("STRESS")?;
+    let columns = STRESS_COMPONENTS.map(|name| field.component(name).map(|c| &c.values));
+    columns.into_iter().collect()
+}
+
+fn read(columns: &[&Vec<f32>], points: &[ReadoutPoint], component: HotSpotComponent) -> Vec<f64> {
+    points
+        .iter()
+        .map(|point| {
+            let tensor: [f64; 6] = std::array::from_fn(|k| {
+                (point.weights.iter())
+                    .map(|&(n, w)| w * columns[k].get(n).map_or(f64::NAN, |&v| v as f64))
+                    .sum()
+            });
+            stress(tensor, component, point.direction)
+        })
+        .collect()
 }
 
 /// The evaluated stress of a tensor (xx, yy, zz, xy, yz, zx); `direction` is the path's.
@@ -636,6 +721,34 @@ mod tests {
             assert!((value.readings[1] - 170.0).abs() < 1e-6, "{value:?}");
             assert!((value.hot_spot - 120.0).abs() < 1e-6, "{value:?}");
         }
+    }
+
+    #[test]
+    fn curve_follows_the_stress_along_the_path() {
+        let mesh = plate();
+        let hot_spot = HotSpot {
+            toe: Region::Nodes(vec![35]),
+            thickness: 5.0,
+            ..HotSpot::new("Hot_Spot-1")
+        };
+        let skin = extract_part_skin(&mesh, &mesh.parts[0], 30.0);
+        let (paths, warnings) = hot_spot_paths(&mesh, &skin.faces, &hot_spot);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(paths[0].direction, [1.0, 0.0, 0.0]);
+        let curve = path_curve(&mesh, &skin.faces, &paths[0], 10.0, 11);
+        assert_eq!(curve.len(), 11);
+        assert_eq!(curve[0].weights, [(paths[0].index, 1.0)]);
+        let increment = increment(&mesh, |x| 100.0 + 10.0 * x);
+        let values = readings(&curve, HotSpotComponent::Perpendicular, &increment).unwrap();
+        for (point, value) in curve.iter().zip(values) {
+            let x = paths[0].position[0] + point.distance;
+            assert!(
+                (value - (100.0 + 10.0 * x)).abs() < 1e-6,
+                "{point:?}: {value}"
+            );
+        }
+        // Beyond the plate's end the curve stops.
+        assert!(path_curve(&mesh, &skin.faces, &paths[0], 40.0, 41).len() < 41);
     }
 
     #[test]

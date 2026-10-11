@@ -121,12 +121,15 @@ values on it.
 == Hot spot stresses <hot-spots>
 
 Hot spot stresses evaluate welded joints as recommended by the IIW: the stress at the weld toe is
-extrapolated from read-out points on the plate surface.
+extrapolated from read-out points on the plate surface. Double-click #ui("Hot Spot Stresses") in
+the Results tree, or use #menu("Results", "Create Hot Spot ..."), and pick the weld toe.
 
-#screenshot("hot-spot.png", [Create Hot Spot])
+#screenshot("hot-spot.png", [Create Hot Spot with the stress along the path, the read-out points
+  and the extrapolation to the weld toe])
 
 #fields(
-  [Weld toe], [Nodes along the weld toe, for example picked as an edge.],
+  [Weld toe], [A node at the weld toe. An edge can be picked as well: of its nodes, the one with
+    the highest hot spot stress in the displayed increment is evaluated and plotted.],
   [Extrapolation], [IIW type a, fine mesh, linear (0.4t / 1.0t, default) or quadratic
     (0.4t / 0.9t / 1.4t); type a, coarse mesh (0.5t / 1.5t); type b, fine (4 / 8 / 12 mm) or
     coarse (5 / 15 mm); or #ui("Custom read-out points").],
@@ -134,12 +137,30 @@ extrapolated from read-out points on the plate surface.
   [Read-out points], [Shows the extrapolation formula.],
   [Stress], [#ui("Perpendicular to weld toe"), #ui("Max principal stress") or #ui("Signed max
     abs principal stress").],
-  [Path direction], [Points away from the weld toe; PrePoLix turns it into the plate surface.],
+  [Path direction], [Points away from the weld toe; PrePoLix turns it into the plate surface.
+    #ui("Flip") reverses it.],
 )
 
+Below the inputs the dialog shows the result for the displayed increment while you edit: the hot
+spot stress `S_hs` with its node, the stresses at the read-out points and a plot of the stress
+along the path from the toe to a quarter beyond the last read-out point. The read-out points and
+the hot spot stress are blue dots, the extrapolation through them is dashed, so you can check at a
+glance whether the read-out points lie on the smooth part of the stress rise. The value axis
+leaves out a sharp notch peak right at the toe, which would otherwise flatten the plot; hover the
+curve to read values. #ui("Copy to Clipboard") and #ui("Save as CSV...") export the curve, the
+read-out points and the hot spot stress.
+
+#ui("Show in View") puts the plot into the 3D view as an annotation that stays after the dialog is
+closed and follows the displayed increment, like the plot of a path (@paths): drag it to move it,
+drag its corner to resize it. Its context menu offers #ui("Edit..."), #ui("Show on Path"), which
+draws the curve, the read-out points and the extrapolation onto the path in the model, and
+#ui("Delete").
+
+#screenshot("hot-spot-on-path.png", [The plot of a hot spot shown on its path])
+
 The evaluation runs for all increments and writes `<result>_hot_spots.csv` next to the result
-file. #menu("Results", "Hot Spot Table") shows the read-out stresses and the hot spot stress per
-node for the displayed increment, with the maximum in bold.
+file, with one row per toe node and increment; the output pane lists the highest value of each hot
+spot. A hot spot is deleted with the #key("Del") key or #ui("Delete") in its context menu.
 
 == Query <query>
 

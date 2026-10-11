@@ -25,6 +25,8 @@ pub struct Analysis {
     pub monitor: bool,
     /// The results of this run were bound to the project when they were opened.
     pub bound: bool,
+    /// The keywords of the input file, see [`plx_io::inp::keywords::input_keywords`].
+    keywords: Vec<String>,
 }
 
 pub enum MonitorEvent {
@@ -105,6 +107,13 @@ impl Analysis {
         };
         let input = write(&model.mesh, &fe, &heading)
             .map_err(|e| format!("Input file not written: {e}"))?;
+        // The model check leaves out the steps; their keywords are still tested.
+        let keywords = if check_model {
+            let full = plx_io::inp::write_inp(&model.mesh, &fe, &heading).unwrap_or_default();
+            plx_io::inp::keywords::input_keywords(&full)
+        } else {
+            plx_io::inp::keywords::input_keywords(&input)
+        };
         let copied = copy_result_files(&fe, &work_dir);
         let job_solver = solver.job_solver();
         let hint = "Check the executable under Tools > Settings > CalculiX.";
@@ -137,12 +146,18 @@ impl Analysis {
             status: JobStatus::Running,
             monitor: true,
             bound: false,
+            keywords,
         })
     }
 
     /// Adds a line of prepolix's own to the monitor output.
     pub fn note(&mut self, line: String) {
         self.output.push(line);
+    }
+
+    /// The keywords of the input file CalculiX runs on.
+    pub fn keywords(&self) -> &[String] {
+        &self.keywords
     }
 
     /// The solver output collected so far.

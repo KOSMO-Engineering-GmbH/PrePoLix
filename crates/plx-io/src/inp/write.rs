@@ -15,9 +15,9 @@ use plx_model::{
     ContactMethod, ContactPair, DefinedFieldKind, DynamicStep, FeModel, FieldOutput, FrequencyStep,
     GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
-    ModelSpace, NodeTie, OutputDimension, OutputKind, Region, Section, SectionKind, StaticStep,
-    SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals,
-    UserKeyword, line_tangent, symmetry_dofs, symmetry_plane,
+    ModelSpace, NodeTie, OutputDimension, OutputKind, Region, Section, SectionKind,
+    SensitivityStep, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior,
+    SurfaceInteraction, Tie, Totals, UserKeyword, line_tangent, symmetry_dofs, symmetry_plane,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -310,6 +310,7 @@ pub fn model_keywords(
     let (mut contact_pairs, pair_surfaces) = contact_pairs(&mut sets, model)?;
     contact_pairs.extend(node_ties(&mut sets, model, &lines)?);
     let initial_conditions = initial_conditions(&mut sets, model)?;
+    let design_variables = design_variables(&mut sets, model)?;
     let amplitudes = amplitudes(model)?;
     let flux_kinds = FluxKinds::of(model);
     let steps = model
@@ -394,8 +395,11 @@ pub fn model_keywords(
         Keyword::title("Contact pairs", contact_pairs),
         Keyword::title("Amplitudes", amplitudes),
         Keyword::title("Initial conditions", initial_conditions),
-        Keyword::title("Steps", steps),
     ]);
+    if !design_variables.is_empty() {
+        tree.push(Keyword::title("Design variables", design_variables));
+    }
+    tree.push(Keyword::title("Steps", steps));
     Ok(tree)
 }
 
@@ -1500,11 +1504,12 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         StepKind::Dynamic(settings) => dynamic_step(settings),
         StepKind::ModalDynamics(settings) => modal_dynamics_step(settings),
         StepKind::SteadyStateDynamics(settings) => steady_state_dynamics_step(settings),
+        StepKind::Sensitivity(settings) => sensitivity_step(sets, &step.name, settings)?,
     };
     // A modal step keeps the supports of the frequency step that stored the modes;
     // CalculiX refuses new ones ("in a modal dynamic step new SPCs are not allowed"), and
     // the reset would make the same supports new. Writing them again is accepted.
-    let mut boundaries = if step.kind.uses_stored_modes() {
+    let mut boundaries = if step.kind.uses_stored_modes() || step.kind.keeps_previous_boundaries() {
         Vec::new()
     } else {
         vec![Keyword::generated("*Boundary, op=New\n".into())]
@@ -1871,6 +1876,7 @@ fn deactivated_step(step: &Step) -> Keyword {
         StepKind::Dynamic(_) => "DynamicStep",
         StepKind::ModalDynamics(_) => "ModalDynamicsStep",
         StepKind::SteadyStateDynamics(_) => "SteadyStateDynamicsStep",
+        StepKind::Sensitivity(_) => "SensitivityStep",
     };
     fn all<'a>(names: impl Iterator<Item = &'a str>) -> Vec<Keyword> {
         names.map(deactivated).collect()
@@ -2015,6 +2021,50 @@ fn static_step(settings: &StaticStep) -> (String, String) {
         let _ = write!(keyword, ", Solver={solver}");
     }
     incremented_step(settings, keyword, settings.nlgeom)
+}
+
+/// The `*Step` line and the procedure of a sensitivity step: one `*Design response` per
+/// response, named like it, on all elements of the model, then the optional filter.
+fn sensitivity_step(
+    sets: &mut Sets,
+    step: &str,
+    settings: &SensitivityStep,
+) -> Result<(String, String), WriteError> {
+    let mut procedure = String::from("*Sensitivity\n");
+    let responses = settings.responses();
+    if responses.iter().any(|r| *r != "EIGENFREQUENCY") {
+        let parts = sets.mesh.parts.iter().map(|p| p.name.clone()).collect();
+        let elements = sets.element_set(step, &Region::Parts(parts))?;
+        for response in &responses {
+            let _ = writeln!(
+                procedure,
+                "*Design response, Name={response}\n{response}, {elements}"
+            );
+        }
+    } else {
+        for response in &responses {
+            let _ = writeln!(procedure, "*Design response, Name={response}\n{response}");
+        }
+    }
+    if let Some(radius) = settings.filter_radius {
+        let _ = writeln!(procedure, "*Filter, Type=Linear\n{}", number(radius));
+    }
+    Ok(("*Step\n".into(), procedure))
+}
+
+/// The design variables of the model (`*Design variables`): the design region of the first
+/// active sensitivity step. CalculiX reads them before the steps.
+fn design_variables(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError> {
+    let Some((name, region)) = (model.steps.iter())
+        .filter(|s| s.active)
+        .find_map(|s| Some((&s.name, s.kind.design_region()?)))
+    else {
+        return Ok(Vec::new());
+    };
+    let set = sets.node_set(&format!("{name}_Design"), region)?;
+    Ok(vec![Keyword::generated(format!(
+        "*Design variables, Type=Coordinate\n{set}\n"
+    ))])
 }
 
 /// The `*Step` line and the procedure keyword of a heat transfer or coupled step, as

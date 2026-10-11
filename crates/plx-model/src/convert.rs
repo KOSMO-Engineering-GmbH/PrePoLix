@@ -128,6 +128,7 @@ impl FeModel {
                 StepKind::ComplexFrequency(_) => {}
                 // Buckling factors and the accuracy have no unit.
                 StepKind::Buckle(_) => {}
+                StepKind::Sensitivity(s) => c.option(&mut s.filter_radius, Quantity::Length),
             }
             for field in &mut step.defined_fields {
                 if let crate::DefinedFieldKind::Temperature(t) = &mut field.kind {

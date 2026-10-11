@@ -28,10 +28,11 @@ results refer to the order at the time of the run.
 
 === Solver
 
-All step types have a #ui("Solver") field: #ui("Default (Pardiso if available)"),
+All step types have a #ui("Solver") field: #ui("Default (Pardiso or PaStiX if available)"),
 #ui("Pardiso"), #ui("Spooles"), #ui("PaStiX"), #ui("Iterative scaling") or
 #ui("Iterative Cholesky"). #ui("Default") uses Pardiso if the CalculiX executable contains it,
-otherwise the default of CalculiX. Frequency and buckle steps need a direct solver.
+otherwise PaStiX if it contains that, otherwise the default of CalculiX (SPOOLES in the
+CalculiX shipped with PrePoLix). Frequency and buckle steps need a direct solver.
 
 === Static
 
@@ -104,7 +105,7 @@ a variable shows what it is.
 #fields(
   [Type], [#ui("Node Output"), #ui("Element Output") or #ui("Contact Output"); chosen when the
     output is created.],
-  [Variables], [Node: `RF U PU V NT PNT RFL`. Element: `S PHS E ME PEEQ ENER HFL ERR HER ZZS SDV`;
+  [Variables], [Node: `RF U PU V NT PNT RFL SEN` (`SEN` in sensitivity steps only). Element: `S PHS E ME PEEQ ENER HFL ERR HER ZZS SDV`;
     `ERR` and `HER` exclude `ZZS`. Contact: `CDIS CSTR CELS PCON`.],
   [Last iterations], [#ui("On") writes every iteration of the last increment, to find out why a
     solution diverges.],

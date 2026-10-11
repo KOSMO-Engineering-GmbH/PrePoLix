@@ -1,6 +1,8 @@
-//! Plots of path results shown as annotations in the 3D view, which stay after the path
-//! dialog is closed and follow the shown increment: either in a box the user moves and
-//! resizes, or drawn onto the path itself, which then is the plot's distance axis.
+//! Plots of path results and of hot spots shown as annotations in the 3D view, which stay
+//! after their dialog is closed and follow the shown increment: either in a box the user
+//! moves and resizes, or drawn onto the path itself, which then is the plot's distance axis.
+//! A hot spot's plot is the stress along the path of its toe with the read-out points and
+//! the extrapolation.
 
 use egui::{
     Color32, CursorIcon, Painter, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
@@ -9,8 +11,10 @@ use egui::{
 use glam::Vec3;
 use plx_model::ResultPath;
 use plx_render::Camera;
+use plx_results::hot_spot::HotSpot;
 use plx_results::path::{self, PathPoint};
 
+use crate::features::{MARK, Marks};
 use crate::model::Model;
 use crate::overlay::project;
 use crate::results::format_value;
@@ -60,13 +64,25 @@ impl Default for Placement {
     }
 }
 
-/// A path whose plot the 3D view shows, with where the user put it.
+/// What a plot shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlotKind {
+    /// The shown result along a result path.
+    Path,
+    /// The stress along the path of a hot spot, with its extrapolation.
+    HotSpot,
+}
+
+/// A path or hot spot whose plot the 3D view shows, with where the user put it.
 pub struct PathPlot {
-    /// Name of the path in the model's features.
+    /// Name of the path in the model's features, or of the hot spot.
     pub path: String,
+    pub kind: PlotKind,
     pub placement: Placement,
     /// Read-out points of the path as last located.
     located: Option<(ResultPath, Result<Vec<PathPoint>, String>)>,
+    /// Paths of the hot spot as last located.
+    hot_spot: crate::hot_spots::Located,
 }
 
 impl PathPlot {
@@ -83,11 +99,15 @@ impl PathPlot {
             x_label: p.x_label.clone(),
             y_label: p.y_label.clone(),
             y_range: p.y_range,
+            hot_spot: self.kind == PlotKind::HotSpot,
         }
     }
 
     pub fn from_saved(saved: &plx_results::saved_view::SavedPathPlot) -> Self {
         let mut plot = Self::new(saved.path.clone());
+        if saved.hot_spot {
+            plot.kind = PlotKind::HotSpot;
+        }
         plot.placement = Placement {
             offset: saved.offset.map(|[x, y]| vec2(x, y)),
             size: vec2(saved.size[0], saved.size[1]),
@@ -104,9 +124,55 @@ impl PathPlot {
     pub fn new(path: String) -> Self {
         Self {
             path,
+            kind: PlotKind::Path,
             placement: Placement::default(),
             located: None,
+            hot_spot: Default::default(),
         }
+    }
+
+    /// The plot of the hot spot named `name`.
+    pub fn hot_spot(name: String) -> Self {
+        Self {
+            kind: PlotKind::HotSpot,
+            ..Self::new(name)
+        }
+    }
+
+    /// Whether this is the plot of the path named `name`.
+    pub fn is_path(&self, name: &str) -> bool {
+        self.kind == PlotKind::Path && self.path == name
+    }
+
+    /// Whether this is the plot of the hot spot named `name`.
+    pub fn is_hot_spot(&self, name: &str) -> bool {
+        self.kind == PlotKind::HotSpot && self.path == name
+    }
+
+    /// The plot of `hot_spot` in the shown increment, or `None` where it has no values.
+    pub fn hot_spot_box(
+        &mut self,
+        index: usize,
+        model: &Model,
+        hot_spot: &HotSpot,
+    ) -> Option<PlotBox> {
+        let plot = self.hot_spot.plot(model, hot_spot).ok()?;
+        let range = plot.range();
+        Some(PlotBox {
+            index,
+            title: format!(
+                "{}: {} at node {}",
+                hot_spot.name,
+                plot.component.short(),
+                plot.node
+            ),
+            ends: plot.ends.map(|p| model.to_render(p)),
+            distances: plot.distances,
+            values: plot.values,
+            placement: self.placement.clone(),
+            marks: Some(plot.marks),
+            auto_range: Some(range),
+        })
     }
 
     /// The plot to draw for the shown component of the model's results along `path`, or
@@ -133,6 +199,8 @@ impl PathPlot {
             values,
             ends,
             placement: self.placement.clone(),
+            marks: None,
+            auto_range: None,
         })
     }
 }
@@ -147,6 +215,10 @@ pub struct PlotBox {
     /// Start and end of the path in render coordinates.
     pub ends: [Vec3; 2],
     pub placement: Placement,
+    /// Read-out points and extrapolation of a hot spot.
+    pub marks: Option<Marks>,
+    /// Value range while the placement's is automatic; `None` fits it to the values.
+    pub auto_range: Option<[f64; 2]>,
 }
 
 /// What the user did to a plot.
@@ -170,8 +242,16 @@ impl PlotBox {
         }
     }
 
-    /// Smallest and largest finite value.
+    /// The value range shown: the one the user fixed, else the automatic one.
+    fn y_range(&self) -> Option<[f64; 2]> {
+        self.placement.y_range.or(self.auto_range)
+    }
+
+    /// Smallest and largest value shown when the range is automatic.
     pub fn extremes(&self) -> Option<[f64; 2]> {
+        if let Some(range) = self.auto_range {
+            return Some(range);
+        }
         let finite = self.values.iter().copied().filter(|v| v.is_finite());
         let low = finite.clone().min_by(f64::total_cmp)?;
         let high = finite.max_by(f64::total_cmp)?;
@@ -295,7 +375,8 @@ fn draw_box(
         &crate::features::Axes {
             x_label: &plot.placement.x_label,
             y_label: &plot.placement.y_label,
-            y_range: plot.placement.y_range,
+            y_range: plot.y_range(),
+            marks: plot.marks.as_ref(),
         },
         false,
     );
@@ -337,7 +418,7 @@ fn draw_on_path(
     let extreme = (plot.values.iter().copied())
         .filter(|v| v.is_finite())
         .max_by(|x, y| x.abs().total_cmp(&y.abs()))?;
-    let reach = match plot.placement.y_range {
+    let reach = match plot.y_range() {
         Some([low, high]) => low.abs().max(high.abs()),
         None => extreme.abs(),
     };
@@ -376,6 +457,24 @@ fn draw_on_path(
                 painter.add(egui::Shape::line(std::mem::take(&mut curve), stroke));
             }
             None => curve.clear(),
+        }
+    }
+    let on_path = |d: f64, v: f64| base(d) + normal * v as f32 * scale;
+    if let Some(marks) = &plot.marks {
+        let line: Vec<Pos2> = (marks.line.iter())
+            .filter(|p| p[1].is_finite())
+            .map(|p| on_path(p[0], p[1]))
+            .collect();
+        painter.extend(egui::Shape::dashed_line(
+            &line,
+            Stroke::new(1.5, Color32::BLACK),
+            6.0,
+            4.0,
+        ));
+        for &[d, s] in marks.support.iter().chain([&[0.0, marks.hot_spot]]) {
+            if s.is_finite() {
+                painter.circle_filled(on_path(d, s), 4.0, MARK);
+            }
         }
     }
     // Labels at the smallest and largest value, and the title beside the middle of the path,
@@ -417,13 +516,20 @@ fn draw_on_path(
         label(i, v);
     }
     let title_at = a + along * 0.5 + title_side * (extent + 8.0);
-    painter.text(
-        title_at,
-        anchor(title_side),
-        plot.shown_title(),
-        font,
-        CURVE,
-    );
+    let galley = painter.layout_no_wrap(plot.shown_title().to_string(), font, CURVE);
+    let mut title = anchor(title_side).anchor_size(title_at, galley.size());
+    // Beside a slanted path one end of the title reaches back towards it.
+    let corners = [
+        title.left_top(),
+        title.right_top(),
+        title.left_bottom(),
+        title.right_bottom(),
+    ];
+    let nearest = corners.into_iter().map(reach).fold(f32::INFINITY, f32::min);
+    if nearest < extent + 8.0 {
+        title = title.translate(title_side * (extent + 8.0 - nearest));
+    }
+    painter.galley(title.min, galley, CURVE);
     // Grabbed where the pointer is near the curve or the path, or while dragged or its menu
     // is open, so that the rest of the view keeps its clicks.
     let pointer = ui.input(|i| i.pointer.hover_pos());

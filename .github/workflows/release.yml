@@ -1,6 +1,6 @@
 name: Release
 
-# Baut den Windows-Installer auf Linux (MinGW + NSIS), das Linux-AppImage und das
+# Baut den Windows-Installer auf Linux (MinGW + NSIS), das Linux-AppImage (beide mit CalculiX) und das
 # Benutzerhandbuch (Typst, PDF; Installer und AppImage enthalten es als HTML für Help > User
 # Guide), getrennt von der schnellen PR-CI. Läuft bei einem Versions-Tag (v0.1.0 usw.) und hängt
 # alles an das GitHub-Release, oder per Hand über "Run workflow", dann nur als Artefakte.
@@ -32,12 +32,13 @@ jobs:
         with:
           path: |
             target/gmsh-windows
+            target/ccx/windows
             target/typst
-          key: gmsh-windows-${{ hashFiles('scripts/fetch_gmsh.py', 'scripts/build_user_guide.sh') }}
+          key: gmsh-windows-${{ hashFiles('scripts/fetch_gmsh.py', 'scripts/fetch_ccx.py', 'installer/ccx/*', 'scripts/build_user_guide.sh') }}
       - name: MinGW und NSIS
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends gcc-mingw-w64-x86-64 nsis
+          sudo apt-get install -y -qq --no-install-recommends gcc-mingw-w64-x86-64 nsis zstd
       - run: scripts/build_windows_installer.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -70,14 +71,15 @@ jobs:
         with:
           path: |
             target/gmsh
+            target/ccx/linux
             target/appimage/tools
             target/typst
-          key: appimage-${{ hashFiles('scripts/fetch_gmsh.py', 'scripts/build_appimage.sh', 'scripts/build_user_guide.sh') }}
+          key: appimage-${{ hashFiles('scripts/fetch_gmsh.py', 'scripts/fetch_ccx.py', 'installer/ccx/*', 'scripts/build_appimage.sh', 'scripts/build_user_guide.sh') }}
       - name: Systembibliotheken
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq --no-install-recommends libasound2-dev libglu1-mesa \
-            libxft2 libxcursor1 libxinerama1 libgomp1 file zsync
+            libxft2 libxcursor1 libxinerama1 libgomp1 file zsync zstd
       - run: scripts/build_appimage.sh
       - uses: actions/upload-artifact@v4
         with:

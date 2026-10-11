@@ -1,12 +1,14 @@
-//! The dialog of a hot spot definition in the Results tree: the toe nodes are picked on the
-//! shown results, the paths are drawn while it is open.
+//! The dialog of a hot spot definition in the Results tree: the toe is picked on the shown
+//! results, its path is drawn while the dialog is open, and below the inputs a plot shows
+//! the stress along the path in the shown increment with the read-out points and the
+//! extrapolation to the toe, so that the hot spot stress can be checked at a glance.
 
 use egui::Ui;
 use plx_model::Quantity;
 use plx_results::hot_spot::{Extrapolation, HotSpot, HotSpotComponent, extrapolation_weights};
 
 use crate::field_output_dialog::DialogAction;
-use crate::hot_spots::short;
+use crate::hot_spots::{Located, short};
 use crate::model::{Highlight, Hit, Model};
 use crate::numeric;
 use crate::selection::{Operation, Picker, Target};
@@ -24,7 +26,24 @@ pub struct HotSpotDialog {
     taken: Vec<String>,
     pub error: Option<String>,
     picker: Picker,
+    /// Paths of the definition as entered, for the plot.
+    located: Located,
+    /// The button to show or remove the plot in the 3D view was clicked.
+    plot_toggled: bool,
+    /// Name of the hot spot when its plot was put into the 3D view, by which the plot refers
+    /// to it while the dialog is open.
+    plot_key: Option<String>,
+    /// Height of the dialog's rows other than the plot in the last frame.
+    rows_height: Option<f32>,
+    /// The plot was drawn in the last frame.
+    plotted: bool,
+    /// The toe node whose path the plot shows.
+    plotted_node: Option<plx_mesh::NodeId>,
 }
+
+/// Height of the plot until the dialog is resized, and the least it shrinks to.
+const PLOT_HEIGHT: f32 = 240.0;
+const MIN_PLOT_HEIGHT: f32 = 150.0;
 
 impl HotSpotDialog {
     /// A new definition next to `existing`; it takes over the settings of the last one, so
@@ -52,7 +71,36 @@ impl HotSpotDialog {
             taken,
             error: None,
             picker: Picker::default(),
+            located: Located::default(),
+            plot_toggled: false,
+            plot_key: None,
+            rows_height: None,
+            plotted: false,
+            plotted_node: None,
         }
+    }
+
+    /// The name by which a plot in the 3D view refers to the edited hot spot: its name when
+    /// the plot was added, else its stored name, or for a new one the name entered.
+    pub fn plot_name(&self, existing: &[HotSpot]) -> String {
+        let stored = self.edit.and_then(|i| existing.get(i));
+        (self.plot_key.clone())
+            .or_else(|| stored.map(|h| h.name.clone()))
+            .unwrap_or_else(|| self.hot_spot.name.clone())
+    }
+
+    /// The toe node whose path the plot shows, the one the 3D view draws.
+    pub fn plotted_node(&self) -> Option<plx_mesh::NodeId> {
+        self.plotted_node
+    }
+
+    /// Whether the plot is to be shown or removed in the 3D view; resets the request.
+    pub fn take_plot_toggle(&mut self) -> bool {
+        std::mem::take(&mut self.plot_toggled)
+    }
+
+    pub fn set_plot_key(&mut self, name: String) {
+        self.plot_key = Some(name);
     }
 
     pub fn edit(existing: &[HotSpot], index: usize, mesh: &plx_mesh::FeMesh) -> Option<Self> {
@@ -117,7 +165,7 @@ impl HotSpotDialog {
             return Err(format!("The name {name} is already used."));
         }
         if self.toe.is_empty() {
-            return Err("Please select nodes at the weld toe.".into());
+            return Err("Please select a node or an edge at the weld toe.".into());
         }
         validate(&hot_spot)?;
         Ok(HotSpot {
@@ -133,6 +181,7 @@ impl HotSpotDialog {
             plx_model::next_name("Hot_Spot", self.taken.iter().map(String::as_str));
         self.toe = RegionDraft::new(NODE_SOURCES, Target::Nodes);
         self.error = None;
+        self.plot_key = None;
     }
 
     pub fn show(&mut self, ctx: &egui::Context, model: &Model) -> DialogAction<HotSpot> {
@@ -142,12 +191,16 @@ impl HotSpotDialog {
             .id(egui::Id::new("hot spot dialog"))
             .open(&mut open)
             .collapsible(false)
-            .resizable(false)
+            .resizable(true)
             .pivot(egui::Align2::LEFT_TOP)
             .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
             .show(ctx, |ui| {
-                // A fixed width, so the selection window opens right next to the dialog.
-                ui.set_width(380.0);
+                ui.set_min_width(420.0);
+                // The plot takes the height the window is resized to beyond its other rows.
+                let plot_height = match self.rows_height {
+                    Some(rows) => (ui.max_rect().height() - rows).max(MIN_PLOT_HEIGHT),
+                    None => PLOT_HEIGHT,
+                };
                 egui::Grid::new("hot spot form")
                     .num_columns(2)
                     .spacing([12.0, 6.0])
@@ -160,6 +213,8 @@ impl HotSpotDialog {
                             &mut self.distances,
                         )
                     });
+                ui.separator();
+                self.results(ui, model, plot_height);
                 if let Some(error) = &self.error {
                     ui.colored_label(egui::Color32::from_rgb(200, 0, 0), error);
                 }
@@ -177,6 +232,8 @@ impl HotSpotDialog {
                         }
                     }
                 });
+                // Only a drawn plot tells the height of the rest.
+                self.rows_height = self.plotted.then(|| ui.min_rect().height() - plot_height);
             });
         if let Some(window) = window
             && self.toe.source == Source::Selection
@@ -194,6 +251,102 @@ impl HotSpotDialog {
         }
         action
     }
+
+    /// The stress along the path in the shown increment, its read-out points and the
+    /// extrapolation to the toe, with buttons to put the plot into the 3D view or export it.
+    fn results(&mut self, ui: &mut Ui, model: &Model, plot_height: f32) {
+        self.plotted = false;
+        self.plotted_node = None;
+        let plot = match self.located.plot(model, &self.hot_spot()) {
+            Ok(plot) => plot,
+            Err(reason) => {
+                ui.weak(reason);
+                return;
+            }
+        };
+        let increment = (model.results.as_ref())
+            .and_then(|view| view.current_increment())
+            .map(crate::results::ResultsView::increment_label)
+            .unwrap_or_default();
+        ui.horizontal(|ui| {
+            ui.strong(plot.component.short());
+            ui.label(format!("Increment {increment}"));
+        });
+        let mut summary = format!(
+            "S_hs = {} at node {}",
+            crate::results::format_value(plot.marks.hot_spot as f32),
+            plot.node
+        );
+        if plot.paths > 1 {
+            summary += &format!(" (highest of {} toe nodes)", plot.paths);
+        }
+        ui.label(summary);
+        let readings: Vec<String> = (plot.marks.support.iter())
+            .map(|[d, s]| {
+                format!(
+                    "S({}) = {}",
+                    short(*d),
+                    crate::results::format_value(*s as f32)
+                )
+            })
+            .collect();
+        ui.weak(readings.join("   "));
+        let width = ui.available_width().max(360.0);
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(width, plot_height), egui::Sense::hover());
+        crate::features::draw_plot(
+            &ui.painter_at(rect),
+            rect,
+            response.hover_pos(),
+            &plot.distances,
+            &plot.values,
+            &crate::features::Axes {
+                x_label: "Distance",
+                y_range: Some(plot.range()),
+                marks: Some(&plot.marks),
+                ..Default::default()
+            },
+            false,
+        );
+        self.plotted = true;
+        self.plotted_node = Some(plot.node);
+        let shown = (model.path_plots.iter())
+            .any(|p| p.is_hot_spot(&self.plot_name(&model.hot_spots.definitions)));
+        ui.horizontal(|ui| {
+            let label = if shown {
+                "Remove from View"
+            } else {
+                "Show in View"
+            };
+            if ui
+                .button(label)
+                .on_hover_text(
+                    "Shows the plot as an annotation in the 3D view, where it stays after \
+                     the dialog is closed. Drag it to move it, drag its corner to resize it; \
+                     right-click it to show it on the path or to delete it.",
+                )
+                .clicked()
+            {
+                self.plot_toggled = true;
+            }
+            if ui.button("Copy to Clipboard").clicked() {
+                ui.ctx().copy_text(plot.to_csv('\t'));
+            }
+            if ui.button("Save as CSV…").clicked()
+                && let Some(file) = rfd::FileDialog::new()
+                    .add_filter("CSV", &["csv"])
+                    .set_file_name(format!("{}.csv", self.hot_spot.name.trim()))
+                    .save_file()
+            {
+                self.error = std::fs::write(&file, plot.to_csv(';'))
+                    .err()
+                    .map(|e| format!("{}: {e}", file.display()));
+            }
+        });
+        for warning in &plot.warnings {
+            ui.colored_label(egui::Color32::from_rgb(170, 90, 0), warning);
+        }
+    }
 }
 
 fn form(
@@ -208,7 +361,7 @@ fn form(
     ui.end_row();
     toe.ui_labeled(ui, model, "Weld toe", "toe", true);
     ui.label("");
-    ui.weak("Nodes at the weld toe, e.g. as an edge.");
+    ui.weak("A node at the weld toe, or an edge: its node with the\nhighest hot spot stress is evaluated.");
     ui.end_row();
     let units = crate::hot_spots::units(model);
     ui.label("Extrapolation");
@@ -286,6 +439,13 @@ fn form(
             for (value, label) in hot_spot.direction.iter_mut().zip(["X", "Y", "Z"]) {
                 ui.label(label);
                 ui.add(numeric::drag_value(value).speed(0.05));
+            }
+            if ui
+                .button("Flip")
+                .on_hover_text("Reverses the path direction.")
+                .clicked()
+            {
+                hot_spot.direction = hot_spot.direction.map(|v| if v == 0.0 { 0.0 } else { -v });
             }
         });
         ui.weak("Away from the weld toe; rotated into the plate surface across the weld.");

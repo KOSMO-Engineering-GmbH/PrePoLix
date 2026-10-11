@@ -763,7 +763,7 @@ impl FeatureDialog {
         plot(ui, &distances, &values, "Distance", false, plot_height);
         self.plotted = true;
         let shown = (self.plot_name(&model.fe))
-            .is_some_and(|name| model.path_plots.iter().any(|p| p.path == name));
+            .is_some_and(|name| model.path_plots.iter().any(|p| p.is_path(&name)));
         ui.horizontal(|ui| {
             let label = if shown {
                 "Remove from View"
@@ -1419,7 +1419,24 @@ pub(crate) struct Axes<'a> {
     pub y_label: &'a str,
     /// Values shown, lowest and highest; `None` fits them to the values.
     pub y_range: Option<[f64; 2]>,
+    /// Read-out points and extrapolation of a hot spot, drawn over the curve.
+    pub marks: Option<&'a Marks>,
 }
+
+/// Read-out points of a hot spot and the extrapolation through them to the toe, drawn over
+/// the stress along its path as in IIW's sketches of surface stress extrapolation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Marks {
+    /// Distance and stress of each read-out point.
+    pub support: Vec<[f64; 2]>,
+    /// The extrapolation line or parabola from the toe to the furthest read-out point.
+    pub line: Vec<[f64; 2]>,
+    /// The extrapolated stress at the toe, distance 0.
+    pub hot_spot: f64,
+}
+
+/// Colour of the read-out points and the hot spot stress.
+pub(crate) const MARK: Color32 = Color32::from_rgb(0, 100, 210);
 
 /// Draws the plot of [`plot`] into `rect`; `hover` is the pointer when it is over the plot.
 pub(crate) fn draw_plot(
@@ -1528,6 +1545,34 @@ pub(crate) fn draw_plot(
         }
     }
     flush(&mut segment);
+    if let Some(marks) = axes.marks {
+        let line: Vec<Pos2> = (marks.line.iter())
+            .filter(|p| p[1].is_finite())
+            .map(|p| to_screen(p[0], p[1]))
+            .collect();
+        painter.extend(egui::Shape::dashed_line(
+            &line,
+            Stroke::new(1.5, Color32::BLACK),
+            6.0,
+            4.0,
+        ));
+        for &[d, s] in &marks.support {
+            if s.is_finite() {
+                painter.circle_filled(to_screen(d, s), 4.0, MARK);
+            }
+        }
+        if marks.hot_spot.is_finite() {
+            let p = to_screen(0.0, marks.hot_spot);
+            painter.circle_filled(p, 4.5, MARK);
+            // Below the dot, where the notch peak does not rise, on white over the dashes.
+            let text = format!("S_hs = {}", format_value(marks.hot_spot as f32));
+            let galley = painter.layout_no_wrap(text, font.clone(), MARK);
+            let at = p + vec2(8.0, 10.0);
+            let back = Rect::from_min_size(at, galley.size()).expand(2.0);
+            painter.rect_filled(back, 2.0, Color32::from_white_alpha(220));
+            painter.galley(at, galley, MARK);
+        }
+    }
     if markers {
         for (&x, &y) in distances.iter().zip(values).filter(|(_, y)| y.is_finite()) {
             painter.circle_filled(to_screen(x, y), 3.0, color);

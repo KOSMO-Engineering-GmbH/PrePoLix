@@ -407,6 +407,19 @@ mod tests {
     }
 
     #[test]
+    fn path_plots_saved_before_hot_spot_plots_still_load() {
+        let older = "(path:\"Path-1\",offset:None,size:(400.0,240.0),on_path:false,\
+            height:80.0,title:\"\",x_label:\"Distance\",y_label:\"\",y_range:None)";
+        let plot: plx_results::saved_view::SavedPathPlot = ron::from_str(older).unwrap();
+        assert!(!plot.hot_spot);
+        let saved = ron::to_string(&plot).unwrap();
+        assert_eq!(
+            ron::from_str::<plx_results::saved_view::SavedPathPlot>(&saved).unwrap(),
+            plot
+        );
+    }
+
+    #[test]
     fn bound_results_are_restored_from_the_project() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mesh = read_inp(&root.join("testdata/block_c3d20r.inp"))

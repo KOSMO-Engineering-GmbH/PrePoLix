@@ -585,6 +585,11 @@ impl ResultsView {
                     "Step: #{}   Mode: #{}   Buckling factor: {value}",
                     inc.step, inc.increment
                 ),
+                AnalysisKind::Sensitivity if inc.value != 0.0 => format!(
+                    "Step: #{}   Sensitivity   Mode: #{}   Frequency: {value}",
+                    inc.step, inc.increment
+                ),
+                AnalysisKind::Sensitivity => format!("Step: #{}   Sensitivity", inc.step),
                 _ => format!(
                     "Step: #{}   Increment: #{}   Analysis time: {value}",
                     inc.step, inc.increment
@@ -1081,7 +1086,7 @@ pub fn field_unit(field: &str, component: &str, units: UnitSystem) -> Option<Str
     let unit = |quantity| Some(units.unit(quantity).to_string()).filter(|u| !u.is_empty());
     let per = |a, b| Some(format!("{}/{}", unit(a)?, unit(b)?));
     match field.to_ascii_uppercase().as_str() {
-        "DISP" | "DISPR" | "DISPI" | "NORM" => unit(Quantity::Length),
+        "DISP" | "DISPR" | "DISPI" => unit(Quantity::Length),
         "STRESS" | "STRESSR" | "STRESSI" | "ZZSTR" | "ZZSTRR" | "ZZSTRI" => {
             unit(Quantity::Pressure)
         }

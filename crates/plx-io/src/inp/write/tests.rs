@@ -4517,3 +4517,152 @@ fn calculix_runs_the_element_types_chosen_for_a_part() {
         assert!(values.iter().any(|v| *v != 0.0), "{type_name}");
     }
 }
+
+/// The cantilever with a sensitivity step after its static step, the design region on the
+/// faces of the elements at the fixed end.
+fn sensitivity_cantilever(settings: SensitivityStep) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = cantilever(tip_force());
+    let mut step = Step::new_sensitivity("Step-2");
+    step.kind = StepKind::Sensitivity(SensitivityStep {
+        design_region: Region::NodeSet("NALL".into()),
+        ..settings
+    });
+    // Supports and loads of the static step stay; the sensitivity step writes none.
+    step.boundary_conditions = model.steps[0].boundary_conditions.clone();
+    model.steps.push(step);
+    (mesh, model)
+}
+
+/// Runs CalculiX and reads the `.frd` and `.dat` files.
+fn run_ccx_frd_dat(name: &str, text: &str) -> Option<(FrdImport, crate::dat::DatImport)> {
+    let dir = ccx_dir(name)?;
+    let frd = run_ccx_in(&dir, name, text);
+    let dat = crate::dat::read_dat(&dir.join(format!("{name}.dat"))).unwrap();
+    remove_ccx_dir(&dir);
+    Some((frd, dat))
+}
+
+#[test]
+fn a_sensitivity_step_writes_design_variables_and_responses() {
+    let (mesh, mut model) = sensitivity_cantilever(SensitivityStep {
+        filter_radius: Some(15.0),
+        ..SensitivityStep::default()
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let design = text
+        .find("*Design variables, Type=Coordinate\nNALL\n")
+        .unwrap();
+    assert!(design < text.find("*Step").unwrap(), "{text}");
+    let step = &text[text.find("** Step-2").unwrap()..];
+    for line in [
+        "*Step\n*Sensitivity\n",
+        "*Design response, Name=MASS\nMASS, Internal_Selection-1_Step-2\n",
+        "*Design response, Name=STRAINENERGY\nSTRAINENERGY, Internal_Selection-1_Step-2\n",
+        "*Filter, Type=Linear\n15\n",
+        "*Node file\nSEN\n",
+    ] {
+        assert!(step.contains(line), "missing {line:?} in\n{step}");
+    }
+    // The step evaluates the static solution: no supports, loads or their resets.
+    assert!(!step.contains("*Boundary"), "{step}");
+    assert!(!step.contains("*Cload"), "{step}");
+    // Eigenfrequencies come alone, without an element set.
+    let StepKind::Sensitivity(settings) = &mut model.steps[1].kind else {
+        unreachable!()
+    };
+    (
+        settings.mass,
+        settings.strain_energy,
+        settings.eigenfrequency,
+    ) = (false, false, true);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Design response, Name=EIGENFREQUENCY\nEIGENFREQUENCY\n"),
+        "{text}"
+    );
+}
+
+/// The mass is density times volume, the strain energy of the static step half the work of
+/// the tip force; CalculiX prints both with their gradients and writes the sensitivities.
+#[test]
+fn calculix_computes_the_sensitivities_of_mass_and_strain_energy() {
+    let (mesh, model) = sensitivity_cantilever(SensitivityStep::default());
+    let Some((frd, dat)) = run_ccx_frd_dat("sensitivitaet", &write_inp(&mesh, &model, "").unwrap())
+    else {
+        return;
+    };
+    let index = frd.mesh.node_index(99).unwrap();
+    let disp = frd.increments[0].field("DISP").unwrap();
+    let tip = -f64::from(disp.component("U3").unwrap().values[index]);
+    let set = dat.sets.iter().find(|s| s.name == "STEP_2").unwrap();
+    let response = |name: &str| {
+        let field = set.field("DESIGN_RESPONSE").unwrap();
+        field.component(name).unwrap().entries[0].values[0]
+    };
+    let mass = 7.85e-9 * 100.0 * 10.0 * 10.0;
+    assert!(
+        (response("MASS") - mass).abs() < 1e-6 * mass,
+        "{}",
+        response("MASS")
+    );
+    let energy = 0.5 * 100.0 * tip;
+    let strain_energy = response("STRAINENERGY");
+    assert!(
+        (strain_energy - energy).abs() < 1e-3 * energy,
+        "{strain_energy} != {energy}"
+    );
+    let sensitivity = (frd.increments.iter())
+        .find(|i| i.step == 2 && i.kind == plx_results::AnalysisKind::Sensitivity)
+        .unwrap();
+    for field in ["NORM", "SENMASS", "SENENER"] {
+        assert!(sensitivity.field(field).is_some(), "{field}");
+    }
+    let sen = sensitivity
+        .field("SENENER")
+        .unwrap()
+        .component("DFDN")
+        .unwrap();
+    assert!(sen.values.iter().any(|v| *v != 0.0));
+}
+
+/// After a frequency step, the sensitivities of the eigenfrequencies come as one increment
+/// per mode with its frequency.
+#[test]
+fn calculix_computes_the_sensitivities_of_the_eigenfrequencies() {
+    let (mesh, mut model) = cantilever(tip_force());
+    let mut frequency = Step::new_frequency("Step-1");
+    frequency.boundary_conditions = model.steps[0].boundary_conditions.clone();
+    let StepKind::Frequency(settings) = &mut frequency.kind else {
+        unreachable!()
+    };
+    settings.num_frequencies = 4;
+    // CalculiX reads the modes from the .eig file.
+    settings.storage = true;
+    let mut step = Step::new_sensitivity("Step-2");
+    step.kind = StepKind::Sensitivity(SensitivityStep {
+        design_region: Region::NodeSet("NALL".into()),
+        mass: false,
+        strain_energy: false,
+        eigenfrequency: true,
+        filter_radius: None,
+    });
+    model.steps = vec![frequency, step];
+    let Some(frd) = run_ccx(
+        "sensitivitaet-frequenz",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    let frequencies: Vec<f64> = (frd.increments.iter())
+        .filter(|i| i.step == 1 && i.kind == plx_results::AnalysisKind::Frequency)
+        .map(|i| i.value)
+        .collect();
+    let modes: Vec<_> = (frd.increments.iter())
+        .filter(|i| i.step == 2 && i.kind == plx_results::AnalysisKind::Sensitivity)
+        .collect();
+    assert_eq!(modes.len(), 4);
+    for (mode, f) in modes.iter().zip(&frequencies) {
+        assert!((mode.value - f).abs() < 1e-3 * f, "{} vs. {f}", mode.value);
+        assert!(mode.field("SENFREQ").is_some());
+    }
+}
