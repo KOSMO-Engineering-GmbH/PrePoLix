@@ -7,6 +7,7 @@
 mod extrude;
 mod ffi;
 pub mod gmsh;
+mod revolve;
 mod step_names;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -719,7 +720,7 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
     with_gmsh(|gmsh| {
         // With the extrusions found automatically, a part that is none is read again for
         // the tetrahedra, as the attempt took the solid out of the model.
-        if geometry.extrusion(part).is_none() && geometry.finds_extrusion(part) {
+        if geometry.extrusion(part).is_none() && geometry.finds_hexahedra(part) {
             let extrude = plx_model::ExtrudeMesh {
                 parts: vec![part.to_string()],
                 ..Default::default()
@@ -728,6 +729,14 @@ pub fn generate_part_mesh(geometry: &Geometry, part: &str) -> Result<GeneratedMe
                 match extrude::extrude_part_mesh(gmsh, geometry, part, volume, &extrude)? {
                     Ok(mesh) => return Ok(mesh),
                     Err(_) => gmsh.clear()?,
+                }
+                if let Some(volume) = solid_alone(gmsh, geometry, &file.0, part)? {
+                    match revolve::revolve_part_mesh(gmsh, geometry, part, volume)? {
+                        Ok(mesh) => return Ok(mesh),
+                        Err(_) => gmsh.clear()?,
+                    }
+                } else {
+                    gmsh.clear()?;
                 }
             } else {
                 gmsh.clear()?;
@@ -1230,6 +1239,7 @@ impl MeshOptions {
             ("Mesh.RecombineAll", f64::from(u8::from(self.quads))),
             // Blossom, Gmsh's default; an extrude mesh chooses its own.
             ("Mesh.RecombinationAlgorithm", 1.0),
+            ("Mesh.MeshOnlyVisible", 0.0),
             // Quadratic quadrilaterals with 8 nodes, as CalculiX has them.
             ("Mesh.SecondOrderIncomplete", 1.0),
         ] {

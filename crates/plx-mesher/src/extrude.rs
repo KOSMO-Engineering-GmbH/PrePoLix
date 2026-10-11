@@ -16,25 +16,25 @@ use crate::{
     node_coords,
 };
 
-type Point = [f64; 3];
+pub(crate) type Point = [f64; 3];
 
-fn sub(a: Point, b: Point) -> Point {
+pub(crate) fn sub(a: Point, b: Point) -> Point {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
 
-fn add(a: Point, b: Point) -> Point {
+pub(crate) fn add(a: Point, b: Point) -> Point {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }
 
-fn scale(a: Point, s: f64) -> Point {
+pub(crate) fn scale(a: Point, s: f64) -> Point {
     [a[0] * s, a[1] * s, a[2] * s]
 }
 
-fn dot(a: Point, b: Point) -> f64 {
+pub(crate) fn dot(a: Point, b: Point) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn cross(a: Point, b: Point) -> Point {
+pub(crate) fn cross(a: Point, b: Point) -> Point {
     [
         a[1] * b[2] - a[2] * b[1],
         a[2] * b[0] - a[0] * b[2],
@@ -42,7 +42,7 @@ fn cross(a: Point, b: Point) -> Point {
     ]
 }
 
-fn norm(a: Point) -> f64 {
+pub(crate) fn norm(a: Point) -> f64 {
     dot(a, a).sqrt()
 }
 
@@ -67,22 +67,22 @@ struct Sweep {
 }
 
 /// The part's topology, read before the mesh is made.
-struct Topology {
-    faces: Vec<i32>,
-    edges: BTreeSet<i32>,
+pub(crate) struct Topology {
+    pub faces: Vec<i32>,
+    pub edges: BTreeSet<i32>,
     /// Edges of each face.
-    face_edges: BTreeMap<i32, Vec<i32>>,
+    pub face_edges: BTreeMap<i32, Vec<i32>>,
     /// Vertices of each edge, one for a closed edge.
-    edge_vertices: BTreeMap<i32, Vec<i32>>,
-    points: BTreeMap<i32, Point>,
-    boxes: BTreeMap<(i32, i32), (Point, Point)>,
-    lengths: BTreeMap<i32, f64>,
+    pub edge_vertices: BTreeMap<i32, Vec<i32>>,
+    pub points: BTreeMap<i32, Point>,
+    pub boxes: BTreeMap<(i32, i32), (Point, Point)>,
+    pub lengths: BTreeMap<i32, f64>,
     /// Size of the part, for tolerances.
-    size: f64,
+    pub size: f64,
 }
 
 impl Topology {
-    fn read(gmsh: &Gmsh, volume: i32) -> Result<Self, GmshError> {
+    pub fn read(gmsh: &Gmsh, volume: i32) -> Result<Self, GmshError> {
         let faces = gmsh.adjacencies(3, volume)?.1;
         let mut face_edges = BTreeMap::new();
         let mut edges = BTreeSet::new();
@@ -322,10 +322,180 @@ fn find_sweep(topology: &Topology, extrude: &ExtrudeMesh, part: &str) -> Result<
 
 /// One element of the source mesh: its corner and midside nodes as Gmsh tags, turned so
 /// that its normal points along the extrusion.
-struct SourceElement {
-    face: i32,
-    corners: Vec<usize>,
-    mids: Vec<usize>,
+pub(crate) struct SourceElement {
+    pub face: i32,
+    pub corners: Vec<usize>,
+    pub mids: Vec<usize>,
+}
+
+/// How the source mesh moves through the part: straight, or about an axis.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Motion {
+    Translate(Point),
+    /// About the unit axis through the origin, by the angle in radians.
+    Rotate {
+        origin: Point,
+        axis: Point,
+        angle: f64,
+    },
+}
+
+impl Motion {
+    /// Where a point of the source is at a fraction of the motion.
+    pub fn at(&self, p: Point, t: f64) -> Point {
+        match *self {
+            Motion::Translate(vector) => add(p, scale(vector, t)),
+            Motion::Rotate {
+                origin,
+                axis,
+                angle,
+            } => {
+                let (sin, cos) = (t * angle).sin_cos();
+                let v = sub(p, origin);
+                let rotated = add(
+                    add(scale(v, cos), scale(cross(axis, v), sin)),
+                    scale(axis, dot(axis, v) * (1.0 - cos)),
+                );
+                add(origin, rotated)
+            }
+        }
+    }
+
+    /// The direction a point of the source moves in.
+    pub fn direction(&self, p: Point) -> Point {
+        match *self {
+            Motion::Translate(vector) => vector,
+            Motion::Rotate { origin, axis, .. } => cross(axis, sub(p, origin)),
+        }
+    }
+
+    /// Whether the motion ends where it began: a full revolution.
+    pub fn closes(&self) -> bool {
+        matches!(*self, Motion::Rotate { angle, .. } if (angle - std::f64::consts::TAU).abs() < 1e-9)
+    }
+}
+
+/// The elements of the source mesh on the faces, turned so that their normals point along
+/// the motion, and the normal of a planar source.
+pub(crate) fn source_elements(
+    gmsh: &Gmsh,
+    faces: &[i32],
+    quadratic: bool,
+    coords: &HashMap<usize, Point>,
+    motion: &Motion,
+) -> Result<(Vec<SourceElement>, Option<Point>), GmshError> {
+    let position = |tag: usize| {
+        coords
+            .get(&tag)
+            .copied()
+            .ok_or_else(|| GmshError::Other(format!("Node {tag} is missing")))
+    };
+    let types: [(i32, usize); 2] = if quadratic {
+        [(TRI6, 3), (QUAD8, 4)]
+    } else {
+        [(TRI3, 3), (QUAD4, 4)]
+    };
+    let mut elements = Vec::new();
+    let mut planar_normal: Option<Point> = None;
+    let mut planar = true;
+    for &face in faces {
+        for (gmsh_type, corners) in types {
+            let n = if quadratic { 2 * corners } else { corners };
+            let (_, tags) = gmsh.elements(gmsh_type, face)?;
+            for element in tags.chunks_exact(n) {
+                let mut c = element[..corners].to_vec();
+                let mut m = element[corners..].to_vec();
+                let p: Vec<Point> = c.iter().map(|&t| position(t)).collect::<Result<_, _>>()?;
+                let normal = if corners == 4 {
+                    cross(sub(p[2], p[0]), sub(p[3], p[1]))
+                } else {
+                    cross(sub(p[1], p[0]), sub(p[2], p[0]))
+                };
+                let centre = scale(
+                    p.iter().fold([0.0; 3], |a, &b| add(a, b)),
+                    1.0 / p.len() as f64,
+                );
+                if dot(normal, motion.direction(centre)) < 0.0 {
+                    // Reversed: corners 0, n-1, ..., 1 and the midside nodes between them.
+                    c[1..].reverse();
+                    m.reverse();
+                }
+                let length = norm(normal);
+                if length > 0.0 {
+                    let unit = scale(normal, 1.0 / length);
+                    match planar_normal {
+                        None => planar_normal = Some(unit),
+                        Some(first) => planar &= norm(cross(first, unit)) < 1e-6,
+                    }
+                }
+                elements.push(SourceElement {
+                    face,
+                    corners: c,
+                    mids: m,
+                });
+            }
+        }
+    }
+    Ok((elements, planar_normal.filter(|_| planar)))
+}
+
+/// Sweeps the source elements through the levels: hexahedra from quadrilaterals, wedges
+/// from triangles, one part.
+pub(crate) fn sweep_mesh<'a>(
+    part: &str,
+    coords: &'a HashMap<usize, Point>,
+    elements: &[SourceElement],
+    motion: Motion,
+    levels: &[f64],
+    quadratic: bool,
+) -> Result<(FeMesh, Builder<'a>), GmshError> {
+    let mut builder = Builder::new(coords, motion, levels, quadratic);
+    let mut mesh = FeMesh::default();
+    let mut part_elements = Part {
+        name: part.to_string(),
+        elements: Vec::new(),
+    };
+    for layer in 0..levels.len() {
+        for element in elements {
+            let (shape, type_name) = match (element.corners.len(), quadratic) {
+                (3, false) => (ElementShape::Wedge6, "C3D6"),
+                (3, true) => (ElementShape::Wedge15, "C3D15"),
+                (_, false) => (ElementShape::Hex8, "C3D8"),
+                (_, true) => (ElementShape::Hex20, "C3D20"),
+            };
+            let (bottom, top) = builder.layer_levels(layer);
+            let mut nodes = Vec::with_capacity(shape.node_count());
+            for &c in &element.corners {
+                nodes.push(builder.node(&mut mesh, c, bottom));
+            }
+            for &c in &element.corners {
+                nodes.push(builder.node(&mut mesh, c, top));
+            }
+            if quadratic {
+                for &m in &element.mids {
+                    nodes.push(builder.node(&mut mesh, m, bottom));
+                }
+                for &m in &element.mids {
+                    nodes.push(builder.node(&mut mesh, m, top));
+                }
+                for &c in &element.corners {
+                    nodes.push(builder.node(&mut mesh, c, bottom + 1));
+                }
+            }
+            let id = ElementId::try_from(mesh.element_count() + 1)
+                .map_err(|_| GmshError::Other("too many elements".into()))?;
+            mesh.add_element(Element {
+                id,
+                type_name: type_name.into(),
+                shape,
+                nodes,
+            })
+            .map_err(|e| GmshError::Other(e.to_string()))?;
+            part_elements.elements.push(id);
+        }
+    }
+    mesh.parts.push(part_elements);
+    Ok((mesh, builder))
 }
 
 /// Meshes a solid as an extrusion of its source faces. The other solids are gone from the
@@ -372,63 +542,16 @@ pub(crate) fn extrude_part_mesh(
     gmsh.generate(2)?;
     let quadratic = options.order == 2;
     let coords = node_coords(gmsh)?;
-    let position = |tag: usize| {
-        coords
-            .get(&tag)
-            .copied()
-            .ok_or_else(|| GmshError::Other(format!("Node {tag} is missing")))
-    };
-
-    // The source mesh, turned along the extrusion.
-    let types: [(i32, usize); 2] = if quadratic {
-        [(TRI6, 3), (QUAD8, 4)]
-    } else {
-        [(TRI3, 3), (QUAD4, 4)]
-    };
-    let mut elements = Vec::new();
-    let mut planar_normal: Option<Point> = None;
-    let mut planar = true;
-    for &face in &sweep.source {
-        for (gmsh_type, corners) in types {
-            let n = if quadratic { 2 * corners } else { corners };
-            let (_, tags) = gmsh.elements(gmsh_type, face)?;
-            for element in tags.chunks_exact(n) {
-                let mut c = element[..corners].to_vec();
-                let mut m = element[corners..].to_vec();
-                let p: Vec<Point> = c.iter().map(|&t| position(t)).collect::<Result<_, _>>()?;
-                let normal = if corners == 4 {
-                    cross(sub(p[2], p[0]), sub(p[3], p[1]))
-                } else {
-                    cross(sub(p[1], p[0]), sub(p[2], p[0]))
-                };
-                if dot(normal, sweep.vector) < 0.0 {
-                    // Reversed: corners 0, n-1, ..., 1 and the midside nodes between them.
-                    c[1..].reverse();
-                    m.reverse();
-                }
-                let length = norm(normal);
-                if length > 0.0 {
-                    let unit = scale(normal, 1.0 / length);
-                    match planar_normal {
-                        None => planar_normal = Some(unit),
-                        Some(first) => planar &= norm(cross(first, unit)) < 1e-6,
-                    }
-                }
-                elements.push(SourceElement {
-                    face,
-                    corners: c,
-                    mids: m,
-                });
-            }
-        }
-    }
+    let motion = Motion::Translate(sweep.vector);
+    let (elements, planar_normal) =
+        source_elements(gmsh, &sweep.source, quadratic, &coords, &motion)?;
     if elements.is_empty() {
         return Err(GmshError::Other(format!(
             "{part}: Gmsh created no elements on the source faces"
         )));
     }
     // A planar source is checked once more: the part's volume is its area times the height.
-    if planar && let Some(normal) = planar_normal {
+    if let Some(normal) = planar_normal {
         let expected = source_area * dot(normal, sweep.vector).abs();
         if (expected - part_volume).abs() > 1e-3 * part_volume.abs().max(f64::MIN_POSITIVE) {
             return Ok(Err(format!(
@@ -441,53 +564,8 @@ pub(crate) fn extrude_part_mesh(
     let max_size = geometry.parameters(part).max_size;
     let levels = (extrude.layers.levels(max_size, norm(sweep.vector)))
         .map_err(|reason| GmshError::Other(format!("{part}: {reason}")))?;
-    let mut builder = Builder::new(&coords, &sweep, &levels, quadratic);
-    let mut mesh = FeMesh::default();
-    let mut part_elements = Part {
-        name: part.to_string(),
-        elements: Vec::new(),
-    };
-    for layer in 0..levels.len() {
-        for element in &elements {
-            let (shape, type_name) = match (element.corners.len(), quadratic) {
-                (3, false) => (ElementShape::Wedge6, "C3D6"),
-                (3, true) => (ElementShape::Wedge15, "C3D15"),
-                (_, false) => (ElementShape::Hex8, "C3D8"),
-                (_, true) => (ElementShape::Hex20, "C3D20"),
-            };
-            let (bottom, top) = builder.layer_levels(layer);
-            let mut nodes = Vec::with_capacity(shape.node_count());
-            for &c in &element.corners {
-                nodes.push(builder.node(&mut mesh, c, bottom));
-            }
-            for &c in &element.corners {
-                nodes.push(builder.node(&mut mesh, c, top));
-            }
-            if quadratic {
-                for &m in &element.mids {
-                    nodes.push(builder.node(&mut mesh, m, bottom));
-                }
-                for &m in &element.mids {
-                    nodes.push(builder.node(&mut mesh, m, top));
-                }
-                for &c in &element.corners {
-                    nodes.push(builder.node(&mut mesh, c, bottom + 1));
-                }
-            }
-            let id = ElementId::try_from(mesh.element_count() + 1)
-                .map_err(|_| GmshError::Other("too many elements".into()))?;
-            mesh.add_element(Element {
-                id,
-                type_name: type_name.into(),
-                shape,
-                nodes,
-            })
-            .map_err(|e| GmshError::Other(e.to_string()))?;
-            part_elements.elements.push(id);
-        }
-    }
-    mesh.parts.push(part_elements);
-    mesh.cad = builder.cad_map(gmsh, &mesh, &elements)?;
+    let (mut mesh, builder) = sweep_mesh(part, &coords, &elements, motion, &levels, quadratic)?;
+    mesh.cad = builder.cad_map(gmsh, &mesh, &elements, &sweep)?;
     Ok(Ok(GeneratedMesh {
         mesh,
         warnings: gmsh.warnings()?,
@@ -495,9 +573,9 @@ pub(crate) fn extrude_part_mesh(
 }
 
 /// Makes the nodes of the swept mesh, numbered from 1, level by level.
-struct Builder<'a> {
+pub(crate) struct Builder<'a> {
     coords: &'a HashMap<usize, Point>,
-    sweep: &'a Sweep,
+    motion: Motion,
     /// Height of each node level as a fraction of the extrusion: the source, then for
     /// quadratic elements the middle and the top of each layer, for linear ones its top.
     heights: Vec<f64>,
@@ -508,7 +586,7 @@ struct Builder<'a> {
 impl<'a> Builder<'a> {
     fn new(
         coords: &'a HashMap<usize, Point>,
-        sweep: &'a Sweep,
+        motion: Motion,
         levels: &[f64],
         quadratic: bool,
     ) -> Self {
@@ -522,7 +600,7 @@ impl<'a> Builder<'a> {
         }
         Self {
             coords,
-            sweep,
+            motion,
             heights,
             quadratic,
             nodes: HashMap::new(),
@@ -549,12 +627,18 @@ impl<'a> Builder<'a> {
 
     /// The node at a source node's place on a level, made on first use.
     fn node(&mut self, mesh: &mut FeMesh, tag: usize, level: usize) -> NodeId {
+        // A full revolution ends on its source.
+        let level = if level == self.top() && self.motion.closes() {
+            0
+        } else {
+            level
+        };
         if let Some(&id) = self.nodes.get(&(tag, level)) {
             return id;
         }
         let id = NodeId::try_from(self.nodes.len() + 1).unwrap_or(NodeId::MAX);
         let base = self.coords.get(&tag).copied().unwrap_or_default();
-        mesh.set_node(id, add(base, scale(self.sweep.vector, self.heights[level])));
+        mesh.set_node(id, self.motion.at(base, self.heights[level]));
         self.nodes.insert((tag, level), id);
         id
     }
@@ -570,8 +654,8 @@ impl<'a> Builder<'a> {
         gmsh: &Gmsh,
         mesh: &FeMesh,
         elements: &[SourceElement],
+        sweep: &Sweep,
     ) -> Result<CadMap, GmshError> {
-        let sweep = self.sweep;
         let top = self.top();
         let mut solid_faces: HashMap<Vec<NodeId>, (ElementId, u8)> = HashMap::new();
         for element in mesh.elements() {
