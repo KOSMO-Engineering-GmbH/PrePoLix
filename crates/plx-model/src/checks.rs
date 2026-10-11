@@ -724,7 +724,9 @@ impl FeModel {
                     ));
                 }
             }
-            if let StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) = &step.kind
+            if let StepKind::HeatTransfer(h)
+            | StepKind::CoupledTempDisp(h)
+            | StepKind::UncoupledTempDisp(h) = &step.kind
                 && !h.steady_state
                 && !initial_temperature
             {
@@ -767,7 +769,9 @@ impl FeModel {
         let mechanical = active().any(|s| s.kind.is_mechanical());
         let thermal = active().any(|s| s.kind.is_thermal());
         let transient = active().any(|s| match &s.kind {
-            StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) => !h.steady_state,
+            StepKind::HeatTransfer(h)
+            | StepKind::CoupledTempDisp(h)
+            | StepKind::UncoupledTempDisp(h) => !h.steady_state,
             _ => false,
         });
         // Eigenfrequencies and inertia need the mass.
@@ -1236,7 +1240,10 @@ impl FeModel {
         // A buckle step solves the static state of its loads first.
         let static_mechanical = matches!(
             step.kind,
-            StepKind::Static(_) | StepKind::Buckle(_) | StepKind::CoupledTempDisp(_)
+            StepKind::Static(_)
+                | StepKind::Buckle(_)
+                | StepKind::CoupledTempDisp(_)
+                | StepKind::UncoupledTempDisp(_)
         );
         if static_mechanical && !constrained_by_keywords {
             self.check_rigid_body(s, mesh, check, trusses, &fixed, &skewed_supports, findings);
