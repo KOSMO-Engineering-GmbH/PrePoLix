@@ -99,6 +99,11 @@ pub struct ResultsView {
     pub history_outputs: Vec<HistoryOutput>,
     /// History CalculiX printed into the `.dat` file next to the results.
     pub file_history: Vec<HistorySet>,
+    /// The evaluated hot spots of the results, which history outputs may take values from.
+    pub hot_spot_reports: Vec<plx_results::hot_spot::HotSpotReport>,
+    /// Positions of the moving loads of the FE model by step, which a history output may
+    /// put beside its values.
+    pub moving_loads: Vec<plx_model::LoadStations>,
     /// The sets of the `.dat` file followed by the data of the derived history outputs that
     /// could be computed, by name.
     pub history: Vec<HistorySet>,
@@ -213,6 +218,8 @@ impl ResultsView {
             field_outputs: Vec::new(),
             history_outputs: Vec::new(),
             file_history: Vec::new(),
+            hot_spot_reports: Vec::new(),
+            moving_loads: Vec::new(),
             history: Vec::new(),
             transformations: Vec::new(),
             coordinate_systems: Vec::new(),
@@ -491,7 +498,11 @@ impl ResultsView {
                     .cloned(),
             )
             .collect();
-        history_output::compute(&output, &self.increments, mesh, &earlier)?;
+        let sources = history_output::Sources {
+            sets: &earlier,
+            ..self.history_sources()
+        };
+        history_output::compute(&output, &self.increments, mesh, sources)?;
         match at {
             Some(i) => self.history_outputs[i] = output,
             None => self.history_outputs.push(output),
@@ -513,13 +524,42 @@ impl ResultsView {
         let mut warnings = Vec::new();
         let mut sets = self.file_history.clone();
         for output in &self.history_outputs {
-            match history_output::compute(output, &self.increments, mesh, &sets) {
+            let sources = history_output::Sources {
+                sets: &sets,
+                ..self.history_sources()
+            };
+            match history_output::compute(output, &self.increments, mesh, sources) {
                 Ok(set) => sets.push(set),
                 Err(error) => warnings.push(format!("{}: {error}", output.name)),
             }
         }
         self.history = sets;
         warnings
+    }
+
+    fn history_sources(&self) -> history_output::Sources<'_> {
+        history_output::Sources {
+            sets: &[],
+            hot_spots: &self.hot_spot_reports,
+            moving_loads: &self.moving_loads,
+        }
+    }
+
+    /// Takes the evaluated hot spots and the moving loads of the FE model and computes the
+    /// history outputs again if they changed; returns their failures, `None` if nothing
+    /// changed.
+    pub fn set_history_sources(
+        &mut self,
+        hot_spots: Vec<plx_results::hot_spot::HotSpotReport>,
+        moving_loads: Vec<plx_model::LoadStations>,
+        mesh: &FeMesh,
+    ) -> Option<Vec<String>> {
+        if hot_spots == self.hot_spot_reports && moving_loads == self.moving_loads {
+            return None;
+        }
+        self.hot_spot_reports = hot_spots;
+        self.moving_loads = moving_loads;
+        Some(self.recompute_history(mesh))
     }
 
     /// Index of the history output of a computed set; the sets of the `.dat` file have none.

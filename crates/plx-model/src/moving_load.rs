@@ -79,6 +79,47 @@ impl Default for MovingLoad {
     }
 }
 
+/// Where a moving load stands in the steps of the results, by CalculiX step number.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LoadStations {
+    /// Name of the load; a load of that name in several steps gives all of their positions.
+    pub load: String,
+    /// The CalculiX step number and the position of the vehicle's reference point in it.
+    pub steps: Vec<(u32, f64)>,
+}
+
+/// Where each moving load of the model stands in which step of the input file the writer
+/// gives: every active step is a `*Step`, one with moving loads one per position, and a load
+/// with fewer positions than another of its step stays at its last one.
+pub fn load_stations(model: &FeModel) -> Vec<LoadStations> {
+    let mut result: Vec<LoadStations> = Vec::new();
+    let mut number = 0;
+    for step in model.steps.iter().filter(|s| s.active) {
+        let moving: Vec<(&str, Vec<f64>)> = (step.loads.iter())
+            .filter(|l| l.active && step.kind.supports_load(&l.kind))
+            .filter_map(|l| match &l.kind {
+                crate::LoadKind::Moving(m) => Some((l.name.as_str(), m.stations())),
+                _ => None,
+            })
+            .collect();
+        let count = moving.iter().map(|(_, s)| s.len()).max().unwrap_or(1);
+        for position in 0..count {
+            number += 1;
+            for (name, stations) in &moving {
+                let station = stations[position.min(stations.len() - 1)];
+                match result.iter_mut().find(|r| r.load == *name) {
+                    Some(r) => r.steps.push((number, station)),
+                    None => result.push(LoadStations {
+                        load: name.to_string(),
+                        steps: vec![(number, station)],
+                    }),
+                }
+            }
+        }
+    }
+    result
+}
+
 /// The nodal forces of a moving load at one position.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MovingFrame {

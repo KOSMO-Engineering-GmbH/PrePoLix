@@ -4835,6 +4835,33 @@ fn a_moving_load_off_its_faces_is_left_out() {
 }
 
 #[test]
+fn moving_load_stations_follow_the_steps_the_writer_gives() {
+    let (mesh, mut model) = moving_cantilever();
+    // A plain step before, a deactivated one in between and one after the moving load.
+    let mut moving = model.steps.remove(0);
+    let mut plain = moving.clone();
+    plain
+        .loads
+        .retain(|l| !matches!(l.kind, LoadKind::Moving(_)));
+    let mut off = plain.clone();
+    off.name = "Off".into();
+    off.active = false;
+    moving.name = "Step-2".into();
+    let mut last = plain.clone();
+    last.name = "Step-3".into();
+    model.steps = vec![plain, off, moving, last];
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("\n*Step").count(), 7, "{text}");
+    let stations = plx_model::load_stations(&model);
+    assert_eq!(stations.len(), 1);
+    assert_eq!(stations[0].load, "Moving-1");
+    assert_eq!(
+        stations[0].steps,
+        [(2, 10.0), (3, 30.0), (4, 50.0), (5, 70.0), (6, 90.0)]
+    );
+}
+
+#[test]
 fn calculix_bends_the_cantilever_more_as_the_moving_load_drives_out() {
     let (mesh, mut model) = moving_cantilever();
     model.steps[0].loads.remove(0);
