@@ -560,11 +560,11 @@ impl MeshItemEditor {
                     ui.vertical(|ui| {
                         ui.horizontal(|ui| {
                             let faces = self.picks.items().len();
-                            if faces == 0 {
-                                ui.label("Empty");
-                            } else {
-                                ui.label(format!("{faces} faces"));
-                            }
+                            match faces {
+                                0 => ui.label("Empty"),
+                                1 => ui.label("1 face"),
+                                _ => ui.label(format!("{faces} faces")),
+                            };
                             if ui.button("Clear Selection").clicked() {
                                 self.picks.clear();
                             }

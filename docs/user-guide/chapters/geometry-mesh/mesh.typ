@@ -104,11 +104,48 @@ values and meshes at once.
 / Tetrahedral Gmsh: chooses the Gmsh algorithms for selected parts. #ui("Surface algorithm"):
   Frontal-Delaunay (default), Delaunay, MeshAdapt or Automatic. #ui("Volume algorithm"):
   Delaunay (default), Frontal or HXT.
+/ Extrude Mesh: hexahedra and wedges for parts that are extrusions of a face (@extrude-mesh).
 
 #screenshot("mesh-setup-item.png", [Creating a mesh setup item])
 
 #ui("OK") stores the item. #ui("OK & Remesh") stores it and meshes again the parts it names.
 A Local Mesh Size item is picked on faces and edges, so it meshes all parts again.
+
+=== Extrude mesh <extrude-mesh>
+
+A part that is a straight extrusion of a face, such as a plate with holes, a profile or a
+gear blank, can be meshed with hexahedra instead of tetrahedra. The #ui("Extrude Mesh") item
+meshes the source face with Gmsh, mostly with quadrilaterals, and sweeps that face mesh through
+the part in layers: every quadrilateral becomes a hexahedron (`C3D8`, or `C3D20` with second
+order), every triangle a wedge (`C3D6`, `C3D15`). The size of the face mesh comes from the part's
+meshing parameters and local mesh sizes, as for tetrahedra.
+
+#fields(
+  [Source faces], [#ui("Automatic") finds a face of each selected part that the part is an
+    extrusion of. #ui("Selected faces") uses the faces you click at one end of the parts; the
+    dialog shows which parts they belong to. A source may consist of several faces.],
+  [Surface algorithm], [The Gmsh algorithm for the source face. #ui("Frontal-Delaunay for
+    quads") (default) gives triangles that join well to quadrilaterals.],
+  [Recombine algorithm], [How triangles are joined to quadrilaterals: #ui("Blossom") (default)
+    or #ui("Simple") leave a few triangles, which become wedges. #ui("Simple full-quad") and
+    #ui("Blossom full-quad") give quadrilaterals only, so the part gets hexahedra only; they
+    split the mesh once more, which halves the element size. #ui("None") keeps the triangles.],
+  [Layers defined by], [The element size in the extrude direction. #ui("Scale factor"): layers
+    as thick as the part's max. element size times the factor. #ui("Number of elements"): this
+    many layers of the same thickness. #ui("Multi-layered"): relative layer sizes such as
+    `0.2; 0.6; 0.2;` and the elements per layer such as `2; 4; 2;`.],
+)
+
+#screenshot("extrude-mesh.png", [Extrude Mesh item with the top face of a plate as source,
+  and the hexahedra swept from it in four layers])
+
+Before meshing, prepolix checks that the part really is an extrusion of the source: every
+vertex at the boundary of the source has a straight edge of the same length and direction to
+its copy at the other end, and the part's volume is the source's area times the height. If not,
+meshing fails with a message naming the part; mesh it with tetrahedra or select the faces at one
+end. The element type can be changed afterwards in the part's properties (@element-type), for
+example to `C3D8I`, which bends without the locking of `C3D8`. A later #ui("Tetrahedral Gmsh")
+item for the same part meshes it with tetrahedra again.
 
 == Using an existing mesh
 
