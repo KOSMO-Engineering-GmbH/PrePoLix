@@ -32,7 +32,7 @@ From top to bottom the window contains:
 #fields(
   [New, Open, Save], [As in the #ui("File") menu (@files).],
   [Import Geometry], [Imports STEP, IGES or BREP files and adds them to the geometry
-    (@geometry-import).],
+    (@geometry-import), or the mesh of input files (`.inp`) as mesh parts (@mesh-import).],
   [Zoom to Fit], [Fits the visible parts into the view.],
   [Front, Back, Top, Bottom, Left, Right, Isometric], [Standard views (@view).],
   [Vertical View], [Rolls the view so that the axis closest to screen-up points straight up.],

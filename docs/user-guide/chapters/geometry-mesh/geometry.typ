@@ -20,6 +20,25 @@ selected at once. Gmsh with OpenCASCADE reads the files, so Gmsh must be availab
 
 #screenshot("geometry.png", [Imported geometry on the Geometry tab])
 
+=== Importing a mesh <mesh-import>
+
+The same dialog also takes input files (`.inp`). Their mesh is added to the model as *mesh
+parts*, for example a mesh written by #menu("File", "Export Deformed Mesh (.inp) ...")
+(@export-deformed) to use a buckling mode as imperfection. Select the files in the file dialog
+(the filter #ui("Input file") shows only those) and the parts appear on the #ui("FE Model") tab.
+
+- A model is never replaced. If it already has parts, the imported nodes and elements are
+  numbered after the highest numbers it has, so nothing that refers to the existing parts changes.
+- A part, set or surface whose name is already taken gets a number appended: the second `PART-1`
+  becomes `PART-1-2`.
+- Only the mesh is read: nodes, elements, sets and surfaces. Materials, steps and loads of the
+  file are skipped and listed in the output window. To open an input file as a model of its own,
+  use #menu("File", "Open ...") instead.
+- Into an empty model the mesh decides the model space (a mesh of plane stress elements makes a 2D
+  model). A 2D mesh cannot be added to a 3D model or the other way round.
+
+#screenshot("mesh-import.png", [A deformed mesh imported next to the original part])
+
 === Parts
 
 Every solid becomes a part. Faces that do not belong to a solid become shell parts, edges that do
