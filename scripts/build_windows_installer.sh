@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Builds the Windows installer for prepolix on Linux: cross-compiles prepolix.exe for
-# x86_64-pc-windows-gnu with MinGW, fetches the Gmsh DLL and packs everything with NSIS.
+# x86_64-pc-windows-gnu with MinGW, fetches the Gmsh DLL and the CalculiX solver and packs
+# everything with NSIS.
 #
 #     scripts/build_windows_installer.sh
 #
-# Needs (Debian/Ubuntu): sudo apt install gcc-mingw-w64-x86-64 nsis python3 curl xz-utils
+# Needs (Debian/Ubuntu): sudo apt install gcc-mingw-w64-x86-64 nsis python3 curl xz-utils zstd
 # and the Rust target:   rustup target add x86_64-pc-windows-gnu
 #
 # The installer ends up in target/windows-installer/prepolix-<version>-setup.exe.
@@ -16,6 +17,7 @@ target=x86_64-pc-windows-gnu
 out=target/windows-installer
 stage="$out/stage"
 gmsh=target/gmsh-windows
+ccx=target/ccx/windows
 
 for tool in makensis x86_64-w64-mingw32-gcc python3 curl; do
     command -v "$tool" >/dev/null || {
@@ -30,6 +32,7 @@ version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Car
 
 cargo build --release --locked -p plx-app --target "$target"
 [ -f "$gmsh/gmsh-4.15.dll" ] || python3 scripts/fetch_gmsh.py --platform windows --dest "$gmsh"
+[ -f "$ccx/bin/ccx.exe" ] || python3 scripts/fetch_ccx.py --platform windows --dest "$ccx"
 scripts/build_user_guide.sh html
 
 rm -rf "$stage"
@@ -40,6 +43,8 @@ cp LICENSE "$stage/LICENSE.txt"
 cp "$gmsh/GMSH-LICENSE.txt" "$gmsh/GMSH-CREDITS.txt" installer/windows/licenses/*.txt "$stage/licenses/"
 cp crates/plx-app/assets/fonts/OFL.txt "$stage/licenses/NotoSans-OFL.txt"
 cp target/user-guide/user-guide.html "$stage/doc/"
+# CalculiX with its DLLs; prepolix uses it when no other CalculiX is set.
+cp -r "$ccx" "$stage/ccx"
 commit="$(git rev-parse HEAD 2>/dev/null || echo unbekannt)"
 dirty="$(git status --porcelain --untracked-files=no 2>/dev/null | head -1)"
 {
@@ -48,7 +53,7 @@ dirty="$(git status --porcelain --untracked-files=no 2>/dev/null | head -1)"
     echo "Commit:    $commit${dirty:+ (mit lokalen Änderungen)}"
 } >"$stage/SOURCE.txt"
 # Windows editors expect CRLF line ends in the text files.
-for file in "$stage"/*.txt "$stage"/licenses/*.txt; do
+for file in "$stage"/*.txt "$stage"/licenses/*.txt "$stage"/ccx/*.txt "$stage"/ccx/licenses/*.txt; do
     sed -i 's/\r$//; s/$/\r/' "$file"
 done
 

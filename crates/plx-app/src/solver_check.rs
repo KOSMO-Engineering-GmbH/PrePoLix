@@ -1,5 +1,5 @@
-//! Self test of the CalculiX executable from the settings: prepolix does not ship CalculiX,
-//! so the user can check that the configured program runs and computes correct results.
+//! Self test of the CalculiX executable from the settings, the shipped one or the user's own:
+//! checks that the program runs and computes correct results.
 //!
 //! The test reads the version and solves small cantilevers through the same path as a real
 //! analysis (model, input file writer, job, results reader), comparing with beam theory.

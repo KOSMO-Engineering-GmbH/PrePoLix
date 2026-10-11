@@ -42,9 +42,10 @@ The project, including geometry, mesh and model, is saved as a PrePoLix project 
 
 == Requirements
 
-- *CalculiX* (`ccx`) is needed to run analyses. It is not part of PrePoLix. Set its path under
-  #menu("Tools", "Settings ...", "CalculiX") and press #ui("Test CalculiX") to check it
-  (@settings).
+- *CalculiX* (`ccx`) is needed to run analyses. The Windows installer and the Linux AppImage
+  include CalculiX 2.23 with the SPOOLES and ARPACK solvers, so analyses run right after
+  installation. Another CalculiX, for example one built with Pardiso, can be set under
+  #menu("Tools", "Settings ...", "CalculiX"); #ui("Test CalculiX") checks it (@settings).
 - *Gmsh* is needed to import and mesh CAD geometry. The Windows installer and the Linux AppImage
   include it. Without
   Gmsh PrePoLix still starts; only geometry import and meshing are unavailable. Its library path
@@ -56,13 +57,13 @@ The project, including geometry, mesh and model, is saved as a PrePoLix project 
 == Installation
 
 *Windows.* Run `prepolix-<version>-setup.exe` from the release page. It installs PrePoLix with
-Gmsh to `C:\Program Files\prepolix`, creates a start menu entry, optionally a desktop icon, and
+Gmsh and CalculiX to `C:\Program Files\prepolix`, creates a start menu entry, optionally a desktop icon, and
 can associate `.plx` project files with PrePoLix. Uninstall it under _Apps_ in the Windows
 settings. Because programs may not write to `C:\Program Files`, the CalculiX work directory then
 defaults to `%TEMP%\prepolix`.
 
 *Linux.* Download `prepolix-<version>-x86_64.AppImage` from the release page, make it executable
-(`chmod +x prepolix-*-x86_64.AppImage`) and start it. It includes Gmsh and runs on x86_64
+(`chmod +x prepolix-*-x86_64.AppImage`) and start it. It includes Gmsh and CalculiX and runs on x86_64
 distributions with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later). A tool
 such as Gear Lever or AppImageLauncher adds a menu entry, associates `.plx` files and updates
 the AppImage when a new release is published. The CalculiX

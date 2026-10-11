@@ -203,10 +203,11 @@ impl PrepolixApp {
             adapter.name,
             adapter.backend
         )];
-        let settings: Settings = cc
+        let mut settings: Settings = cc
             .storage
             .and_then(|s| eframe::get_value(s, settings::STORAGE_KEY))
             .unwrap_or_default();
+        settings.upgrade();
         plx_mesher::set_library_path(settings.gmsh.library());
         let app = Self {
             workbench: Workbench {
