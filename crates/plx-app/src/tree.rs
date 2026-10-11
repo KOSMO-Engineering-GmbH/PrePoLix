@@ -13,7 +13,7 @@ use plx_model::{FeModel, Finding, ModelItem, SetKind, Severity};
 use crate::features::{FeatureItem, FeatureKind};
 use crate::model::{Model, PartInfo};
 use crate::setup::NewItem;
-use crate::tree_icons::{self, TreeIcon};
+use crate::tree_icons::{self, StepGlyph, TreeIcon};
 
 /// Which of the three trees is shown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -737,6 +737,8 @@ struct Tree<'a> {
     symbols: HashMap<TreeItem, bool>,
     /// Number of steps, to disable "Move Down" on the last one.
     step_count: usize,
+    /// The type of every step, which gives it its icon and tooltip.
+    step_types: Vec<StepGlyph>,
 }
 
 impl Tree<'_> {
@@ -746,6 +748,13 @@ impl Tree<'_> {
             _ => (self.state.selected.as_ref())
                 .is_some_and(|(view, selected)| *view == self.view && selected == item),
         }
+    }
+
+    /// Tooltip of a step: its type, which the name of the step does not tell.
+    fn step_type_hint(&self, item: &TreeItem) -> Option<String> {
+        let TreeItem::Step(s) = item else { return None };
+        let glyph = self.step_types.get(*s)?;
+        Some(format!("Step type: {}", glyph.name()))
     }
 
     /// Selectable label of an item: a click selects it, a double click opens its properties.
@@ -760,9 +769,19 @@ impl Tree<'_> {
             inactive.then_some(INACTIVE)
         };
         let mut response = row_label(ui, self.is_selected(&item), color, text);
+        let step_type = self.step_type_hint(&item);
+        if findings.is_none()
+            && let Some(hint) = &step_type
+        {
+            response = response.on_hover_text(hint);
+        }
         if let Some(findings) = findings {
-            let mut hover: Vec<String> = (findings.iter())
-                .map(|f| format!("{}: {}", f.problem.title(), f.detail))
+            let mut hover: Vec<String> = (step_type.iter().cloned())
+                .chain(
+                    findings
+                        .iter()
+                        .map(|f| format!("{}: {}", f.problem.title(), f.detail)),
+                )
                 .collect();
             hover.push("Click the warning sign to explain the problem.".into());
             let hover = hover.join("\n");
@@ -1032,7 +1051,10 @@ impl Tree<'_> {
             TreeItem::Group("Amplitudes") => TreeIcon::Amplitude,
             TreeItem::Group("Initial Conditions") => TreeIcon::InitialConditions,
             TreeItem::Group("Steps") => TreeIcon::Steps,
-            TreeItem::Step(_) => TreeIcon::Step,
+            TreeItem::Step(s) => match self.step_types.get(*s) {
+                Some(glyph) => TreeIcon::StepType(*glyph),
+                None => TreeIcon::Step,
+            },
             TreeItem::StepGroup(_, "Field Outputs") | TreeItem::FieldOutputs => {
                 TreeIcon::FieldOutput
             }
@@ -1091,6 +1113,10 @@ impl Tree<'_> {
             if ui.is_rect_visible(rect) {
                 tree_icons::paint(ui.painter(), rect.min, icon);
             }
+            let icon_response = match self.step_type_hint(&item) {
+                Some(hint) if !inactive => icon_response.on_hover_text(hint),
+                _ => icon_response,
+            };
             if inactive && icon_response.on_hover_text("Activate").clicked() {
                 self.response.toggle_active = Some(item.clone());
             }
@@ -1367,6 +1393,7 @@ pub fn show(
         symbols: HashMap::new(),
         master_slave: HashSet::new(),
         step_count: 0,
+        step_types: Vec::new(),
     };
     let expanding = tree.state.expand.clone();
     egui::ScrollArea::both()
@@ -1524,6 +1551,7 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             return;
         }
         tree.step_count = fe.steps.len();
+        tree.step_types = fe.steps.iter().map(|s| StepGlyph::from(&s.kind)).collect();
         let text = counted("Steps", fe.steps.len());
         tree.branch(ui, steps, text, true, |tree, ui| {
             for (s, step) in fe.steps.iter().enumerate() {
