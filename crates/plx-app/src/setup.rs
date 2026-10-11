@@ -1621,19 +1621,27 @@ impl Editor {
                 name_row(ui, &mut bc.name);
                 ui.label("Type");
                 let step_kind = model.fe.steps.get(*step).map(|s| &s.kind);
-                ui.horizontal(|ui| {
-                    let current = boundary_kind_name(&bc.kind);
-                    for (label, name, kind) in boundary_kinds() {
-                        // Only the kinds the step takes, as PrePoMax lists them.
-                        if step_kind.is_some_and(|s| !s.supports_boundary(&kind)) {
-                            continue;
+                let current = boundary_kind_name(&bc.kind);
+                let label = (boundary_kinds().into_iter())
+                    .find(|(_, name, _)| *name == current)
+                    .map_or("", |(label, ..)| label);
+                egui::ComboBox::from_id_salt("boundary kind")
+                    .selected_text(label)
+                    .width(200.0)
+                    .show_ui(ui, |ui| {
+                        for (label, name, kind) in boundary_kinds() {
+                            // Only the kinds the step takes, as PrePoMax lists them.
+                            if step_kind.is_some_and(|s| !s.supports_boundary(&kind)) {
+                                continue;
+                            }
+                            if ui.selectable_label(current == name, label).clicked()
+                                && current != name
+                            {
+                                bc.kind = kind;
+                                rename_default(&mut bc.name, current, name, &taken);
+                            }
                         }
-                        if ui.radio(current == name, label).clicked() && current != name {
-                            bc.kind = kind;
-                            rename_default(&mut bc.name, current, name, &taken);
-                        }
-                    }
-                });
+                    });
                 ui.end_row();
                 if let BoundaryKind::Temperature(t) = &mut bc.kind {
                     ui.label("Temperature");
