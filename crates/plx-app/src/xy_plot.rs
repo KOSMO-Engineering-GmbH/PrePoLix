@@ -77,12 +77,37 @@ pub fn show(ui: &mut Ui, data: &XyData) {
     let size = ui.available_size().max(vec2(360.0, 220.0));
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter_at(rect);
+    paint(&painter, rect, response.hover_pos(), data, &Axes::default());
+}
+
+/// What a viewport annotation changes of a diagram: the label of the value axis and a fixed
+/// value range.
+#[derive(Default)]
+pub struct Axes<'a> {
+    /// Written above the value axis; empty for none.
+    pub y_label: &'a str,
+    /// Values shown, lowest and highest; `None` follows the data.
+    pub y_range: Option<[f64; 2]>,
+}
+
+/// Smallest and largest value of the curves and guides.
+pub fn extremes(data: &XyData) -> Option<[f64; 2]> {
+    let values = (data.curves.iter().chain(&data.guides)).flat_map(|(_, y)| y.iter().copied());
+    range(values).map(|(min, max)| [min, max])
+}
+
+/// Draws the diagram into `rect` with the value under `hover`.
+pub fn paint(painter: &egui::Painter, rect: Rect, hover: Option<Pos2>, data: &XyData, axes: &Axes) {
+    let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
     painter.rect_filled(rect, 0.0, Color32::WHITE);
     let font = egui::FontId::proportional(12.0);
     let text = Color32::from_gray(40);
     let values = (data.curves.iter().chain(&data.guides)).flat_map(|(_, y)| y.iter().copied());
-    let y_range = match data.y_max {
-        Some(top) if top.is_finite() && top > 0.0 => {
+    let y_range = match (axes.y_range, data.y_max) {
+        (Some([low, high]), _) if low.is_finite() && high.is_finite() && high > low => {
+            Some((low, high))
+        }
+        (_, Some(top)) if top.is_finite() && top > 0.0 => {
             range(values).map(|(min, _)| (min.min(0.0), top))
         }
         _ => range(values),
@@ -97,7 +122,17 @@ pub fn show(ui: &mut Ui, data: &XyData) {
         );
         return;
     };
-    let area = Rect::from_min_max(rect.min + vec2(72.0, 12.0), rect.max - vec2(16.0, 40.0));
+    let top = if axes.y_label.is_empty() { 12.0 } else { 26.0 };
+    let area = Rect::from_min_max(rect.min + vec2(72.0, top), rect.max - vec2(16.0, 40.0));
+    if !axes.y_label.is_empty() {
+        painter.text(
+            pos2(area.left(), rect.top() + 4.0),
+            egui::Align2::LEFT_TOP,
+            axes.y_label,
+            font.clone(),
+            text,
+        );
+    }
     let to_screen = |x: f64, y: f64| {
         pos2(
             area.left() + ((x - x0) / (x1 - x0)) as f32 * area.width(),
@@ -195,7 +230,7 @@ pub fn show(ui: &mut Ui, data: &XyData) {
         flush(&mut segment);
     }
     legend(&painter, area, data, &font);
-    if let Some(hover) = response.hover_pos().filter(|p| area.contains(*p)) {
+    if let Some(hover) = hover.filter(|p| area.contains(*p)) {
         let lines: Vec<_> = data.curves.iter().chain(&data.guides).collect();
         let nearest = (lines.iter().enumerate())
             .flat_map(|(c, (_, values))| {
@@ -296,20 +331,52 @@ fn legend(painter: &egui::Painter, area: Rect, data: &XyData, font: &egui::FontI
     }
 }
 
-/// The diagram in its own window, PrePoMax's diagram view; returns false when it is closed.
-pub fn window(ctx: &egui::Context, data: &XyData) -> bool {
+/// What the user did in the diagram's window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowResponse {
+    pub closed: bool,
+    /// Show in View or Remove from View was clicked.
+    pub toggle_view: bool,
+}
+
+/// The diagram in its own window, PrePoMax's diagram view; `shown` is whether it is also an
+/// annotation in the 3D view.
+pub fn window(ctx: &egui::Context, data: &XyData, shown: bool) -> WindowResponse {
     let mut open = true;
+    let mut toggle_view = false;
     egui::Window::new(format!("Plot: {}", data.title))
         .id(egui::Id::new("history plot"))
         .open(&mut open)
         .collapsible(false)
         .resizable(true)
-        .default_size([640.0, 420.0])
+        .default_size([640.0, 450.0])
         .pivot(egui::Align2::RIGHT_TOP)
         .default_pos(ctx.content_rect().right_top() + vec2(-24.0, 96.0))
-        .min_size([360.0, 240.0])
-        .show(ctx, |ui| show(ui, data));
-    open
+        .min_size([360.0, 270.0])
+        .show(ctx, |ui| {
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+                let label = if shown {
+                    "Remove from View"
+                } else {
+                    "Show in View"
+                };
+                toggle_view = ui
+                    .button(label)
+                    .on_hover_text(
+                        "Shows the plot as an annotation in the 3D view, where it stays after \
+                         the window is closed. Drag it to move it, drag its corner to resize \
+                         it; right-click it to edit or delete it.",
+                    )
+                    .clicked();
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    show(ui, data)
+                });
+            });
+        });
+    WindowResponse {
+        closed: !open,
+        toggle_view,
+    }
 }
 
 #[cfg(test)]

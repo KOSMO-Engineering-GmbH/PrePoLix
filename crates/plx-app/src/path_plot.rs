@@ -2,7 +2,8 @@
 //! after their dialog is closed and follow the shown increment: either in a box the user
 //! moves and resizes, or drawn onto the path itself, which then is the plot's distance axis.
 //! A hot spot's plot is the stress along the path of its toe with the read-out points and
-//! the extrapolation.
+//! the extrapolation. A table's plot shows curves from a history output table; it has no
+//! path and is always drawn in a box.
 
 use egui::{
     Color32, CursorIcon, Painter, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2,
@@ -18,6 +19,7 @@ use crate::features::{MARK, Marks};
 use crate::model::Model;
 use crate::overlay::project;
 use crate::results::format_value;
+use crate::xy_plot::XyData;
 
 const MARGIN: f32 = 20.0;
 /// Space kept free below a new box for the scale bar.
@@ -71,6 +73,8 @@ pub enum PlotKind {
     Path,
     /// The stress along the path of a hot spot, with its extrapolation.
     HotSpot,
+    /// Curves from a history output table, which do not change with the increment.
+    Table,
 }
 
 /// A path or hot spot whose plot the 3D view shows, with where the user put it.
@@ -83,6 +87,8 @@ pub struct PathPlot {
     located: Option<(ResultPath, Result<Vec<PathPoint>, String>)>,
     /// Paths of the hot spot as last located.
     hot_spot: crate::hot_spots::Located,
+    /// The curves of a table's plot.
+    pub table: Option<XyData>,
 }
 
 impl PathPlot {
@@ -100,6 +106,14 @@ impl PathPlot {
             y_label: p.y_label.clone(),
             y_range: p.y_range,
             hot_spot: self.kind == PlotKind::HotSpot,
+            table: self
+                .table
+                .as_ref()
+                .map(|data| plx_results::saved_view::SavedTablePlot {
+                    x_label: data.x_label.clone(),
+                    x: data.x.clone(),
+                    curves: data.curves.clone(),
+                }),
         }
     }
 
@@ -107,6 +121,17 @@ impl PathPlot {
         let mut plot = Self::new(saved.path.clone());
         if saved.hot_spot {
             plot.kind = PlotKind::HotSpot;
+        }
+        if let Some(table) = &saved.table {
+            plot.kind = PlotKind::Table;
+            plot.table = Some(XyData {
+                title: saved.path.clone(),
+                x_label: table.x_label.clone(),
+                x: table.x.clone(),
+                curves: table.curves.clone(),
+                guides: Vec::new(),
+                y_max: None,
+            });
         }
         plot.placement = Placement {
             offset: saved.offset.map(|[x, y]| vec2(x, y)),
@@ -128,6 +153,7 @@ impl PathPlot {
             placement: Placement::default(),
             located: None,
             hot_spot: Default::default(),
+            table: None,
         }
     }
 
@@ -137,6 +163,39 @@ impl PathPlot {
             kind: PlotKind::HotSpot,
             ..Self::new(name)
         }
+    }
+
+    /// The plot of curves from a history output table.
+    pub fn table(data: XyData) -> Self {
+        let mut plot = Self::new(data.title.clone());
+        plot.kind = PlotKind::Table;
+        plot.placement.x_label = data.x_label.clone();
+        plot.table = Some(data);
+        plot
+    }
+
+    /// Whether this is the plot of these curves of a table.
+    pub fn is_table(&self, data: &XyData) -> bool {
+        self.kind == PlotKind::Table && self.table.as_ref() == Some(data)
+    }
+
+    /// The table's plot as the 3D view draws it.
+    pub fn table_box(&self, index: usize) -> Option<PlotBox> {
+        let data = self.table.clone()?;
+        Some(PlotBox {
+            index,
+            title: data.title.clone(),
+            distances: Vec::new(),
+            values: Vec::new(),
+            ends: [Vec3::ZERO; 2],
+            placement: Placement {
+                on_path: false,
+                ..self.placement.clone()
+            },
+            marks: None,
+            auto_range: None,
+            table: Some(data),
+        })
     }
 
     /// Whether this is the plot of the path named `name`.
@@ -172,6 +231,7 @@ impl PathPlot {
             placement: self.placement.clone(),
             marks: Some(plot.marks),
             auto_range: Some(range),
+            table: None,
         })
     }
 
@@ -201,6 +261,7 @@ impl PathPlot {
             placement: self.placement.clone(),
             marks: None,
             auto_range: None,
+            table: None,
         })
     }
 }
@@ -219,6 +280,8 @@ pub struct PlotBox {
     pub marks: Option<Marks>,
     /// Value range while the placement's is automatic; `None` fits it to the values.
     pub auto_range: Option<[f64; 2]>,
+    /// The curves of a table's plot, drawn instead of the values along a path.
+    pub table: Option<XyData>,
 }
 
 /// What the user did to a plot.
@@ -251,6 +314,9 @@ impl PlotBox {
     pub fn extremes(&self) -> Option<[f64; 2]> {
         if let Some(range) = self.auto_range {
             return Some(range);
+        }
+        if let Some(data) = &self.table {
+            return crate::xy_plot::extremes(data);
         }
         let finite = self.values.iter().copied().filter(|v| v.is_finite());
         let low = finite.clone().min_by(f64::total_cmp)?;
@@ -291,7 +357,7 @@ pub fn draw(ui: &Ui, rect: Rect, camera: &Camera, boxes: &mut [PlotBox]) -> Vec<
             } else {
                 ("Show on Path", true)
             };
-            if ui.button(label).clicked() {
+            if plot.table.is_none() && ui.button(label).clicked() {
                 plot.placement.on_path = on_path;
                 ui.close();
             }
@@ -366,20 +432,37 @@ fn draw_box(
     );
     let area = Rect::from_min_max(frame.min + vec2(0.0, TITLE_HEIGHT), frame.max);
     let hover = response.hover_pos().filter(|_| !response.dragged());
-    crate::features::draw_plot(
-        painter,
-        area.shrink(1.0),
-        hover,
-        &plot.distances,
-        &plot.values,
-        &crate::features::Axes {
-            x_label: &plot.placement.x_label,
-            y_label: &plot.placement.y_label,
-            y_range: plot.y_range(),
-            marks: plot.marks.as_ref(),
-        },
-        false,
-    );
+    if let Some(data) = &plot.table {
+        let data = XyData {
+            x_label: plot.placement.x_label.clone(),
+            ..data.clone()
+        };
+        crate::xy_plot::paint(
+            painter,
+            area.shrink(1.0),
+            hover,
+            &data,
+            &crate::xy_plot::Axes {
+                y_label: &plot.placement.y_label,
+                y_range: plot.placement.y_range,
+            },
+        );
+    } else {
+        crate::features::draw_plot(
+            painter,
+            area.shrink(1.0),
+            hover,
+            &plot.distances,
+            &plot.values,
+            &crate::features::Axes {
+                x_label: &plot.placement.x_label,
+                y_label: &plot.placement.y_label,
+                y_range: plot.y_range(),
+                marks: plot.marks.as_ref(),
+            },
+            false,
+        );
+    }
     painter.rect_stroke(
         frame,
         0.0,
@@ -604,6 +687,8 @@ pub struct EditDialog {
     pub draft: Placement,
     /// Range entered for a fixed value axis, kept while it is automatic.
     range: [f64; 2],
+    /// A table's plot, which has no path to be drawn on.
+    table: bool,
 }
 
 pub enum EditResult {
@@ -614,8 +699,15 @@ pub enum EditResult {
 
 impl EditDialog {
     /// `extremes` are the plot's current values, the start of a fixed range.
-    pub fn new(result: usize, index: usize, placement: &Placement, extremes: [f64; 2]) -> Self {
+    pub fn new(
+        result: usize,
+        index: usize,
+        placement: &Placement,
+        extremes: [f64; 2],
+        table: bool,
+    ) -> Self {
         Self {
+            table,
             result,
             index,
             original: placement.clone(),
@@ -635,6 +727,7 @@ impl EditDialog {
         let mut result = EditResult::Open;
         let mut open = true;
         let draft = &mut self.draft;
+        let table = self.table;
         egui::Window::new("Edit Annotation")
             .id(egui::Id::new("path plot edit"))
             .open(&mut open)
@@ -647,28 +740,38 @@ impl EditDialog {
                     .num_columns(2)
                     .spacing([12.0, 4.0])
                     .show(ui, |ui| {
-                        ui.label("Display");
-                        ui.horizontal(|ui| {
-                            ui.radio_value(&mut draft.on_path, false, "In Box");
-                            ui.radio_value(&mut draft.on_path, true, "On Path");
-                        });
-                        ui.end_row();
-                        ui.label("Height on path");
-                        ui.add_enabled(
-                            draft.on_path,
-                            egui::DragValue::new(&mut draft.height)
-                                .range(10.0..=2000.0)
-                                .suffix(" px"),
-                        );
-                        ui.end_row();
+                        if !table {
+                            ui.label("Display");
+                            ui.horizontal(|ui| {
+                                ui.radio_value(&mut draft.on_path, false, "In Box");
+                                ui.radio_value(&mut draft.on_path, true, "On Path");
+                            });
+                            ui.end_row();
+                            ui.label("Height on path");
+                            ui.add_enabled(
+                                draft.on_path,
+                                egui::DragValue::new(&mut draft.height)
+                                    .range(10.0..=2000.0)
+                                    .suffix(" px"),
+                            );
+                            ui.end_row();
+                        }
                         ui.label("Title");
                         ui.add(
                             egui::TextEdit::singleline(&mut draft.title)
-                                .hint_text("Path and component")
+                                .hint_text(if table {
+                                    "Table and component"
+                                } else {
+                                    "Path and component"
+                                })
                                 .desired_width(220.0),
                         );
                         ui.end_row();
-                        ui.label("Distance axis label");
+                        ui.label(if table {
+                            "X axis label"
+                        } else {
+                            "Distance axis label"
+                        });
                         ui.add_enabled(
                             !draft.on_path,
                             egui::TextEdit::singleline(&mut draft.x_label).desired_width(220.0),

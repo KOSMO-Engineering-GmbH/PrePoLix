@@ -3861,10 +3861,29 @@ impl Workbench {
     }
 
     fn history_table_window(&mut self, ctx: &egui::Context) {
-        if let Some(data) = &self.history_plot
-            && !crate::xy_plot::window(ctx, data)
-        {
-            self.history_plot = None;
+        if let Some(data) = &self.history_plot {
+            let model = match self.tree_view {
+                TreeView::Results => self.results.get_mut(self.current_result),
+                _ => None,
+            };
+            let shown = model
+                .as_ref()
+                .is_some_and(|m| m.path_plots.iter().any(|p| p.is_table(data)));
+            let response = crate::xy_plot::window(ctx, data, shown);
+            // The annotation belongs to the shown results and stays after the window closes.
+            if response.toggle_view
+                && let Some(model) = model
+            {
+                match model.path_plots.iter().position(|p| p.is_table(data)) {
+                    Some(index) => {
+                        model.path_plots.remove(index);
+                    }
+                    None => model.path_plots.push(PathPlot::table(data.clone())),
+                }
+            }
+            if response.closed {
+                self.history_plot = None;
+            }
         }
         let Some(mut table) = self.history_table.take() else {
             return;
@@ -4966,6 +4985,7 @@ impl Workbench {
             path_plot::PlotKind::HotSpot => {
                 hot_spot(&model.hot_spots.definitions, &plot.path).is_some()
             }
+            path_plot::PlotKind::Table => true,
         });
         let boxes = (plots.iter_mut().enumerate())
             .filter_map(|(index, plot)| match plot.kind {
@@ -4977,6 +4997,7 @@ impl Workbench {
                     let hot_spot = hot_spot(&model.hot_spots.definitions, &plot.path)?;
                     plot.hot_spot_box(index, model, &hot_spot)
                 }
+                path_plot::PlotKind::Table => plot.table_box(index),
             })
             .collect();
         model.path_plots = plots;
@@ -5008,6 +5029,7 @@ impl Workbench {
                             index,
                             &plot.placement,
                             extremes,
+                            plot.kind == path_plot::PlotKind::Table,
                         ));
                     }
                 }

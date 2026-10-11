@@ -2038,6 +2038,15 @@ mod tests {
                 path_plots: vec![
                     crate::path_plot::PathPlot::new("Path-1".into()).saved(),
                     crate::path_plot::PathPlot::hot_spot("Hot_Spot-1".into()).saved(),
+                    crate::path_plot::PathPlot::table(crate::xy_plot::XyData {
+                        title: "SP_A.STRESSES.MISES".into(),
+                        x_label: "Increment".into(),
+                        x: vec![1.0, 2.0],
+                        curves: vec![("12_1".into(), vec![0.5, 1.5])],
+                        guides: Vec::new(),
+                        y_max: None,
+                    })
+                    .saved(),
                 ],
                 // Camera and mesh edges belong to the 3D view, not to the results.
                 camera: None,
