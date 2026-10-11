@@ -33,7 +33,10 @@ fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem
     ui.end_row();
     ui.label("Mesh type");
     ui.vertical(|ui| {
-        ui.checkbox(&mut d.second_order, "Second order (C3D10, CPS6/CPS8)");
+        ui.checkbox(
+            &mut d.second_order,
+            "Second order (C3D10, S6/S8, CPS6/CPS8)",
+        );
         ui.add_enabled(
             d.second_order,
             egui::Checkbox::new(
@@ -42,8 +45,8 @@ fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem
             ),
         );
         ui.checkbox(&mut d.optimize, "Optimize mesh (Netgen)");
-        ui.checkbox(&mut d.quad_dominated, "Quad-dominated mesh (2D)")
-            .on_hover_text("Mesh the surfaces of 2D models mostly with quadrilaterals.");
+        ui.checkbox(&mut d.quad_dominated, "Quad-dominated surface mesh")
+            .on_hover_text("Mesh faces (2D models and shells) mostly with quadrilaterals.");
     });
     ui.end_row();
 }

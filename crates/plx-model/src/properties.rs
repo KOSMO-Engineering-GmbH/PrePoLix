@@ -192,16 +192,14 @@ impl ModelSpace {
     /// Makes a mesh generated from the geometry fit the model space: gives its elements the
     /// model's types and, in 2D models, numbers them counter-clockwise seen from +z, as
     /// CalculiX needs. Fails if the mesh does not fit: 2D models take faces in the x-y
-    /// plane only, axisymmetric ones on the side x >= 0 of the axis, 3D models solids only.
+    /// plane only, axisymmetric ones on the side x >= 0 of the axis; 3D models take solids,
+    /// shells and lines.
     pub fn prepare_generated_mesh(self, mesh: &mut FeMesh) -> Result<(), String> {
         use plx_mesh::ElementFamily;
         let family = |f| mesh.elements().iter().any(|e| e.shape.family() == f);
         if !self.is_2d() {
-            if family(ElementFamily::Surface) {
-                return Err(
-                    "Surfaces can only be meshed in 2D models; the model space is 3D".into(),
-                );
-            }
+            // Faces of a 3D model are shells, thickened by a shell section as in PrePoMax.
+            self.convert_mesh(mesh);
             return Ok(());
         }
         if family(ElementFamily::Solid) {
@@ -327,10 +325,15 @@ mod tests {
             (element.type_name.as_str(), &element.nodes[..]),
             ("CPS4", &[1, 2, 3, 4][..])
         );
-        assert!(
-            ModelSpace::ThreeD
-                .prepare_generated_mesh(&mut square(0.0, false))
-                .is_err()
+        // A face in a 3D model is a shell, thickened by its shell section.
+        let mut shell = square(1.0, true);
+        ModelSpace::ThreeD
+            .prepare_generated_mesh(&mut shell)
+            .unwrap();
+        let element = &shell.elements()[0];
+        assert_eq!(
+            (element.type_name.as_str(), &element.nodes[..]),
+            ("S4", &[1, 4, 3, 2][..])
         );
         assert!(
             ModelSpace::PlaneStrain
