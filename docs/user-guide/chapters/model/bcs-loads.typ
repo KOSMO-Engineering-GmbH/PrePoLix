@@ -50,8 +50,9 @@ Loads are created like boundary conditions, with #ui("Create ...") on #ui("Loads
   [Concentrated Force], [`F1`, `F2`, `F3` at *every* node of the region (`*CLOAD`). The force is
     not divided between the nodes; use #ui("Surface Traction") for a total force on a face.],
   [Pressure], [Pressure on faces; positive values push into the material (`*DLOAD`).],
-  [Surface Traction], [A *total* force on faces. When the input file is written it is
-    distributed to the nodes according to the face areas and the element shape functions
+  [Surface Traction], [A *total* force on faces, or along edges with #ui("Apply to")
+    #ui("Edges") (@traction-edges). When the input file is written it is distributed to the
+    nodes according to the face areas or edge lengths and the element shape functions
     (`*CLOAD`).],
   [Moving Load], [Wheel forces that travel over faces, one static step per position
     (@moving-load).],
@@ -71,9 +72,32 @@ coefficient or the emissivity.
 In 2D models face loads act on element edges. In axisymmetric models forces act on the full
 circumference.
 
-#limitation[Line loads are not available in the dialogs yet. Bolt pre-tension: @pre-tension.
-Defined temperature fields: @defined-fields. They can be added with the keyword
+#limitation[Line loads (force per length) are not available in the dialogs; a
+#ui("Surface Traction") along edges takes the total force (@traction-edges). Bolt pre-tension:
+@pre-tension. Defined temperature fields: @defined-fields. They can be added with the keyword
 editor (@keyword-editor).]
+
+=== Surface traction along edges <traction-edges>
+
+In 3D models a #ui("Surface Traction") can act along edges instead of faces, for example on
+the free edge of a shell or a membrane, or along an edge of a solid. Choose #ui("Apply to")
+#ui("Edges") in the load dialog; the #ui("Selection") window then picks edges:
+
+#fields(
+  [Edges], [A click picks the edge nearest to it, from corner to corner. On a mesh created from
+    the geometry it picks the edge of the geometry, which is kept when the part is remeshed.],
+  [Edge angle], [The chain of edges through the click, continued while it bends by less than
+    the angle.],
+)
+
+#key("Shift") adds edges, #key("Ctrl") removes them, and a box selects the edges inside it. The
+field below the region shows the number of element edges. When the input file is written the
+total force is distributed to the nodes of the edges by their length, as the consistent nodal
+forces of a constant line load: on quadratic elements an edge's end nodes take 1/6 and its
+midside node 4/6 of the edge's share.
+
+#screenshot("surface-traction-edge.png", [Surface traction of 100 N along the free edge of a
+  shell plate])
 
 == Hiding symbols <hide-symbols>
 

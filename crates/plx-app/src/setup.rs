@@ -107,6 +107,8 @@ pub(crate) struct RegionDraft {
     pub(crate) target: Target,
     nodes: History<NodeId>,
     faces: History<(ElementId, u8)>,
+    /// Element edges of 3D parts, by their end nodes.
+    edges: History<[NodeId; 2]>,
     /// Picks of CAD entities on a mesh generated from geometry. Mixed with picks of nodes or
     /// faces they turn into those, so only one of the histories is in use at a time.
     geometry: History<CadEntity>,
@@ -116,6 +118,8 @@ pub(crate) struct RegionDraft {
 
 pub(crate) const NODE_SOURCES: &[Source] = &[Source::Selection, Source::NodeSet, Source::Surface];
 pub(crate) const FACE_SOURCES: &[Source] = &[Source::Selection, Source::Surface];
+/// Edges of 3D parts, only picked: a surface traction along them.
+pub(crate) const EDGE_SOURCES: &[Source] = &[Source::Selection];
 /// Nodes, or the reference point of a rigid body: for boundary conditions and point loads.
 pub(crate) const SUPPORT_SOURCES: &[Source] = &[
     Source::Selection,
@@ -146,6 +150,7 @@ impl RegionDraft {
             target,
             nodes: History::default(),
             faces: History::default(),
+            edges: History::default(),
             geometry: History::default(),
             parts: PartPicks::default(),
             set: String::new(),
@@ -163,7 +168,7 @@ impl RegionDraft {
         // dialog lists another source first (whole parts for element regions).
         if matches!(
             region,
-            Region::Nodes(_) | Region::Faces(_) | Region::Geometry(_)
+            Region::Nodes(_) | Region::Faces(_) | Region::Edges(_) | Region::Geometry(_)
         ) && sources.contains(&Source::Selection)
         {
             draft.source = Source::Selection;
@@ -179,7 +184,12 @@ impl RegionDraft {
             {
                 draft.faces = History::from_items(faces.iter().copied());
             }
-            Region::Faces(_) => draft.nodes = History::from_items(region.nodes(mesh)),
+            Region::Edges(edges) if target == Target::Lines => {
+                draft.edges = History::from_items(edges.iter().copied());
+            }
+            Region::Faces(_) | Region::Edges(_) => {
+                draft.nodes = History::from_items(region.nodes(mesh));
+            }
             Region::Geometry(entities) => {
                 draft.geometry = History::from_items(entities.iter().copied());
             }
@@ -211,6 +221,7 @@ impl RegionDraft {
                 Target::Faces | Target::Surfaces | Target::Edges => {
                     Region::Faces(self.faces.items().into_iter().collect())
                 }
+                Target::Lines => Region::Edges(self.edges.items().into_iter().collect()),
             },
             Source::Parts => Region::Parts(self.parts.names().into_iter().collect()),
             Source::NodeSet => Region::NodeSet(self.set.clone()),
@@ -226,6 +237,7 @@ impl RegionDraft {
             Source::Selection => match self.target {
                 Target::Nodes | Target::Point => self.nodes.items().is_empty(),
                 Target::Faces | Target::Surfaces | Target::Edges => self.faces.items().is_empty(),
+                Target::Lines => self.edges.items().is_empty(),
             },
             Source::Parts => self.parts.is_empty(),
             _ => self.set.is_empty(),
@@ -236,6 +248,7 @@ impl RegionDraft {
         match self.target {
             Target::Nodes | Target::Point => self.nodes.items().len(),
             Target::Faces | Target::Surfaces | Target::Edges => self.faces.items().len(),
+            Target::Lines => self.edges.items().len(),
         }
     }
 
@@ -264,6 +277,7 @@ impl RegionDraft {
     pub(crate) fn clear(&mut self) {
         self.nodes.clear();
         self.faces.clear();
+        self.edges.clear();
         self.geometry.clear();
     }
 
@@ -275,6 +289,7 @@ impl RegionDraft {
             Items::Geometry(entities) if replace || !self.ids_can_undo() => {
                 self.nodes.clear();
                 self.faces.clear();
+                self.edges.clear();
                 self.geometry.push(operation, entities);
             }
             Items::Geometry(entities) => {
@@ -290,6 +305,7 @@ impl RegionDraft {
                 match items {
                     Items::Nodes(nodes) => self.nodes.push(operation, nodes),
                     Items::Faces(faces) => self.faces.push(operation, faces),
+                    Items::Edges(edges) => self.edges.push(operation, edges),
                     Items::Geometry(_) => unreachable!("handled above"),
                 }
             }
@@ -310,6 +326,9 @@ impl RegionDraft {
             Target::Faces | Target::Surfaces | Target::Edges => {
                 self.faces = History::from_items(mesh.cad_faces(&entities));
             }
+            Target::Lines => {
+                self.edges = History::from_items(crate::selection::cad_segments(mesh, &entities));
+            }
         }
     }
 
@@ -317,6 +336,7 @@ impl RegionDraft {
         match self.target {
             Target::Nodes | Target::Point => self.nodes.can_undo(),
             Target::Faces | Target::Surfaces | Target::Edges => self.faces.can_undo(),
+            Target::Lines => self.edges.can_undo(),
         }
     }
 
@@ -368,6 +388,19 @@ impl RegionDraft {
             (PickerAction::Undo, Target::Faces | Target::Surfaces | Target::Edges) => {
                 self.faces.undo()
             }
+            (PickerAction::Undo, Target::Lines) => self.edges.undo(),
+            (PickerAction::All, Target::Lines) => {
+                let all = crate::selection::visible_segments(model);
+                self.edges.push(Operation::Replace, all);
+            }
+            (PickerAction::Invert, Target::Lines) => {
+                let selected = self.edges.items();
+                let mut all = crate::selection::visible_segments(model);
+                all.retain(|e| !selected.contains(e));
+                self.edges.push(Operation::Replace, all);
+            }
+            // Element ids do not name edges.
+            (PickerAction::Ids(..), Target::Lines) => {}
             (PickerAction::Clear, _) => self.clear(),
             (PickerAction::All, Target::Nodes | Target::Point) => {
                 self.nodes.push(Operation::Replace, model.visible_nodes());
@@ -472,7 +505,7 @@ impl RegionDraft {
                         let what = match self.target {
                             Target::Nodes | Target::Point => "Nodes",
                             Target::Faces | Target::Surfaces => "Element faces",
-                            Target::Edges => "Element edges",
+                            Target::Edges | Target::Lines => "Element edges",
                         };
                         if !geometry.is_empty() {
                             let entities: Vec<CadEntity> = geometry.into_iter().collect();
@@ -833,6 +866,16 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
                 .filter(|(_, p)| names.contains(&p.name))
                 .map(|(i, _)| i)
                 .collect();
+        }
+        Region::Edges(_) => {
+            // Split at the midside node, as the edges of 2D elements.
+            for line in region.edges(&model.mesh) {
+                match line[..] {
+                    [a, b, m] => highlight.lines.extend([[a, m], [m, b]]),
+                    [a, b] => highlight.lines.push([a, b]),
+                    _ => {}
+                }
+            }
         }
         Region::Faces(_) | Region::Surface(_) if model.is_plane() => {
             // The faces of 2D elements are edges, drawn as lines.
@@ -1277,7 +1320,12 @@ fn load_region(
     fe: &FeModel,
     mesh: &FeMesh,
 ) -> RegionDraft {
+    // A surface traction on a 3D model may act along picked edges instead of faces.
+    let along_edges = matches!(kind, LoadKind::SurfaceTraction(_))
+        && !fe.properties.space.is_2d()
+        && region.is_some_and(is_edge_region);
     let (sources, target) = match load_target(kind) {
+        LoadTarget::Faces if along_edges => (EDGE_SOURCES, Target::Lines),
         // Forces and moments also act on the reference point of a rigid body.
         LoadTarget::Nodes if !kind.is_thermal() => (SUPPORT_SOURCES, Target::Nodes),
         LoadTarget::Nodes => (NODE_SOURCES, Target::Nodes),
@@ -1287,6 +1335,17 @@ fn load_region(
     match region {
         Some(region) => RegionDraft::from_region(region, sources, target, mesh),
         None => RegionDraft::new(sources, target),
+    }
+}
+
+/// Whether a region consists of edges of 3D parts: picked element edges or CAD edges.
+fn is_edge_region(region: &Region) -> bool {
+    match region {
+        Region::Edges(_) => true,
+        Region::Geometry(entities) => {
+            !entities.is_empty() && entities.iter().all(|e| matches!(e, CadEntity::Edge(_)))
+        }
+        _ => false,
     }
 }
 
@@ -2029,7 +2088,9 @@ impl Editor {
                             if ui.selectable_label(current == name, label).clicked()
                                 && current != name
                             {
-                                let moved = load_target(&kind) != load_target(&load.kind);
+                                // Only a surface traction acts along edges.
+                                let moved = load_target(&kind) != load_target(&load.kind)
+                                    || region.target == Target::Lines;
                                 load.kind = kind;
                                 rename_default(&mut load.name, current, name, &taken);
                                 if moved {
@@ -2075,8 +2136,28 @@ impl Editor {
                     }
                     LoadKind::SurfaceTraction(force) => {
                         force_rows(ui, force, two_d, units);
+                        let mut edges = region.target == Target::Lines;
+                        if !two_d {
+                            ui.label("Apply to");
+                            ui.horizontal(|ui| {
+                                ui.radio_value(&mut edges, false, "Faces");
+                                ui.radio_value(&mut edges, true, "Edges");
+                            });
+                            ui.end_row();
+                            if edges != (region.target == Target::Lines) {
+                                *region = if edges {
+                                    RegionDraft::new(EDGE_SOURCES, Target::Lines)
+                                } else {
+                                    load_region(&load.kind, None, &model.fe, &model.mesh)
+                                };
+                            }
+                        }
                         ui.label("");
-                        ui.weak("Total force, distributed to the nodes by area on export.");
+                        ui.weak(if edges {
+                            "Total force, distributed to the nodes by length on export."
+                        } else {
+                            "Total force, distributed to the nodes by area on export."
+                        });
                         ui.end_row();
                         revolution_hint(ui, axisymmetric);
                     }
@@ -4384,6 +4465,40 @@ fn incrementation_label(incrementation: Incrementation) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_surface_traction_on_edges_keeps_its_edges() {
+        let fe = FeModel::default();
+        let mesh = FeMesh::default();
+        let traction = LoadKind::SurfaceTraction([0.0, 0.0, -1.0]);
+        let mut draft = RegionDraft::new(EDGE_SOURCES, Target::Lines);
+        draft.take(
+            &mesh,
+            Items::Edges(BTreeSet::from([[1, 2]])),
+            Operation::Replace,
+        );
+        draft.take(
+            &mesh,
+            Items::Edges(BTreeSet::from([[2, 3]])),
+            Operation::Add,
+        );
+        let region = draft.region();
+        assert_eq!(region, Region::Edges(vec![[1, 2], [2, 3]]));
+        // Reopened, the dialog picks edges again; faces stay faces.
+        let reopened = load_region(&traction, Some(&region), &fe, &mesh);
+        assert_eq!(reopened.target, Target::Lines);
+        assert_eq!(reopened.region(), region);
+        let faces = Region::Faces(vec![(1, 1)]);
+        assert_eq!(
+            load_region(&traction, Some(&faces), &fe, &mesh).target,
+            Target::Faces
+        );
+        let cad = Region::Geometry(vec![CadEntity::Edge(3)]);
+        assert_eq!(
+            load_region(&traction, Some(&cad), &fe, &mesh).target,
+            Target::Lines
+        );
+    }
 
     #[test]
     fn default_names_follow_the_kind() {

@@ -849,6 +849,67 @@ fn calculix_bends_the_shell_plate_like_a_beam() {
     );
 }
 
+/// The tip edge of the shell plate as segments between its corner nodes, ordered along y.
+fn shell_plate_tip_edge(mesh: &FeMesh) -> Vec<[NodeId; 2]> {
+    let mut tip = nodes_at(mesh, 0, 100.0);
+    tip.sort_by(|&a, &b| mesh.node(a).unwrap()[1].total_cmp(&mesh.node(b).unwrap()[1]));
+    // Corners at y = 0, 5 and 10, midside nodes between them.
+    vec![[tip[0], tip[2]], [tip[2], tip[4]]]
+}
+
+#[test]
+fn surface_traction_on_an_edge_spreads_the_total_force_by_length() {
+    let (mesh, _) = shell_plate();
+    let edges = Region::Edges(shell_plate_tip_edge(&mesh)).edges(&mesh);
+    assert_eq!(edges.len(), 2);
+    assert!(
+        edges.iter().all(|e| e.len() == 3),
+        "quadratic edges keep their midside node"
+    );
+    let nodal = edge_traction_forces(&mesh, &edges, [0.0, 0.0, -12.0], false);
+    let mut tip = nodes_at(&mesh, 0, 100.0);
+    tip.sort_by(|&a, &b| mesh.node(a).unwrap()[1].total_cmp(&mesh.node(b).unwrap()[1]));
+    // Two quadratic edges of equal length: 1/6, 4/6, 1/6 of each half.
+    let expected = [-1.0, -4.0, -2.0, -4.0, -1.0];
+    for (node, f) in tip.iter().zip(expected) {
+        assert!(
+            (nodal[node][2] - f).abs() < 1e-9,
+            "{node}: {:?}",
+            nodal[node]
+        );
+    }
+    assert_eq!(nodal.len(), 5);
+}
+
+/// A total force on the tip edge bends the plate like the same force at the tip nodes.
+#[test]
+fn calculix_bends_the_shell_plate_by_a_traction_on_its_edge() {
+    let (mesh, mut model) = shell_plate();
+    let load = &mut model.steps[0].loads[0];
+    load.kind = LoadKind::SurfaceTraction([0.0, 0.0, -1.0]);
+    load.region = Region::Edges(shell_plate_tip_edge(&mesh));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Cload"), "{text}");
+    let Some(frd) = run_ccx("schalenkante", &text) else {
+        return;
+    };
+    let reaction: f64 = (nodes_at(&mesh, 0, 0.0).iter())
+        .map(|&n| node_value(&frd, "FORC", "F3", n))
+        .sum();
+    assert!((reaction - 1.0).abs() < 1e-4, "{reaction}");
+    let inertia = 10.0 * 2.0f64.powi(3) / 12.0;
+    let expected = -100.0f64.powi(3) / (3.0 * 210_000.0 * inertia);
+    let tip = nodes_at(&mesh, 0, 100.0);
+    let deflection: f64 = (tip.iter())
+        .map(|&n| node_value(&frd, "DISP", "U3", n))
+        .sum::<f64>()
+        / tip.len() as f64;
+    assert!(
+        (deflection - expected).abs() < 0.03 * expected.abs(),
+        "{deflection} != {expected}"
+    );
+}
+
 #[test]
 fn a_pre_tension_load_cuts_the_mesh_and_ties_the_sides_by_equations() {
     let (mesh, mut model) = pre_tension(1000.0, false);

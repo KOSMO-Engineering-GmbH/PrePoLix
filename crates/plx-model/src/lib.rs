@@ -174,8 +174,8 @@ impl FeModel {
     /// Follows nodes merged into others, as [`plx_mesh::FeMesh::merge_nodes`] does: regions
     /// of nodes name the nodes that stay.
     pub fn merge_nodes(&mut self, replaced: &std::collections::BTreeMap<NodeId, NodeId>) {
-        let follow = |region: &mut Region| {
-            if let Region::Nodes(nodes) = region {
+        let follow = |region: &mut Region| match region {
+            Region::Nodes(nodes) => {
                 for node in nodes.iter_mut() {
                     if let Some(&kept) = replaced.get(node) {
                         *node = kept;
@@ -184,6 +184,12 @@ impl FeModel {
                 nodes.sort_unstable();
                 nodes.dedup();
             }
+            Region::Edges(edges) => {
+                for edge in edges.iter_mut() {
+                    *edge = edge.map(|id| replaced.get(&id).copied().unwrap_or(id));
+                }
+            }
+            _ => {}
         };
         self.regions_mut().for_each(follow);
         (self.initial_conditions.iter_mut()).for_each(|i| follow(&mut i.region));
@@ -202,6 +208,11 @@ impl FeModel {
                     *id = nodes.get(id).copied().unwrap_or(*id);
                 }
                 ids.sort_unstable();
+            }
+            Region::Edges(edges) => {
+                for edge in edges.iter_mut() {
+                    *edge = edge.map(|id| nodes.get(&id).copied().unwrap_or(id));
+                }
             }
             Region::Faces(faces) => {
                 for (element, _) in faces.iter_mut() {

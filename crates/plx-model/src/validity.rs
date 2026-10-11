@@ -312,6 +312,10 @@ impl Region {
                     .count();
                 (missing > 0).then(|| format!("{missing} element faces do not exist"))
             }
+            Region::Edges(edges) => {
+                let missing = edges.len() - mesh.edge_lines(edges).len();
+                (missing > 0).then(|| format!("{missing} element edges do not exist"))
+            }
             // Checked against the model's reference points by the caller.
             Region::ReferencePoint(_) => None,
             Region::Geometry(entities) => {
