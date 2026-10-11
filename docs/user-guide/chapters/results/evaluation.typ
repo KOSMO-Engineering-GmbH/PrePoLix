@@ -109,9 +109,12 @@ removes it.
 #ui("Show on Path") in the context menu draws the plot onto the path itself instead: the path is
 the distance axis, the values stand off it perpendicular on the screen over a translucent area,
 with the largest and smallest value labelled. Drag the curve away from the path or towards it to
-change its height; #ui("Show in Box") puts it back into its box.
+change its height. Drag it across the path and the height becomes negative: the plot flips to
+the other side of the path. #ui("Show in Box") puts it back into its box.
 
 #screenshot("path-plot-on-path.png", [The same plot drawn onto its path])
+
+#screenshot("path-plot-flipped.png", [The plot dragged across the path: negative height, other side])
 
 #ui("Edit...") in the context menu, or a double-click on the plot, opens #ui("Edit Annotation").
 Changes show at once; #ui("Cancel") restores the plot.
@@ -120,7 +123,7 @@ Changes show at once; #ui("Cancel") restores the plot.
 
 #fields(
   [Display], [#ui("In Box") or #ui("On Path").],
-  [Height on path], [Distance of the largest value from the path, in screen pixels.],
+  [Height on path], [Distance of the largest value from the path, in screen pixels; a negative value puts the plot on the other side of the path.],
   [Title], [Empty for the path's name and the displayed component.],
   [Distance axis label, Value axis label], [Labels of the box's axes; the value axis label is
     written above the axis, empty for none.],

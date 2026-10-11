@@ -40,7 +40,8 @@ pub struct Placement {
     pub size: Vec2,
     /// Drawn onto the path instead of in a box.
     pub on_path: bool,
-    /// On the path: distance in points of the largest value from the path.
+    /// On the path: distance in points of the largest value from the path; negative flips the
+    /// plot to the other side of the path.
     pub height: f32,
     /// Title; empty for the path's name and the shown component.
     pub title: String,
@@ -497,6 +498,13 @@ fn draw_on_path(
     if normal.y > 0.0 || (normal.y == 0.0 && normal.x > 0.0) {
         normal = -normal;
     }
+    // A negative height puts the plot on the other side of the path.
+    let flip = if plot.placement.height < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    normal *= flip;
     let length = plot.distances.last().copied().unwrap_or(0.0);
     let extreme = (plot.values.iter().copied())
         .filter(|v| v.is_finite())
@@ -506,7 +514,7 @@ fn draw_on_path(
         None => extreme.abs(),
     };
     let scale = if reach > 0.0 {
-        plot.placement.height / reach as f32
+        plot.placement.height.abs() / reach as f32
     } else {
         0.0
     };
@@ -643,8 +651,9 @@ fn draw_on_path(
         Sense::click_and_drag(),
     );
     if response.dragged_by(PointerButton::Primary) {
-        let away = response.drag_delta().dot(title_side);
-        plot.placement.height = (plot.placement.height + away).max(10.0);
+        // Dragging across the path turns the height negative and flips the plot.
+        let away = response.drag_delta().dot(title_side) * flip;
+        plot.placement.height = (plot.placement.height + away).clamp(-2000.0, 2000.0);
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
     } else if response.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::Grab);
@@ -751,7 +760,7 @@ impl EditDialog {
                             ui.add_enabled(
                                 draft.on_path,
                                 egui::DragValue::new(&mut draft.height)
-                                    .range(10.0..=2000.0)
+                                    .range(-2000.0..=2000.0)
                                     .suffix(" px"),
                             );
                             ui.end_row();
