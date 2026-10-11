@@ -699,11 +699,21 @@ fn a_membrane_section_is_written_for_membrane_elements() {
     );
     // Results at the membrane nodes, as for shells.
     assert!(text.contains("*Node file, Output=2D\nRF, U\n"), "{text}");
-    // Shell elements under a membrane section, and membranes under a shell or solid
-    // section, are refused before CalculiX would be.
+    // Linear shells under a membrane section are written as membranes without choosing an
+    // element type; the mesh keeps its shells.
     model.element_types.clear();
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Element, Type=M3D4, Elset=PLATE\n"),
+        "{text}"
+    );
+    assert!(mesh.elements().iter().all(|e| e.type_name == "S4"));
+    // Quadratic shells under a membrane section, and membranes under a shell or solid
+    // section, are refused before CalculiX would be.
+    let (quadratic, mut plate) = shell_plate();
+    plate.sections[0].kind = model.sections[0].kind.clone();
     assert!(matches!(
-        write_inp(&mesh, &model, ""),
+        write_inp(&quadratic, &plate, ""),
         Err(WriteError::InvalidSection { .. })
     ));
     for kind in [
@@ -726,11 +736,17 @@ fn a_membrane_section_is_written_for_membrane_elements() {
 /// unevenly loaded tip, with each membrane element type a part can have.
 #[test]
 fn calculix_stretches_a_membrane_strip() {
-    for type_name in ["M3D3", "M3D4", "M3D4R"] {
-        let (mesh, model) = membrane_strip(type_name);
+    // S4R is written as M3D4R.
+    for (chosen, type_name) in [
+        ("M3D3", "M3D3"),
+        ("M3D4", "M3D4"),
+        ("M3D4R", "M3D4R"),
+        ("S4R", "M3D4R"),
+    ] {
+        let (mesh, model) = membrane_strip(chosen);
         let text = write_inp(&mesh, &model, "").unwrap();
         assert!(text.contains(&format!("Type={type_name},")), "{text}");
-        let name = format!("membran-{}", type_name.to_ascii_lowercase());
+        let name = format!("membran-{}", chosen.to_ascii_lowercase());
         let Some(frd) = run_ccx(&name, &text) else {
             return;
         };

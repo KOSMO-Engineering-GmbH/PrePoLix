@@ -1836,10 +1836,13 @@ impl Editor {
                         ui.end_row();
                         if membrane {
                             ui.label("");
-                            ui.weak("Membranes carry in-plane forces only. Give the parts an");
+                            ui.weak("Membranes carry in-plane forces only. Linear shells are");
                             ui.end_row();
                             ui.label("");
-                            ui.weak("M3D element type: double-click the part under Mesh.");
+                            ui.weak("written as membranes (M3D3, M3D4); quadratic ones are");
+                            ui.end_row();
+                            ui.label("");
+                            ui.weak("refused: mesh the part with Second order off.");
                             ui.end_row();
                         }
                     }
