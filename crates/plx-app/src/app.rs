@@ -1333,7 +1333,8 @@ impl Workbench {
                             .and_then(|p| p.bound_results.as_ref()?.settings.clone())
                     });
                     if let Some(settings) = &settings {
-                        let warnings = model.restore_results_settings(settings);
+                        let warnings =
+                            model.restore_results_settings(settings, self.moving_load_stations());
                         self.output.extend(warnings);
                         camera = settings.view.camera.map(saved_camera);
                         if let Some(edges) = settings.view.mesh_edges {
@@ -1758,6 +1759,7 @@ impl Workbench {
     /// Evaluates the hot spots of the current results file over all increments and writes
     /// the values next to it.
     fn evaluate_hot_spots(&mut self) {
+        let moving_loads = self.moving_load_stations();
         let Some(results) = self.results.get_mut(self.current_result) else {
             return;
         };
@@ -1765,25 +1767,51 @@ impl Workbench {
         let hot_spots = &mut results.hot_spots;
         hot_spots.reports = Vec::new();
         hot_spots.file = None;
-        if reports.is_empty() {
-            self.update_contour();
-            return;
-        }
-        match crate::hot_spots::write(&results.path, &reports) {
-            Ok(file) => {
-                self.output
-                    .push(format!("Hot spots evaluated: {}", file.display()));
-                hot_spots.file = Some(file);
+        if !reports.is_empty() {
+            match crate::hot_spots::write(&results.path, &reports) {
+                Ok(file) => {
+                    self.output
+                        .push(format!("Hot spots evaluated: {}", file.display()));
+                    hot_spots.file = Some(file);
+                }
+                Err(error) => self.output.push(error),
             }
-            Err(error) => self.output.push(error),
+            self.output.extend(crate::hot_spots::summary(&reports));
+            for report in &reports {
+                self.output
+                    .extend(report.warnings.iter().map(|w| format!("Warning: {w}")));
+            }
+            hot_spots.reports = reports.clone();
         }
-        self.output.extend(crate::hot_spots::summary(&reports));
-        for report in &reports {
-            self.output
-                .extend(report.warnings.iter().map(|w| format!("Warning: {w}")));
+        // History outputs of the hot spots follow them.
+        if let Some(view) = &mut results.results
+            && let Some(warnings) = view.set_history_sources(reports, moving_loads, &results.mesh)
+        {
+            (self.output).extend(warnings.into_iter().map(|w| format!("Warning: {w}")));
+            self.history_table = None;
         }
-        hot_spots.reports = reports;
         self.update_contour();
+    }
+
+    /// Takes the moving loads of the FE model as they are now into the current results, for
+    /// the history outputs.
+    fn refresh_moving_loads(&mut self) {
+        let moving_loads = self.moving_load_stations();
+        let Some(results) = self.results.get_mut(self.current_result) else {
+            return;
+        };
+        if let Some(view) = &mut results.results {
+            let reports = view.hot_spot_reports.clone();
+            if let Some(warnings) = view.set_history_sources(reports, moving_loads, &results.mesh) {
+                (self.output).extend(warnings.into_iter().map(|w| format!("Warning: {w}")));
+                self.history_table = None;
+            }
+        }
+    }
+
+    /// Where the moving loads of the FE model stand in the steps of its results.
+    fn moving_load_stations(&self) -> Vec<plx_model::LoadStations> {
+        (self.model.as_ref()).map_or_else(Vec::new, |project| plx_model::load_stations(&project.fe))
     }
 
     fn edit_hot_spot(&mut self, index: usize) {
@@ -2242,6 +2270,7 @@ impl Workbench {
             return;
         }
         if kind == NewItem::ResultHistoryOutput {
+            self.refresh_moving_loads();
             if let Some(view) = self.shown_results_view() {
                 self.history_dialog = Some(HistoryOutputDialog::create(view));
             }
@@ -3788,6 +3817,7 @@ impl Workbench {
     }
 
     fn edit_history_output(&mut self, set: usize) {
+        self.refresh_moving_loads();
         let Some(model) = self.results.get(self.current_result) else {
             return;
         };

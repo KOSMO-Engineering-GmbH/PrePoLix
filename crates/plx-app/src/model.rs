@@ -398,10 +398,13 @@ impl Model {
         })
     }
 
-    /// Takes saved settings of bound results; returns the outputs that failed.
+    /// Takes saved settings of bound results; returns the outputs that failed. History
+    /// outputs may put the positions of `moving_loads`, those of the FE model, beside their
+    /// values.
     pub fn restore_results_settings(
         &mut self,
         settings: &plx_results::ResultsSettings,
+        moving_loads: Vec<plx_model::LoadStations>,
     ) -> Vec<String> {
         self.fe.reference_points = settings.reference_points.clone();
         self.fe.coordinate_systems = settings.coordinate_systems.clone();
@@ -418,8 +421,14 @@ impl Model {
             .map(crate::path_plot::PathPlot::from_saved)
             .collect();
         self.set_contours(&settings.plain_parts, false);
+        // History outputs of hot spots need their values first.
+        let reports = crate::hot_spots::evaluate(self);
         match &mut self.results {
-            Some(view) => view.restore(settings, &self.mesh),
+            Some(view) => {
+                view.hot_spot_reports = reports;
+                view.moving_loads = moving_loads;
+                view.restore(settings, &self.mesh)
+            }
             None => Vec::new(),
         }
     }
@@ -2046,7 +2055,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            model.restore_results_settings(&settings),
+            model.restore_results_settings(&settings, Vec::new()),
             Vec::<String>::new()
         );
         assert!(!model.parts[0].contours);
