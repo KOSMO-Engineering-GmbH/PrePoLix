@@ -515,6 +515,10 @@ pub enum StepKind {
     /// Temperatures and displacements solved together
     /// (`*COUPLED TEMPERATURE-DISPLACEMENT`).
     CoupledTempDisp(HeatTransferStep),
+    /// Temperatures first, then displacements from them, in each increment
+    /// (`*UNCOUPLED TEMPERATURE-DISPLACEMENT`): cheaper than the coupled step when the
+    /// deformation does not change the heat flow.
+    UncoupledTempDisp(HeatTransferStep),
     /// Displacements over time with inertia and damping (`*DYNAMIC`).
     Dynamic(DynamicStep),
     /// Response over time as a superposition of the stored eigenmodes (`*MODAL DYNAMICS`).
@@ -533,9 +537,9 @@ impl StepKind {
             StepKind::Frequency(settings) => Some(&mut settings.solver),
             StepKind::ComplexFrequency(_) => None,
             StepKind::Buckle(settings) => Some(&mut settings.solver),
-            StepKind::HeatTransfer(settings) | StepKind::CoupledTempDisp(settings) => {
-                Some(&mut settings.increments.solver)
-            }
+            StepKind::HeatTransfer(settings)
+            | StepKind::CoupledTempDisp(settings)
+            | StepKind::UncoupledTempDisp(settings) => Some(&mut settings.increments.solver),
             StepKind::Dynamic(settings) => Some(&mut settings.increments.solver),
             StepKind::ModalDynamics(settings) => Some(&mut settings.solver),
             StepKind::SteadyStateDynamics(settings) => Some(&mut settings.solver),
@@ -577,7 +581,9 @@ impl StepKind {
     pub fn is_thermal(&self) -> bool {
         matches!(
             self,
-            StepKind::HeatTransfer(_) | StepKind::CoupledTempDisp(_)
+            StepKind::HeatTransfer(_)
+                | StepKind::CoupledTempDisp(_)
+                | StepKind::UncoupledTempDisp(_)
         )
     }
 
@@ -1497,6 +1503,10 @@ mod tests {
             (StepKind::HeatTransfer(HeatTransferStep::default()), false),
             (
                 StepKind::CoupledTempDisp(HeatTransferStep::default()),
+                false,
+            ),
+            (
+                StepKind::UncoupledTempDisp(HeatTransferStep::default()),
                 false,
             ),
         ];

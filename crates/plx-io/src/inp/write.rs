@@ -1494,6 +1494,9 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         StepKind::CoupledTempDisp(settings) => {
             heat_transfer_step(settings, "*Coupled temperature-displacement", true)
         }
+        StepKind::UncoupledTempDisp(settings) => {
+            heat_transfer_step(settings, "*Uncoupled temperature-displacement", false)
+        }
         StepKind::Dynamic(settings) => dynamic_step(settings),
         StepKind::ModalDynamics(settings) => modal_dynamics_step(settings),
         StepKind::SteadyStateDynamics(settings) => steady_state_dynamics_step(settings),
@@ -1864,6 +1867,7 @@ fn deactivated_step(step: &Step) -> Keyword {
         StepKind::Buckle(_) => "BuckleStep",
         StepKind::HeatTransfer(_) => "HeatTransferStep",
         StepKind::CoupledTempDisp(_) => "CoupledTempDispStep",
+        StepKind::UncoupledTempDisp(_) => "UncoupledTempDispStep",
         StepKind::Dynamic(_) => "DynamicStep",
         StepKind::ModalDynamics(_) => "ModalDynamicsStep",
         StepKind::SteadyStateDynamics(_) => "SteadyStateDynamicsStep",

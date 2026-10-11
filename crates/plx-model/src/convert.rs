@@ -96,7 +96,9 @@ impl FeModel {
         for step in &mut self.steps {
             match &mut step.kind {
                 StepKind::Static(s) => s.convert_units(&c),
-                StepKind::HeatTransfer(h) | StepKind::CoupledTempDisp(h) => {
+                StepKind::HeatTransfer(h)
+                | StepKind::CoupledTempDisp(h)
+                | StepKind::UncoupledTempDisp(h) => {
                     h.increments.convert_units(&c);
                     c.option(&mut h.deltmx, Quantity::TemperatureDifference);
                 }

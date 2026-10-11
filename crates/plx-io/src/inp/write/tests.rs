@@ -3357,6 +3357,25 @@ fn calculix_warms_the_bar_transiently() {
 /// temperature grows by alpha dT L and stays free of stress.
 #[test]
 fn calculix_expands_the_bar_in_a_coupled_step() {
+    expand_bar(
+        StepKind::CoupledTempDisp(HeatTransferStep::default()),
+        "waermedehnung",
+    );
+}
+
+/// The uncoupled step solves the temperatures first and the displacements from them; the
+/// bar grows as in the coupled step.
+#[test]
+fn calculix_expands_the_bar_in_an_uncoupled_step() {
+    let inp = expand_bar(
+        StepKind::UncoupledTempDisp(HeatTransferStep::default()),
+        "waermedehnung-entkoppelt",
+    );
+    assert!(inp.contains("*Uncoupled temperature-displacement, Steady state\n"));
+}
+
+/// Writes and runs the heated bar in a step of the given kind; returns the input file.
+fn expand_bar(kind: StepKind, name: &str) -> String {
     let length = 100.0;
     let (mesh, _) = cantilever(tip_force());
     let at = |p: [f64; 3]| -> NodeId {
@@ -3375,7 +3394,7 @@ fn calculix_expands_the_bar_in_a_coupled_step() {
     };
     let (origin, y, z) = (at([0.0; 3]), at([0.0, 5.0, 0.0]), at([0.0, 0.0, 5.0]));
     let (mesh, mut model) = thermal_bar(
-        StepKind::CoupledTempDisp(HeatTransferStep::default()),
+        kind,
         vec![
             support("Support-1", nodes_at(&mesh, 0, 0.0), FIX_X),
             support(
@@ -3403,8 +3422,9 @@ fn calculix_expands_the_bar_in_a_coupled_step() {
         region: Region::Parts(vec!["EALL".into()]),
         kind: plx_model::InitialConditionKind::Temperature(20.0),
     });
-    let Some(frd) = run_ccx("waermedehnung", &write_inp(&mesh, &model, "").unwrap()) else {
-        return;
+    let inp = write_inp(&mesh, &model, "").unwrap();
+    let Some(frd) = run_ccx(name, &inp) else {
+        return inp;
     };
     let expected = 1e-5 * 100.0 * length;
     for node in nodes_at(&mesh, 0, length) {
@@ -3413,6 +3433,7 @@ fn calculix_expands_the_bar_in_a_coupled_step() {
         let s = node_value(&frd, "STRESS", "S11", node);
         assert!(s.abs() < 1e-6, "{s}");
     }
+    inp
 }
 
 /// In a plane stress model the faces are edges: a strip held at 0 at x = 0 and cooled by a
