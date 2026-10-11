@@ -109,6 +109,7 @@ pub struct ViewportRenderer {
     background_pipeline: wgpu::RenderPipeline,
     surface_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
+    mesh_edge_pipeline: wgpu::RenderPipeline,
     wide_edge_pipeline: wgpu::RenderPipeline,
     parts: Vec<GpuMesh>,
     /// Section faces of the parts, drawn while the section view is on.
@@ -118,6 +119,9 @@ pub struct ViewportRenderer {
     /// the plane.
     sections_only: bool,
     targets: Targets,
+    /// Camera and options of the image in the color texture; `None` when the scene changed
+    /// since. Drawing a large mesh is expensive, and the GUI repaints for every mouse move.
+    drawn: Option<(Camera, DisplayOptions)>,
 }
 
 impl ViewportRenderer {
@@ -240,6 +244,16 @@ impl ViewportRenderer {
             "viewport edges",
             "vs_edge",
             "fs_edge",
+            &[Some(vertex_layout.clone())],
+            wgpu::PrimitiveTopology::LineList,
+            depth_state(false, wgpu::CompareFunction::LessEqual, Default::default()),
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+        );
+        // Mesh edges index the surface vertices and take their colour from the shader.
+        let mesh_edge_pipeline = pipeline(
+            "viewport mesh edges",
+            "vs_mesh_edge",
+            "fs_edge",
             &[Some(vertex_layout)],
             wgpu::PrimitiveTopology::LineList,
             depth_state(false, wgpu::CompareFunction::LessEqual, Default::default()),
@@ -285,12 +299,14 @@ impl ViewportRenderer {
             background_pipeline,
             surface_pipeline,
             edge_pipeline,
+            mesh_edge_pipeline,
             wide_edge_pipeline,
             parts: Vec::new(),
             sections: Vec::new(),
             clip: None,
             sections_only: false,
             targets: Targets::new(device, 1, 1),
+            drawn: None,
         }
     }
 
@@ -298,26 +314,37 @@ impl ViewportRenderer {
     pub fn set_parts(&mut self, device: &wgpu::Device, parts: &[RenderMesh]) {
         self.parts = parts.iter().map(|mesh| upload(device, mesh)).collect();
         self.sections.clear();
+        self.drawn = None;
     }
 
     /// Cuts the scene at a plane, or shows it whole again with `None`.
     pub fn set_clip_plane(&mut self, clip: Option<ClipPlane>) {
-        self.clip = clip;
+        if self.clip != clip {
+            self.clip = clip;
+            self.drawn = None;
+        }
     }
 
     /// Shows only the section faces and the feature edges of the parts while a section is on.
     pub fn set_sections_only(&mut self, only: bool) {
-        self.sections_only = only;
+        if self.sections_only != only {
+            self.sections_only = only;
+            self.drawn = None;
+        }
     }
 
     /// Section faces of the parts, in the order of the parts.
     pub fn set_sections(&mut self, device: &wgpu::Device, sections: &[RenderMesh]) {
         self.sections = sections.iter().map(|mesh| upload(device, mesh)).collect();
+        self.drawn = None;
     }
 
     pub fn set_part_visible(&mut self, index: usize, visible: bool) {
-        if let Some(part) = self.parts.get_mut(index) {
+        if let Some(part) = self.parts.get_mut(index)
+            && part.visible != visible
+        {
             part.visible = visible;
+            self.drawn = None;
         }
     }
 
@@ -328,6 +355,7 @@ impl ViewportRenderer {
             return false;
         }
         self.targets = Targets::new(device, width, height);
+        self.drawn = None;
         true
     }
 
@@ -336,13 +364,19 @@ impl ViewportRenderer {
         &self.targets.resolve_view
     }
 
+    /// Draws the scene into the color texture, unless it already shows this view of it;
+    /// returns whether it drew.
     pub fn render(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         camera: &Camera,
         options: DisplayOptions,
-    ) {
+    ) -> bool {
+        if self.drawn.as_ref() == Some(&(camera.clone(), options)) {
+            return false;
+        }
+        self.drawn = Some((camera.clone(), options));
         let aspect = self.targets.width as f32 / self.targets.height as f32;
         let globals = Globals {
             view_proj: camera.view_proj(aspect).to_cols_array_2d(),
@@ -434,15 +468,20 @@ impl ViewportRenderer {
                     pass.draw_indexed(0..triangles.count, 0, 0..1);
                 }
             }
+            if options.mesh_edges {
+                pass.set_pipeline(&self.mesh_edge_pipeline);
+                for (part, _) in visible().filter(|(_, whole)| *whole) {
+                    if let (Some(vertices), Some(edges)) = (&part.vertices, &part.mesh_edges) {
+                        pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+                        pass.set_index_buffer(edges.buffer.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..edges.count, 0, 0..1);
+                    }
+                }
+            }
             pass.set_pipeline(&self.edge_pipeline);
             for (part, whole) in visible() {
-                let mesh_edges = part
-                    .mesh_edges
-                    .as_ref()
-                    .filter(|_| options.mesh_edges && whole);
                 let lines = [
                     part.wireframe_edges.as_ref().filter(|_| whole),
-                    mesh_edges,
                     part.feature_edges.as_ref(),
                 ];
                 for lines in lines.into_iter().flatten() {
@@ -458,6 +497,7 @@ impl ViewportRenderer {
             }
         }
         queue.submit([encoder.finish()]);
+        true
     }
 }
 
@@ -496,7 +536,7 @@ fn upload(device: &wgpu::Device, mesh: &RenderMesh) -> GpuMesh {
             "part mesh edges",
             bytemuck::cast_slice(&mesh.mesh_edges),
             mesh.mesh_edges.len(),
-            vertex,
+            wgpu::BufferUsages::INDEX,
         ),
         wireframe_edges: buffer(
             "part wireframe edges",
@@ -566,5 +606,21 @@ impl Targets {
                 wgpu::TextureUsages::RENDER_ATTACHMENT,
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use wgpu::naga;
+
+    /// The shader compiles only when the GUI starts; check it without a GPU.
+    #[test]
+    fn shader_is_valid() {
+        let module = naga::front::wgsl::parse_str(include_str!("viewport.wgsl"))
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(include_str!("viewport.wgsl"))));
+        let flags = naga::valid::ValidationFlags::all();
+        naga::valid::Validator::new(flags, naga::valid::Capabilities::all())
+            .validate(&module)
+            .unwrap();
     }
 }

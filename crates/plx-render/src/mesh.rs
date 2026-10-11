@@ -19,8 +19,9 @@ pub struct RenderMesh {
     pub triangles: Vec<u32>,
     /// Outline of the part, always drawn; also holds line elements such as beams.
     pub feature_edges: Vec<Vertex>,
-    /// Every element edge on the surface, drawn when the mesh is shown.
-    pub mesh_edges: Vec<Vertex>,
+    /// Every element edge on the surface, drawn when the mesh is shown: pairs of indices into
+    /// `vertices`, drawn in black whatever the vertex colours are.
+    pub mesh_edges: Vec<u32>,
     /// Outline of the undeformed shape, drawn behind deformed results.
     pub wireframe_edges: Vec<Vertex>,
     /// Lines drawn [`WIDE_EDGE_PX`](crate::renderer::WIDE_EDGE_PX) wide over everything
@@ -36,7 +37,8 @@ impl RenderMesh {
         self.triangles
             .extend(other.triangles.into_iter().map(|index| base + index));
         self.feature_edges.extend(other.feature_edges);
-        self.mesh_edges.extend(other.mesh_edges);
+        self.mesh_edges
+            .extend(other.mesh_edges.into_iter().map(|index| base + index));
         self.wireframe_edges.extend(other.wireframe_edges);
         self.wide_edges.extend(other.wide_edges);
     }

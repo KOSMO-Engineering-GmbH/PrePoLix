@@ -121,6 +121,9 @@ pub struct ResultsView {
     /// Characteristic model size for the automatic scale (PrePoMax: cube root of the bounding
     /// box volume, square root of the area for flat models).
     model_size: f64,
+    /// [`max_deformation`] of each increment, once asked for: the toolbar wants it every frame
+    /// and an increment animation for all its frames.
+    deformation_peaks: Vec<std::cell::OnceCell<Option<f32>>>,
 }
 
 /// Several mode shapes overlaid at one moment, each scaled by its level and swinging at its
@@ -218,7 +221,11 @@ impl ResultsView {
             plane_result: None,
             units: UnitSystem::default(),
             model_size: bounds.map_or(1.0, model_size),
+            deformation_peaks: Vec::new(),
         };
+        view.deformation_peaks = (view.increments.iter())
+            .map(|_| Default::default())
+            .collect();
         view.increment = view.default_increment();
         view.contact =
             (view.increments.iter()).any(|i| i.fields.iter().any(|f| f.name == "CONTACT"));
@@ -598,6 +605,15 @@ impl ResultsView {
     }
 
     /// Displacement scale factor for the current increment and deformation setting.
+    /// The largest displacement of an increment.
+    fn deformation_peak(&self, index: usize) -> Option<f32> {
+        let increment = self.increments.get(index)?;
+        match self.deformation_peaks.get(index) {
+            Some(peak) => *peak.get_or_init(|| max_deformation(increment)),
+            None => max_deformation(increment),
+        }
+    }
+
     pub fn scale(&self) -> f32 {
         match self.deformation {
             Deformation::Undeformed => 0.0,
@@ -617,9 +633,9 @@ impl ResultsView {
                     }
                     Some(indices) => indices
                         .iter()
-                        .filter_map(|&i| self.increments.get(i).and_then(max_deformation))
+                        .filter_map(|&i| self.deformation_peak(i))
                         .reduce(f32::max),
-                    None => self.current_increment().and_then(max_deformation),
+                    None => self.deformation_peak(self.increment),
                 };
                 let Some(max) = max else {
                     return 0.0;
@@ -677,20 +693,23 @@ impl ResultsView {
     /// Displacements of a whirling complex mode at the phase of the shown frame:
     /// `u_k = MAG_k cos(phase + PHA_k)` per node, PrePoMax's complex animation.
     fn whirl_displacements(phase: f32, field: &Field) -> Vec<[f32; 3]> {
-        let magnitude = ["MAG1", "MAG2", "MAG3"].map(|n| &field.component(n).unwrap().values);
-        let shift = ["PHA1", "PHA2", "PHA3"].map(|n| &field.component(n).unwrap().values);
-        (0..magnitude[0].len())
-            .map(|i| {
-                [0, 1, 2].map(|k| {
-                    let (m, p) = (magnitude[k][i], shift[k][i]);
-                    if m.is_finite() && p.is_finite() {
-                        m * (phase + p.to_radians()).cos()
-                    } else {
-                        0.0
-                    }
-                })
-            })
+        let nodes = field.component("MAG1").map_or(0, |c| c.values.len());
+        (0..nodes)
+            .map(|i| Self::whirl_displacement(phase, field, i))
             .collect()
+    }
+
+    /// [`Self::whirl_displacements`] of one node.
+    fn whirl_displacement(phase: f32, field: &Field, node: usize) -> [f32; 3] {
+        let value = |name: &str| field.component(name).map_or(f32::NAN, |c| c.values[node]);
+        [("MAG1", "PHA1"), ("MAG2", "PHA2"), ("MAG3", "PHA3")].map(|(mag, pha)| {
+            let (m, p) = (value(mag), value(pha));
+            if m.is_finite() && p.is_finite() {
+                m * (phase + p.to_radians()).cos()
+            } else {
+                0.0
+            }
+        })
     }
 
     /// Values of the shown displacement component of a whirling complex mode.
@@ -799,7 +818,8 @@ impl ResultsView {
     /// Displacement of one node as shown.
     pub fn shown_displacement(&self, node: usize) -> Option<[f32; 3]> {
         if let Some((phase, field)) = self.whirl() {
-            return Self::whirl_displacements(phase, field).get(node).copied();
+            let nodes = field.component("MAG1").map_or(0, |c| c.values.len());
+            return (node < nodes).then(|| Self::whirl_displacement(phase, field, node));
         }
         if let Some(superposition) = &self.superposition {
             return superposition.displacements.get(node).copied();

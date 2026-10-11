@@ -2676,8 +2676,10 @@ version = "0.2.1"
 dependencies = [
  "bytemuck",
  "glam",
+ "plx-io",
  "plx-mesh",
  "plx-model",
+ "pollster 1.0.1",
  "wgpu",
 ]
 
