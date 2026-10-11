@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
-use plx_model::UnitSystem;
+use plx_model::{MeshSetupKind, UnitSystem};
 use plx_render::StandardView;
 use plx_results::hot_spot::{HotSpot, HotSpotPath};
 
@@ -2449,10 +2449,24 @@ impl Workbench {
             self.mesh_item_editor = None;
             return;
         };
+        let mut remesh = None;
         match editor.show(ctx, geometry, self.geometry.as_ref()) {
             MeshItemResult::Open => return,
             MeshItemResult::Cancel => {}
-            MeshItemResult::Ok(index, item) => {
+            result @ (MeshItemResult::Ok(..) | MeshItemResult::OkRemesh(..)) => {
+                let (index, item, remeshes) = match result {
+                    MeshItemResult::Ok(index, item) => (index, item, false),
+                    MeshItemResult::OkRemesh(index, item) => (index, item, true),
+                    MeshItemResult::Open | MeshItemResult::Cancel => return,
+                };
+                if remeshes {
+                    // A local mesh size is picked on faces and edges: mesh every part.
+                    remesh = Some(match &item.kind {
+                        MeshSetupKind::MeshingParameters { parts, .. }
+                        | MeshSetupKind::TetrahedralGmsh { parts, .. } => Some(parts.clone()),
+                        MeshSetupKind::LocalMeshSize { .. } => None,
+                    });
+                }
                 let index = match index.filter(|&i| i < geometry.mesh_items.len()) {
                     Some(index) => {
                         geometry.mesh_items[index] = item;
@@ -2468,6 +2482,9 @@ impl Workbench {
         }
         self.mesh_item_editor = None;
         self.viewport.preview = Default::default();
+        if let Some(parts) = remesh {
+            self.generate_mesh(ctx, parts);
+        }
     }
 
     /// Meshes the named parts of the geometry, or all with `None`, on a worker thread;

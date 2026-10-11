@@ -107,6 +107,9 @@ values and meshes at once.
 
 #screenshot("mesh-setup-item.png", [Creating a mesh setup item])
 
+#ui("OK") stores the item. #ui("OK & Remesh") stores it and meshes again the parts it names.
+A Local Mesh Size item is picked on faces and edges, so it meshes all parts again.
+
 == Using an existing mesh
 
 A CalculiX mesh can be opened with #menu("File", "Open ...") (@files). Its node sets, element
