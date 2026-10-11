@@ -78,6 +78,9 @@ pub struct GeometryDisplay {
     pub mesh: FeMesh,
     /// The CAD face or edge of each display element; element ids count from 1.
     pub entities: Vec<CadEntity>,
+    /// The dimension of the CAD shape of each part of the mesh: 3 for a solid, 2 for a face,
+    /// 1 for an edge.
+    pub part_dimensions: Vec<u8>,
     pub solids: usize,
     pub faces: usize,
     pub edges: usize,
@@ -1323,14 +1326,14 @@ fn display_mesh(gmsh: &Gmsh, geometry: &Geometry) -> Result<GeometryDisplay, Gms
     // Parts as (name, faces, edges); the edges of the faces are added below. Every face
     // outside the solids is a shell part of its own, as for 2D models, every edge outside
     // the faces a line part.
-    let mut groups: Vec<(String, Vec<i32>, Vec<i32>)> = Vec::new();
+    let mut groups: Vec<(String, u8, Vec<i32>, Vec<i32>)> = Vec::new();
     for ((dim, tag), name) in parts(gmsh, geometry)? {
         let (faces, edges) = match dim {
             3 => (gmsh.adjacencies(3, tag)?.1, Vec::new()),
             2 => (vec![tag], Vec::new()),
             _ => (Vec::new(), vec![tag]),
         };
-        groups.push((name, faces, edges));
+        groups.push((name, dim as u8, faces, edges));
     }
 
     // Triangles and edge segments of each entity, fetched once.
@@ -1345,6 +1348,7 @@ fn display_mesh(gmsh: &Gmsh, geometry: &Geometry) -> Result<GeometryDisplay, Gms
 
     let mut mesh = FeMesh::default();
     let mut entities = Vec::new();
+    let mut part_dimensions = Vec::new();
     let mut add = |mesh: &mut FeMesh,
                    part: &mut Part,
                    entity: CadEntity,
@@ -1374,7 +1378,7 @@ fn display_mesh(gmsh: &Gmsh, geometry: &Geometry) -> Result<GeometryDisplay, Gms
         })
         .map_err(|e| GmshError::Other(e.to_string()))
     };
-    for (name, faces, own_edges) in groups {
+    for (name, dimension, faces, own_edges) in groups {
         let mut part = Part {
             name,
             elements: Vec::new(),
@@ -1395,11 +1399,13 @@ fn display_mesh(gmsh: &Gmsh, geometry: &Geometry) -> Result<GeometryDisplay, Gms
         }
         if !part.elements.is_empty() {
             mesh.parts.push(part);
+            part_dimensions.push(dimension);
         }
     }
     Ok(GeometryDisplay {
         mesh,
         entities,
+        part_dimensions,
         solids: gmsh.entities(3)?.len(),
         faces: surfaces.len(),
         edges: curves.len(),

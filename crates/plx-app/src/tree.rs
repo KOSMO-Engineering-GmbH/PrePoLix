@@ -625,6 +625,12 @@ fn part_icon(part: &PartInfo) -> TreeIcon {
     if !part.visible {
         return TreeIcon::Hidden;
     }
+    match part.dimension {
+        Some(3) => return TreeIcon::Solid,
+        Some(2) => return TreeIcon::Shell,
+        Some(1) => return TreeIcon::Wire,
+        _ => {}
+    }
     let is = |prefixes: &[&str]| {
         (part.element_types.iter())
             .any(|(name, _)| prefixes.iter().any(|p| name.to_uppercase().starts_with(p)))
