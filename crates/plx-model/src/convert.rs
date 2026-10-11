@@ -182,6 +182,21 @@ impl FeModel {
                         c.all(point, Quantity::Length);
                         c.value(speed, Quantity::RotationalSpeed);
                     }
+                    LoadKind::Moving(moving) => {
+                        for length in [
+                            &mut moving.start,
+                            &mut moving.end,
+                            &mut moving.patch_length,
+                            &mut moving.patch_width,
+                        ] {
+                            c.value(length, Quantity::Length);
+                        }
+                        for wheel in &mut moving.wheels {
+                            c.value(&mut wheel.along, Quantity::Length);
+                            c.value(&mut wheel.across, Quantity::Length);
+                            c.all(&mut wheel.force, Quantity::Force);
+                        }
+                    }
                 }
             }
         }

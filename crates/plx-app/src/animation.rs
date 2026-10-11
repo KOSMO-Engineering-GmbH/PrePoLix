@@ -1,5 +1,6 @@
 //! Result animation as in PrePoMax: either the deformation of one increment grows from zero to
-//! its full scale, or the increments of a step play one after another. A mode shape of a
+//! its full scale, or the increments of a step play one after another, or the steps (their last
+//! increments) do. A mode shape of a
 //! frequency or buckling step swings from -1 to 1 instead, so both halves of the oscillation show.
 
 /// What the frames of an animation show.
@@ -10,6 +11,15 @@ pub enum AnimationKind {
     ScaleFactor,
     /// Each frame is one increment of the shown step (PrePoMax: "Time increments").
     Increments,
+    /// Each frame is the last increment of one step, e.g. one position of a moving load.
+    Steps,
+}
+
+impl AnimationKind {
+    /// Whether the frames are increments of the results rather than a scaled one.
+    pub fn plays_increments(self) -> bool {
+        matches!(self, AnimationKind::Increments | AnimationKind::Steps)
+    }
 }
 
 /// What happens at the last frame.
@@ -70,7 +80,7 @@ impl Animation {
             fps: DEFAULT_FPS,
             playback: Playback::Swing,
             limits: ColorLimits::CurrentFrame,
-            frame: if kind == AnimationKind::Increments {
+            frame: if kind.plays_increments() {
                 frame
             } else {
                 DEFAULT_FRAMES as usize - 1
@@ -89,7 +99,7 @@ impl Animation {
     pub fn retarget(&mut self, increments: Vec<usize>, start_increment: usize, modal: bool) {
         self.modal = modal;
         self.start_increment = start_increment;
-        if self.kind == AnimationKind::Increments {
+        if self.kind.plays_increments() {
             self.frame = increments
                 .iter()
                 .position(|&i| i == start_increment)
@@ -101,7 +111,7 @@ impl Animation {
     pub fn frame_count(&self) -> usize {
         match self.kind {
             AnimationKind::ScaleFactor => self.frames.max(2) as usize,
-            AnimationKind::Increments => self.increments.len().max(1),
+            AnimationKind::Increments | AnimationKind::Steps => self.increments.len().max(1),
         }
     }
 
@@ -124,7 +134,7 @@ impl Animation {
                     t
                 }
             }
-            AnimationKind::Increments => 1.0,
+            AnimationKind::Increments | AnimationKind::Steps => 1.0,
         }
     }
 
@@ -132,7 +142,9 @@ impl Animation {
     pub fn increment(&self) -> Option<usize> {
         match self.kind {
             AnimationKind::ScaleFactor => None,
-            AnimationKind::Increments => self.increments.get(self.frame).copied(),
+            AnimationKind::Increments | AnimationKind::Steps => {
+                self.increments.get(self.frame).copied()
+            }
         }
     }
 

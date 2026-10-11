@@ -4496,3 +4496,100 @@ fn calculix_runs_the_element_types_chosen_for_a_part() {
         assert!(values.iter().any(|v| *v != 0.0), "{type_name}");
     }
 }
+
+/// The cantilever with a wheel driving along its top face from x = 10 to 90 in five steps.
+fn moving_cantilever() -> (FeMesh, FeModel) {
+    let mesh = read_inp(&testdata("kragbalken_c3d8.inp")).unwrap().mesh;
+    let top = mesh.coords().iter().map(|c| c[2]).fold(f64::MIN, f64::max);
+    let mut faces = Vec::new();
+    for element in mesh.elements() {
+        for (f, topology) in element.faces().iter().enumerate() {
+            let on_top =
+                (topology.corners.iter()).all(|&l| mesh.node(element.nodes[l]).unwrap()[2] == top);
+            if on_top {
+                faces.push((element.id, f as u8 + 1));
+            }
+        }
+    }
+    let load = Load {
+        name: "Moving-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Faces(faces),
+        kind: LoadKind::Moving(plx_model::MovingLoad {
+            start: 10.0,
+            end: 90.0,
+            positions: 5,
+            patch_length: 10.0,
+            patch_width: 10.0,
+            wheels: vec![plx_model::Wheel {
+                along: 0.0,
+                across: 5.0,
+                force: [0.0, 0.0, -100.0],
+            }],
+            ..Default::default()
+        }),
+        amplitude: None,
+        factor_amplitude: None,
+    };
+    let (_, mut model) = cantilever(load);
+    // Another load stays the same in every position.
+    model.steps[0].loads.insert(0, tip_force());
+    (mesh, model)
+}
+
+#[test]
+fn a_moving_load_writes_a_step_per_position() {
+    let (mesh, model) = moving_cantilever();
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("\n*Step").count(), 5, "{text}");
+    assert!(text.contains("** Moving load position 1 of 5, Moving-1 at 10\n*Step"));
+    assert!(text.contains("** Moving load position 5 of 5, Moving-1 at 90\n*Step"));
+    // Each step holds the tip force and the wheel's 100 N spread over the top face.
+    for block in text.split("\n*Step").skip(1) {
+        let moving = block.split("** Name: Moving-1\n*Cload\n").nth(1).unwrap();
+        let total: f64 = (moving.lines())
+            .take_while(|l| !l.starts_with('*'))
+            .map(|l| l.split(", ").nth(2).unwrap().parse::<f64>().unwrap())
+            .sum();
+        assert!((total + 100.0).abs() < 1e-9, "{total}");
+        assert!(block.contains("** Name: Force-1\n*Cload\n"));
+    }
+    // The node sets of other items are written once.
+    assert_eq!(text.matches("*Nset, Nset=Internal_Selection").count(), 1);
+    // Check Model checks every position without solving it.
+    let check = write_check_inp(&mesh, &model, "").unwrap();
+    assert_eq!(check.matches("*No analysis").count(), 5);
+    assert!(!check.contains("*Static"));
+}
+
+#[test]
+fn a_moving_load_off_its_faces_is_left_out() {
+    let (mesh, mut model) = moving_cantilever();
+    let LoadKind::Moving(moving) = &mut model.steps[0].loads[1].kind else {
+        unreachable!()
+    };
+    moving.end = 200.0;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let last = text.split("\n*Step").last().unwrap();
+    assert!(
+        last.contains("** Name: Moving-1: No wheel on the region\n"),
+        "{last}"
+    );
+}
+
+#[test]
+fn calculix_bends_the_cantilever_more_as_the_moving_load_drives_out() {
+    let (mesh, mut model) = moving_cantilever();
+    model.steps[0].loads.remove(0);
+    let Some(frd) = run_ccx("moving", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let index = frd.mesh.node_index(99).unwrap();
+    let tip: Vec<f64> = (frd.increments.iter())
+        .filter_map(|i| i.field("DISP"))
+        .map(|f| f64::from(f.component("U3").unwrap().values[index]))
+        .collect();
+    assert_eq!(tip.len(), 5, "{tip:?}");
+    assert!(tip.windows(2).all(|w| w[1] < w[0] && w[1] < 0.0), "{tip:?}");
+}

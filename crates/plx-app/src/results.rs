@@ -625,7 +625,7 @@ impl ResultsView {
                 let animated = self
                     .animation
                     .as_ref()
-                    .filter(|a| a.kind == AnimationKind::Increments)
+                    .filter(|a| a.kind.plays_increments())
                     .map(|a| a.increments.as_slice());
                 let max = match animated.filter(|i| !i.is_empty()) {
                     _ if self.superposition.is_some() => {
@@ -773,11 +773,8 @@ impl ResultsView {
             return;
         };
         self.select_increment(target);
-        let step = self.current_increment().map(|i| i.step);
         let modal = self.current_increment().is_some_and(|i| i.kind.is_modal());
-        let increments = (0..self.increments.len())
-            .filter(|&i| Some(self.increments[i].step) == step)
-            .collect();
+        let increments = self.animated_increments(animation.kind);
         animation.retarget(increments, target, modal);
         self.animation = Some(animation);
         self.show_animation_frame();
@@ -790,13 +787,37 @@ impl ResultsView {
             .take()
             .map_or(self.increment, |a| a.start_increment);
         self.select_increment(start);
-        let step = self.current_increment().map(|i| i.step);
         let modal = self.current_increment().is_some_and(|i| i.kind.is_modal());
-        let increments = (0..self.increments.len())
-            .filter(|&i| Some(self.increments[i].step) == step)
-            .collect();
+        let increments = self.animated_increments(kind);
         self.animation = Some(Animation::new(kind, increments, start, modal));
         self.show_animation_frame();
+    }
+
+    /// The increments an animation plays from the current increment: those of its step, or
+    /// the last increment of every step of the same kind of analysis.
+    fn animated_increments(&self, kind: AnimationKind) -> Vec<usize> {
+        let Some(current) = self.current_increment() else {
+            return Vec::new();
+        };
+        let (step, analysis) = (current.step, current.kind);
+        if kind != AnimationKind::Steps {
+            return (0..self.increments.len())
+                .filter(|&i| self.increments[i].step == step)
+                .collect();
+        }
+        let mut last: Vec<usize> = Vec::new();
+        for (i, increment) in self.increments.iter().enumerate() {
+            if increment.kind != analysis {
+                continue;
+            }
+            match last.last_mut() {
+                Some(previous) if self.increments[*previous].step == increment.step => {
+                    *previous = i
+                }
+                _ => last.push(i),
+            }
+        }
+        last
     }
 
     /// Displacements as shown: those of the overlaid modes, or of the current increment.
@@ -986,8 +1007,10 @@ impl ResultsView {
             (AnimationKind::ScaleFactor, ColorLimits::AllFrames) => {
                 Some((min.min(0.0), max.max(0.0)))
             }
-            (AnimationKind::Increments, ColorLimits::CurrentFrame) => Some((min, max)),
-            (AnimationKind::Increments, ColorLimits::AllFrames) => animation
+            (AnimationKind::Increments | AnimationKind::Steps, ColorLimits::CurrentFrame) => {
+                Some((min, max))
+            }
+            (AnimationKind::Increments | AnimationKind::Steps, ColorLimits::AllFrames) => animation
                 .increments
                 .iter()
                 .filter_map(|&i| {
@@ -1421,6 +1444,26 @@ mod tests {
         view.switch_increment(0);
         assert_eq!(view.animation.as_ref().unwrap().increments, [0, 1]);
         assert_eq!(view.animation.as_ref().unwrap().frame, 0);
+    }
+
+    #[test]
+    fn a_steps_animation_plays_the_last_increment_of_each_step() {
+        let still = [[0.0; 3]];
+        let mut view = ResultsView::new(
+            vec![
+                increment(1, 1, AnalysisKind::Static, &still),
+                increment(1, 2, AnalysisKind::Static, &still),
+                increment(2, 1, AnalysisKind::Frequency, &still),
+                increment(3, 1, AnalysisKind::Static, &still),
+                increment(4, 1, AnalysisKind::Static, &still),
+            ],
+            Some(([0.0; 3], [10.0; 3])),
+        );
+        view.select_increment(3);
+        view.start_animation(AnimationKind::Steps);
+        let animation = view.animation.as_ref().unwrap();
+        assert_eq!(animation.increments, [1, 3, 4]);
+        assert_eq!(animation.frame, 1);
     }
 
     #[test]

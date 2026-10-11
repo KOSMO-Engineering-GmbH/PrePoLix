@@ -53,6 +53,8 @@ Loads are created like boundary conditions, with #ui("Create ...") on #ui("Loads
   [Surface Traction], [A *total* force on faces. When the input file is written it is
     distributed to the nodes according to the face areas and the element shape functions
     (`*CLOAD`).],
+  [Moving Load], [Wheel forces that travel over faces, one static step per position
+    (@moving-load).],
   [Concentrated Flux], [Heat flow into every node of the region (`*CFLUX`).],
   [Surface Flux], [Heat flux density into faces (`*DFLUX`).],
   [Body Flux], [Heat generated per volume in parts or elements (`*DFLUX`, `BF`).],
