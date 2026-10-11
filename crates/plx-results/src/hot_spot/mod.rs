@@ -680,6 +680,7 @@ mod tests {
             })
             .collect();
         Increment {
+            nodal_diameter: None,
             step: 1,
             increment: 1,
             kind: AnalysisKind::Static,

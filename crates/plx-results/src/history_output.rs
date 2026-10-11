@@ -445,6 +445,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, &top)| Increment {
+                nodal_diameter: None,
                 step: 1,
                 increment: i as u32 + 1,
                 kind: AnalysisKind::Static,

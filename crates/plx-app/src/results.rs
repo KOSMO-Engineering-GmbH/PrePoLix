@@ -539,7 +539,10 @@ impl ResultsView {
 
     /// Entry of the increment list, "step, increment" as in PrePoMax's results toolbar.
     pub fn increment_label(increment: &Increment) -> String {
-        format!("{}, {}", increment.step, increment.increment)
+        match increment.nodal_diameter {
+            Some(nd) => format!("{}, {} (ND {nd})", increment.step, increment.increment),
+            None => format!("{}, {}", increment.step, increment.increment),
+        }
     }
 
     /// PrePoMax's information block in the top right corner of the 3D view.
@@ -561,10 +564,16 @@ impl ResultsView {
         } else if let Some(inc) = self.current_increment() {
             let value = format_value(inc.value as f32);
             lines.push(match inc.kind {
-                AnalysisKind::Frequency => format!(
-                    "Step: #{}   Mode: #{}   Frequency: {value}",
-                    inc.step, inc.increment
-                ),
+                AnalysisKind::Frequency => match inc.nodal_diameter {
+                    Some(nd) => format!(
+                        "Step: #{}   Mode: #{}   Nodal diameter: {nd}   Frequency: {value}",
+                        inc.step, inc.increment
+                    ),
+                    None => format!(
+                        "Step: #{}   Mode: #{}   Frequency: {value}",
+                        inc.step, inc.increment
+                    ),
+                },
                 AnalysisKind::ComplexFrequency => {
                     let phase = match self.whirl() {
                         Some((phase, _)) => format!("   Phase: {:.0} deg", phase.to_degrees()),
@@ -1203,6 +1212,7 @@ mod tests {
         };
         plx_results::add_derived_components(&mut field);
         Increment {
+            nodal_diameter: None,
             step,
             increment: number,
             kind,

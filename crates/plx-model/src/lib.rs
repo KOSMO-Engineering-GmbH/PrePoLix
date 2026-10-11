@@ -32,8 +32,8 @@ pub use constraint::{
     CompressionOnly, NodeTie, PointSpring, RigidBody, SurfaceSpring, SurfaceToSurfaceSpring,
 };
 pub use contact::{
-    Constraint, ContactMethod, ContactPair, DEFAULT_SURFACE_COLOR, Friction, GapConductance,
-    InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
+    Constraint, ContactMethod, ContactPair, CyclicSymmetry, DEFAULT_SURFACE_COLOR, Friction,
+    GapConductance, InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
 };
 pub use element_type::{PartElementType, element_type_options};
 pub use features::{
@@ -119,6 +119,12 @@ pub struct FeModel {
 }
 
 impl FeModel {
+    /// The cyclic symmetry of the first active tie that has one; Frequency steps then
+    /// compute the modes by nodal diameter.
+    pub fn cyclic_symmetry(&self) -> Option<&CyclicSymmetry> {
+        (self.ties.iter().filter(|t| t.active)).find_map(|t| t.cyclic.as_ref())
+    }
+
     /// Replaces [`EquationSolver::Default`] in all steps by `solver`, the solver the
     /// installed CalculiX should use by default.
     pub fn resolve_default_solver(&mut self, solver: EquationSolver) {
@@ -776,6 +782,11 @@ pub struct FrequencyStep {
     /// stiffening by a preload (`*STEP, PERTURBATION`).
     pub perturbation: bool,
     pub solver: EquationSolver,
+    /// Lowest and highest nodal diameter of a cyclic symmetric model
+    /// (`*SELECT CYCLIC SYMMETRY MODES, NMIN=, NMAX=`); `None` is CalculiX's 0 and the
+    /// highest one the sectors allow.
+    #[serde(default)]
+    pub nodal_diameters: Option<[u32; 2]>,
 }
 
 /// Settings of a `*DYNAMIC` step, with PrePoMax's defaults; like PrePoMax's `DynamicStep` it
@@ -1057,6 +1068,7 @@ impl Default for FrequencyStep {
             storage: false,
             perturbation: false,
             solver: EquationSolver::Default,
+            nodal_diameters: None,
         }
     }
 }
