@@ -63,6 +63,8 @@ struct StepHeader {
     step: u32,
     increment: u32,
     mode: Option<u32>,
+    /// Nodal diameter of a cyclic symmetric mode (`1PHID`).
+    nodal_diameter: Option<u32>,
 }
 
 struct Reader<'a> {
@@ -96,6 +98,7 @@ struct ResultBlock<'a> {
     increment: u32,
     kind: AnalysisKind,
     value: f64,
+    nodal_diameter: Option<u32>,
     field_name: String,
     names: Vec<String>,
     /// Bytes per binary float, `None` for ASCII.
@@ -118,6 +121,10 @@ impl<'a> Reader<'a> {
                 self.elements(&line)?;
             } else if line.starts_with("    1PSTEP") {
                 self.pending = Some(step_header(&line));
+            } else if let Some(diameter) = line.strip_prefix("    1PHID") {
+                if let Some(header) = &mut self.pending {
+                    header.nodal_diameter = diameter.trim().parse().ok();
+                }
             } else if let Some(mode) = line.strip_prefix("    1PMODE") {
                 if let Some(header) = &mut self.pending {
                     header.mode = mode.trim().parse().ok();
@@ -170,6 +177,7 @@ impl<'a> Reader<'a> {
                     kind: block.kind,
                     value: block.value,
                     fields: vec![field],
+                    nodal_diameter: block.nodal_diameter,
                 }),
             }
         }
@@ -376,7 +384,7 @@ impl<'a> Reader<'a> {
         let step = self.pending.take().unwrap_or(StepHeader {
             step: 1,
             increment: 1,
-            mode: None,
+            ..StepHeader::default()
         });
         let field_line = self
             .next_line()
@@ -428,6 +436,12 @@ impl<'a> Reader<'a> {
         // Steady state dynamics writes increment 0 into every `1PSTEP` line; the frequency
         // points are then only told apart by the increment counter of the block header.
         let increment = match (kind, step.mode) {
+            // Each nodal diameter counts its modes from 1 again; the block header numbers
+            // them on through the step. CalculiX solves for a cosine and a sine part, so
+            // every mode comes twice and only the first of each pair (1, 3, 5) is written.
+            (AnalysisKind::Frequency, Some(_)) if step.nodal_diameter.is_some() => {
+                (int_field(header, 58..63).unwrap_or(1).max(1) as u32).div_ceil(2)
+            }
             (AnalysisKind::Frequency | AnalysisKind::ComplexFrequency, Some(mode)) => mode,
             (AnalysisKind::Buckling, _) => self.buckling_increment(header, step.step, value),
             // Every eigenfrequency gets a SENFREQ block of increment 1; they become one
@@ -449,6 +463,7 @@ impl<'a> Reader<'a> {
             increment,
             kind,
             value,
+            nodal_diameter: step.nodal_diameter,
             field_name,
             names,
             binary,
@@ -577,6 +592,7 @@ fn step_header(line: &str) -> StepHeader {
         increment: number(2).unwrap_or(1),
         step: number(3).unwrap_or(1),
         mode: None,
+        nodal_diameter: None,
     }
 }
 

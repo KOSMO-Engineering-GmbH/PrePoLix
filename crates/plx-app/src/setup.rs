@@ -11,13 +11,14 @@ use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, BoundaryKind,
-    BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, DefinedField, DefinedFieldKind,
-    DynamicProcedure, DynamicStep, Elastic, EquationSolver, FeModel, FieldOutput, FrequencyStep,
-    Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
-    InitialConditionKind, Load, LoadKind, Material, MeshSet, ModalDamping, ModalDynamicsStep,
-    ModeDamping, ModelSpace, NodeTie, OutputDimension, OutputKind, PlasticPoint, Quantity, Region,
-    Section, SectionKind, SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step,
-    StepKind, SurfaceInteraction, SymmetryError, Tie, UnitSystem, next_name, symmetry_plane,
+    BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CyclicSymmetry, DefinedField,
+    DefinedFieldKind, DynamicProcedure, DynamicStep, Elastic, EquationSolver, FeModel, FieldOutput,
+    FrequencyStep, Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
+    InitialCondition, InitialConditionKind, Load, LoadKind, Material, MeshSet, ModalDamping,
+    ModalDynamicsStep, ModeDamping, ModelSpace, NodeTie, OutputDimension, OutputKind, PlasticPoint,
+    Quantity, Region, Section, SectionKind, SensitivityStep, SetKind, StaticStep,
+    SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction, SymmetryError, Tie, UnitSystem,
+    next_name, symmetry_plane,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
@@ -2284,7 +2285,12 @@ impl Editor {
                 contacts::validate_contact_pair(pair, fe)?;
                 regions.validate()?;
             }
-            Draft::Tie(_, regions) => regions.validate()?,
+            Draft::Tie(tie, regions) => {
+                regions.validate()?;
+                if let Some(problem) = tie.cyclic.as_ref().and_then(CyclicSymmetry::problem) {
+                    return Err(problem);
+                }
+            }
             Draft::SurfaceInteraction(interaction, _) => {
                 contacts::validate_interaction(interaction)?;
             }
@@ -3493,7 +3499,7 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
     let units = fe.properties.units;
     match &mut step.kind {
         StepKind::Static(settings) => static_form(ui, settings, units),
-        StepKind::Frequency(settings) => frequency_form(ui, settings, units),
+        StepKind::Frequency(settings) => frequency_form(ui, settings, units, fe.cyclic_symmetry()),
         StepKind::Dynamic(settings) => dynamic_form(ui, settings, units),
         StepKind::ModalDynamics(settings) => modal_dynamics_form(ui, settings, units),
         StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
@@ -3831,7 +3837,12 @@ fn solver_row(ui: &mut Ui, solver: &mut EquationSolver, eigenvalues: bool) {
     ui.end_row();
 }
 
-fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep, units: UnitSystem) {
+fn frequency_form(
+    ui: &mut Ui,
+    settings: &mut FrequencyStep,
+    units: UnitSystem,
+    cyclic: Option<&CyclicSymmetry>,
+) {
     ui.label("");
     ui.checkbox(
         &mut settings.perturbation,
@@ -3864,8 +3875,36 @@ fn frequency_form(ui: &mut Ui, settings: &mut FrequencyStep, units: UnitSystem) 
         "Store matrices and eigenmodes (Storage, .eig)",
     );
     ui.end_row();
+    if let Some(cyclic) = cyclic {
+        nodal_diameter_rows(ui, &mut settings.nodal_diameters, cyclic);
+    }
     ui.label("");
     ui.weak("Loads have no effect in a frequency step; only the boundary conditions count.");
+    ui.end_row();
+}
+
+/// The nodal diameters a cyclic symmetric model is solved for, PrePoMax's minimum and
+/// maximum cyclic symmetry mode; unchecked, CalculiX solves all of them.
+fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, cyclic: &CyclicSymmetry) {
+    let highest = cyclic.highest_nodal_diameter();
+    let mut set = range.is_some();
+    ui.checkbox(&mut set, "Nodal diameter range")
+        .on_hover_text(format!(
+            "Cyclic symmetry: the eigenfrequencies are computed for each nodal diameter \
+             from 0 to {highest}, or only for this range. The number of eigenfrequencies \
+             counts per nodal diameter."
+        ));
+    let mut values = range.unwrap_or([0, highest]);
+    ui.add_enabled_ui(set, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("from");
+            ui.add(egui::DragValue::new(&mut values[0]).range(0..=highest));
+            ui.label("to");
+            let low = values[0];
+            ui.add(egui::DragValue::new(&mut values[1]).range(low..=highest));
+        });
+    });
+    *range = set.then_some(values);
     ui.end_row();
 }
 

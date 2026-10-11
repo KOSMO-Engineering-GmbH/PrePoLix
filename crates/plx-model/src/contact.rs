@@ -365,6 +365,57 @@ pub struct Tie {
     pub slave: Region,
     pub master_color: [u8; 3],
     pub slave_color: [u8; 3],
+    /// Makes the tie the cyclic symmetry of a sector: the slave side is the master side
+    /// rotated by one sector about the axis (`*TIE, CYCLIC SYMMETRY`).
+    #[serde(default)]
+    pub cyclic: Option<CyclicSymmetry>,
+}
+
+/// A sector of a part that repeats about an axis, such as a blade of an impeller
+/// (`*CYCLIC SYMMETRY MODEL`). Frequency steps then compute the modes by nodal diameter.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CyclicSymmetry {
+    /// Number of sectors in 360 degrees (`N=`).
+    pub sectors: u32,
+    /// Sectors the results are expanded to (`NGRAPH=`); all of them show the whole part.
+    pub graph_sectors: u32,
+    pub axis_point: [f64; 3],
+    pub axis_direction: [f64; 3],
+    /// Lets CalculiX check that the sector angle fits the number of sectors.
+    pub check_angle: bool,
+}
+
+impl Default for CyclicSymmetry {
+    fn default() -> Self {
+        Self {
+            sectors: 12,
+            graph_sectors: 12,
+            axis_point: [0.0; 3],
+            axis_direction: [0.0, 0.0, 1.0],
+            check_angle: true,
+        }
+    }
+}
+
+impl CyclicSymmetry {
+    /// The highest nodal diameter the sectors can carry, PrePoMax's limit.
+    pub fn highest_nodal_diameter(&self) -> u32 {
+        self.sectors / 2
+    }
+
+    /// Why CalculiX would reject the settings.
+    pub fn problem(&self) -> Option<String> {
+        if self.sectors < 2 {
+            Some("The number of sectors must be at least 2.".into())
+        } else if !(1..=self.sectors).contains(&self.graph_sectors) {
+            Some("The displayed sectors must be between 1 and the number of sectors.".into())
+        } else if self.axis_direction.iter().all(|v| *v == 0.0) {
+            Some("The axis direction must not be the zero vector.".into())
+        } else {
+            None
+        }
+    }
 }
 
 impl Tie {
@@ -384,6 +435,7 @@ impl Tie {
             slave: Region::Faces(Vec::new()),
             master_color: DEFAULT_SURFACE_COLOR,
             slave_color: DEFAULT_SURFACE_COLOR,
+            cyclic: None,
         }
     }
 }

@@ -4666,3 +4666,155 @@ fn calculix_computes_the_sensitivities_of_the_eigenfrequencies() {
         assert!(mode.field("SENFREQ").is_some());
     }
 }
+
+/// An annular steel disk of C3D8 elements, 20 to 60 mm in radius and 4 mm thick, held at
+/// its bore: the whole disk, or one of `sectors` sectors with its two cut faces.
+fn disk(sectors: u32, full: bool) -> (FeMesh, FeModel, Faces, Faces) {
+    let (nr, nt, nz) = (6, 4, 2);
+    let angle = std::f64::consts::TAU / f64::from(sectors);
+    let columns = if full { nt * sectors } else { nt + 1 };
+    let id = |i: u32, j: u32, k: u32| 1 + i + (nr + 1) * ((j % columns) + columns * k);
+    let mut text = String::from("*Node\n");
+    for k in 0..=nz {
+        for j in 0..columns {
+            for i in 0..=nr {
+                let (r, t) = (
+                    20.0 + 40.0 * f64::from(i) / f64::from(nr),
+                    angle * f64::from(j) / f64::from(nt),
+                );
+                let z = 4.0 * f64::from(k) / f64::from(nz);
+                text += &format!("{}, {}, {}, {z}\n", id(i, j, k), r * t.cos(), r * t.sin());
+            }
+        }
+    }
+    text += "*Element, Type=C3D8, Elset=EALL\n";
+    let (mut left, mut right, mut element) = (Vec::new(), Vec::new(), 0);
+    let rows = if full { nt * sectors } else { nt };
+    for k in 0..nz {
+        for j in 0..rows {
+            for i in 0..nr {
+                element += 1;
+                let nodes = [
+                    id(i, j, k),
+                    id(i + 1, j, k),
+                    id(i + 1, j + 1, k),
+                    id(i, j + 1, k),
+                    id(i, j, k + 1),
+                    id(i + 1, j, k + 1),
+                    id(i + 1, j + 1, k + 1),
+                    id(i, j + 1, k + 1),
+                ]
+                .map(|n| n.to_string());
+                text += &format!("{element}, {}\n", nodes.join(", "));
+                // Face S3 runs through nodes 1, 2, 6, 5, face S5 through 3, 4, 8, 7.
+                if j == 0 {
+                    left.push((element, 3));
+                }
+                if j == rows - 1 {
+                    right.push((element, 5));
+                }
+            }
+        }
+    }
+    let bore: Vec<String> = (0..=nz)
+        .flat_map(|k| (0..columns).map(move |j| id(0, j, k).to_string()))
+        .collect();
+    text += &format!("*Nset, Nset=FIX\n{}\n", bore.join(", "));
+    let mesh = read_inp_str(&text, None).unwrap().mesh;
+    let mut model = cantilever(tip_force()).1;
+    let mut step = Step::new_frequency("Step-1");
+    step.boundary_conditions = model.steps[0].boundary_conditions.clone();
+    model.steps = vec![step];
+    (mesh, model, left, right)
+}
+
+#[test]
+fn a_cyclic_symmetry_tie_is_written_like_prepomax_does() {
+    let (mesh, mut model, left, right) = disk(12, false);
+    let mut tie = plx_model::Tie::new("Tie-1");
+    tie.master = Region::Faces(left);
+    tie.slave = Region::Faces(right);
+    tie.cyclic = Some(plx_model::CyclicSymmetry {
+        graph_sectors: 3,
+        check_angle: false,
+        ..Default::default()
+    });
+    model.ties.push(tie);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*Tie, Name=Tie-1, Cyclic symmetry\n",
+        "*Cyclic symmetry model, N=12, Tie=Tie-1, Ngraph=3, Check=No\n0, 0, 0, 0, 0, 1\n",
+        "*Frequency\n20\n*Select cyclic symmetry modes\n",
+    ] {
+        assert!(text.contains(line), "{line:?} missing in\n{text}");
+    }
+    let StepKind::Frequency(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.nodal_diameters = Some([1, 3]);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Select cyclic symmetry modes, Nmin=1, Nmax=3\n"),
+        "{text}"
+    );
+    // The bore nodes of the slave side follow the master side; CalculiX refuses them in
+    // a boundary condition as well.
+    assert!(text.contains("*Boundary\nInternal_Selection-1_Fixed-1, 1, 6, 0\n"));
+    let set = "*Nset, Nset=Internal_Selection-1_Fixed-1\n";
+    let nodes = &text[text.find(set).unwrap() + set.len()..];
+    let nodes: Vec<&str> = nodes.lines().next().unwrap().split(", ").collect();
+    assert_eq!(nodes.len(), 3 * 4, "{nodes:?}");
+}
+
+/// The sector computes the frequencies of the whole disk, sorted by nodal diameter.
+#[test]
+fn calculix_finds_the_disk_frequencies_on_a_sector() {
+    let (mesh, mut model, _, _) = disk(12, true);
+    let Some(dir) = ccx_dir("zyklisch") else {
+        return;
+    };
+    let full = run_ccx_in(&dir, "voll", &write_inp(&mesh, &model, "").unwrap());
+    let whole: Vec<f64> = full.increments.iter().map(|i| i.value).collect();
+    let (mesh, sector_model, left, right) = disk(12, false);
+    model = sector_model;
+    let mut tie = plx_model::Tie::new("Tie-1");
+    tie.master = Region::Faces(left);
+    tie.slave = Region::Faces(right);
+    tie.cyclic = Some(plx_model::CyclicSymmetry::default());
+    model.ties.push(tie);
+    let StepKind::Frequency(settings) = &mut model.steps[0].kind else {
+        unreachable!()
+    };
+    settings.num_frequencies = 2;
+    settings.nodal_diameters = Some([0, 2]);
+    let frd = run_ccx_in(&dir, "sektor", &write_inp(&mesh, &model, "").unwrap());
+    let dat = std::fs::read_to_string(dir.join("sektor.dat")).unwrap();
+    remove_ccx_dir(&dir);
+    // The results are expanded to the whole disk.
+    assert_eq!(frd.mesh.node_count(), 12 * mesh.node_count());
+    let modes: Vec<(Option<u32>, u32, f64)> = (frd.increments.iter())
+        .map(|i| (i.nodal_diameter, i.increment, i.value))
+        .collect();
+    let diameters: Vec<_> = modes.iter().map(|m| m.0).collect();
+    assert_eq!(diameters, [0, 0, 1, 1, 2, 2].map(Some), "{modes:?}");
+    let increments: Vec<_> = modes.iter().map(|m| m.1).collect();
+    assert_eq!(increments, [1, 2, 3, 4, 5, 6], "{modes:?}");
+    // The lowest frequency of each nodal diameter is one of the whole disk.
+    for (_, _, f) in modes.iter().step_by(2) {
+        assert!(
+            whole.iter().any(|w| (w - f).abs() < 1e-4 * f),
+            "{f} Hz not in {whole:?}"
+        );
+    }
+    // The .dat file numbers the modes on through the nodal diameters, as the .frd does.
+    let import = crate::dat::parse_dat(&dat);
+    let set = import.sets.iter().find(|s| s.name == "STEP_1").unwrap();
+    let field = (set.fields.iter())
+        .find(|f| f.name == "EIGENVALUE_OUTPUT")
+        .unwrap();
+    let nd = (field.components.iter())
+        .find(|c| c.name == "NODAL_DIAMETER")
+        .unwrap();
+    let rows: Vec<f64> = nd.entries[0].values.clone();
+    assert_eq!(rows, [0.0, 0.0, 1.0, 1.0, 2.0, 2.0], "{rows:?}");
+}

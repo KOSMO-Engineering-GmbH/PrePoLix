@@ -66,6 +66,8 @@ Computes eigenfrequencies and mode shapes (`*FREQUENCY`). A frequency step takes
   [Number of eigenfrequencies], [Default 10.],
   [Lower / Upper frequency bound], [Optional range of frequencies to compute.],
   [Store matrices and eigenmodes], [Writes the `.eig` file (`STORAGE=YES`).],
+  [Nodal diameter range], [Only in cyclic symmetric models (@cyclic-symmetry): the nodal
+    diameters to compute.],
 )
 
 Materials need a density in a frequency step.
