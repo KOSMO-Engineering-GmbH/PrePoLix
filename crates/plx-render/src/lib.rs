@@ -6,6 +6,7 @@ mod fe;
 mod mesh;
 mod renderer;
 mod section;
+mod shell;
 
 pub use camera::{Camera, StandardView};
 pub use fe::{part_color, part_render_mesh, wireframe_edges};
@@ -14,4 +15,5 @@ pub use renderer::{COLOR_FORMAT, ContourPalette, DisplayOptions, ViewportRendere
 pub use section::{
     ClipPlane, SectionCells, SectionValues, clip_plane, lighten, section_mesh, section_values,
 };
+pub use shell::{ShellThickness, thick_shell_mesh};
 pub use wgpu;

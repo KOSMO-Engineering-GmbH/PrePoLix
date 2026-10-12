@@ -24,6 +24,10 @@ pub struct Settings {
     pub format: u32,
 }
 
+/// Label and tooltip of [`Graphics::shell_thickness`], in the settings and the View menu.
+pub const SHELL_THICKNESS_LABEL: &str = "Shell thickness";
+pub const SHELL_THICKNESS_TIP: &str = "Draws shell and membrane elements of the FE model as solids of their section's thickness, placed by its offset.";
+
 /// [`Settings::format`] of this version.
 const FORMAT: u32 = 1;
 
@@ -61,6 +65,9 @@ pub struct Graphics {
     /// Axis triad in the bottom right corner showing the view direction.
     pub view_triad: bool,
     pub scale_bar: bool,
+    /// Shell and membrane elements of the FE model drawn as the solid of their section's
+    /// thickness and offset rather than as surfaces.
+    pub shell_thickness: bool,
 }
 
 impl Default for Graphics {
@@ -70,6 +77,7 @@ impl Default for Graphics {
             global_axes: true,
             view_triad: true,
             scale_bar: true,
+            shell_thickness: true,
         }
     }
 }
@@ -571,6 +579,8 @@ impl SettingsWindow {
                     "Coordinate triad in the corner (view direction)",
                 );
                 ui.checkbox(&mut g.scale_bar, "Scale bar");
+                ui.checkbox(&mut g.shell_thickness, SHELL_THICKNESS_LABEL)
+                    .on_hover_text(SHELL_THICKNESS_TIP);
             }
             Page::PostProcessing => {
                 let p = &mut self.draft.post;
@@ -839,6 +849,7 @@ mod tests {
         assert!(settings.post.min_label);
         assert!(settings.post.max_label);
         assert!(settings.graphics.global_axes);
+        assert!(settings.graphics.shell_thickness);
         assert!(settings.updates.check_at_startup);
     }
 

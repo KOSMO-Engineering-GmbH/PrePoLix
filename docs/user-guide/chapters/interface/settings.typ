@@ -20,6 +20,8 @@ portable Windows version in the folder `Settings` next to `prepolix.exe` (@porta
   [Global axes at the origin], [Draws a coordinate triad at the global origin (default on).],
   [Coordinate triad in the corner], [The clickable triad in the lower right (default on).],
   [Scale bar], [Shows a scale bar (default on).],
+  [Shell thickness], [Draws shell and membrane elements of the FE model as solids of their
+    section's thickness, placed by its offset (default on), see @shell-section.],
 )
 
 #screenshot("dark-theme.png", [The dark theme with the results of a cantilever])

@@ -1,18 +1,18 @@
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use glam::{DAffine3, DVec3, Vec3};
 use plx_io::frd::{FrdImport, read_frd};
 use plx_io::inp::{InpImport, read_inp};
-use plx_mesh::{ElementId, FeMesh, NodeId, PartSkin, extract_part_skin};
+use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, PartSkin, extract_part_skin};
 use plx_mesher::{CadEntity, GeometryDisplay};
 #[cfg(test)]
 use plx_model::SectionKind;
 use plx_model::{FeModel, Finding, Geometry, MeshCheck, UnitSystem};
 use plx_render::{
-    ClipPlane, RenderMesh, SectionCells, SectionValues, Vertex, lighten, part_color,
-    part_render_mesh, section_mesh, section_values, wireframe_edges,
+    ClipPlane, RenderMesh, SectionCells, SectionValues, ShellThickness, Vertex, lighten,
+    part_color, part_render_mesh, section_mesh, section_values, thick_shell_mesh, wireframe_edges,
 };
 
 use crate::exploded::{Assembly, Explosion, Parameters, PartShape};
@@ -110,6 +110,9 @@ pub struct Model {
     checks: std::sync::Mutex<Option<Checks>>,
     /// What the user changed, to undo and redo it.
     pub history: crate::undo::History,
+    /// Shell and membrane sections whose elements are drawn as the solid of their
+    /// thickness and offset, see [`Model::shell_sections`]; empty draws them as surfaces.
+    pub thick_shells: Vec<plx_model::Section>,
 }
 
 /// Findings of the model checks with what they were computed for.
@@ -497,6 +500,7 @@ impl Model {
             checks: Default::default(),
             cad_index: Default::default(),
             history: Default::default(),
+            thick_shells: Vec::new(),
         };
         let meshes = model.render_meshes();
         for (part, render) in model.parts.iter_mut().zip(&meshes) {
@@ -840,6 +844,7 @@ impl Model {
         } else {
             std::borrow::Cow::Borrowed(&[][..])
         };
+        let shells = self.thick_shell_elements();
         self.mesh
             .parts
             .iter()
@@ -857,6 +862,17 @@ impl Model {
                     scalars,
                 );
                 self.highlight_outline(index, &mut mesh);
+                if let Some(thick) = shells.as_ref() {
+                    mesh.append(thick_shell_mesh(
+                        coords,
+                        skin,
+                        self.origin,
+                        info.color,
+                        self.face_highlight(index, skin),
+                        |face| thick.get(&skin.faces[face].element).copied(),
+                        SMOOTH_ANGLE_DEG,
+                    ));
+                }
                 if deformed {
                     mesh.wireframe_edges = wireframe_edges(&undeformed, skin, self.origin);
                 }
@@ -866,6 +882,46 @@ impl Model {
                 mesh
             })
             .collect()
+    }
+
+    /// The shell and membrane sections of a 3D FE model, whose elements can be drawn as the
+    /// solid they stand for.
+    pub fn shell_sections(&self) -> impl Iterator<Item = &plx_model::Section> {
+        let three_d = self.fe.properties.space == plx_model::ModelSpace::ThreeD;
+        let model = !self.is_geometry && self.results.is_none();
+        (self.fe.sections.iter())
+            .filter(move |_| three_d && model)
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    plx_model::SectionKind::Shell { .. } | plx_model::SectionKind::Membrane { .. }
+                )
+            })
+    }
+
+    /// Thickness and offset of the surface elements of [`Model::thick_shells`] by element
+    /// index; `None` when there are none.
+    fn thick_shell_elements(&self) -> Option<HashMap<usize, ShellThickness>> {
+        if self.thick_shells.is_empty() || self.is_geometry || self.results.is_some() {
+            return None;
+        }
+        let mut elements = HashMap::new();
+        for section in &self.thick_shells {
+            let (plx_model::SectionKind::Shell { thickness, offset }
+            | plx_model::SectionKind::Membrane { thickness, offset }) = section.kind
+            else {
+                continue;
+            };
+            let shell = ShellThickness { thickness, offset };
+            for id in section.region.elements(&self.mesh) {
+                if let Some(index) = self.mesh.element_index(id)
+                    && self.mesh.elements()[index].shape.family() == ElementFamily::Surface
+                {
+                    elements.insert(index, shell);
+                }
+            }
+        }
+        (!elements.is_empty()).then_some(elements)
     }
 
     /// Section faces of all parts where a plane in model coordinates cuts them, deformed and
@@ -1787,6 +1843,62 @@ mod tests {
         let sxx = &stress.component("S11").unwrap().values;
         let max = sxx.iter().copied().fold(f32::MIN, f32::max);
         assert!(max > 300.0 && max < 1500.0, "largest stress {max}");
+    }
+
+    /// Shells of a shell section are drawn as the solid of its thickness, placed by its
+    /// offset, in 3D FE models only.
+    #[test]
+    fn shell_sections_are_drawn_thick() {
+        let mut mesh = FeMesh::default();
+        for (id, c) in [
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [10.0, 10.0, 0.0],
+            [0.0, 10.0, 0.0],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            mesh.set_node(id as u32 + 1, c);
+        }
+        mesh.add_element(plx_mesh::Element {
+            id: 1,
+            type_name: "S4".into(),
+            shape: plx_mesh::ElementShape::Quad4,
+            nodes: vec![1, 2, 3, 4],
+        })
+        .unwrap();
+        mesh.parts.push(plx_mesh::Part {
+            name: "Plate".into(),
+            elements: vec![1],
+        });
+        let mut model = Model::new(Path::new("plate.inp"), mesh);
+        model.fe.sections.push(plx_model::Section {
+            name: "Shell_Section-1".into(),
+            material: "Steel".into(),
+            region: plx_model::Region::Parts(vec!["Plate".into()]),
+            thickness: 1.0,
+            kind: SectionKind::Shell {
+                thickness: 2.0,
+                offset: 0.5,
+            },
+        });
+        let z_range = |model: &Model| {
+            let (min, max) = model.render_meshes()[0].bounds().unwrap();
+            let origin = model.origin.z as f32;
+            (min.z + origin, max.z + origin)
+        };
+        assert_eq!(z_range(&model), (0.0, 0.0));
+        model.thick_shells = model.shell_sections().cloned().collect();
+        assert_eq!(model.thick_shells.len(), 1);
+        // The nodes lie on the top face, the solid below them.
+        let (low, high) = z_range(&model);
+        assert!(
+            (low + 2.0).abs() < 1e-5 && high.abs() < 1e-5,
+            "{low} {high}"
+        );
+        model.fe.properties.space = plx_model::ModelSpace::PlaneStress;
+        assert_eq!(model.shell_sections().count(), 0);
     }
 
     /// A flat disk in a 3D model is meshed as shells and thickened by a shell section; thin,
