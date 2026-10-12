@@ -2532,50 +2532,6 @@ impl Workbench {
         self.results_changed = true;
     }
 
-    /// Shows another results file of the collection, like PrePoMax's Result box.
-    fn select_result(&mut self, index: usize) {
-        if index != self.current_result && index < self.results.len() {
-            self.current_result = index;
-            if let Some(view) = &self.results[index].results {
-                self.tree.selected = Some((
-                    TreeView::Results,
-                    TreeItem::Component(view.field, view.component),
-                ));
-            }
-            self.dialog = None;
-            self.field_output_dialog = None;
-            self.transformation_dialog = None;
-            self.close_history_windows();
-            self.viewport.labels = Default::default();
-            self.results_changed = true;
-        }
-    }
-
-    /// Closes the current results file, or all of them.
-    fn close_results(&mut self, all: bool) {
-        let closed: Vec<Model> = if all {
-            std::mem::take(&mut self.results)
-        } else if self.current_result < self.results.len() {
-            vec![self.results.remove(self.current_result)]
-        } else {
-            Vec::new()
-        };
-        for model in closed {
-            self.output.push(format!("{} closed", model.file_name()));
-        }
-        self.current_result = self
-            .current_result
-            .min(self.results.len().saturating_sub(1));
-        self.field_output_dialog = None;
-        self.transformation_dialog = None;
-        self.close_history_windows();
-        if self.tree_view == TreeView::Results {
-            self.dialog = None;
-            self.tree.selected = None;
-            self.results_changed = true;
-        }
-    }
-
     /// PrePoMax's Results menu.
     fn results_menu(&mut self, ui: &mut egui::Ui) {
         let any = !self.results.is_empty();
@@ -2594,23 +2550,9 @@ impl Workbench {
         {
             self.create(NewItem::ResultHotSpot);
         }
-        ui.separator();
-        if ui
-            .add_enabled(any, egui::Button::new("Close Current Results"))
-            .clicked()
-        {
-            self.close_results(false);
-        }
-        if ui
-            .add_enabled(any, egui::Button::new("Close All Results"))
-            .clicked()
-        {
-            self.close_results(true);
-        }
     }
 
-    /// The results row of the tool bar: PrePoMax's Result box with all opened results
-    /// files, then the controls of the shown result.
+    /// The results row of the tool bar: the controls of the shown result.
     fn results_tool_bar(&mut self, ui: &mut egui::Ui) {
         let enabled = self.tree_view == TreeView::Results && !self.results.is_empty();
         ui.add_enabled_ui(enabled, |ui| self.results_tool_bar_row(ui, enabled));
@@ -2618,25 +2560,6 @@ impl Workbench {
 
     fn results_tool_bar_row(&mut self, ui: &mut egui::Ui, enabled: bool) {
         ui.horizontal(|ui| {
-            ui.label("Result");
-            let mut selected = self.current_result;
-            let current = self
-                .results
-                .get(selected)
-                .map(|m| m.path.display().to_string());
-            egui::ComboBox::from_id_salt("result file")
-                .selected_text(current.clone().unwrap_or_default())
-                .width(320.0)
-                .truncate()
-                .show_ui(ui, |ui| {
-                    for (index, model) in self.results.iter().enumerate() {
-                        ui.selectable_value(&mut selected, index, model.path.display().to_string());
-                    }
-                })
-                .response
-                .on_hover_text(current.unwrap_or_default());
-            self.select_result(selected);
-            ui.separator();
             // Greyed out, the row shows the current results file, or empty controls.
             let mut placeholder = None;
             let view = match self.results.get_mut(self.current_result) {
