@@ -131,6 +131,8 @@ properties first (@new-analysis).
 
 === Menus and toolbar of the project window
 
+#screenshot("project-menu-f5.png", [Project menu; #key("F5") starts Update Project])
+
 #fields(
   [File > New Project], [Closes the project and starts a new, empty one. Add analyses with #ui("New Analysis").],
   [File > Open ... (#key("Ctrl+O"))], [Opens a project. Its analyses open when you
@@ -147,7 +149,8 @@ properties first (@new-analysis).
     (@mesh-block).],
   [Project > Show All Blocks (#key("Home"))], [Fits all blocks of the schematic into the
     view.],
-  [Project > Update Project], [Solves every analysis that is not up to date (@update-project).],
+  [Project > Update Project (#key("F5"))], [Solves every analysis that is not up to date
+    (@update-project). #key("F5") in an analysis window solves only that analysis.],
   [Project > Solution Monitor], [Shows the analyses being solved with the output of CalculiX
     (@solution-monitor).],
   [Tools > Settings ...], [The settings (@settings); they apply to all windows.],
