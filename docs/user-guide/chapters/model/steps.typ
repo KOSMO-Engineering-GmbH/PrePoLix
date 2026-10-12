@@ -104,7 +104,7 @@ together with supports and mechanical loads.
     temperature.],
   [Max. temperature change], [Largest temperature change per increment in a transient analysis
     (`DELTMX`).],
-  [Nonlinear geometry], [Coupled steps only, as in PrePoMax.],
+  [Nonlinear geometry], [Coupled steps only.],
 )
 
 Incrementation and solver fields are the same as for a static step.

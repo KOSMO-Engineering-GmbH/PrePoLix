@@ -16,7 +16,7 @@ reference point: a bolt head, a bearing seat or a face a lever acts on. Create i
 )
 
 In the 3D view of the FE model, a rigid body is drawn as yellow lines from nodes spread over its
-region to its reference point, as in PrePoMax, with the symbols of any step. A selected or edited
+region to its reference point, with the symbols of any step. A selected or edited
 rigid body is drawn in red; a deactivated one has no lines.
 
 #screenshot("rigid-body-symbol.png", [Rigid body on the end face of a cantilever, driven by RP-1])

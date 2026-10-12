@@ -2,8 +2,8 @@
 
 == Analysis window <main-window>
 
-Each analysis of the project opens in a window of its own, the main window of PrePoMax. Its
-title shows the name of the analysis and of the project. The layout is fixed, as in PrePoMax.
+Each analysis of the project opens in a window of its own. Its
+title shows the name of the analysis and of the project. The layout is fixed.
 Only the separators between the panes can be moved.
 
 #screenshot("analysis-window.png", [Analysis window with a solved model on the FE Model tab])
