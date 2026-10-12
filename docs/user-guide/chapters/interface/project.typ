@@ -6,8 +6,7 @@
 
 A PrePoLix project (`.plx`) holds several analyses, like a project of Ansys Workbench. PrePoLix
 starts with the *project window*. It shows each analysis as a block in the project schematic;
-each analysis opens in a window of its own (@main-window), which looks like the main window of
-PrePoMax. Several analysis windows can be open at the same time, next to the project window.
+each analysis opens in a window of its own (@main-window). Several analysis windows can be open at the same time, next to the project window.
 
 #screenshot("project-window.png", [Project window with three analyses: #ui("Cantilever
   continued") continues #ui("Cantilever") after its last step (green wire), #ui("Axial-load")
@@ -20,8 +19,8 @@ both.
 
 === Creating an analysis <new-analysis>
 
-#menu("Project", "New Analysis ..."), the first toolbar button, a right-click on the
-background of the schematic or #ui("Analysis") in the block search (@block-search) open #ui("Model Properties") for the new analysis
+#menu("Project", "New Analysis ..."), a right-click on the background of the schematic or
+#ui("Analysis") in the block search (@block-search) open #ui("Model Properties") for the new analysis
 (@model-properties). Choose its *model space* (3D, plane stress, plane strain or axisymmetric)
 and its *unit system* there.
 
@@ -152,7 +151,7 @@ properties first (@new-analysis).
     for a new version.],
 )
 
-The toolbar holds #ui("New Analysis"), #ui("Open"), #ui("Save"), #ui("Update Project") and
+The toolbar holds #ui("New Project"), #ui("Open"), #ui("Save"), #ui("Update Project") and
 the button that stops the update. Stopping the update lets the running CalculiX jobs finish; use
 #ui("Stop") in the analysis window to kill one.
 

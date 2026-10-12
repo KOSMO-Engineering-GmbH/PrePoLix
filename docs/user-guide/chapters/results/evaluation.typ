@@ -38,7 +38,7 @@ transformations.
     Gives `RATIO` (value / limit) and `SAFETY_FACTOR` (limit / value).],
   [Envelope], [`MAX`, `MIN` and `AVERAGE` of a component over all increments of all steps.],
   [Equation], [A formula of components, for example `=Abs([STRESS.S11]) / 235`, with the
-    functions of PrePoMax (`Abs`, `Sqrt`, `Max`, `Min`, `Pow`, `Sin`, `If`, ...). #ui("Insert
+    functions (`Abs`, `Sqrt`, `Max`, `Min`, `Pow`, `Sin`, `If`, ...). #ui("Insert
     Component...") inserts a component name. #ui("Unit") is shown in the legend.],
   [Coordinate System Transformation], [Rotates a vector or tensor field into a coordinate system
     defined under #ui("Features"); cylindrical systems give radial, tangential and axial
@@ -230,7 +230,7 @@ nodes). The values appear in the output pane and as labels in the 3D view. On re
 queries also show the deformed position, the displacement and the value of the displayed
 component.
 
-The labels stay in the view when the query window is closed, as in PrePoMax, and can be dragged
+The labels stay in the view when the query window is closed and can be dragged
 aside. A right click on a label offers #ui("Delete") for this label and #ui("Delete All
 Annotations"); #ui("Remove Annotations") in the query window, in the #ui("Tools") menu and on the
 toolbar deletes all of them. Each model keeps its own labels: the geometry, the FE model and every

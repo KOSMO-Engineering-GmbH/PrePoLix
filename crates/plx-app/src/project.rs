@@ -1234,8 +1234,8 @@ impl ProjectApp {
     fn tool_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
-            if icons::button(ui, Icon::New, "New Analysis", true, false).clicked() {
-                self.ask_new_analysis(self.free_position());
+            if icons::button(ui, Icon::New, "New Project", true, false).clicked() {
+                self.new_project();
             }
             let can_open = self.opening.is_none();
             if icons::button(ui, Icon::Open, "Open Project (Ctrl+O)", can_open, false).clicked() {

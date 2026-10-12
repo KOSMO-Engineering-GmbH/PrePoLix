@@ -12,7 +12,7 @@ portable Windows version in the folder `Settings` next to `prepolix.exe` (@porta
 === Graphics
 
 #fields(
-  [Color theme], [#ui("Light") is PrePoMax's light look, #ui("Dark") shows dark panels, a dark
+  [Color theme], [#ui("Light") is the light look, #ui("Dark") shows dark panels, a dark
     3D background and light text over the model. #ui("System") (default) follows the light or
     dark mode of the operating system and switches along with it. Icons, tree symbols, plots and
     annotations change with the theme; exported SVG plots and the images of the user guide stay
@@ -62,8 +62,12 @@ portable Windows version in the folder `Settings` next to `prepolix.exe` (@porta
     PaStiX, otherwise CalculiX's own choice.],
   [Test CalculiX], [Starts CalculiX, computes a cantilever under a tip load and under pressure,
     compares the results with beam theory, checks which solvers are available and whether
-    CalculiX knows every keyword PrePoLix writes. Each test shows OK or an error.],
+    CalculiX knows every keyword PrePoLix writes. Each test shows OK or an error. While the test runs, a window over the
+    application shows the running step and, for the keyword check, how far it has come; the
+    test can take a while, particularly on Windows.],
 )
+
+#screenshot("calculix-test-running.png", [While #ui("Test CalculiX") runs])
 
 #screenshot("calculix-test.png", [Result of #ui("Test CalculiX")])
 
