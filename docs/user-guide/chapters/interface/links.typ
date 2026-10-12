@@ -159,12 +159,21 @@ Drop the results of a step on the #ui("State") row at the top of another block. 
   other linked items; the steps it took are listed before its own. New steps are added as
   usual and are its own; as always, a new step starts with the boundary conditions and loads
   of the step before it.
-- Its #ui("State") row reads #ui("State of <source>").
+- Its #ui("State") row reads #ui("After <step> of <source>"). In its block, #ui("Results") lists
+  only the steps of its own. The steps it took over are folded into one row right below
+  #ui("Results"), #ui("2 steps from <source>"), in the link colour and with the link sign; it has
+  no pins, and a click on its arrow lists the steps, greyed, as a reminder of what the state
+  contains. Their results are in the block of the source. Every step shows the symbol of its type, like in
+  the tree.
 - A state link replaces every other link of the target: while it continues another analysis,
   nothing else can be linked to it.
 - #ui("Unlink") on the #ui("State") pin, or on a taken item in the window, makes the analysis
   independent again. It keeps copies of the model and of the steps it took, so it still solves
   the same problem, now on its own.
+
+#screenshot("project-inherited-steps.png", [The block of an analysis that continues Static after
+  Step-1: #ui("Results") lists only its own Step-2, the step it took over is folded into one row
+  and shown greyed once opened])
 
 #screenshot("continued-analysis.png", [The tree of an analysis that continues another one: the
   model and the first two steps come from there, the third is its own])

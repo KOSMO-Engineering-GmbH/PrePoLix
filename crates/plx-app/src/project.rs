@@ -26,6 +26,7 @@ use crate::node_icons::{self, NodeIcon};
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::status::{self, AnalysisStatus, CellState};
 use crate::tree::TreeView;
+use crate::tree_icons::StepGlyph;
 
 /// Storage key of the project file open at exit, reopened at the next start.
 const LAST_PROJECT_KEY: &str = "last_project";
@@ -815,28 +816,11 @@ impl ProjectApp {
         let (sender, receiver) = std::sync::mpsc::channel();
         let (file, ctx) = (path.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let project = plx_io::project::read_project(&file).map(|mut project| {
-                // Format 2 kept the values in the project's unit system.
-                let mut notes = Vec::new();
-                if project.format < 3 {
-                    let (space, units) = (project.space, project.units);
-                    for analysis in project.analyses_mut() {
-                        analysis.model.properties.space = space;
-                        analysis.model.properties.units = units;
-                        notes.extend(crate::model::migrate_to_si(analysis));
-                    }
-                    notes.push(
-                        "The project was converted for this version; once saved, it no \
-                         longer opens in older versions."
-                            .into(),
-                    );
-                }
-                // Format 3 differs only by what it lacks: state links; format 4 by what it
-                // lacks too: blocks besides analyses.
-                project.format = plx_model::PROJECT_FORMAT;
-                (project, notes)
-            });
-            let _ = sender.send(project.map_err(|e| e.to_string()));
+            // A panic while reading is reported like any other error, instead of leaving
+            // the project window waiting for the file forever.
+            let opened = std::panic::catch_unwind(|| read_opened(&file))
+                .unwrap_or_else(|panic| Err(panic_message(panic.as_ref())));
+            let _ = sender.send(opened);
             ctx.request_repaint();
         });
         self.opening = Some((path, receiver));
@@ -846,7 +830,7 @@ impl ProjectApp {
         let Some((path, receiver)) = &self.opening else {
             return;
         };
-        let Ok(result) = receiver.try_recv() else {
+        let Some(result) = received(receiver) else {
             return;
         };
         let path = path.clone();
@@ -1275,11 +1259,22 @@ impl ProjectApp {
 
     fn schematic(&mut self, ui: &mut egui::Ui) -> Vec<Action> {
         let mut incoming: HashMap<u64, Vec<(Vec<String>, String)>> = HashMap::new();
+        let mut continuations: HashMap<u64, Continuation> = HashMap::new();
         let mut bundles: HashMap<u64, Vec<Bundle>> = HashMap::new();
         for link in &self.links {
             if let Some(source) = self.nodes.iter().find(|n| n.id == link.source) {
                 (incoming.entry(link.target).or_default())
                     .extend(links::filled_paths(link, &source.name));
+                if links::is_state(link) {
+                    continuations.insert(
+                        link.target,
+                        Continuation {
+                            source: source.name.clone(),
+                            step: link.item.get(1).cloned().unwrap_or_default(),
+                            inherited: link.inherited.clone(),
+                        },
+                    );
+                }
                 if links::is_bundle(link) {
                     bundles.entry(link.target).or_default().push(Bundle {
                         path: link.item.clone(),
@@ -1304,6 +1299,7 @@ impl ProjectApp {
                         &n.expanded,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                         bundles.get(&n.id).map_or(&[][..], Vec::as_slice),
+                        continuations.get(&n.id),
                     ),
                     (Kind::Analysis, None) => Vec::new(),
                 };
@@ -2648,6 +2644,50 @@ impl ProjectApp {
     }
 }
 
+/// Reads a project file for the project window, converting older formats.
+fn read_opened(file: &Path) -> Opened {
+    let mut project = plx_io::project::read_project(file).map_err(|e| e.to_string())?;
+    // Format 2 kept the values in the project's unit system.
+    let mut notes = Vec::new();
+    if project.format < 3 {
+        let (space, units) = (project.space, project.units);
+        for analysis in project.analyses_mut() {
+            analysis.model.properties.space = space;
+            analysis.model.properties.units = units;
+            notes.extend(crate::model::migrate_to_si(analysis));
+        }
+        notes.push(
+            "The project was converted for this version; once saved, it no longer opens in \
+             older versions."
+                .into(),
+        );
+    }
+    // Format 3 differs only by what it lacks: state links; format 4 by what it lacks too:
+    // blocks besides analyses.
+    project.format = plx_model::PROJECT_FORMAT;
+    Ok((project, notes))
+}
+
+/// What the thread reading a project sent, once it is done; a thread that ended without
+/// sending anything failed.
+fn received(receiver: &Receiver<Opened>) -> Option<Opened> {
+    match receiver.try_recv() {
+        Ok(opened) => Some(opened),
+        Err(std::sync::mpsc::TryRecvError::Empty) => None,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Some(Err("reading the file stopped unexpectedly".into()))
+        }
+    }
+}
+
+/// The message of a panic, as far as it has one.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    let message = (panic.downcast_ref::<&str>().copied())
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown error");
+    format!("reading the file failed: {message}")
+}
+
 /// The workspace a double-click on the row at `path` opens the analysis in: Geometry and
 /// Mesh in the Geometry workspace, the setup in the FE Model workspace, Results in the
 /// Results workspace.
@@ -2799,6 +2839,16 @@ struct Bundle {
     excluded: usize,
 }
 
+/// The state link into an analysis: what it continues from and the steps it takes over.
+struct Continuation {
+    source: String,
+    step: String,
+    inherited: Vec<String>,
+}
+
+/// Path of the row that lists the steps a continuation takes over from its source.
+const INHERITED: &str = "Inherited steps";
+
 /// How a block of the schematic looks: what the viewer needs of an analysis.
 struct BlockView {
     id: u64,
@@ -2824,6 +2874,7 @@ fn block_rows(
     expanded: &BTreeSet<Vec<String>>,
     incoming: &[(Vec<String>, String)],
     bundles: &[Bundle],
+    continuation: Option<&Continuation>,
 ) -> Vec<Row> {
     let from = |path: &[String]| {
         (incoming.iter())
@@ -2853,7 +2904,10 @@ fn block_rows(
     let mut rows = vec![
         Row {
             text: match &continues {
-                Some(source) => format!("State of {source}"),
+                Some(source) => match continuation {
+                    Some(c) => format!("After {} of {}", c.step, c.source),
+                    None => format!("State of {source}"),
+                },
                 None => "State".to_owned(),
             },
             depth: 0,
@@ -2958,7 +3012,58 @@ fn block_rows(
     }
     rows.push(cell("Solution", NodeIcon::Solution, status.solution, false));
     rows.push(cell("Results", NodeIcon::Results, status.results, false));
-    for step in fe.map(|fe| fe.steps.as_slice()).unwrap_or_default() {
+    let taken = continuation.map_or(&[][..], |c| c.inherited.as_slice());
+    if let Some(c) = continuation.filter(|c| !c.inherited.is_empty()) {
+        let path = vec![INHERITED.to_owned()];
+        let open = expanded.contains(&path);
+        let count = c.inherited.len();
+        rows.push(Row {
+            text: format!(
+                "{count} step{} from {}",
+                if count == 1 { "" } else { "s" },
+                c.source
+            ),
+            depth: 1,
+            icon: NodeIcon::Link,
+            state: None,
+            expander: Some(open),
+            input: false,
+            output: false,
+            linked_from: Some(c.source.clone()),
+            collection: false,
+            partial: false,
+            tip: format!(
+                "These steps are taken over from {} and solved there, not in this analysis. \
+                 Their results are in {}.",
+                c.source, c.source
+            ),
+            path: path.clone(),
+        });
+        for name in c.inherited.iter().filter(|_| open) {
+            let mut path = path.clone();
+            path.push(name.clone());
+            rows.push(Row {
+                text: name.clone(),
+                depth: 2,
+                icon: step_icon(fe, name),
+                state: None,
+                expander: None,
+                input: false,
+                output: false,
+                linked_from: None,
+                collection: false,
+                partial: false,
+                tip: format!("{name} is solved in {}", c.source),
+                path,
+            });
+        }
+    }
+    for step in fe
+        .map(|fe| fe.steps.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter(|s| !taken.contains(&s.name))
+    {
         let path = vec![links::RESULTS.to_owned(), step.name.clone()];
         let tip = if step.active {
             format!(
@@ -2975,7 +3080,7 @@ fn block_rows(
         rows.push(Row {
             text: step.name.clone(),
             depth: 1,
-            icon: NodeIcon::Step,
+            icon: NodeIcon::StepType(StepGlyph::from(&step.kind)),
             state: None,
             expander: None,
             input: true,
@@ -3252,6 +3357,13 @@ fn shown_row(rows: &[Row], path: &[String]) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
+/// The symbol of the type of the step called `name`.
+fn step_icon(fe: Option<&plx_model::FeModel>, name: &str) -> NodeIcon {
+    (fe.and_then(|fe| fe.steps.iter().find(|s| s.name == name))).map_or(NodeIcon::Step, |s| {
+        NodeIcon::StepType(StepGlyph::from(&s.kind))
+    })
+}
+
 /// The symbol of each category of the setup.
 fn category_icon(category: &str) -> NodeIcon {
     match category {
@@ -3524,10 +3636,20 @@ impl SnarlViewer<u64> for Viewer {
             toggled = response.clicked() && pointer.is_some_and(|p| p.x < arrow.right() + 2.0);
         }
         x += 12.0;
-        let ink = ui.visuals().text_color().gamma_multiply(0.75);
-        node_icons::paint(painter, egui::pos2(x, middle - 7.0), row.icon, ink);
+        let dim = row.path.first().is_some_and(|c| c == INHERITED) && row.path.len() > 1;
+        let mut faded = ui.painter().clone();
+        if dim {
+            faded.multiply_opacity(0.45);
+        }
+        let ink = ui
+            .visuals()
+            .text_color()
+            .gamma_multiply(if dim { 0.45 } else { 0.75 });
+        node_icons::paint(&faded, egui::pos2(x, middle - 7.0), row.icon, ink);
         x += 20.0;
-        let color = if row.linked_from.is_some() {
+        let color = if dim {
+            ui.visuals().text_color().gamma_multiply(0.5)
+        } else if row.linked_from.is_some() {
             crate::style::adapt(egui::Color32::from_rgb(40, 110, 200))
         } else {
             ui.visuals().text_color()
@@ -4105,6 +4227,29 @@ mod tests {
         }
 
         fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn a_reader_that_fails_ends_the_opening() {
+        // Still reading: nothing yet.
+        let (sender, receiver) = std::sync::mpsc::channel::<Opened>();
+        assert!(received(&receiver).is_none());
+        // A reader thread that panicked drops its sender without sending; the project
+        // window used to wait for it forever.
+        let reader = std::thread::spawn(move || {
+            let _sender = sender;
+            panic!("broken file");
+        });
+        assert!(reader.join().is_err());
+        assert!(matches!(received(&receiver), Some(Err(_))));
+        // A panic caught on the reader thread carries its message.
+        let panic = std::panic::catch_unwind(|| panic!("index out of bounds")).unwrap_err();
+        assert_eq!(
+            panic_message(panic.as_ref()),
+            "reading the file failed: index out of bounds"
+        );
+        let file = std::env::temp_dir().join("prepolix-missing-project.plx");
+        assert!(read_opened(&file).is_err());
     }
 
     #[test]
