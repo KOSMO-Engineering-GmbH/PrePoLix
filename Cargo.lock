@@ -2823,6 +2823,8 @@ name = "plx-job"
 version = "0.2.6"
 dependencies = [
  "plx-core",
+ "ron",
+ "serde",
 ]
 
 [[package]]
