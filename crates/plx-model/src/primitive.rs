@@ -30,6 +30,54 @@ pub enum MeshPrimitive {
     },
 }
 
+/// A number a mesh block is made from: a length, stored in SI units, or a count of elements.
+/// Each is a row of the block in the project schematic, which a numeric input can later feed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ParamValue {
+    Length(f64),
+    Count(u32),
+}
+
+/// A parameter of a [`MeshPrimitive`]: its key, which stays the same for the project file and
+/// links, and its label in the GUI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Param {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub tip: &'static str,
+}
+
+const fn param(key: &'static str, label: &'static str, tip: &'static str) -> Param {
+    Param { key, label, tip }
+}
+
+const BOX_PARAMS: [Param; 9] = [
+    param("x", "X", "X of the corner the box starts at"),
+    param("y", "Y", "Y of the corner the box starts at"),
+    param("z", "Z", "Z of the corner the box starts at"),
+    param("lx", "Lx", "Edge length along X"),
+    param("ly", "Ly", "Edge length along Y"),
+    param("lz", "Lz", "Edge length along Z"),
+    param("nx", "nx", "Elements along X"),
+    param("ny", "ny", "Elements along Y"),
+    param("nz", "nz", "Elements along Z"),
+];
+
+const RECTANGLE_PARAMS: [Param; 6] = [
+    param("x", "X", "X of the corner the rectangle starts at"),
+    param("y", "Y", "Y of the corner the rectangle starts at"),
+    param("lx", "Lx", "Edge length along X"),
+    param("ly", "Ly", "Edge length along Y"),
+    param("nx", "nx", "Elements along X"),
+    param("ny", "ny", "Elements along Y"),
+];
+
+/// Where a parameter's number is held, by its kind: a length in SI units or a count.
+pub enum ParamSlot<'a> {
+    Length(&'a mut f64),
+    Count(&'a mut u32),
+}
+
 /// Most elements a mesh block makes, so that a typing slip does not freeze the program.
 pub const MAX_PRIMITIVE_ELEMENTS: u64 = 2_000_000;
 
@@ -64,6 +112,58 @@ impl MeshPrimitive {
             Self::Box { .. } => "Box",
             Self::Rectangle { .. } => "Rectangle",
         }
+    }
+
+    /// Its numeric parameters, in the order its block shows them.
+    pub fn params(&self) -> &'static [Param] {
+        match self {
+            Self::Box { .. } => &BOX_PARAMS,
+            Self::Rectangle { .. } => &RECTANGLE_PARAMS,
+        }
+    }
+
+    /// The parameter of the key and the number it holds.
+    pub fn slot(&mut self, key: &str) -> Option<ParamSlot<'_>> {
+        let (origin, size, divisions): (&mut [f64], &mut [f64], &mut [u32]) = match self {
+            Self::Box {
+                origin,
+                size,
+                divisions,
+                ..
+            } => (origin, size, divisions),
+            Self::Rectangle {
+                origin,
+                size,
+                divisions,
+                ..
+            } => (origin, size, divisions),
+        };
+        let axis = |name: &str| ["x", "y", "z"].iter().position(|a| *a == name);
+        if let Some(rest) = key.strip_prefix('l') {
+            return size.get_mut(axis(rest)?).map(ParamSlot::Length);
+        }
+        if let Some(rest) = key.strip_prefix('n') {
+            return divisions.get_mut(axis(rest)?).map(ParamSlot::Count);
+        }
+        origin.get_mut(axis(key)?).map(ParamSlot::Length)
+    }
+
+    /// The value of the parameter of the key.
+    pub fn get(&self, key: &str) -> Option<ParamValue> {
+        self.clone().slot(key).map(|slot| match slot {
+            ParamSlot::Length(value) => ParamValue::Length(*value),
+            ParamSlot::Count(value) => ParamValue::Count(*value),
+        })
+    }
+
+    /// Sets the parameter of the key; returns whether it has one of that kind.
+    pub fn set(&mut self, key: &str, value: ParamValue) -> bool {
+        match (self.slot(key), value) {
+            (Some(ParamSlot::Length(slot)), ParamValue::Length(value)) => *slot = value,
+            (Some(ParamSlot::Count(slot)), ParamValue::Count(value)) => *slot = value,
+            _ => return false,
+        }
+        true
     }
 
     /// The model spaces it is made for.
@@ -237,5 +337,38 @@ mod tests {
         let space = ModelSpace::ThreeD;
         assert_ne!(good.fingerprint(space), changed.fingerprint(space));
         assert_eq!(good.fingerprint(space), good.clone().fingerprint(space));
+    }
+
+    #[test]
+    fn parameters_are_read_and_set_by_key() {
+        let mut block = MeshPrimitive::default_box();
+        let keys: Vec<&str> = block.params().iter().map(|p| p.key).collect();
+        assert_eq!(keys, ["x", "y", "z", "lx", "ly", "lz", "nx", "ny", "nz"]);
+        // Every key reaches its own number.
+        for param in block.params() {
+            assert!(block.get(param.key).is_some(), "{}", param.key);
+        }
+        assert_eq!(block.get("ly"), Some(ParamValue::Length(0.02)));
+        assert_eq!(block.get("nx"), Some(ParamValue::Count(10)));
+        assert!(block.set("lx", ParamValue::Length(0.5)));
+        assert!(block.set("nz", ParamValue::Count(4)));
+        assert!(block.set("y", ParamValue::Length(-1.0)));
+        // A count is no length, and a rectangle has no Z.
+        assert!(!block.set("nx", ParamValue::Length(3.0)));
+        assert!(block.get("w").is_none());
+        let MeshPrimitive::Box {
+            origin,
+            size,
+            divisions,
+            ..
+        } = &block
+        else {
+            panic!()
+        };
+        assert_eq!((origin[1], size[0], divisions[2]), (-1.0, 0.5, 4));
+        let rectangle = MeshPrimitive::default_rectangle();
+        assert_eq!(rectangle.params().len(), 6);
+        assert!(rectangle.get("z").is_none());
+        assert!(rectangle.get("nz").is_none());
     }
 }

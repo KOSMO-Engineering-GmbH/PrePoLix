@@ -11,7 +11,9 @@ use crate::node_picker::{self, NodePicker};
 use egui_snarl::ui::{AnyPins, PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
 use plx_io::project::{Link, MaterialSet, MeshBlock, Project, ProjectAnalysis, ProjectNode};
-use plx_model::{MeshPrimitive, ModelProperties, ModelSpace};
+use plx_model::{
+    MeshPrimitive, ModelProperties, ModelSpace, Param, ParamSlot, Quantity, UnitSystem,
+};
 
 use crate::app::{AnalysisWindow, Request};
 use crate::icons::{self, Icon};
@@ -300,6 +302,8 @@ enum Action {
     AddMaterials(egui::Pos2),
     /// A new mesh block meshing the primitive at the position.
     AddMesh(egui::Pos2, MeshPrimitive),
+    /// Parameters of a mesh block changed in its block.
+    SetPrimitive(u64, MeshPrimitive),
     /// Make the mesh of a mesh block anew.
     Generate(u64),
     /// Open the analysis' window, in the workspace of a cell if given.
@@ -1314,6 +1318,9 @@ impl ProjectApp {
                     rows,
                     loading: n.window.as_ref().is_some_and(|w| w.model().is_none()),
                     open: n.window.is_some(),
+                    primitive: n.primitive.clone(),
+                    units: (n.data.as_ref())
+                        .map_or(UnitSystem::default(), |d| d.model.properties.units),
                 }
             })
             .collect();
@@ -2324,6 +2331,11 @@ impl ProjectApp {
                 self.add_mesh(pos, primitive);
             }
             Action::Generate(id) => self.generate_mesh(id),
+            Action::SetPrimitive(id, primitive) => {
+                if let Some(node) = self.node(id) {
+                    node.primitive = Some(primitive);
+                }
+            }
             Action::Open(id, view) => self.open_window(ctx, id, view),
             Action::Solve(id) => self.solve_chain(id),
             Action::Rename(id) => {
@@ -2804,7 +2816,18 @@ struct Row {
     /// category link to it leaves out items.
     collection: bool,
     partial: bool,
+    /// What the row edits in place, for a parameter of a source block.
+    widget: Option<RowWidget>,
     tip: String,
+}
+
+/// What a row of a block edits in place, like the input rows of a Blender node.
+#[derive(Clone, Copy, Debug)]
+enum RowWidget {
+    /// A number a mesh block is made from. Its row is where a numeric input will link to.
+    Param(Param),
+    /// The element type of a mesh block.
+    Element,
 }
 
 /// A link of a whole category to a block, for its row: from where, how many items it takes
@@ -2838,6 +2861,9 @@ struct BlockView {
     rows: Vec<Row>,
     loading: bool,
     open: bool,
+    /// What a mesh block meshes, and the units its parameters are shown in.
+    primitive: Option<MeshPrimitive>,
+    units: UnitSystem,
 }
 
 /// The rows of an analysis' block: its cells, the setup opened as far as `expanded` says, and
@@ -2868,6 +2894,7 @@ fn block_rows(
             linked_from: from(&path),
             collection: false,
             partial: false,
+            widget: None,
             tip: format!("{name}: {}", state.text()),
             path,
         }
@@ -2896,6 +2923,7 @@ fn block_rows(
             linked_from: continues,
             collection: false,
             partial: false,
+            widget: None,
             path: state,
         },
         cell(links::GEOMETRY, NodeIcon::Geometry, status.geometry, true),
@@ -2955,6 +2983,7 @@ fn block_rows(
                     .or_else(|| (!sources.is_empty()).then(|| sources.join(", "))),
                 collection: links::is_collection(&path),
                 partial: linked.iter().any(|b| b.excluded > 0),
+                widget: None,
                 tip,
                 path: path.clone(),
             });
@@ -2974,6 +3003,7 @@ fn block_rows(
                         linked_from: from(&path),
                         collection: false,
                         partial: false,
+                        widget: None,
                         path,
                     });
                 }
@@ -3002,6 +3032,7 @@ fn block_rows(
             linked_from: Some(c.source.clone()),
             collection: false,
             partial: false,
+            widget: None,
             tip: format!(
                 "These steps are taken over from {} and solved there, not in this analysis. \
                  Their results are in {}.",
@@ -3023,6 +3054,7 @@ fn block_rows(
                 linked_from: None,
                 collection: false,
                 partial: false,
+                widget: None,
                 tip: format!("{name} is solved in {}", c.source),
                 path,
             });
@@ -3058,6 +3090,7 @@ fn block_rows(
             linked_from: from(&path),
             collection: false,
             partial: false,
+            widget: None,
             tip,
             path,
         });
@@ -3081,6 +3114,7 @@ fn material_rows(fe: &plx_model::FeModel, expanded: &BTreeSet<Vec<String>>) -> V
         linked_from: None,
         collection: false,
         partial: false,
+        widget: None,
         tip: "All materials: drag them to the Materials row of an analysis, which then takes \
               each of them, also those added here later"
             .into(),
@@ -3104,6 +3138,7 @@ fn material_rows(fe: &plx_model::FeModel, expanded: &BTreeSet<Vec<String>>) -> V
             linked_from: None,
             collection: false,
             partial: false,
+            widget: None,
             path,
         });
     }
@@ -3123,13 +3158,16 @@ fn mesh_rows(node: &Node) -> Vec<Row> {
     if state == CellState::OutOfDate {
         tip = "Mesh: out of date: Update Project or Generate Mesh makes it again".into();
     }
+    if let Some(problem) = (node.primitive.as_ref()).and_then(|p| p.problem(node.space)) {
+        tip.push_str(&format!("\nIt cannot be made: {problem}"));
+    }
     if count > 0 {
         tip.push_str(&format!(
             "\n{count} elements {element}, sides {sides} as node sets and surfaces.\nDrag it \
              to the Mesh row of an analysis to link it."
         ));
     }
-    vec![Row {
+    let mut rows = vec![Row {
         path: vec![links::MESH.to_owned()],
         text: links::MESH.to_owned(),
         depth: 0,
@@ -3141,9 +3179,46 @@ fn mesh_rows(node: &Node) -> Vec<Row> {
         linked_from: None,
         collection: false,
         partial: false,
+        widget: None,
         tip,
-    }]
+    }];
+    // Its parameters below, like the inputs of a Blender node under its outputs.
+    let Some(primitive) = &node.primitive else {
+        return rows;
+    };
+    let row = |key: &str, text: &str, widget: RowWidget, tip: String| Row {
+        path: vec![PARAMETERS.to_owned(), key.to_owned()],
+        text: text.to_owned(),
+        depth: 0,
+        icon: NodeIcon::Mesh,
+        state: None,
+        expander: None,
+        input: false,
+        output: false,
+        linked_from: None,
+        collection: false,
+        partial: false,
+        widget: Some(widget),
+        tip,
+    };
+    for param in primitive.params() {
+        let tip = format!("{}; the mesh is out of date once it changes.", param.tip);
+        rows.push(row(param.key, param.label, RowWidget::Param(*param), tip));
+    }
+    let tip = match primitive {
+        MeshPrimitive::Box { .. } => "Element type of the hexahedra".to_owned(),
+        MeshPrimitive::Rectangle { .. } => format!(
+            "Element type: linear (4-node) or quadratic (8-node) quadrilaterals, with reduced \
+             integration (R) or not; the family follows from the model space, {}",
+            node.space.label()
+        ),
+    };
+    rows.push(row("element", "Element", RowWidget::Element, tip));
+    rows
 }
+
+/// The first part of the path of a parameter row of a mesh block.
+const PARAMETERS: &str = "Parameters";
 
 /// Tooltip of an Add Mesh entry.
 /// A kind of block the schematic adds: the menus and the picker list these, in this order.
@@ -3342,6 +3417,99 @@ impl Viewer {
         }
     }
 
+    /// A row that edits a parameter of a mesh block in place: its label, and the field at
+    /// the right.
+    fn edit_row(&mut self, ui: &mut egui::Ui, id: u64, row: &Row, widget: RowWidget) {
+        let Some(block) = self.block(id) else {
+            return;
+        };
+        let (Some(mut primitive), units, space) =
+            (block.primitive.clone(), block.units, block.space)
+        else {
+            return;
+        };
+        let before = primitive.clone();
+        let (rect, label) =
+            ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::hover());
+        ui.painter().text(
+            egui::pos2(rect.left() + 30.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            &row.text,
+            egui::TextStyle::Body.resolve(ui.style()),
+            ui.visuals().text_color(),
+        );
+        label.on_hover_text(&row.tip);
+        let field = egui::Rect::from_min_max(
+            egui::pos2(rect.right() - 122.0, rect.top() + 1.0),
+            egui::pos2(rect.right() - 4.0, rect.bottom() - 1.0),
+        );
+        let mut ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(field)
+                .id_salt((id, &row.path)),
+        );
+        ui.spacing_mut().interact_size.y = field.height();
+        let response = match widget {
+            RowWidget::Param(param) => match primitive.slot(param.key) {
+                Some(ParamSlot::Length(value)) => ui.add_sized(
+                    field.size(),
+                    crate::numeric::quantity(value, units, Quantity::Length),
+                ),
+                Some(ParamSlot::Count(value)) => ui.add_sized(
+                    field.size(),
+                    egui::DragValue::new(value).range(1..=10_000).speed(0.1),
+                ),
+                None => return,
+            },
+            RowWidget::Element => match &mut primitive {
+                MeshPrimitive::Box { element, .. } => {
+                    egui::ComboBox::from_id_salt(("mesh block element", id))
+                        .selected_text(element.as_str())
+                        .width(field.width())
+                        .show_ui(&mut ui, |ui| {
+                            for choice in MeshPrimitive::BOX_ELEMENTS {
+                                ui.selectable_value(element, choice.to_owned(), choice);
+                            }
+                        })
+                        .response
+                }
+                MeshPrimitive::Rectangle {
+                    quadratic, reduced, ..
+                } => {
+                    // The four types of the model space's family, by order and integration.
+                    let name = |quadratic: bool, reduced: bool| {
+                        let choice = MeshPrimitive::Rectangle {
+                            origin: [0.0; 2],
+                            size: [1.0; 2],
+                            divisions: [1; 2],
+                            quadratic,
+                            reduced,
+                        };
+                        choice.element_type(space)
+                    };
+                    egui::ComboBox::from_id_salt(("mesh block element", id))
+                        .selected_text(name(*quadratic, *reduced))
+                        .width(field.width())
+                        .show_ui(&mut ui, |ui| {
+                            for (q, r) in
+                                [(false, false), (false, true), (true, false), (true, true)]
+                            {
+                                let selected = (*quadratic, *reduced) == (q, r);
+                                if ui.selectable_label(selected, name(q, r)).clicked() {
+                                    (*quadratic, *reduced) = (q, r);
+                                }
+                            }
+                        })
+                        .response
+                }
+            },
+        };
+        response.on_hover_text(&row.tip);
+        if primitive != before {
+            self.actions.push(Action::SetPrimitive(id, primitive));
+        }
+    }
+
     fn row(&self, snarl: &Snarl<u64>, node: NodeId, index: usize) -> Option<(u64, &Row)> {
         let id = *snarl.get_node(node)?;
         Some((id, self.block(id)?.rows.get(index)?))
@@ -3430,6 +3598,11 @@ impl SnarlViewer<u64> for Viewer {
             return BlockPin::single(hidden_pin());
         };
         let row = row.clone();
+        if let Some(widget) = row.widget {
+            self.edit_row(ui, id, &row, widget);
+            // A numeric input will link to the parameter's pin.
+            return BlockPin::single(hidden_pin());
+        }
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::click());
         let painter = ui.painter();
@@ -3957,8 +4130,12 @@ fn schematic_style() -> SnarlStyle {
                 .fill(crate::style::window())
                 .stroke(border)
                 .corner_radius(6.0)
-                .inner_margin(egui::Margin::symmetric(4, 3)),
+                .inner_margin(egui::Margin::symmetric(5, 3)),
         ),
+        // Pins on the edge of the block, like the sockets of a Blender node. Inside the
+        // frame, egui_snarl 0.12 widens a block by the pin size for every row: the space it
+        // keeps for an output pin pushes the next row's right edge out.
+        pin_placement: Some(egui_snarl::ui::PinPlacement::Edge),
         header_frame: Some(
             egui::Frame::new()
                 .fill(crate::style::node_header())
@@ -4137,13 +4314,24 @@ mod tests {
         assert_eq!(links::MeshCopy::of(data).mesh.node_sets.len(), 6);
         let rows = mesh_rows(&node);
         assert!(rows[0].output && !rows[0].input);
-        node.primitive = Some(MeshPrimitive::Box {
-            origin: [0.0; 3],
-            size: [0.1, 0.02, 0.02],
-            divisions: [20, 2, 2],
-            element: "C3D8I".into(),
-        });
+        // Its parameters are rows below the mesh, the element type last; none has a pin yet.
+        let params: Vec<String> = (rows[1..].iter()).map(|row| row.path.join("/")).collect();
+        assert_eq!(params[0], "Parameters/x");
+        assert_eq!(params[6], "Parameters/nx");
+        assert_eq!(params.last().unwrap(), "Parameters/element");
+        assert!(
+            rows[1..]
+                .iter()
+                .all(|r| r.widget.is_some() && !r.input && !r.output)
+        );
+        // What the rows edit: the count of elements along X and the element type.
+        let primitive = node.primitive.as_mut().unwrap();
+        assert!(primitive.set("nx", plx_model::ParamValue::Count(20)));
+        if let MeshPrimitive::Box { element, .. } = primitive {
+            *element = "C3D8I".into();
+        }
         assert_eq!(node.mesh_state(), CellState::OutOfDate);
+        assert!(mesh_rows(&node)[0].tip.contains("out of date"));
         match node.written([1.0, 2.0]) {
             Some(ProjectNode::Mesh(written)) => {
                 assert_eq!(written.mesh.element_count(), 40);
