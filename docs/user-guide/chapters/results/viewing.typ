@@ -4,13 +4,12 @@
 
 == Opening results
 
-Results are opened with #menu("Analysis", "Open Results") after a run, with #ui("Results") in the
-monitor, or with #menu("File", "Open ...") for any `.frd` file (ASCII or binary). A `.dat` file
-with the same name is read as well. Several result files can be open at the same time; the
-#ui("Result") box on the toolbar switches between them. #menu("Results", "Close Current
-Results") and #ui("Close All Results") close them.
+The #ui("Results") tab shows the results of its analysis: they open when a run is finished,
+with #ui("Results") in the monitor, with #menu("Analysis", "Open Results") and when an analysis
+with kept results is opened (@bind-result). The `.dat` file of the run is read as well. Result
+files from elsewhere are not opened.
 
-When a result file is opened, PrePoLix shows the #ui("Results") tab with the last increment.
+When results are opened, PrePoLix shows the #ui("Results") tab with the last increment.
 
 #screenshot("results.png", [von Mises stress of a static step])
 
@@ -27,8 +26,7 @@ When a result file is opened, PrePoLix shows the #ui("Results") tab with the las
 Results list the parts of the model they were computed from, as in the #ui("FE Model") tab, also
 when several parts share a section. A `.frd` file itself only groups the elements by material;
 PrePoLix reads the parts from the input file CalculiX ran, the `.inp` file of the same name next
-to the results. Results of an analysis run from PrePoLix and results bound to a project always
-have it. A `.frd` file opened without its input file shows one part per material.
+to the results. Results of an analysis run from PrePoLix always have it.
 
 #screenshot("results-parts.png", [Three parts sharing one section keep their names in the results])
 
@@ -90,8 +88,8 @@ and below 5 MPa are grey])
     smallest value unless #ui("Show in legend") is cleared.],
 )
 
-The last line of the legend title says #ui("Automatic") or #ui("Manual"). When the result is
-bound to the project (@bind-result), its colour scale is saved in the project file and restored
+The last line of the legend title says #ui("Automatic") or #ui("Manual"). When the results are
+kept with the project (@bind-result), its colour scale is saved in the project file and restored
 with it; a result file that is read again, for example after another run, keeps its scale.
 
 #screenshot("color-scale-cool-warm.png", [The same stress in the Cool-warm spectrum with
@@ -106,7 +104,7 @@ A stiff or irrelevant part can dominate the colour scale. Right-click a part und
 part turns plain grey and no longer counts for the legend range, the minimum and maximum labels
 or the animation limits; the colours of the other parts then use the full scale.
 #ui("Color Contours On") brings the contours back. With several parts selected, the command
-applies to all of them. Results bound to a project (@bind-result) remember which parts have
+applies to all of them. Results kept with the project (@bind-result) remember which parts have
 contours off. Nodes that a grey part shares with a part that still has contours keep
 their colour.
 

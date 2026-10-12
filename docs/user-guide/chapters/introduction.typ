@@ -13,6 +13,7 @@ With PrePoLix you
   (`.inp`),
 - define the finite element model: materials, sections, constraints, contacts, steps, boundary
   conditions and loads,
+- keep several analyses in one project, as in Ansys Workbench, and solve only what changed,
 - run CalculiX and watch its progress,
 - view and evaluate the results (`.frd`, `.dat`): contour plots, deformed shapes, animations,
   derived fields, history plots, paths, planes and hot spot stresses.

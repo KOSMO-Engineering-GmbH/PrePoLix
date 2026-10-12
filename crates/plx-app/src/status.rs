@@ -64,6 +64,12 @@ impl AnalysisStatus {
         ]
     }
 
+    /// Whether there is something to solve: a mesh, or geometry to mesh, and a step.
+    pub fn solvable(&self) -> bool {
+        self.setup != CellState::Missing
+            && (self.mesh != CellState::Missing || self.geometry == CellState::UpToDate)
+    }
+
     /// Whether Solve has anything to do.
     pub fn needs_solve(&self) -> bool {
         matches!(self.mesh, CellState::OutOfDate)
@@ -141,8 +147,8 @@ pub fn analysis_status(
 }
 
 /// Paints the symbol of a state into a 16 × 16 square at `min`, as Ansys Workbench marks its
-/// cells, with PrePoMax's icons where it has one: OK, an arrow for out of date, No Result for
-/// missing.
+/// cells, with PrePoMax's icons where it has one: OK, an arrow for out of date, a question mark
+/// for missing.
 pub fn paint(painter: &Painter, min: egui::Pos2, state: CellState) {
     let p = |x: f32, y: f32| pos2(min.x + x, min.y + y);
     let adapt = crate::style::adapt;
@@ -170,9 +176,17 @@ pub fn paint(painter: &Painter, min: egui::Pos2, state: CellState) {
                 Stroke::NONE,
             ));
         }
-        CellState::Missing => tree_icons::paint(painter, min, TreeIcon::NoResult),
+        CellState::Missing => {
+            painter.text(
+                p(8.0, 8.5),
+                egui::Align2::CENTER_CENTER,
+                "?",
+                egui::FontId::proportional(13.0),
+                adapt(Color32::from_rgb(60, 110, 200)),
+            );
+        }
         CellState::Running => tree_icons::paint(painter, min, TreeIcon::Running),
-        CellState::Failed => tree_icons::paint(painter, min, TreeIcon::Warning),
+        CellState::Failed => tree_icons::paint(painter, min, TreeIcon::NoResult),
         CellState::NotUsed => {
             painter.line_segment(
                 [p(4.0, 8.5), p(12.0, 8.5)],

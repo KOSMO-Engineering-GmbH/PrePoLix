@@ -4482,7 +4482,13 @@ impl Workbench {
             }
             let space = plx_model::ModelSpace::of_mesh(&import.mesh);
             if model.mesh.element_count() == 0 && model.geometry.is_none() {
-                // Into an empty model, the mesh decides what the model is, as opening it does.
+                // Into an empty model, the mesh decides what the model is, as opening it does;
+                // the model space is the project's, so all its analyses take it over.
+                if model.fe.properties.space != space {
+                    let units = model.fe.properties.units;
+                    self.requests
+                        .push(Request::SpaceAndUnits(space, units, false));
+                }
                 model.fe.properties.space = space;
             } else if space.is_2d() != model.fe.properties.space.is_2d() {
                 self.output.push(format!(

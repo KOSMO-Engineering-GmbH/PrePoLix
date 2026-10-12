@@ -16,7 +16,7 @@ use crate::icons::{self, Icon};
 use crate::model::PROJECT_EXTENSION;
 use crate::model_properties::{DialogResult, ModelPropertiesDialog};
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
-use crate::status::{self, AnalysisStatus, CellState};
+use crate::status::{self, AnalysisStatus};
 use crate::tree_icons::{self, TreeIcon};
 
 /// Storage key of the project file open at exit, reopened at the next start.
@@ -101,6 +101,8 @@ pub struct ProjectApp {
     links: Vec<Link>,
     /// The schematic: a block per analysis, by its id.
     graph: Snarl<u64>,
+    /// Counts the graphs shown, so that the view centres on the blocks of each new one.
+    graph_generation: u64,
     /// Name typed for an analysis being renamed, with why it cannot be taken.
     rename: Option<(u64, String)>,
     /// Analysis to delete once the user agrees.
@@ -109,9 +111,10 @@ pub struct ProjectApp {
     properties_dialog: Option<ModelPropertiesDialog>,
     /// A project file being read on a worker thread.
     opening: Option<(PathBuf, Receiver<Result<Project, String>>)>,
-    /// Analyses Update Project still has to solve, in order, and the one it solves.
+    /// Analyses Update Project still has to solve, in order, and the one it solves, with
+    /// whether the update opened its window.
     update_queue: VecDeque<u64>,
-    updating: Option<u64>,
+    updating: Option<(u64, bool)>,
     /// Files given on the command line, imported into the first analysis once it is open.
     startup_import: Vec<PathBuf>,
 }
@@ -151,6 +154,7 @@ impl ProjectApp {
             nodes: Vec::new(),
             links: Vec::new(),
             graph: Snarl::new(),
+            graph_generation: 0,
             rename: None,
             confirm_delete: None,
             properties_dialog: None,
@@ -300,6 +304,7 @@ impl ProjectApp {
         self.nodes.clear();
         self.links.clear();
         self.graph = Snarl::new();
+        self.graph_generation += 1;
         self.path = None;
         self.space = self.settings.new_model.space;
         self.units = self.settings.new_model.units;
@@ -349,6 +354,7 @@ impl ProjectApp {
                 }
                 self.nodes.clear();
                 self.graph = Snarl::new();
+                self.graph_generation += 1;
                 self.space = project.space;
                 self.units = project.units;
                 self.links = project.links;
@@ -503,24 +509,31 @@ impl ProjectApp {
     /// Ansys Workbench's Update Project: solves every analysis that is not up to date, one
     /// after the other.
     fn update_project(&mut self) {
-        self.update_queue = (self.nodes.iter())
-            .filter(|n| n.status.as_ref().is_some_and(AnalysisStatus::needs_solve))
-            .filter(|n| {
-                n.status.as_ref().is_some_and(|s| {
-                    s.mesh != CellState::Missing || s.geometry == CellState::UpToDate
-                })
-            })
-            .map(|n| n.id)
-            .collect();
+        let mut skipped = Vec::new();
+        self.update_queue.clear();
+        for node in &self.nodes {
+            match &node.status {
+                Some(status) if status.needs_solve() && status.solvable() => {
+                    self.update_queue.push_back(node.id)
+                }
+                Some(status) if status.needs_solve() => skipped.push(node.name.clone()),
+                _ => {}
+            }
+        }
+        for name in skipped {
+            self.output.push(format!(
+                "{name} skipped: it has no mesh or geometry, or no step yet."
+            ));
+        }
         if self.update_queue.is_empty() {
-            self.output.push("All analyses are up to date.".into());
+            self.output.push("Nothing to update.".into());
         }
     }
 
     /// Works through Update Project: opens the next analysis and solves it, then the next
     /// once the one before is done.
     fn run_update(&mut self, ctx: &egui::Context) {
-        if let Some(id) = self.updating {
+        if let Some((id, opened)) = self.updating {
             let Some(node) = self.node(id) else {
                 self.updating = None;
                 return;
@@ -540,14 +553,22 @@ impl ProjectApp {
                 self.update_queue.clear();
                 self.output
                     .push(format!("Update stopped: {name} could not be solved."));
+            } else if opened {
+                // Windows the update opened close again, as Workbench solves in the
+                // background; the window stays open to show what went wrong.
+                self.close_window(id);
+            }
+            if !failed && self.update_queue.is_empty() {
+                self.output.push("Project updated".into());
             }
             return;
         }
         let Some(id) = self.update_queue.pop_front() else {
             return;
         };
+        let opened = self.node(id).is_some_and(|n| n.window.is_none());
         self.open_window(ctx, id);
-        self.updating = Some(id);
+        self.updating = Some((id, opened));
         if let Some(window) = self.node(id).and_then(|n| n.window.as_mut()) {
             window.solve_when_loaded();
         }
@@ -684,16 +705,18 @@ impl ProjectApp {
             }
             ui.separator();
             let updating = self.updating.is_some() || !self.update_queue.is_empty();
-            if icons::button(ui, Icon::Solve, UPDATE_TIP, !updating, false).clicked() {
+            let update = icons::button(ui, Icon::Solve, UPDATE_TIP, !updating, false).clicked();
+            let text = egui::Button::new("Update Project").frame(false);
+            let text = ui.add_enabled(!updating, text).on_hover_text(UPDATE_TIP);
+            if update || text.clicked() {
                 self.update_project();
             }
+            ui.add_space(4.0);
             if icons::button(ui, Icon::Stop, "Stop Update Project", updating, false).clicked() {
                 self.update_queue.clear();
                 self.updating = None;
                 self.output.push("Update stopped".into());
             }
-            ui.add_space(6.0);
-            ui.label("Update Project");
         });
     }
 
@@ -719,7 +742,7 @@ impl ProjectApp {
             actions: Vec::new(),
         };
         SnarlWidget::new()
-            .id_salt("project schematic")
+            .id_salt(("project schematic", self.graph_generation))
             .style(schematic_style())
             .show(&mut self.graph, &mut viewer, ui);
         if self.nodes.is_empty() {
@@ -1103,14 +1126,21 @@ impl SnarlViewer<u64> for Viewer {
             return;
         };
         let text = egui::RichText::new(&block.name).strong();
-        let label = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+        let label = ui.add(
+            egui::Label::new(text)
+                .selectable(false)
+                .sense(egui::Sense::click()),
+        );
         if block.open {
             ui.weak("(open)");
         }
         if label.double_clicked() {
             self.actions.push(Action::Open(id));
         }
-        label.on_hover_text("Double-click opens the analysis in its own window.");
+        // The name takes the clicks of the header, so it opens the block's menu too.
+        label
+            .on_hover_text("Double-click opens the analysis in its own window.")
+            .context_menu(|ui| node_menu(ui, id, &mut self.actions));
     }
 
     fn inputs(&mut self, _node: &u64) -> usize {
@@ -1230,24 +1260,32 @@ impl SnarlViewer<u64> for Viewer {
         snarl: &mut Snarl<u64>,
     ) {
         let id = snarl[node];
-        let mut entry = |ui: &mut egui::Ui, text: &str, action: Action| {
-            if ui.button(text).clicked() {
-                self.actions.push(action);
-                ui.close();
-            }
-        };
-        entry(ui, "Open", Action::Open(id));
-        entry(ui, "Solve", Action::Solve(id));
-        ui.separator();
-        entry(ui, "Rename …", Action::Rename(id));
-        entry(ui, "Duplicate", Action::Duplicate(id));
-        entry(ui, "Delete …", Action::Delete(id));
+        node_menu(ui, id, &mut self.actions);
     }
+}
+
+/// The context menu of an analysis' block.
+fn node_menu(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
+    let mut entry = |ui: &mut egui::Ui, text: &str, action: Action| {
+        if ui.button(text).clicked() {
+            actions.push(action);
+            ui.close();
+        }
+    };
+    entry(ui, "Open", Action::Open(id));
+    entry(ui, "Solve", Action::Solve(id));
+    ui.separator();
+    entry(ui, "Rename …", Action::Rename(id));
+    entry(ui, "Duplicate", Action::Duplicate(id));
+    entry(ui, "Delete …", Action::Delete(id));
 }
 
 fn schematic_style() -> SnarlStyle {
     SnarlStyle {
         collapsible: Some(false),
+        // Blocks are never magnified beyond their size, also when the view centres on them.
+        max_scale: Some(1.0),
+        min_scale: Some(0.3),
         ..SnarlStyle::new()
     }
 }

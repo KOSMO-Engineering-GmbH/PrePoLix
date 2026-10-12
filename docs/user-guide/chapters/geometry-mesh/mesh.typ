@@ -179,6 +179,6 @@ of revolution, a plain ring for example, is meshed as an extrusion.
 
 == Using an existing mesh
 
-A CalculiX mesh can be opened with #menu("File", "Open ...") (@files). Its node sets, element
+A CalculiX mesh can be imported with #menu("Geometry", "Import ...") (@mesh-import). Its node sets, element
 sets and surfaces appear under #ui("Mesh") in the #ui("FE Model") tree and can be used as
 regions. Such a mesh has no geometry, so regions are picked on the mesh.
