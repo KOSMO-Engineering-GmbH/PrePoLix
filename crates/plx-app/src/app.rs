@@ -289,7 +289,9 @@ impl PrepolixApp {
             load_events: channel(),
             loading: None,
         };
-        if app.workbench.settings.updates.check_at_startup {
+        if app.workbench.settings.updates.check_at_startup
+            && app.workbench.updater.installation().checks_at_startup()
+        {
             app.workbench.updater.check(&cc.egui_ctx, false);
         }
         // Every file on the command line is opened in turn, e.g. a model and its results.
@@ -618,12 +620,14 @@ impl PrepolixApp {
                     updater.check(ui.ctx(), true);
                 }
             });
-            // Version number, greyed out at the far right of the menu bar.
+            // Version number, greyed out at the far right of the menu bar, with the symbol of
+            // a newer release left of it.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                         .color(ui.visuals().weak_text_color()),
                 );
+                self.workbench.updater.indicator(ui);
             });
         });
     }
@@ -939,10 +943,6 @@ impl eframe::App for PrepolixApp {
         eframe::set_value(storage, LAST_PROJECT_KEY, &self.workbench.last_project());
     }
 
-    fn on_exit(&mut self) {
-        self.workbench.updater.restart_if_updated();
-    }
-
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_load_events();
         let ctx = ui.ctx().clone();
@@ -1115,8 +1115,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.update_hot_spot_preview();
         self.workbench.findings_window(&ctx);
         self.workbench.settings_window(&ctx);
-        let workbench = &mut self.workbench;
-        (workbench.updater).show(&ctx, &mut workbench.settings.updates, &mut workbench.output);
+        (self.workbench.updater).show(&ctx, &mut self.workbench.output);
         self.workbench.model_dialog_window(&ctx);
         if std::mem::take(&mut self.workbench.import_requested) {
             self.import_dialog(&ctx);

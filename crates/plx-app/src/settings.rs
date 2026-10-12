@@ -329,15 +329,12 @@ impl Gmsh {
 pub struct Updates {
     /// Ask GitHub for a new release when PrePoLix starts.
     pub check_at_startup: bool,
-    /// Version the user chose to skip; the check at startup does not offer it again.
-    pub skipped: String,
 }
 
 impl Default for Updates {
     fn default() -> Self {
         Self {
             check_at_startup: true,
-            skipped: String::new(),
         }
     }
 }
@@ -615,16 +612,8 @@ impl SettingsWindow {
                 let updates = &mut self.draft.updates;
                 ui.checkbox(&mut updates.check_at_startup, "Check for updates at startup")
                     .on_hover_text(
-                        "Asks GitHub for the latest release when PrePoLix starts. Help > Check for Updates asks at any time.",
+                        "Asks GitHub for the latest release when PrePoLix starts and shows a symbol next to the version if there is a newer one. Help > Check for Updates asks at any time.",
                     );
-                if !updates.skipped.is_empty() {
-                    ui.horizontal(|ui| {
-                        ui.label(format!("Version {} is skipped.", updates.skipped));
-                        if ui.button("Remind Again").clicked() {
-                            updates.skipped.clear();
-                        }
-                    });
-                }
                 ui.add_space(4.0);
                 ui.add(egui::Label::new(self.installation.description()).wrap());
             }

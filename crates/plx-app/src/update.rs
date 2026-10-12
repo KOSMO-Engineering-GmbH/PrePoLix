@@ -1,11 +1,12 @@
-//! Help > Check for Updates and the check at startup: asks GitHub for the latest release and,
-//! where PrePoLix can replace itself, downloads and installs it. The Windows installer is run
-//! with `/UPDATE`, which skips its pages, waits for PrePoLix to close and starts the new
-//! version; the Linux AppImage is replaced in place and restarted. Other builds (from source,
-//! a distribution package) only point to the release page.
+//! Help > Check for Updates and the check at startup: asks GitHub for the latest release. A
+//! newer one shows a symbol next to the version in the menu bar; it opens a window with the
+//! release notes. The Windows installer is downloaded there and run with `/UPDATE`, which skips
+//! its pages, waits for PrePoLix to close and starts the new version. An AppImage is left to the
+//! system's AppImage manager; other builds (from source, the portable ZIP) only point to the
+//! release page.
 
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -13,8 +14,6 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use sha2::Digest;
-
-use crate::settings::Updates;
 
 /// The latest release that is neither a draft nor a pre-release.
 const LATEST_RELEASE: &str = "https://api.github.com/repos/KwentiN-ui/PrePoLix/releases/latest";
@@ -58,8 +57,8 @@ impl std::fmt::Display for Version {
 pub enum Installation {
     /// Installed by the Windows installer (`uninstall.exe` next to the program).
     WindowsInstaller,
-    /// Started from this AppImage file.
-    AppImage(PathBuf),
+    /// Started from an AppImage, which an AppImage manager such as Gear Lever updates.
+    AppImage,
     /// Built from source or installed otherwise; updated by hand.
     Other,
 }
@@ -70,42 +69,40 @@ impl Installation {
             .ok()
             .and_then(|exe| exe.parent().map(Path::to_path_buf));
         if cfg!(windows) && exe_dir.is_some_and(|dir| dir.join("uninstall.exe").is_file()) {
-            return Self::WindowsInstaller;
+            Self::WindowsInstaller
+        } else if cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some() {
+            // The AppImage runtime names the file it was started from.
+            Self::AppImage
+        } else {
+            Self::Other
         }
-        // The AppImage runtime names the file it was started from.
-        if cfg!(target_os = "linux")
-            && let Some(file) = std::env::var_os("APPIMAGE").map(PathBuf::from)
-            && file.is_file()
-        {
-            return Self::AppImage(file);
-        }
-        Self::Other
     }
 
-    /// Which file of a release updates this installation.
+    /// Which file of a release updates this installation from within PrePoLix.
     fn wants(&self, asset_name: &str) -> bool {
-        match self {
-            Self::WindowsInstaller => asset_name.ends_with("-setup.exe"),
-            Self::AppImage(_) => asset_name.ends_with("-x86_64.AppImage"),
-            Self::Other => false,
-        }
+        *self == Self::WindowsInstaller && asset_name.ends_with("-setup.exe")
+    }
+
+    /// Whether PrePoLix asks for updates at startup: not in an AppImage, whose manager does.
+    pub fn checks_at_startup(&self) -> bool {
+        *self != Self::AppImage
     }
 
     /// One line for the settings window.
-    pub fn description(&self) -> String {
+    pub fn description(&self) -> &'static str {
         match self {
             Self::WindowsInstaller => {
                 "Installed with the Windows installer: updates are downloaded and installed from \
                  within PrePoLix."
-                    .into()
             }
-            Self::AppImage(file) => format!(
-                "Running from the AppImage {}: updates replace this file.",
-                file.display()
-            ),
-            Self::Other => "Not installed with the Windows installer or the AppImage: new \
-                            versions are announced, but must be installed by hand."
-                .into(),
+            Self::AppImage => {
+                "Running as AppImage: an AppImage manager such as Gear Lever or AppImageLauncher \
+                 updates it, so PrePoLix does not check at startup."
+            }
+            Self::Other => {
+                "Not installed with the Windows installer: new versions are announced, but must \
+                 be downloaded from the release page."
+            }
         }
     }
 }
@@ -337,52 +334,18 @@ fn start_installer(_installer: &Path) -> Result<(), String> {
     Err("the Windows installer only runs on Windows".into())
 }
 
-/// Puts the downloaded AppImage in place of the running one. Renaming over the file is safe:
-/// the running program keeps the old file open until it exits.
-#[cfg(unix)]
-fn replace_appimage(new: &Path, target: &Path) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(new, std::fs::Permissions::from_mode(0o755))
-        .and_then(|()| std::fs::rename(new, target))
-        .map_err(|e| format!("cannot replace {}: {e}", target.display()))
-}
-
-#[cfg(not(unix))]
-fn replace_appimage(_new: &Path, _target: &Path) -> Result<(), String> {
-    Err("AppImages only run on Linux".into())
-}
-
-/// Where the asset is downloaded to: the AppImage next to the one it replaces, so that it can
-/// be renamed over it; the installer to the temporary directory.
-fn download_path(installation: &Installation, asset: &Asset) -> Result<PathBuf, String> {
-    match installation {
-        Installation::AppImage(file) => Ok(file.with_file_name(format!(".{}.new", asset.name))),
-        _ => {
-            let dir = std::env::temp_dir().join("prepolix-update");
-            std::fs::create_dir_all(&dir)
-                .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-            Ok(dir.join(&asset.name))
-        }
-    }
-}
-
-/// Downloads and installs: replaces the AppImage, or starts the installer. On success the
-/// program must close, and with an AppImage start the new file afterwards.
+/// Downloads the installer to the temporary directory and starts it. On success the program
+/// must close.
 fn download_and_install(
-    installation: &Installation,
     asset: &Asset,
     progress: &AtomicU64,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
-    let dest = download_path(installation, asset)?;
+    let dir = std::env::temp_dir().join("prepolix-update");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    let dest = dir.join(&asset.name);
     download(asset, &dest, progress, cancel)?;
-    match installation {
-        Installation::WindowsInstaller => start_installer(&dest),
-        Installation::AppImage(file) => replace_appimage(&dest, file).inspect_err(|_| {
-            let _ = std::fs::remove_file(&dest);
-        }),
-        Installation::Other => Err("this installation cannot update itself".into()),
-    }
+    start_installer(&dest)
 }
 
 enum State {
@@ -391,31 +354,23 @@ enum State {
         manual: bool,
         receiver: Receiver<Result<Release, String>>,
     },
-    /// A newer release, shown in the update window.
-    Available(Release),
-    /// Answer to Help > Check for Updates when there is nothing newer.
-    UpToDate(Version),
-    Failed(String),
     Installing {
-        release: Release,
         progress: Arc<AtomicU64>,
         cancel: Arc<AtomicBool>,
         receiver: Receiver<Result<(), String>>,
     },
 }
 
-/// What a button of the update window asks for.
-enum Next {
-    Close,
-    Install(Release),
-}
-
-/// The update check and its window.
+/// The update check, the symbol of a newer release and its window.
 pub struct Updater {
     installation: Installation,
     state: State,
-    /// The AppImage to start once the program has closed.
-    restart: Option<PathBuf>,
+    /// The newer release found by the last check.
+    available: Option<Release>,
+    /// The window is open: with the newer release, or with this message of a check by hand
+    /// (up to date, or failed) or of a failed installation.
+    window: bool,
+    message: Option<String>,
 }
 
 impl Default for Updater {
@@ -423,22 +378,25 @@ impl Default for Updater {
         Self {
             installation: Installation::detect(),
             state: State::Idle,
-            restart: None,
+            available: None,
+            window: false,
+            message: None,
         }
     }
 }
 
 impl Updater {
+    pub fn installation(&self) -> &Installation {
+        &self.installation
+    }
+
     /// Whether a check or an installation is under way.
     pub fn busy(&self) -> bool {
-        matches!(
-            self.state,
-            State::Checking { .. } | State::Installing { .. }
-        )
+        !matches!(self.state, State::Idle)
     }
 
     /// Asks GitHub for the latest release in the background. `manual` for Help > Check for
-    /// Updates, which also reports that there is nothing new or that the check failed.
+    /// Updates, which opens the window with the answer, whatever it is.
     pub fn check(&mut self, ctx: &egui::Context, manual: bool) {
         if self.busy() {
             return;
@@ -452,271 +410,323 @@ impl Updater {
         self.state = State::Checking { manual, receiver };
     }
 
-    /// Starts the AppImage that replaced this one; called when the program exits.
-    pub fn restart_if_updated(&mut self) {
-        if let Some(file) = self.restart.take() {
-            // The variables of the old AppImage's runtime; the new one sets its own.
-            let started = std::process::Command::new(&file)
-                .env_remove("APPDIR")
-                .env_remove("APPIMAGE")
-                .env_remove("ARGV0")
-                .env_remove("OWD")
-                .spawn();
-            if let Err(error) = started {
-                log::error!("cannot start {}: {error}", file.display());
-            }
+    /// The symbol next to the version in the menu bar while a newer release is known; a click
+    /// opens the update window. Call it in a right-to-left layout.
+    pub fn indicator(&mut self, ui: &mut egui::Ui) {
+        let Some(release) = &self.available else {
+            return;
+        };
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+        let response = response
+            .on_hover_text(format!(
+                "PrePoLix {} is available. Click for what's new and to update.",
+                release.version
+            ))
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        let painter = ui.painter();
+        let fill = if response.hovered() {
+            egui::Color32::from_rgb(0, 150, 60)
+        } else {
+            egui::Color32::from_rgb(20, 170, 80)
+        };
+        let c = rect.center();
+        painter.circle_filled(c, 8.0, fill);
+        // A white arrow pointing down: download.
+        let stroke = egui::Stroke::new(2.0, egui::Color32::WHITE);
+        painter.line_segment(
+            [c + egui::vec2(0.0, -4.5), c + egui::vec2(0.0, 3.0)],
+            stroke,
+        );
+        painter.line_segment(
+            [c + egui::vec2(-3.5, -0.5), c + egui::vec2(0.0, 3.5)],
+            stroke,
+        );
+        painter.line_segment(
+            [c + egui::vec2(3.5, -0.5), c + egui::vec2(0.0, 3.5)],
+            stroke,
+        );
+        if response.clicked() {
+            self.message = None;
+            self.window = true;
         }
     }
 
     /// Takes the answer of a running check or installation and shows the update window.
     /// Lines for the output pane are pushed to `output`.
-    pub fn show(&mut self, ctx: &egui::Context, settings: &mut Updates, output: &mut Vec<String>) {
-        self.poll(ctx, settings, output);
+    pub fn show(&mut self, ctx: &egui::Context, output: &mut Vec<String>) {
+        self.poll(ctx, output);
+        if !self.window {
+            return;
+        }
         let mut open = true;
-        let mut next = None;
-        let title = match &self.state {
-            State::Idle | State::Checking { .. } => return,
-            State::Available(_) | State::Installing { .. } => "Update Available",
-            State::UpToDate(_) | State::Failed(_) => "Check for Updates",
+        let mut close = false;
+        let mut install = None;
+        let title = if self.message.is_some() {
+            "Check for Updates"
+        } else {
+            "Update Available"
         };
         egui::Window::new(title)
             .id(egui::Id::new("update window"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .default_width(460.0)
+            .default_width(480.0)
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
-            .show(ctx, |ui| match &self.state {
-                State::Available(release) => next = self.available_ui(ui, release, settings),
-                State::Installing {
-                    release,
-                    progress,
-                    cancel,
-                    ..
-                } => {
-                    ui.label(format!("Downloading PrePoLix {} …", release.version));
-                    let size = release.asset.as_ref().map_or(0, |a| a.size).max(1);
-                    let done = progress.load(Ordering::Relaxed);
-                    let fraction = (done as f32 / size as f32).clamp(0.0, 1.0);
-                    ui.add(
-                        egui::ProgressBar::new(fraction)
-                            .text(format!("{:.1} of {:.1} MB", mb(done), mb(size)))
-                            .desired_width(420.0),
-                    );
-                    if fraction >= 1.0 {
-                        ui.label("Starting the installation …");
-                    }
-                    ui.add_space(4.0);
-                    if ui.button("Cancel").clicked() {
-                        cancel.store(true, Ordering::Relaxed);
-                    }
-                    ctx.request_repaint_after(Duration::from_millis(100));
-                }
-                State::UpToDate(version) => {
-                    ui.label(format!("PrePoLix {version} is the latest version."));
-                    ui.add_space(4.0);
-                    if ui.button("OK").clicked() {
-                        next = Some(Next::Close);
-                    }
-                }
-                State::Failed(error) => {
-                    ui.add(egui::Label::new(error.as_str()).wrap());
+            .show(ctx, |ui| {
+                if let Some(message) = &self.message {
+                    ui.add(egui::Label::new(message.as_str()).wrap());
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         if ui.button("OK").clicked() {
-                            next = Some(Next::Close);
+                            close = true;
                         }
                         if ui.button("Open Release Page").clicked() {
                             open_page(RELEASES_PAGE, output);
-                            next = Some(Next::Close);
+                            close = true;
                         }
                     });
+                } else if let Some(release) = &self.available {
+                    match &self.state {
+                        State::Installing {
+                            progress, cancel, ..
+                        } => installing_ui(ui, release, progress, cancel),
+                        _ => {
+                            let (closed, update) =
+                                release_ui(ui, release, &self.installation, output);
+                            close = closed;
+                            if update {
+                                install = release.asset.clone();
+                            }
+                        }
+                    }
                 }
-                State::Idle | State::Checking { .. } => {}
             });
-        match next {
-            Some(Next::Close) => self.state = State::Idle,
-            Some(Next::Install(release)) => self.install(release, ctx),
-            None => {}
+        if let Some(asset) = install {
+            self.install(asset, ctx);
         }
-        if !open {
+        if close || !open {
             if let State::Installing { cancel, .. } = &self.state {
                 cancel.store(true, Ordering::Relaxed);
-            } else {
-                self.state = State::Idle;
             }
+            self.window = false;
+            self.message = None;
         }
-    }
-
-    /// The window of a newer release; returns the next state for a pressed button.
-    fn available_ui(
-        &self,
-        ui: &mut egui::Ui,
-        release: &Release,
-        settings: &mut Updates,
-    ) -> Option<Next> {
-        let mut next = None;
-        ui.label(
-            egui::RichText::new(format!("PrePoLix {} is available.", release.version)).strong(),
-        );
-        ui.label(format!("You are using version {}.", Version::current()));
-        if !release.notes.trim().is_empty() {
-            ui.add_space(4.0);
-            ui.label("What's new:");
-            egui::Frame::new()
-                .stroke(egui::Stroke::new(1.0, crate::style::BORDER))
-                .inner_margin(4)
-                .show(ui, |ui| {
-                    egui::ScrollArea::vertical()
-                        .max_height(200.0)
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            ui.add(egui::Label::new(release.notes.trim()).wrap());
-                        });
-                });
-        }
-        ui.add_space(4.0);
-        let installable = release.asset.is_some();
-        match (&self.installation, installable) {
-            (Installation::WindowsInstaller, true) => {
-                ui.add(
-                    egui::Label::new(
-                        "PrePoLix closes to install the update and starts again afterwards. \
-                         Save your project first. Windows asks for administrator rights.",
-                    )
-                    .wrap(),
-                );
-            }
-            (Installation::AppImage(_), true) => {
-                ui.add(
-                    egui::Label::new(
-                        "The AppImage file is replaced and PrePoLix starts again. Save your \
-                         project first.",
-                    )
-                    .wrap(),
-                );
-            }
-            (Installation::Other, _) => {
-                ui.add(
-                    egui::Label::new(
-                        "This copy of PrePoLix cannot update itself. Download the new version \
-                         from the release page.",
-                    )
-                    .wrap(),
-                );
-            }
-            (_, false) => {
-                ui.add(
-                    egui::Label::new(
-                        "The release has no file for this installation. Download it from the \
-                         release page.",
-                    )
-                    .wrap(),
-                );
-            }
-        }
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            if installable && ui.button("Update Now").clicked() {
-                next = Some(Next::Install(release.clone()));
-            }
-            if ui.button("Open Release Page").clicked() {
-                let _ = open::that_detached(&release.page);
-                next = Some(Next::Close);
-            }
-            if ui
-                .button("Skip This Version")
-                .on_hover_text("No reminder at startup until a newer version is released.")
-                .clicked()
-            {
-                settings.skipped = release.version.to_string();
-                next = Some(Next::Close);
-            }
-            if ui.button("Later").clicked() {
-                next = Some(Next::Close);
-            }
-        });
-        next
     }
 
     /// Downloads and installs the release in the background.
-    fn install(&mut self, release: Release, ctx: &egui::Context) {
+    fn install(&mut self, asset: Asset, ctx: &egui::Context) {
         let (progress, cancel) = (Arc::<AtomicU64>::default(), Arc::<AtomicBool>::default());
-        let Some(asset) = release.asset.clone() else {
-            return;
-        };
         let (sender, receiver) = channel();
-        let (installation, ctx) = (self.installation.clone(), ctx.clone());
+        let ctx = ctx.clone();
         let (thread_progress, thread_cancel) = (progress.clone(), cancel.clone());
         std::thread::spawn(move || {
-            let result =
-                download_and_install(&installation, &asset, &thread_progress, &thread_cancel);
-            let _ = sender.send(result);
+            let _ = sender.send(download_and_install(
+                &asset,
+                &thread_progress,
+                &thread_cancel,
+            ));
             ctx.request_repaint();
         });
         self.state = State::Installing {
-            release,
             progress,
             cancel,
             receiver,
         };
     }
 
-    fn poll(&mut self, ctx: &egui::Context, settings: &Updates, output: &mut Vec<String>) {
+    fn poll(&mut self, ctx: &egui::Context, output: &mut Vec<String>) {
         match &self.state {
+            State::Idle => {}
             State::Checking { manual, receiver } => {
                 let Ok(result) = receiver.try_recv() else {
                     return;
                 };
                 let manual = *manual;
-                self.state = match result {
+                self.state = State::Idle;
+                match result {
                     Ok(release) if release.version > Version::current() => {
                         output.push(format!("PrePoLix {} is available", release.version));
-                        // The check at startup does not remind of a skipped version.
-                        if manual || settings.skipped != release.version.to_string() {
-                            State::Available(release)
-                        } else {
-                            State::Idle
+                        self.available = Some(release);
+                        self.message = None;
+                        self.window |= manual;
+                    }
+                    Ok(_) => {
+                        self.available = None;
+                        if manual {
+                            self.message = Some(format!(
+                                "PrePoLix {} is the latest version.",
+                                Version::current()
+                            ));
+                            self.window = true;
                         }
                     }
-                    Ok(_) if manual => State::UpToDate(Version::current()),
-                    Ok(_) => State::Idle,
                     Err(error) if manual => {
-                        State::Failed(format!("No update information: {error}."))
+                        self.message = Some(format!("No update information: {error}."));
+                        self.window = true;
                     }
-                    Err(error) => {
-                        log::info!("update check: {error}");
-                        State::Idle
-                    }
-                };
+                    Err(error) => log::info!("update check: {error}"),
+                }
             }
-            State::Installing {
-                release, receiver, ..
-            } => {
+            State::Installing { receiver, .. } => {
                 let Ok(result) = receiver.try_recv() else {
                     return;
                 };
+                self.state = State::Idle;
+                let version = self.available.as_ref().map(|r| r.version.to_string());
                 match result {
                     Ok(()) => {
-                        output.push(format!("Installing PrePoLix {}", release.version));
-                        if let Installation::AppImage(file) = &self.installation {
-                            self.restart = Some(file.clone());
-                        }
-                        self.state = State::Idle;
+                        output.push(format!(
+                            "Installing PrePoLix {}",
+                            version.unwrap_or_default()
+                        ));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                     Err(error) => {
                         output.push(format!("Update not installed: {error}"));
-                        self.state = if error == CANCELLED {
-                            State::Idle
-                        } else {
-                            State::Failed(format!("The update was not installed: {error}."))
-                        };
+                        if error != CANCELLED {
+                            self.message = Some(format!("The update was not installed: {error}."));
+                            self.window = true;
+                        }
                     }
                 }
             }
-            _ => {}
+        }
+    }
+}
+
+/// The newer release with its notes and what can be done; returns whether the window closes
+/// and whether to update now.
+fn release_ui(
+    ui: &mut egui::Ui,
+    release: &Release,
+    installation: &Installation,
+    output: &mut Vec<String>,
+) -> (bool, bool) {
+    let (mut close, mut update) = (false, false);
+    ui.label(egui::RichText::new(format!("PrePoLix {} is available.", release.version)).strong());
+    ui.label(format!("You are using version {}.", Version::current()));
+    if !release.notes.trim().is_empty() {
+        ui.add_space(4.0);
+        egui::Frame::new()
+            .stroke(egui::Stroke::new(1.0, crate::style::BORDER))
+            .inner_margin(6)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| notes_ui(ui, &release.notes));
+            });
+    }
+    ui.add_space(4.0);
+    let installable = release.asset.is_some();
+    let note = match installation {
+        Installation::WindowsInstaller if installable => {
+            "PrePoLix closes to install the update and starts again afterwards. Save your \
+             project first. Windows asks for administrator rights."
+        }
+        Installation::WindowsInstaller => {
+            "The release has no installer. Download the new version from the release page."
+        }
+        Installation::AppImage => "Your AppImage manager installs the new version.",
+        Installation::Other => {
+            "This copy of PrePoLix cannot update itself. Download the new version from the \
+             release page."
+        }
+    };
+    ui.add(egui::Label::new(note).wrap());
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        if installable && ui.button("Update Now").clicked() {
+            update = true;
+        }
+        if ui.button("Open Release Page").clicked() {
+            open_page(&release.page, output);
+            close = true;
+        }
+        if ui.button("Close").clicked() {
+            close = true;
+        }
+    });
+    (close, update)
+}
+
+fn installing_ui(ui: &mut egui::Ui, release: &Release, progress: &AtomicU64, cancel: &AtomicBool) {
+    ui.label(format!("Downloading PrePoLix {} …", release.version));
+    let size = release.asset.as_ref().map_or(0, |a| a.size).max(1);
+    let done = progress.load(Ordering::Relaxed);
+    let fraction = (done as f32 / size as f32).clamp(0.0, 1.0);
+    ui.add(
+        egui::ProgressBar::new(fraction)
+            .text(format!("{:.1} of {:.1} MB", mb(done), mb(size)))
+            .desired_width(440.0),
+    );
+    if fraction >= 1.0 {
+        ui.label("Starting the installation …");
+    }
+    ui.add_space(4.0);
+    if ui.button("Cancel").clicked() {
+        cancel.store(true, Ordering::Relaxed);
+    }
+    ui.ctx().request_repaint_after(Duration::from_millis(100));
+}
+
+/// One line of GitHub's release notes, as far as they are shown.
+#[derive(Debug, PartialEq)]
+enum NoteLine<'a> {
+    Heading(&'a str),
+    /// A list item, with the pull request its text ends with ("... by @user in <url>").
+    Item(&'a str, Option<&'a str>),
+    /// A link on a line of its own, e.g. "**Full Changelog**: <url>".
+    Link(&'a str, &'a str),
+    Text(&'a str),
+}
+
+fn note_line(line: &str) -> NoteLine<'_> {
+    let line = line.trim();
+    if let Some(heading) = line.strip_prefix('#') {
+        return NoteLine::Heading(heading.trim_start_matches('#').trim());
+    }
+    if let Some(item) = line.strip_prefix("* ").or_else(|| line.strip_prefix("- ")) {
+        // "Title by @author in https://github.com/.../pull/123"
+        if let Some((text, url)) = item.rsplit_once(" in https://") {
+            let text = text.rsplit_once(" by @").map_or(text, |(title, _)| title);
+            let url = &item[item.len() - url.len() - "https://".len()..];
+            return NoteLine::Item(text, Some(url));
+        }
+        return NoteLine::Item(item, None);
+    }
+    if let Some((label, url)) = line.split_once(": https://") {
+        let url = &line[line.len() - url.len() - "https://".len()..];
+        return NoteLine::Link(label.trim_matches('*'), url);
+    }
+    NoteLine::Text(line)
+}
+
+/// GitHub's generated release notes, "What's Changed" with one line per pull request.
+fn notes_ui(ui: &mut egui::Ui, notes: &str) {
+    for line in notes.lines().filter(|l| !l.trim().is_empty()) {
+        match note_line(line) {
+            NoteLine::Heading(text) => {
+                ui.label(egui::RichText::new(text).strong());
+            }
+            NoteLine::Item(text, url) => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("-");
+                    ui.label(text);
+                    if let Some(url) = url {
+                        let number = url.rsplit('/').next().unwrap_or_default();
+                        ui.hyperlink_to(format!("#{number}"), url);
+                    }
+                });
+            }
+            NoteLine::Link(label, url) => {
+                ui.hyperlink_to(label, url);
+            }
+            NoteLine::Text(text) => {
+                ui.add(egui::Label::new(text).wrap());
+            }
         }
     }
 }
@@ -774,10 +784,9 @@ mod tests {
         assert_eq!(asset.name, "prepolix-0.3.0-setup.exe");
         assert_eq!(asset.size, 1234);
         assert_eq!(asset.sha256.as_deref(), Some("abcdef"));
-        let appimage = parse_release(RELEASE, &Installation::AppImage("/x".into())).unwrap();
-        let asset = appimage.asset.unwrap();
-        assert_eq!(asset.name, "prepolix-0.3.0-x86_64.AppImage");
-        assert_eq!(asset.sha256, None);
+        // An AppImage manager updates the AppImage.
+        let appimage = parse_release(RELEASE, &Installation::AppImage).unwrap();
+        assert_eq!(appimage.asset, None);
         let other = parse_release(RELEASE, &Installation::Other).unwrap();
         assert_eq!(other.asset, None);
         assert!(parse_release("{}", &Installation::Other).is_err());
@@ -823,34 +832,33 @@ mod tests {
     }
 
     #[test]
-    fn appimage_is_downloaded_next_to_itself() {
-        let asset = Asset {
-            name: "prepolix-0.3.0-x86_64.AppImage".into(),
-            url: String::new(),
-            size: 0,
-            sha256: None,
-        };
-        let installation = Installation::AppImage("/home/u/Apps/prepolix.AppImage".into());
+    fn release_notes_are_read() {
         assert_eq!(
-            download_path(&installation, &asset).unwrap(),
-            Path::new("/home/u/Apps/.prepolix-0.3.0-x86_64.AppImage.new")
+            note_line("## What's Changed"),
+            NoteLine::Heading("What's Changed")
         );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn appimage_is_replaced_in_place() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("plx-update-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let (old, new) = (dir.join("prepolix.AppImage"), dir.join(".new"));
-        std::fs::write(&old, "old").unwrap();
-        std::fs::write(&new, "new").unwrap();
-        replace_appimage(&new, &old).unwrap();
-        assert_eq!(std::fs::read_to_string(&old).unwrap(), "new");
-        assert!(!new.exists());
-        let mode = std::fs::metadata(&old).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o755);
-        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(
+            note_line(
+                "* Hexahedra for bodies of revolution by @KwentiN-ui in https://github.com/KwentiN-ui/PrePoLix/pull/211"
+            ),
+            NoteLine::Item(
+                "Hexahedra for bodies of revolution",
+                Some("https://github.com/KwentiN-ui/PrePoLix/pull/211")
+            )
+        );
+        assert_eq!(
+            note_line("- Plain item"),
+            NoteLine::Item("Plain item", None)
+        );
+        assert_eq!(
+            note_line(
+                "**Full Changelog**: https://github.com/KwentiN-ui/PrePoLix/compare/v0.2.4...v0.2.5"
+            ),
+            NoteLine::Link(
+                "Full Changelog",
+                "https://github.com/KwentiN-ui/PrePoLix/compare/v0.2.4...v0.2.5"
+            )
+        );
+        assert_eq!(note_line("Some text"), NoteLine::Text("Some text"));
     }
 }
