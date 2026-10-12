@@ -1509,6 +1509,13 @@ impl ProjectApp {
         }
     }
 
+    /// F5, as Solve in an analysis window: Update Project, unless it is under way.
+    fn solve_shortcut(&mut self) {
+        if self.updating.is_empty() && self.update_queue.is_empty() {
+            self.update_project();
+        }
+    }
+
     fn toggle_monitor(&mut self) {
         self.monitor = match self.monitor.take() {
             Some(_) => None,
@@ -1577,7 +1584,7 @@ impl ProjectApp {
                     self.show_all = true;
                 }
                 ui.separator();
-                let update = egui::Button::new("Update Project");
+                let update = egui::Button::new("Update Project").shortcut_text("F5");
                 if ui.add(update).on_hover_text(UPDATE_TIP).clicked() {
                     self.update_project();
                 }
@@ -3131,6 +3138,9 @@ impl eframe::App for ProjectApp {
         self.poll_opening();
         let title = format!("{} - PrePoLix", self.project_name());
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
+            self.solve_shortcut();
+        }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.open_dialog(&ctx);
         }
@@ -4588,8 +4598,8 @@ const MATERIALS_TIP: &str = "Adds a block of materials kept in the project: anal
      them one by one or all at once, so that they are defined in one place.";
 
 /// Tooltip of Update Project.
-const UPDATE_TIP: &str = "Update Project: solves every analysis that is not up to date, one \
-     after the other, and keeps the new results.";
+const UPDATE_TIP: &str = "Update Project (F5): solves every analysis that is not up to date, \
+     one after the other, and keeps the new results.";
 
 const MONITOR_TIP: &str = "Solution Monitor: the analyses being solved, with the output of \
      CalculiX";
