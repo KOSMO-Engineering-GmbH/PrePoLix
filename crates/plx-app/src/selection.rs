@@ -388,7 +388,7 @@ impl Picker {
                     }
                 });
                 if let Some(error) = &self.error {
-                    ui.colored_label(egui::Color32::from_rgb(200, 0, 0), error);
+                    ui.colored_label(crate::style::error(), error);
                 }
                 ui.horizontal(|ui| {
                     if ui

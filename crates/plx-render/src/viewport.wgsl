@@ -15,6 +15,8 @@ struct Globals {
     clip: vec4<f32>,
     // x: 1 while the section view is on, y: tolerance behind the plane in world units.
     clip_options: vec4<f32>,
+    // Colour of the wireframe of the undeformed shape in rgb.
+    wireframe: vec4<f32>,
     palette: array<vec4<f32>, 26>,
 };
 
@@ -141,6 +143,12 @@ fn edge_vertex(position: vec3<f32>, color: vec4<f32>) -> EdgeOut {
 fn vs_edge(in: SurfaceIn) -> EdgeOut {
     // Line vertices carry their opacity in the scalar slot.
     return edge_vertex(in.position, vec4<f32>(in.color, in.scalar));
+}
+
+// The wireframe of the undeformed shape takes its colour from the theme.
+@vertex
+fn vs_wireframe(in: SurfaceIn) -> EdgeOut {
+    return edge_vertex(in.position, vec4<f32>(globals.wireframe.rgb, in.scalar));
 }
 
 // MESH_EDGE_OPACITY of fe.rs.

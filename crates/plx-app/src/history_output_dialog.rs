@@ -378,7 +378,7 @@ impl HistoryOutputDialog {
                     });
                 });
                 if let Some(error) = &self.error {
-                    ui.colored_label(egui::Color32::from_rgb(200, 0, 0), error);
+                    ui.colored_label(crate::style::error(), error);
                 }
                 ui.add_space(4.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -410,7 +410,7 @@ impl HistoryOutputDialog {
 
     fn properties(&mut self, ui: &mut Ui, model: &Model) {
         let header = egui::Frame::new()
-            .fill(crate::style::CONTROL)
+            .fill(crate::style::control())
             .inner_margin(egui::Margin::symmetric(4, 1));
         header.show(ui, |ui| {
             ui.set_width(ui.available_width());

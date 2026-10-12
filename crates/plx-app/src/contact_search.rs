@@ -280,7 +280,7 @@ impl ContactSearchDialog {
                     });
                 });
                 if let Some(error) = &self.error {
-                    ui.colored_label(egui::Color32::from_rgb(200, 0, 0), error);
+                    ui.colored_label(crate::style::error(), error);
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {

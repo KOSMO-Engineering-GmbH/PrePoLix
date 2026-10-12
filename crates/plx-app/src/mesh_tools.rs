@@ -175,7 +175,7 @@ impl MeshToolDialog {
                     });
                 if let Some(error) = &self.error {
                     ui.add_space(4.0);
-                    ui.colored_label(egui::Color32::from_rgb(200, 0, 0), error);
+                    ui.colored_label(crate::style::error(), error);
                 }
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {

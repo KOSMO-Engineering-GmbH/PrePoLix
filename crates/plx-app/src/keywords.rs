@@ -547,7 +547,11 @@ impl KeywordEditor {
                         .is_some_and(|s| s.contains(&row));
                     let mut text = egui::RichText::new(line).font(font.clone());
                     if selected {
-                        text = text.background_color(SELECTED_LINE);
+                        text = text.background_color(if crate::style::dark() {
+                            SELECTED_LINE_DARK
+                        } else {
+                            SELECTED_LINE
+                        });
                     }
                     ui.add(egui::Label::new(text).extend());
                 }
@@ -557,13 +561,14 @@ impl KeywordEditor {
 }
 
 const SELECTED_LINE: egui::Color32 = egui::Color32::from_rgb(255, 236, 160);
+const SELECTED_LINE_DARK: egui::Color32 = egui::Color32::from_rgb(95, 80, 25);
 /// Colour of the user's keywords in the tree, like PrePoMax's added-keyword icon.
 const USER_KEYWORD: egui::Color32 = egui::Color32::from_rgb(0, 110, 0);
 
 pub(crate) fn frame() -> egui::Frame {
     egui::Frame::new()
-        .fill(crate::style::WINDOW)
-        .stroke(egui::Stroke::new(1.0, crate::style::BORDER))
+        .fill(crate::style::window())
+        .stroke(egui::Stroke::new(1.0, crate::style::border()))
         .inner_margin(2)
 }
 
@@ -581,7 +586,7 @@ fn tree_ui(
         if node.is_user() {
             label = label.strong();
             if !is_selected {
-                label = label.color(USER_KEYWORD);
+                label = label.color(crate::style::lift(USER_KEYWORD));
             }
             if let KeywordKind::User { active: false } = node.keyword.kind {
                 label = label.strikethrough();

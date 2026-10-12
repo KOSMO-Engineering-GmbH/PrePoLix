@@ -375,7 +375,7 @@ impl MaterialLibraryEditor {
                     }
                 }
                 if let Some(error) = &self.load_error {
-                    ui.colored_label(egui::Color32::from_rgb(180, 30, 30), error);
+                    ui.colored_label(crate::style::error(), error);
                 }
             });
     }
@@ -735,7 +735,7 @@ fn category_label(name: &str, selected: bool) -> RichText {
     if selected {
         text
     } else {
-        text.color(crate::style::HIGHLIGHT)
+        text.color(crate::style::highlight())
     }
 }
 

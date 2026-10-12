@@ -482,10 +482,7 @@ impl SectionDialog {
                     ui.end_row();
                     if frame.is_none() {
                         ui.label("");
-                        ui.colored_label(
-                            egui::Color32::from_rgb(200, 0, 0),
-                            "The plane is missing or invalid.",
-                        );
+                        ui.colored_label(crate::style::error(), "The plane is missing or invalid.");
                         ui.end_row();
                     }
                 }

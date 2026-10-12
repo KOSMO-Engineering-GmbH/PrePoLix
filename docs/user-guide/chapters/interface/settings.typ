@@ -11,10 +11,17 @@ user (`~/.local/share/prepolix` on Linux, `%APPDATA%\prepolix\data` on Windows).
 === Graphics
 
 #fields(
+  [Color theme], [#ui("Light") is PrePoMax's light look, #ui("Dark") shows dark panels, a dark
+    3D background and light text over the model. #ui("System") (default) follows the light or
+    dark mode of the operating system and switches along with it. Icons, tree symbols, plots and
+    annotations change with the theme; exported SVG plots and the images of the user guide stay
+    light.],
   [Global axes at the origin], [Draws a coordinate triad at the global origin (default on).],
   [Coordinate triad in the corner], [The clickable triad in the lower right (default on).],
   [Scale bar], [Shows a scale bar (default on).],
 )
+
+#screenshot("dark-theme.png", [The dark theme with the results of a cantilever])
 
 === Post-processing
 

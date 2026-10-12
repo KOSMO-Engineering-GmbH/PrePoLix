@@ -145,7 +145,10 @@ pub fn paint(painter: &Painter, min: Pos2, icon: TreeIcon) {
                 pos2(snap(min.x + start as f32), snap(min.y + y as f32)),
                 pos2(snap(min.x + x as f32), snap(min.y + y as f32 + 1.0)),
             );
-            mesh.add_colored_rect(rect, Color32::from_rgba_unmultiplied(r, g, b, a));
+            mesh.add_colored_rect(
+                rect,
+                crate::style::adapt(Color32::from_rgba_unmultiplied(r, g, b, a)),
+            );
         }
     }
     painter.add(Shape::mesh(mesh));
@@ -220,7 +223,10 @@ fn paint_step_type(painter: &Painter, min: Pos2, glyph: StepGlyph) {
     let at = |x: f32, y: f32| min + vec2(x, y);
     let line = |points: &[(f32, f32)], color: Color32| {
         let points = points.iter().map(|&(x, y)| at(x, y)).collect();
-        painter.add(Shape::line(points, Stroke::new(1.5, color)));
+        painter.add(Shape::line(
+            points,
+            Stroke::new(1.5, crate::style::adapt(color)),
+        ));
     };
     let curve = |from: f32, to: f32, color: Color32, y: &dyn Fn(f32) -> f32| {
         let steps = 28;
