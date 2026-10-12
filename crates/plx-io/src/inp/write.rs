@@ -472,8 +472,28 @@ pub fn model_keywords(
     if !design_variables.is_empty() {
         tree.push(Keyword::title("Design variables", design_variables));
     }
-    tree.push(Keyword::title("Steps", steps));
+    let mut steps = Keyword::title("Steps", steps);
+    if let Some(boundaries) = boundaries_before_stored_modes(model, &mut steps) {
+        tree.push(Keyword::title("Boundary conditions", boundaries));
+    }
+    tree.push(steps);
     Ok(tree)
+}
+
+/// The boundary conditions of a first step that works on the eigenmodes of another
+/// analysis, taken out of the step: CalculiX allows no new boundary conditions in a modal
+/// dynamics or steady state dynamics step, so they go into the model definition, where the
+/// run that stored the eigenmodes had them before its frequency step.
+fn boundaries_before_stored_modes(model: &FeModel, steps: &mut Keyword) -> Option<Vec<Keyword>> {
+    model.properties.stored_modes.as_ref()?;
+    let first = model.steps.iter().position(|s| s.active)?;
+    if !model.steps[first].kind.uses_stored_modes() {
+        return None;
+    }
+    let block = steps.children.get_mut(first)?.children.first_mut()?;
+    let boundaries = (block.children.iter_mut())
+        .find(|k| matches!(&k.kind, KeywordKind::Title(t) if t == "Boundary conditions"))?;
+    Some(std::mem::take(&mut boundaries.children))
 }
 
 /// `*Transform` of each node set that a skewed symmetry plane holds.

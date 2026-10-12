@@ -38,10 +38,16 @@ pub fn solve_input(mesh: &FeMesh, fe: &FeModel) -> u64 {
     // The global results of a submodel count by their folder and file name, which change
     // with the global results they are; where the work directory is does not count.
     let mut properties = properties.clone();
-    properties.global_results = (properties.global_results.as_deref()).map(|path| {
+    let short = |path: &std::path::Path| -> std::path::PathBuf {
         let parts: Vec<_> = path.components().rev().take(2).collect();
         parts.into_iter().rev().collect()
-    });
+    };
+    properties.global_results = properties.global_results.as_deref().map(short);
+    // So do the files of other analyses' results the model starts from.
+    properties.stored_modes = properties.stored_modes.as_deref().map(short);
+    if let Some((file, _)) = &mut properties.initial_temperatures {
+        *file = short(file);
+    }
     hash.add_debug(&properties);
     hash.add_debug(materials);
     hash.add_debug(sections);

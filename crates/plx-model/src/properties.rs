@@ -22,6 +22,16 @@ pub struct ModelProperties {
     pub absolute_zero: Option<f64>,
     /// Stefan-Boltzmann constant in the model's units; radiation needs it.
     pub stefan_boltzmann: Option<f64>,
+    /// The eigenmodes a Frequency step of another analysis stored (`.eig`): Modal Dynamics
+    /// and Steady State Dynamics steps without a Frequency step before them work on them.
+    /// Set by a results link of the project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stored_modes: Option<std::path::PathBuf>,
+    /// The temperatures of a step of a result file (`.frd`, the step counted from 1) the
+    /// model starts at, on every node of the file (`*INITIAL CONDITIONS, TYPE=TEMPERATURE`).
+    /// Set by a results link of the project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_temperatures: Option<(std::path::PathBuf, u32)>,
 }
 
 impl ModelProperties {
