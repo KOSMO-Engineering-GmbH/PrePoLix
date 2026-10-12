@@ -5787,3 +5787,83 @@ fn the_edge_of_a_shell_or_membrane_tied_to_a_solid_carries_its_load() {
         assert!((-0.007..-0.004).contains(&u3), "{plate_type}: U3 = {u3}");
     }
 }
+
+#[test]
+fn calculix_bends_a_box_of_a_mesh_block_held_and_loaded_on_its_sides() {
+    // A box 100 x 10 x 10 held at its side X- and pressed down on its side Z+ by 1 MPa:
+    // a cantilever under q = 10 N/mm, whose tip sinks by q L^4 / (8 E I).
+    let primitive = plx_model::MeshPrimitive::Box {
+        origin: [0.0; 3],
+        size: [100.0, 10.0, 10.0],
+        divisions: [20, 2, 2],
+        element: "C3D20R".into(),
+    };
+    let mesh = primitive.generate(ModelSpace::ThreeD, "BOX");
+    let load = Load {
+        name: "Pressure-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Surface("Z+".into()),
+        kind: LoadKind::Pressure(1.0),
+        amplitude: None,
+        factor_amplitude: None,
+    };
+    let (_, mut model) = cantilever(load);
+    model.sections[0].region = Region::Parts(vec!["BOX".into()]);
+    model.steps[0].boundary_conditions[0].region = Region::NodeSet("X-".into());
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Surface, Name=Z+, Type=Element\n"), "{text}");
+    let Some(frd) = run_ccx("box-block", &text) else {
+        return;
+    };
+    let increment = frd.increments.last().unwrap();
+    let u3 = increment.field("DISP").unwrap().component("U3").unwrap();
+    let tip = f64::from(u3.values.iter().copied().fold(f32::MAX, f32::min));
+    let inertia = 10.0 * 10.0_f64.powi(3) / 12.0;
+    let expected = -10.0 * 100.0_f64.powi(4) / (8.0 * 210_000.0 * inertia);
+    assert!(
+        (tip - expected).abs() < 0.03 * expected.abs(),
+        "{tip} against {expected}"
+    );
+}
+
+#[test]
+fn calculix_bends_a_rectangle_of_a_mesh_block_held_and_loaded_on_its_edges() {
+    // The box above as a plate in plane stress, 10 thick, pressed down on its edge Y+.
+    let primitive = plx_model::MeshPrimitive::Rectangle {
+        origin: [0.0; 2],
+        size: [100.0, 10.0],
+        divisions: [20, 2],
+        quadratic: true,
+        reduced: true,
+    };
+    let space = ModelSpace::PlaneStress;
+    let mesh = primitive.generate(space, "RECTANGLE");
+    let mut model = plane_model(
+        space,
+        10.0,
+        Vec::new(),
+        LoadKind::Pressure(1.0),
+        Region::Surface("Y+".into()),
+    );
+    model.sections[0].region = Region::Parts(vec!["RECTANGLE".into()]);
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Fixed-1".into(),
+        active: true,
+        visible: true,
+        region: Region::NodeSet("X-".into()),
+        kind: BoundaryKind::Fixed,
+        amplitude: None,
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let Some(frd) = run_ccx("rectangle-block", &text) else {
+        return;
+    };
+    let inertia = 10.0 * 10.0_f64.powi(3) / 12.0;
+    let expected = -10.0 * 100.0_f64.powi(4) / (8.0 * 210_000.0 * inertia);
+    let tip = min_u2(&frd);
+    assert!(
+        (tip - expected).abs() < 0.03 * expected.abs(),
+        "{tip} against {expected}"
+    );
+}

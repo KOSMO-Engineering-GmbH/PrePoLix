@@ -9,13 +9,14 @@ use std::time::{Duration, Instant};
 
 use egui_snarl::ui::{AnyPins, PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
-use plx_io::project::{Link, MaterialSet, Project, ProjectAnalysis, ProjectNode};
-use plx_model::{ModelProperties, ModelSpace};
+use plx_io::project::{Link, MaterialSet, MeshBlock, Project, ProjectAnalysis, ProjectNode};
+use plx_model::{MeshPrimitive, ModelProperties, ModelSpace};
 
 use crate::app::{AnalysisWindow, Request};
 use crate::icons::{self, Icon};
 use crate::links;
 use crate::material_set::{MaterialSetEditor, MaterialSetResult};
+use crate::mesh_block::{MeshBlockEditor, MeshBlockResult};
 use crate::model::PROJECT_EXTENSION;
 use crate::model_properties::{DialogResult, ModelPropertiesDialog};
 use crate::node_icons::{self, NodeIcon};
@@ -33,6 +34,8 @@ enum Kind {
     /// A collection of materials, held in the setup of its data: a source of data for
     /// analyses, which has no steps and is not solved.
     Materials,
+    /// A structured mesh made from a few parameters, held in the mesh of its data.
+    Mesh,
 }
 
 impl Kind {
@@ -46,6 +49,7 @@ impl Kind {
         match self {
             Self::Analysis => "analysis",
             Self::Materials => "materials block",
+            Self::Mesh => "mesh block",
         }
     }
 }
@@ -68,6 +72,9 @@ struct Node {
     expanded: BTreeSet<Vec<String>>,
     /// Its model space, shown in the header of its block.
     space: ModelSpace,
+    /// What a mesh block meshes, and the fingerprint of what its mesh was made from.
+    primitive: Option<MeshPrimitive>,
+    generated: Option<u64>,
 }
 
 impl Node {
@@ -92,9 +99,56 @@ impl Node {
             status: None,
             expanded,
             space,
+            primitive: None,
+            generated: None,
         };
         node.refresh_closed();
         node
+    }
+
+    /// A mesh block meshing `primitive`, with the mesh in `data` made from `generated`.
+    fn mesh_block(
+        id: u64,
+        name: String,
+        data: ProjectAnalysis,
+        primitive: MeshPrimitive,
+        generated: Option<u64>,
+    ) -> Self {
+        let mut node = Self::of_kind(Kind::Mesh, id, name, data);
+        node.primitive = Some(primitive);
+        node.generated = generated;
+        node
+    }
+
+    /// The state of a mesh block's mesh: out of date once its parameters changed.
+    fn mesh_state(&self) -> CellState {
+        let made = self
+            .data
+            .as_ref()
+            .is_some_and(|d| d.mesh.element_count() > 0);
+        match &self.primitive {
+            _ if !made => CellState::Missing,
+            Some(primitive) if Some(primitive.fingerprint(self.space)) == self.generated => {
+                CellState::UpToDate
+            }
+            _ => CellState::OutOfDate,
+        }
+    }
+
+    /// Makes a mesh block's mesh from its parameters; returns the number of elements, or
+    /// why it cannot be made.
+    fn generate(&mut self) -> Result<usize, String> {
+        let primitive = self.primitive.as_ref().ok_or("not a mesh block")?;
+        if let Some(problem) = primitive.problem(self.space) {
+            return Err(problem);
+        }
+        let mesh = primitive.generate(self.space, &primitive.label().to_uppercase());
+        let count = mesh.element_count();
+        self.generated = Some(primitive.fingerprint(self.space));
+        let data = self.data.as_mut().ok_or("no data")?;
+        data.mesh = mesh;
+        data.model.properties.space = self.space;
+        Ok(count)
     }
 
     /// A block read from the project file.
@@ -113,6 +167,19 @@ impl Node {
                 data.model.materials = set.materials;
                 data.model.properties.units = set.units;
                 Self::of_kind(Kind::Materials, set.id, set.name, data)
+            }
+            ProjectNode::Mesh(block) => {
+                let block = *block;
+                let mut data = ProjectAnalysis {
+                    id: block.id,
+                    name: block.name.clone(),
+                    position: block.position,
+                    mesh: block.mesh,
+                    ..Default::default()
+                };
+                data.model.properties.space = block.space;
+                data.model.properties.units = block.units;
+                Self::mesh_block(block.id, block.name, data, block.primitive, block.generated)
             }
         }
     }
@@ -133,6 +200,16 @@ impl Node {
                 units: data.model.properties.units,
                 materials: data.model.materials,
             }),
+            Kind::Mesh => ProjectNode::Mesh(Box::new(MeshBlock {
+                id: data.id,
+                name: data.name,
+                position,
+                space: self.space,
+                units: data.model.properties.units,
+                primitive: self.primitive.clone()?,
+                mesh: data.mesh,
+                generated: self.generated,
+            })),
         })
     }
 
@@ -219,6 +296,10 @@ enum Action {
     New(egui::Pos2),
     /// A new materials block at the position.
     AddMaterials(egui::Pos2),
+    /// A new mesh block meshing the primitive at the position.
+    AddMesh(egui::Pos2, MeshPrimitive),
+    /// Make the mesh of a mesh block anew.
+    Generate(u64),
     /// Open the analysis' window, in the workspace of a cell if given.
     Open(u64, Option<TreeView>),
     Solve(u64),
@@ -275,6 +356,10 @@ pub struct ProjectApp {
     confirm_delete: Option<u64>,
     /// The editor of a materials block.
     material_set: Option<MaterialSetEditor>,
+    /// The editor of a mesh block.
+    mesh_block: Option<MeshBlockEditor>,
+    /// Update Project made meshes anew and goes on once links took them.
+    update_after_sync: bool,
     /// The properties of a new analysis being asked for, with where its block goes.
     new_analysis: Option<(egui::Pos2, ModelPropertiesDialog)>,
     /// A project file being read on a worker thread, with notes on its conversion.
@@ -335,6 +420,8 @@ impl ProjectApp {
             rename: None,
             confirm_delete: None,
             material_set: None,
+            mesh_block: None,
+            update_after_sync: false,
             new_analysis: None,
             opening: None,
             update_queue: VecDeque::new(),
@@ -436,6 +523,120 @@ impl ProjectApp {
         id
     }
 
+    /// Adds a mesh block meshing `primitive` and makes its mesh; returns its id.
+    fn add_mesh(&mut self, position: egui::Pos2, primitive: MeshPrimitive) -> u64 {
+        let id = self.next_id();
+        let name = self.unique_name(primitive.label());
+        let space = match &primitive {
+            MeshPrimitive::Box { .. } => ModelSpace::ThreeD,
+            MeshPrimitive::Rectangle { .. } => match self.settings.new_model.space {
+                ModelSpace::ThreeD => ModelSpace::PlaneStress,
+                space => space,
+            },
+        };
+        let mut data = ProjectAnalysis {
+            id,
+            name: name.clone(),
+            ..Default::default()
+        };
+        data.model.properties.space = space;
+        data.model.properties.units = self.settings.new_model.units;
+        let mut node = Node::mesh_block(id, name.clone(), data, primitive, None);
+        let made = node.generate();
+        self.nodes.push(node);
+        self.graph.insert_node(position, id);
+        self.output.push(match made {
+            Ok(count) => format!(
+                "{name} created: {}, {count} elements. Double-click it to change its size, then \
+                 drag its mesh to analyses.",
+                space.label()
+            ),
+            Err(why) => format!("{name} created without a mesh: {why}"),
+        });
+        id
+    }
+
+    /// Makes the meshes of the mesh blocks that are out of date anew; returns whether it
+    /// made any.
+    fn generate_meshes(&mut self) -> bool {
+        let mut lines = Vec::new();
+        for node in (self.nodes.iter_mut()).filter(|n| n.kind == Kind::Mesh) {
+            if node.mesh_state() == CellState::UpToDate {
+                continue;
+            }
+            lines.push(match node.generate() {
+                Ok(count) => format!("{}: mesh made, {count} elements", node.name),
+                Err(why) => format!("{}: no mesh made: {why}", node.name),
+            });
+        }
+        if lines.is_empty() {
+            return false;
+        }
+        self.output.extend(lines);
+        self.sync_due = true;
+        true
+    }
+
+    /// Makes the mesh of one mesh block anew.
+    fn generate_mesh(&mut self, id: u64) {
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        let line = match node.generate() {
+            Ok(count) => format!("{}: mesh made, {count} elements", node.name),
+            Err(why) => format!("{}: no mesh made: {why}", node.name),
+        };
+        self.output.push(line);
+        self.sync_due = true;
+    }
+
+    fn edit_mesh(&mut self, id: u64) {
+        let linked = self.links.iter().any(|l| l.source == id);
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            return;
+        };
+        let (Some(primitive), Some(data)) = (&node.primitive, &node.data) else {
+            return;
+        };
+        self.mesh_block = Some(MeshBlockEditor::new(
+            id,
+            &node.name,
+            primitive.clone(),
+            node.space,
+            data.model.properties.units,
+            linked,
+        ));
+    }
+
+    fn mesh_block_window(&mut self, ctx: &egui::Context) {
+        let Some(editor) = &mut self.mesh_block else {
+            return;
+        };
+        let id = editor.id;
+        match editor.show(ctx) {
+            MeshBlockResult::Open => {}
+            MeshBlockResult::Cancel => self.mesh_block = None,
+            MeshBlockResult::Ok(primitive, space, units) => {
+                self.mesh_block = None;
+                if let Some(node) = self.node(id) {
+                    node.primitive = Some(primitive);
+                    node.space = space;
+                    if let Some(data) = &mut node.data {
+                        data.model.properties.units = units;
+                    }
+                    if node.mesh_state() == CellState::OutOfDate {
+                        let line = format!(
+                            "{}: the mesh is out of date; Update Project or Generate Mesh \
+                             makes it anew.",
+                            node.name
+                        );
+                        self.output.push(line);
+                    }
+                }
+            }
+        }
+    }
+
     /// Opens the editor of a materials block, with the materials of the analyses to import.
     fn edit_materials(&mut self, id: u64) {
         let analyses = (self.nodes.iter())
@@ -491,6 +692,10 @@ impl ProjectApp {
                 // Asked for from an analysis window: the editor is in the project window.
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 return self.edit_materials(id);
+            }
+            Some(Kind::Mesh) => {
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                return self.edit_mesh(id);
             }
             None => return,
         }
@@ -777,13 +982,15 @@ impl ProjectApp {
             return;
         };
         let name = format!("Copy of {}", node.name);
-        let kind = node.kind;
+        let (kind, primitive, generated) = (node.kind, node.primitive.clone(), node.generated);
         let new_id = self.next_id();
         let name = self.unique_name(&name);
         data.id = new_id;
         data.name = name.clone();
-        self.nodes
-            .push(Node::of_kind(kind, new_id, name.clone(), data));
+        self.nodes.push(match primitive {
+            Some(primitive) => Node::mesh_block(new_id, name.clone(), data, primitive, generated),
+            None => Node::of_kind(kind, new_id, name.clone(), data),
+        });
         self.graph.insert_node(position, new_id);
         self.output.push(format!("{name} created"));
     }
@@ -804,12 +1011,21 @@ impl ProjectApp {
         if self.material_set.as_ref().is_some_and(|e| e.id == id) {
             self.material_set = None;
         }
+        if self.mesh_block.as_ref().is_some_and(|e| e.id == id) {
+            self.mesh_block = None;
+        }
         self.update_queue.retain(|&queued| queued != id);
     }
 
     /// Ansys Workbench's Update Project: solves every analysis that is not up to date, one
     /// after the other.
     fn update_project(&mut self) {
+        // Mesh blocks first: what links their meshes takes the new one before it is found
+        // out of date, so the update goes on once the links are brought up to date.
+        if self.generate_meshes() {
+            self.update_after_sync = true;
+            return;
+        }
         let mut skipped = Vec::new();
         self.update_queue.clear();
         // Sources before their targets; a submodel is solved again after its global model.
@@ -971,6 +1187,17 @@ impl ProjectApp {
                 {
                     self.add_materials(self.free_position());
                 }
+                ui.menu_button("Add Mesh", |ui| {
+                    for primitive in [
+                        MeshPrimitive::default_box(),
+                        MeshPrimitive::default_rectangle(),
+                    ] {
+                        let tip = mesh_tip(&primitive);
+                        if ui.button(primitive.label()).on_hover_text(tip).clicked() {
+                            self.add_mesh(self.free_position(), primitive);
+                        }
+                    }
+                });
                 ui.separator();
                 let update = egui::Button::new("Update Project");
                 if ui.add(update).on_hover_text(UPDATE_TIP).clicked() {
@@ -1071,6 +1298,7 @@ impl ProjectApp {
                     (Kind::Materials, _) => fe
                         .map(|fe| material_rows(fe, &n.expanded))
                         .unwrap_or_default(),
+                    (Kind::Mesh, _) => mesh_rows(n),
                     (Kind::Analysis, Some(status)) => block_rows(
                         status,
                         fe,
@@ -2047,6 +2275,8 @@ impl ProjectApp {
     /// Solves the analyses whose results `id` needs and that have none yet, in the order of
     /// the links, then `id`.
     fn solve_chain(&mut self, id: u64) {
+        // The solve waits for the links to bring a new mesh.
+        self.generate_meshes();
         let mut sources = Vec::new();
         let mut queue = vec![id];
         while let Some(target) = queue.pop() {
@@ -2073,6 +2303,10 @@ impl ProjectApp {
             Action::AddMaterials(pos) => {
                 self.add_materials(pos);
             }
+            Action::AddMesh(pos, primitive) => {
+                self.add_mesh(pos, primitive);
+            }
+            Action::Generate(id) => self.generate_mesh(id),
             Action::Open(id, view) => self.open_window(ctx, id, view),
             Action::Solve(id) => self.solve_chain(id),
             Action::Rename(id) => {
@@ -2174,6 +2408,9 @@ impl ProjectApp {
             if let Some(editor) = self.material_set.as_mut().filter(|e| e.id == id) {
                 editor.rename(&name);
             }
+            if let Some(editor) = self.mesh_block.as_mut().filter(|e| e.id == id) {
+                editor.rename(&name);
+            }
         } else if open {
             self.rename = Some((id, name));
         }
@@ -2191,6 +2428,7 @@ impl ProjectApp {
         let what = match kind {
             Kind::Analysis => "with its model and results",
             Kind::Materials => "with its materials",
+            Kind::Mesh => "with its mesh",
         };
         let users = (self.links.iter())
             .filter(|l| l.source == id)
@@ -2467,10 +2705,15 @@ impl eframe::App for ProjectApp {
         self.rename_window(&ctx);
         self.confirm_delete_window(&ctx);
         self.material_set_window(&ctx);
+        self.mesh_block_window(&ctx);
         self.new_analysis_window(&ctx);
         self.settings_window(&ctx);
         self.updater.show(&ctx, &mut self.output);
         self.sync_links(&ctx);
+        if self.update_after_sync && !self.sync_due {
+            self.update_after_sync = false;
+            self.update_project();
+        }
         self.run_update(&ctx);
         self.analysis_windows(&ctx);
     }
@@ -2737,6 +2980,55 @@ fn material_rows(fe: &plx_model::FeModel, expanded: &BTreeSet<Vec<String>>) -> V
     rows
 }
 
+/// The row of a mesh block: its mesh, to link to analyses, with its state.
+fn mesh_rows(node: &Node) -> Vec<Row> {
+    let state = node.mesh_state();
+    let mesh = node.data.as_ref().map(|d| &d.mesh);
+    let count = mesh.map_or(0, plx_mesh::FeMesh::element_count);
+    let element = (mesh.and_then(|m| m.elements().first())).map_or("", |e| e.type_name.as_str());
+    let sides = mesh.map_or_else(String::new, |m| {
+        m.node_sets.keys().cloned().collect::<Vec<_>>().join(", ")
+    });
+    let mut tip = format!("Mesh: {}", state.text());
+    if state == CellState::OutOfDate {
+        tip = "Mesh: out of date: Update Project or Generate Mesh makes it again".into();
+    }
+    if count > 0 {
+        tip.push_str(&format!(
+            "\n{count} elements {element}, sides {sides} as node sets and surfaces.\nDrag it \
+             to the Mesh row of an analysis to link it."
+        ));
+    }
+    vec![Row {
+        path: vec![links::MESH.to_owned()],
+        text: links::MESH.to_owned(),
+        depth: 0,
+        icon: NodeIcon::Mesh,
+        state: Some(state),
+        expander: None,
+        input: false,
+        output: count > 0,
+        linked_from: None,
+        collection: false,
+        partial: false,
+        tip,
+    }]
+}
+
+/// Tooltip of an Add Mesh entry.
+fn mesh_tip(primitive: &MeshPrimitive) -> &'static str {
+    match primitive {
+        MeshPrimitive::Box { .. } => {
+            "Adds a block that meshes a box with hexahedra, for 3D analyses; its sides are \
+             node sets and surfaces X-, X+, Y-, Y+, Z-, Z+."
+        }
+        MeshPrimitive::Rectangle { .. } => {
+            "Adds a block that meshes a rectangle with quadrilaterals, for 2D analyses; its \
+             sides are node sets and surfaces X-, X+, Y-, Y+."
+        }
+    }
+}
+
 /// The row of all materials of a materials block, open when the block is added.
 fn material_set_path() -> Vec<String> {
     vec![links::SETUP.to_owned(), "Materials".to_owned()]
@@ -2840,7 +3132,7 @@ impl SnarlViewer<u64> for Viewer {
         };
         let (rect, icon) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
         match block.kind {
-            Kind::Analysis => {
+            Kind::Analysis | Kind::Mesh => {
                 paint_space(ui.painter(), rect, block.space, ui.visuals().text_color());
                 icon.on_hover_text(format!("Model space: {}", block.space.label()));
             }
@@ -2869,6 +3161,7 @@ impl SnarlViewer<u64> for Viewer {
         let tip = match kind {
             Kind::Analysis => "Double-click opens the analysis in its own window.",
             Kind::Materials => "Double-click edits the materials.",
+            Kind::Mesh => "Double-click edits the size and division of the mesh.",
         };
         // The name takes the clicks of the header, so it opens the block's menu too.
         label.on_hover_text(tip).context_menu(|ui| {
@@ -3106,6 +3399,18 @@ impl SnarlViewer<u64> for Viewer {
             self.actions.push(Action::AddMaterials(pos));
             ui.close();
         }
+        ui.menu_button("Add Mesh", |ui| {
+            for primitive in [
+                MeshPrimitive::default_box(),
+                MeshPrimitive::default_rectangle(),
+            ] {
+                let tip = mesh_tip(&primitive);
+                if ui.button(primitive.label()).on_hover_text(tip).clicked() {
+                    self.actions.push(Action::AddMesh(pos, primitive));
+                    ui.close();
+                }
+            }
+        });
     }
 
     /// Header bands tinted by the kind of block, like the node groups of Blender.
@@ -3123,6 +3428,7 @@ impl SnarlViewer<u64> for Viewer {
             .map(|b| b.kind)
         {
             Some(Kind::Materials) => default.fill(crate::style::materials_header()),
+            Some(Kind::Mesh) => default.fill(crate::style::mesh_header()),
             _ => default,
         }
     }
@@ -3342,6 +3648,9 @@ fn node_menu(
     if kind.is_source() {
         // Sources have no steps and are not solved.
         entry(ui, "Edit …", Action::Open(id, None));
+        if kind == Kind::Mesh {
+            entry(ui, "Generate Mesh", Action::Generate(id));
+        }
         ui.separator();
         entry(ui, "Rename …", Action::Rename(id));
         entry(ui, "Duplicate", Action::Duplicate(id));
@@ -3515,6 +3824,48 @@ mod tests {
             Some(ProjectNode::Materials(written)) => assert_eq!(written, set),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_mesh_block_is_out_of_date_once_its_parameters_change() {
+        let block = MeshBlock {
+            id: 2,
+            name: "Box".into(),
+            position: [0.0; 2],
+            space: ModelSpace::ThreeD,
+            units: plx_model::UnitSystem::MmTonSC,
+            primitive: MeshPrimitive::default_box(),
+            mesh: Default::default(),
+            generated: None,
+        };
+        let mut node = Node::read(ProjectNode::Mesh(Box::new(block)));
+        assert_eq!(node.kind, Kind::Mesh);
+        assert_eq!(node.mesh_state(), CellState::Missing);
+        assert_eq!(node.generate(), Ok(40));
+        assert_eq!(node.mesh_state(), CellState::UpToDate);
+        let data = node.link_data().unwrap();
+        let mesh = vec![links::MESH.to_owned()];
+        assert!(links::exists(data, &mesh));
+        assert_eq!(links::MeshCopy::of(data).mesh.node_sets.len(), 6);
+        let rows = mesh_rows(&node);
+        assert!(rows[0].output && !rows[0].input);
+        node.primitive = Some(MeshPrimitive::Box {
+            origin: [0.0; 3],
+            size: [0.1, 0.02, 0.02],
+            divisions: [20, 2, 2],
+            element: "C3D8I".into(),
+        });
+        assert_eq!(node.mesh_state(), CellState::OutOfDate);
+        match node.written([1.0, 2.0]) {
+            Some(ProjectNode::Mesh(written)) => {
+                assert_eq!(written.mesh.element_count(), 40);
+                assert_eq!(written.primitive, node.primitive.clone().unwrap());
+                assert_eq!(written.position, [1.0, 2.0]);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(node.generate(), Ok(80));
+        assert_eq!(node.mesh_state(), CellState::UpToDate);
     }
 
     #[test]

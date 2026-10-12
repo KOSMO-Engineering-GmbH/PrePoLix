@@ -174,6 +174,14 @@ pub fn materials_header() -> Color32 {
         Color32::from_rgb(236, 222, 204)
     }
 }
+/// Header band of a mesh block in the project schematic: a muted green-grey.
+pub fn mesh_header() -> Color32 {
+    if dark() {
+        Color32::from_rgb(54, 74, 58)
+    } else {
+        Color32::from_rgb(212, 230, 214)
+    }
+}
 /// Outline of the pins of the project schematic.
 pub fn pin_edge() -> Color32 {
     if dark() {

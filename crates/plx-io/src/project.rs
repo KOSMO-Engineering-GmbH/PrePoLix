@@ -77,6 +77,8 @@ pub enum ProjectNode {
     Analysis(Box<ProjectAnalysis>),
     /// A collection of materials kept in the project, unlike the user's material library.
     Materials(MaterialSet),
+    /// A mesh made from a few parameters, such as a box.
+    Mesh(Box<MeshBlock>),
 }
 
 impl ProjectNode {
@@ -85,6 +87,7 @@ impl ProjectNode {
         match self {
             Self::Analysis(a) => a.id,
             Self::Materials(m) => m.id,
+            Self::Mesh(m) => m.id,
         }
     }
 
@@ -92,6 +95,7 @@ impl ProjectNode {
         match self {
             Self::Analysis(a) => &a.name,
             Self::Materials(m) => &m.name,
+            Self::Mesh(m) => &m.name,
         }
     }
 
@@ -100,8 +104,32 @@ impl ProjectNode {
         match self {
             Self::Analysis(a) => a.position,
             Self::Materials(m) => m.position,
+            Self::Mesh(m) => m.position,
         }
     }
+}
+
+/// A block that makes a structured mesh for analyses to link, with its sides as node sets
+/// and surfaces.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MeshBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The model space of the analyses that link it.
+    pub space: plx_model::ModelSpace,
+    /// The unit system its parameters are shown in; they are stored in SI units.
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    pub primitive: plx_model::MeshPrimitive,
+    /// The mesh as last made.
+    #[serde(default)]
+    pub mesh: FeMesh,
+    /// Fingerprint of the parameters the mesh was made from, see
+    /// [`plx_model::MeshPrimitive::fingerprint`]; the mesh is out of date once it differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<u64>,
 }
 
 /// A block that holds materials for analyses to link, item by item or all of them.
@@ -619,7 +647,7 @@ mod tests {
     }
 
     #[test]
-    fn material_sets_read_back_and_older_projects_become_nodes() {
+    fn source_blocks_read_back_and_older_projects_become_nodes() {
         let dir = std::env::temp_dir().join(format!("plx-nodes-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("nodes.plx");
@@ -636,6 +664,18 @@ mod tests {
         };
         let mut saved = single(None, &FeMesh::default(), &FeModel::default(), None);
         saved.nodes.push(ProjectNode::Materials(set.clone()));
+        let primitive = plx_model::MeshPrimitive::default_box();
+        let space = plx_model::ModelSpace::ThreeD;
+        saved.nodes.push(ProjectNode::Mesh(Box::new(MeshBlock {
+            id: 5,
+            name: "Box".into(),
+            position: [0.0, 0.0],
+            space,
+            units: plx_model::UnitSystem::MmTonSC,
+            mesh: primitive.generate(space, "Box"),
+            generated: Some(primitive.fingerprint(space)),
+            primitive: primitive.clone(),
+        })));
         saved.links.push(Link {
             source: 3,
             target: 1,
@@ -649,7 +689,16 @@ mod tests {
         assert!(text.contains(&format!("format:{PROJECT_FORMAT}")));
         assert!(!text.contains("analyses:"), "{text}");
         let project = read_project(&path).unwrap();
-        assert_eq!(project.nodes.len(), 2);
+        assert_eq!(project.nodes.len(), 3);
+        match &project.nodes[2] {
+            ProjectNode::Mesh(block) => {
+                assert_eq!(block.primitive, primitive);
+                assert_eq!(block.generated, Some(primitive.fingerprint(space)));
+                assert_eq!(block.mesh.element_count(), 40);
+                assert_eq!(block.mesh.surfaces.len(), 6);
+            }
+            other => panic!("{other:?}"),
+        }
         assert_eq!(
             (project.nodes[0].id(), project.nodes[0].name()),
             (1, "Analysis-1")

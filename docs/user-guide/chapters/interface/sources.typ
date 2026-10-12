@@ -46,3 +46,44 @@ the block's editor.
 
 #ui("OK") keeps the changes, and the analyses that link the block take them at once;
 #ui("Cancel") drops them.
+
+=== Box and Rectangle meshes <mesh-block>
+
+A mesh block makes a structured mesh from a few numbers, without geometry and without Gmsh:
+#menu("Project", "Add Mesh", "Box") meshes a box with hexahedra for 3D analyses,
+#menu("Project", "Add Mesh", "Rectangle") a rectangle in the X-Y plane with quadrilaterals for
+2D analyses. Link its #ui("Mesh") row to the #ui("Mesh") row of analyses of the same model
+space; several analyses can share one mesh block.
+
+#screenshot("mesh-block.png", [A box linked to an analysis; its mesh is out of date after its
+  division changed])
+
+Its sides are node sets and surfaces at once, named after the axis and the side they lie on:
+#ui("X-") at the smallest X, #ui("X+") at the largest, then #ui("Y-"), #ui("Y+") and, for a
+box, #ui("Z-") and #ui("Z+"). Boundary conditions and loads pick them under #ui("Node set") or
+#ui("Surface") without selecting anything. The elements form the part #ui("BOX") or
+#ui("RECTANGLE"), which a section takes.
+
+#screenshot("mesh-block-editor.png", [The parameters of a box])
+
+#fields(
+  [Model space], [Rectangle only: plane stress, plane strain or axisymmetric. It is fixed while
+    analyses link the mesh, which have the same model space. An axisymmetric rectangle lies at
+    X >= 0, as X is the radius.],
+  [Shown in], [The unit system the lengths are shown and typed in; they are stored in SI
+    units.],
+  [Origin], [The corner at the smallest coordinates.],
+  [Edge lengths], [The size along each axis.],
+  [Elements along], [The number of elements along each axis.],
+  [Element type], [Box: C3D8, C3D8R, C3D8I, C3D20 or C3D20R. Rectangle: #ui("Quadratic")
+    gives 8-node instead of 4-node elements, #ui("Reduced integration") the R types; the family
+    (CPS, CPE or CAX) follows from the model space.],
+)
+
+The line below the fields counts the elements and names the sides. #ui("OK") keeps the
+parameters, and the #ui("Mesh") row of the block shows that its mesh is out of date.
+#ui("Update Project") makes it anew before it solves (@update-project), and so does
+#ui("Generate Mesh") in the block's context menu; the analyses that link it take the new mesh,
+and their solutions are out of date.
+
+#screenshot("mesh-block-result.png", [The box held at X- and pressed on Z+, solved])

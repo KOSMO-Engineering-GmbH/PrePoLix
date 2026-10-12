@@ -20,6 +20,7 @@ mod history;
 pub mod library;
 mod mesh_set;
 mod moving_load;
+mod primitive;
 mod properties;
 mod region;
 mod section;
@@ -51,6 +52,7 @@ pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use library::MaterialLibrary;
 pub use mesh_set::{MeshSet, SetKind};
 pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel, load_stations};
+pub use primitive::{MAX_PRIMITIVE_ELEMENTS, MeshPrimitive};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
 pub use section::{
