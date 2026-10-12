@@ -3089,12 +3089,14 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// The workspace a double-click on the row at `path` opens the analysis in: Geometry and
-/// Mesh in the Geometry workspace, the setup in the FE Model workspace, Results in the
-/// Results workspace.
+/// Mesh in the Geometry workspace, the setup and the steps in the FE Model workspace,
+/// Results in the Results workspace.
 fn workspace_of(path: &[String]) -> Option<TreeView> {
     match path.first().map(String::as_str) {
         Some(links::GEOMETRY | links::MESH) => Some(TreeView::Geometry),
         Some(links::SETUP) => Some(TreeView::FeModel),
+        // The rows of the steps stand for the steps of the setup.
+        Some(links::RESULTS) if path.len() > 1 => Some(TreeView::FeModel),
         Some(links::RESULTS) => Some(TreeView::Results),
         _ => None,
     }
@@ -4632,6 +4634,24 @@ fn timestamped(message: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rows_open_the_analysis_in_their_workspace() {
+        use super::{TreeView, workspace_of};
+        let path = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(workspace_of(&path(&["Geometry"])), Some(TreeView::Geometry));
+        assert_eq!(workspace_of(&path(&["Mesh"])), Some(TreeView::Geometry));
+        assert_eq!(
+            workspace_of(&path(&["Setup", "Steps"])),
+            Some(TreeView::FeModel)
+        );
+        assert_eq!(workspace_of(&path(&["Results"])), Some(TreeView::Results));
+        assert_eq!(
+            workspace_of(&path(&["Results", "Step-1"])),
+            Some(TreeView::FeModel)
+        );
+        assert_eq!(workspace_of(&path(&["State"])), None);
+    }
+
     use super::*;
     use std::collections::HashMap;
 
