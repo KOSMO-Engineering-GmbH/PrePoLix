@@ -1734,8 +1734,10 @@ impl ProjectApp {
             .style(schematic_style())
             .show(&mut self.graph, &mut viewer, ui);
         // A double-click into empty space shows the blocks to add there, as in Blender.
+        // The response lies on the zoomed and panned layer of the schematic, so its pointer
+        // position is in the schematic; the picker needs the one on the screen.
         if response.double_clicked()
-            && let Some(screen) = response.interact_pointer_pos()
+            && let Some(screen) = ui.ctx().input(|i| i.pointer.interact_pos())
         {
             let graph = viewer.to_global.inverse() * screen;
             self.picker = Some(NodePicker::new(screen, graph));
