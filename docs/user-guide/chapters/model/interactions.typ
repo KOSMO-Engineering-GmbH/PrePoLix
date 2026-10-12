@@ -62,15 +62,26 @@ pairs refer to. Move the models you need from #ui("Available") to #ui("Selected"
     contacts: #ui("Linear") (stiffness K, about 5 to 50 times Young's modulus per length, and
     tension at large clearance σ#sub[∞]), #ui("Exponential") (pressure p#sub[0] at zero gap,
     dropping to 1 % at gap c#sub[0]; helps convergence from open contact), #ui("Tabular") (your
-    own curve) or #ui("Tied") (the surfaces stay connected with stiffness K).],
+    own curve) or #ui("Tied") (the surfaces stay connected with stiffness K, see below).],
   [Friction], [Coulomb friction: the tangential force is limited to #ui("Friction coefficient")
     times the contact pressure. The optional #ui("Stick slope") is the stiffness while sticking;
-    CalculiX chooses it if empty. Friction makes the analysis more nonlinear, so start with
+    if empty, PrePoLix writes CalculiX's default, half the Young's modulus of the first
+    material. Friction makes the analysis more nonlinear, so start with
     small coefficients and enough increments.],
   [Gap Conductance], [Heat transfer across the contact, constant or as a table over pressure
     and temperature, for thermal and coupled steps. Without it the contact is thermally
     insulating.],
 )
+
+A #ui("Tied") surface behavior glues the surfaces together, like a Tie, but as a penalty contact.
+CalculiX needs #ui("Friction") with it in the same surface interaction: the #ui("Stick slope")
+is the stiffness of the tie along the surfaces (half the Young's modulus of the first material if
+empty), the friction coefficient is irrelevant. Without friction the run
+aborts. So choosing #ui("Tied") adds #ui("Friction") to the selected models at once, and the
+dialog does not accept a tied interaction without it. Tied contact works only with the method
+#ui("Surface to surface"). The model check reports contact pairs that use it otherwise.
+
+#screenshot("surface-interaction-tied.png", [Choosing Tied adds Friction])
 
 === Contact pairs
 
@@ -99,7 +110,7 @@ In 3D models the master and slave regions can also be edges of shells and membra
 shell meets a solid face edge on: a click near a free edge of a shell picks the edge, and so do
 #ui("Edge angle") and, under #ui("More"), #ui("Edge"). CalculiX takes such an edge as a face of
 the shell (S3 and up). For a contact on a shell edge use #ui("Surface to surface") with a
-#ui("Tied") surface behavior; CalculiX needs a #ui("Stick slope") under #ui("Friction") for it.
+#ui("Tied") surface behavior (with its #ui("Friction"), see above).
 
 ==== Which method?
 

@@ -2546,6 +2546,49 @@ fn calculix_carries_the_load_across_a_contact() {
     }
 }
 
+/// A tied contact carries shear too. Its stiffness along the surfaces is the stick slope of
+/// the friction; without one CalculiX 2.23 does not take its default (half Young's modulus of
+/// the first material) and gives up, so the writer puts the default in.
+#[test]
+fn calculix_carries_shear_across_a_tied_contact_without_stick_slope() {
+    let (mesh, lower, upper) = two_blocks(0.0);
+    let mut model = stacked_blocks(&mesh);
+    // The top of the upper block is pushed sideways.
+    let top: Vec<NodeId> = (110..=118).collect();
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Shift-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(top.clone()),
+        kind: BoundaryKind::Displacement([Some(0.001), None, None, None, None, None]),
+        amplitude: None,
+    });
+    model.surface_interactions.push(SurfaceInteraction {
+        name: "Tied".into(),
+        properties: vec![
+            InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tied { k: 1e7 }),
+            InteractionProperty::Friction(plx_model::Friction::default()),
+        ],
+    });
+    let mut pair = ContactPair::new("Contact_Pair-1", "Tied");
+    pair.master = Region::Faces(lower);
+    pair.slave = Region::Faces(upper);
+    model.contact_pairs.push(pair);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Friction\n0.1, 105000\n"), "{text}");
+    let Some(frd) = run_ccx("kontakt-tied", &text) else {
+        return;
+    };
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let shear = node_sum(&frd, "FORC", "F1", &bottom);
+    let pushed = node_sum(&frd, "FORC", "F1", &top);
+    assert!(shear < -10.0, "{shear}");
+    assert!(
+        (shear + pushed).abs() < 1e-3 * pushed.abs(),
+        "{shear} {pushed}"
+    );
+}
+
 /// Plane strain: a strip of 4 x 1 resting on another of the same size only by contact on
 /// their edges carries the pressure on its top into the supports of the lower one.
 #[test]

@@ -20,6 +20,32 @@ pub struct SurfaceInteraction {
     pub properties: Vec<InteractionProperty>,
 }
 
+impl SurfaceInteraction {
+    /// Whether the surface behavior is tied.
+    pub fn is_tied(&self) -> bool {
+        (self.properties.iter()).any(|p| {
+            matches!(
+                p,
+                InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tied { .. })
+            )
+        })
+    }
+
+    pub fn has_friction(&self) -> bool {
+        (self.properties.iter()).any(|p| matches!(p, InteractionProperty::Friction(_)))
+    }
+
+    /// Adds the friction CalculiX requires with a tied surface behavior: its stick slope is
+    /// the stiffness of the tie along the surfaces. Returns whether it was added.
+    pub fn add_friction_if_tied(&mut self) -> bool {
+        let add = self.is_tied() && !self.has_friction();
+        if add {
+            (self.properties).push(InteractionProperty::Friction(Friction::default()));
+        }
+        add
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum InteractionProperty {
     SurfaceBehavior(SurfaceBehavior),

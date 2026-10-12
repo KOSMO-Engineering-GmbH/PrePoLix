@@ -15,8 +15,8 @@ use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 use crate::{Region, SymmetryPlane, symmetry_dofs, symmetry_plane};
 
 use crate::{
-    BoundaryKind, Constraint, DefinedFieldKind, FeModel, LoadKind, Material, ModelItem, ModelSpace,
-    SectionKind, StepKind,
+    BoundaryKind, Constraint, ContactMethod, DefinedFieldKind, FeModel, LoadKind, Material,
+    ModelItem, ModelSpace, SectionKind, StepKind,
 };
 
 /// Whether CalculiX aborts or the results are likely wrong.
@@ -94,6 +94,9 @@ pub enum Problem {
     ContactIgnored,
     /// Contact pairs in a complex frequency step: the Coriolis coupling goes wrong.
     ContactWithCoriolis,
+    /// A contact pair with tied surface behavior that CalculiX rejects: without friction in
+    /// its surface interaction or with another method than surface to surface.
+    InvalidTiedContact,
     /// A wheel of a moving load that is off the selected surface at some positions.
     WheelOffSurface,
     /// Found in the solver output only.
@@ -170,6 +173,7 @@ impl Problem {
             Problem::NoRotation => "No rotation",
             Problem::ContactIgnored => "Contact ignored",
             Problem::ContactWithCoriolis => "Contact with Coriolis",
+            Problem::InvalidTiedContact => "Tied contact not possible like this",
             Problem::WheelOffSurface => "Wheel off the surface",
             Problem::NoConvergence => "No convergence",
             Problem::MpcAndSpc => "Degree of freedom bound twice",
@@ -381,6 +385,14 @@ impl Problem {
                  pairs, tied ones included, are left out without a message: parts held only \
                  by them float and give eigenfrequencies near zero or on weak springs."
             }
+            Problem::InvalidTiedContact => {
+                "CalculiX offers the Tied surface behavior only for Surface to surface \
+                 contact pairs, and it needs a Friction model in the same surface \
+                 interaction: the stick slope of the friction is the stiffness of the tie \
+                 along the surfaces (the friction coefficient is irrelevant). Without \
+                 friction the run aborts with \"a stick slope using the *FRICTION card is \
+                 mandatory\"; with Node to surface it aborts too, and Mortar fails."
+            }
             Problem::ContactWithCoriolis => {
                 "CalculiX computes the Coriolis coupling of a Complex Frequency step without \
                  the contact springs of the Frequency step. With parts joined by contact \
@@ -562,6 +574,11 @@ impl Problem {
             Problem::ContactIgnored => {
                 "Tick Perturbation in the Frequency step (after a static step), or join \
                  bonded parts with a Tie constraint instead of a tied contact pair (Interaction > Create Tie)."
+            }
+            Problem::InvalidTiedContact => {
+                "Edit the surface interaction and add Friction, and set the method of the \
+                 contact pairs to Surface to surface. To bond parts, a Tie (Interaction > \
+                 Create Tie) works with every method."
             }
             Problem::ContactWithCoriolis => {
                 "Join bonded parts with a Tie constraint (Interaction > Create Tie) instead \
@@ -797,6 +814,7 @@ impl FeModel {
             }
         }
         self.check_cyclic_symmetry(&mut findings);
+        self.check_tied_contacts(&mut findings);
         let trusses = Trusses::new(self, mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             self.check_step(s, mesh, mesh_check, &trusses, &mut findings);
@@ -891,6 +909,37 @@ impl FeModel {
         }
         findings.sort_by_key(|f| f.severity());
         findings
+    }
+
+    /// Contact pairs with tied surface behavior CalculiX rejects.
+    fn check_tied_contacts(&self, findings: &mut Vec<Finding>) {
+        for (i, pair) in self.contact_pairs.iter().enumerate() {
+            let Some(interaction) = (self.surface_interactions.iter())
+                .find(|s| s.name == pair.interaction)
+                .filter(|_| pair.active)
+            else {
+                continue;
+            };
+            if !interaction.is_tied() {
+                continue;
+            }
+            let mut reasons = Vec::new();
+            if !interaction.has_friction() {
+                reasons.push(format!("{} has no Friction", interaction.name));
+            }
+            if pair.method != ContactMethod::SurfaceToSurface {
+                reasons.push(format!("method {}", pair.method.name()));
+            }
+            if reasons.is_empty() {
+                continue;
+            }
+            let detail = format!("{}: tied, but {}", pair.name, reasons.join(" and "));
+            findings.push(Finding::new(
+                ModelItem::ContactPair(i),
+                Problem::InvalidTiedContact,
+                detail,
+            ));
+        }
     }
 
     fn check_materials(&self, findings: &mut Vec<Finding>) {
@@ -2271,6 +2320,7 @@ mod tests {
         BoundaryCondition, ContactPair, Elastic, Hardening, Load, Material, Plastic, PlasticPoint,
         ReferencePoint, Region, RigidBody, Section, Step, SurfaceInteraction, Tie,
     };
+    use crate::{InteractionProperty, SurfaceBehavior};
 
     /// Unit cubes side by side along x, one C3D8 and one part each; neighbours share nodes
     /// when `joined`.
@@ -2732,6 +2782,41 @@ mod tests {
         );
         model.contact_pairs[0].active = false;
         assert_eq!(modal(&model), []);
+    }
+
+    #[test]
+    fn tied_contact_needs_friction_and_surface_to_surface() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        model
+            .contact_pairs
+            .push(ContactPair::new("Contact_Pair-1", "Tied"));
+        model.surface_interactions.push(SurfaceInteraction {
+            name: "Tied".into(),
+            properties: vec![InteractionProperty::SurfaceBehavior(
+                SurfaceBehavior::Tied { k: 1e7 },
+            )],
+        });
+        let tied = |model: &FeModel| {
+            (check(model, &mesh).into_iter())
+                .filter(|f| f.problem == Problem::InvalidTiedContact)
+                .map(|f| f.detail)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            tied(&model),
+            ["Contact_Pair-1: tied, but Tied has no Friction"]
+        );
+        (model.surface_interactions[0].properties)
+            .push(InteractionProperty::Friction(crate::Friction::default()));
+        assert_eq!(tied(&model), Vec::<String>::new());
+        model.contact_pairs[0].method = ContactMethod::NodeToSurface;
+        assert_eq!(
+            tied(&model),
+            ["Contact_Pair-1: tied, but method Node to surface"]
+        );
+        model.contact_pairs[0].active = false;
+        assert_eq!(tied(&model), Vec::<String>::new());
     }
 
     #[test]
