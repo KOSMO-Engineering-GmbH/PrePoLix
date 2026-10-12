@@ -20,6 +20,7 @@ use crate::model_properties::{DialogResult, ModelPropertiesDialog};
 use crate::node_icons::{self, NodeIcon};
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::status::{self, AnalysisStatus, CellState};
+use crate::tree::TreeView;
 
 /// Storage key of the project file open at exit, reopened at the next start.
 const LAST_PROJECT_KEY: &str = "last_project";
@@ -128,8 +129,8 @@ enum Payload {
 /// What the user did in the schematic, done after it is drawn.
 enum Action {
     New(egui::Pos2),
-    /// Open the analysis' window, on the tab of a cell if given.
-    Open(u64),
+    /// Open the analysis' window, in the workspace of a cell if given.
+    Open(u64, Option<TreeView>),
     Solve(u64),
     Rename(u64),
     Duplicate(u64),
@@ -269,7 +270,7 @@ impl ProjectApp {
             let properties = app.settings.new_model.clone();
             let id = app.add_analysis(&name, egui::pos2(40.0, 40.0), properties);
             app.startup_import = files;
-            app.open_window(&cc.egui_ctx, id);
+            app.open_window(&cc.egui_ctx, id, None);
         } else if let Some(path) = cc.storage.and_then(stored_last_project) {
             // Without files on the command line, the project open at the last exit opens.
             app.open(&cc.egui_ctx, path);
@@ -330,7 +331,7 @@ impl ProjectApp {
             .map(|(graph_id, _)| graph_id)
     }
 
-    fn open_window(&mut self, ctx: &egui::Context, id: u64) {
+    fn open_window(&mut self, ctx: &egui::Context, id: u64, view: Option<TreeView>) {
         let path = self.model_path();
         let folder = crate::analysis::job_name(&self.project_name());
         let (render_state, settings) = (self.render_state.clone(), self.settings.clone());
@@ -346,6 +347,9 @@ impl ProjectApp {
             // Brought to the front.
             let viewport = analysis_viewport(id);
             ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
+            if let (Some(view), Some(window)) = (view, &mut node.window) {
+                window.show_workspace(view);
+            }
             return;
         }
         let Some(data) = node.data.take() else {
@@ -354,6 +358,9 @@ impl ProjectApp {
         let mut window = AnalysisWindow::new(render_state, settings, &node.name);
         window.set_project_folder(folder);
         window.set_links(incoming, Vec::new());
+        if let Some(view) = view {
+            window.show_workspace(view);
+        }
         window.load(ctx, path, data);
         if !import.is_empty() {
             window.import_after_load(import);
@@ -722,7 +729,7 @@ impl ProjectApp {
                 return;
             };
             let opened = self.node(id).is_some_and(|n| n.window.is_none());
-            self.open_window(ctx, id);
+            self.open_window(ctx, id, None);
             self.updating.push((id, opened));
             if let Some(window) = self.node(id).and_then(|n| n.window.as_mut()) {
                 window.solve_when_loaded();
@@ -1676,7 +1683,7 @@ impl ProjectApp {
     fn act(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::New(pos) => self.ask_new_analysis(pos),
-            Action::Open(id) => self.open_window(ctx, id),
+            Action::Open(id, view) => self.open_window(ctx, id, view),
             Action::Solve(id) => self.solve_chain(id),
             Action::Rename(id) => {
                 let name = self
@@ -1942,7 +1949,7 @@ impl ProjectApp {
                 Request::OpenAnalysis(name) => {
                     if let Some(source) = self.nodes.iter().find(|n| n.name == name) {
                         let source = source.id;
-                        self.open_window(ctx, source);
+                        self.open_window(ctx, source, None);
                     }
                 }
                 // Unlinking what a state link took makes the analysis independent.
@@ -1951,6 +1958,18 @@ impl ProjectApp {
                 }),
             }
         }
+    }
+}
+
+/// The workspace a double-click on the row at `path` opens the analysis in: Geometry and
+/// Mesh in the Geometry workspace, the setup in the FE Model workspace, Results in the
+/// Results workspace.
+fn workspace_of(path: &[String]) -> Option<TreeView> {
+    match path.first().map(String::as_str) {
+        Some(links::GEOMETRY | links::MESH) => Some(TreeView::Geometry),
+        Some(links::SETUP) => Some(TreeView::FeModel),
+        Some(links::RESULTS) => Some(TreeView::Results),
+        _ => None,
     }
 }
 
@@ -2315,7 +2334,7 @@ impl SnarlViewer<u64> for Viewer {
         }
         let (steps, continues) = (block.steps.clone(), block.continues.clone());
         if label.double_clicked() {
-            self.actions.push(Action::Open(id));
+            self.actions.push(Action::Open(id, None));
         }
         // The name takes the clicks of the header, so it opens the block's menu too.
         label
@@ -2402,7 +2421,7 @@ impl SnarlViewer<u64> for Viewer {
         if toggled || (row.expander.is_some() && response.double_clicked()) {
             self.actions.push(Action::Toggle(id, row.path.clone()));
         } else if response.double_clicked() {
-            self.actions.push(Action::Open(id));
+            self.actions.push(Action::Open(id, workspace_of(&row.path)));
         }
         let color = wire_color(&row.path);
         if row.path.first().is_some_and(|c| c == links::STATE) {
@@ -2672,7 +2691,7 @@ fn node_menu(
             ui.close();
         }
     };
-    entry(ui, "Open", Action::Open(id));
+    entry(ui, "Open", Action::Open(id, None));
     entry(ui, "Solve", Action::Solve(id));
     ui.separator();
     let split = steps.len() > 1;
