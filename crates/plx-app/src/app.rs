@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -68,6 +68,14 @@ pub enum Request {
     /// Give the project, all its analyses, this model space and unit system; `true` converts
     /// the values into the new units.
     SpaceAndUnits(plx_model::ModelSpace, UnitSystem, bool),
+    /// Solve the analyses this one takes global results from and have none yet, then this
+    /// one.
+    SolveChain,
+    /// Open the analysis of this name, which a linked item comes from.
+    OpenAnalysis(String),
+    /// Stop taking the item at this path from another analysis; the analysis keeps its
+    /// copy.
+    Unlink(Vec<String>),
 }
 
 struct Workbench {
@@ -84,6 +92,13 @@ struct Workbench {
     solve_after_meshing: bool,
     /// What the window asks of the project window.
     requests: Vec<Request>,
+    /// What the analysis takes from other analyses of the project; the window shows it but
+    /// does not change it.
+    incoming: crate::links::Incoming,
+    /// Analyses whose results this one needs as global model and that have none yet.
+    upstream_missing: Vec<String>,
+    /// A linked item was double-clicked: where it comes from, with its path.
+    linked_prompt: Option<(Vec<String>, String)>,
     /// The state of the analysis' cells and when it was found; finding it takes the
     /// fingerprints of mesh and model, so it is not done in every frame.
     status: Option<(std::time::Instant, crate::status::AnalysisStatus)>,
@@ -240,6 +255,9 @@ impl AnalysisWindow {
                 project_folder: String::new(),
                 solve_after_meshing: false,
                 requests: Vec::new(),
+                incoming: Default::default(),
+                upstream_missing: Vec::new(),
+                linked_prompt: None,
                 status: None,
                 model_dialog: None,
                 import_requested: false,
@@ -314,6 +332,77 @@ impl AnalysisWindow {
     /// Imports these files into the analysis as soon as it is loaded.
     pub fn import_after_load(&mut self, paths: Vec<PathBuf>) {
         self.import_when_loaded = paths;
+    }
+
+    /// Tells the window what the analysis takes from other analyses, and which of those it
+    /// needs results of that are not there yet.
+    pub fn set_links(&mut self, incoming: crate::links::Incoming, upstream_missing: Vec<String>) {
+        self.workbench.incoming = incoming;
+        self.workbench.upstream_missing = upstream_missing;
+    }
+
+    /// Takes over what `path` names of the setup of another analysis, see
+    /// [`crate::links::apply_setup`].
+    pub fn apply_setup(&mut self, source: &plx_model::FeModel, path: &[String]) {
+        if let Some(model) = &mut self.workbench.model {
+            crate::links::apply_setup(&mut model.fe, source, path);
+            self.workbench.results_changed = true;
+            self.workbench.symbols_shown = None;
+        }
+    }
+
+    /// Makes the analysis a submodel of the global results at `results`, see
+    /// [`crate::links::apply_submodel`].
+    pub fn apply_submodel(&mut self, step: &str, global: u32, results: PathBuf) {
+        if let Some(model) = &mut self.workbench.model {
+            crate::links::apply_submodel(&mut model.fe, step, global, results);
+        }
+    }
+
+    pub fn clear_submodel(&mut self) {
+        if let Some(model) = &mut self.workbench.model {
+            crate::links::clear_submodel(&mut model.fe);
+        }
+    }
+
+    /// Takes over the geometry of another analysis, shown on the Geometry tab.
+    pub fn apply_geometry(&mut self, geometry: Option<plx_model::Geometry>) {
+        let workbench = &mut self.workbench;
+        let Some(model) = &mut workbench.model else {
+            return;
+        };
+        workbench.geometry = match &geometry {
+            Some(geometry) => match plx_mesher::tessellate(geometry) {
+                Ok(display) => Some(Model::geometry_view(&model.path, display)),
+                Err(error) => {
+                    (workbench.output).push(format!("Geometry cannot be displayed: {error}"));
+                    None
+                }
+            },
+            None => None,
+        };
+        model.geometry = geometry;
+        workbench.after_parts_changed();
+    }
+
+    /// Takes over the mesh of another analysis with the geometry it was meshed from.
+    pub fn apply_mesh(&mut self, mesh: crate::links::MeshCopy) {
+        let crate::links::MeshCopy {
+            geometry,
+            mesh,
+            mesh_inputs,
+            mesh_sets,
+            element_types,
+        } = mesh;
+        let Some(model) = &mut self.workbench.model else {
+            return;
+        };
+        model.fe.mesh_sets = mesh_sets;
+        model.fe.element_types = element_types;
+        model.set_mesh(mesh);
+        model.mesh_inputs = mesh_inputs;
+        self.apply_geometry(geometry);
+        self.workbench.view_command = Some(ViewCommand::Fit);
     }
 
     /// Whether the window is still loading, or has an import or a solve to start once loaded.
@@ -1320,6 +1409,7 @@ impl AnalysisWindow {
         self.workbench.findings_window(&ctx);
         self.workbench.settings_window(&ctx);
         self.workbench.model_dialog_window(&ctx);
+        self.workbench.linked_prompt_window(&ctx);
         if std::mem::take(&mut self.workbench.import_requested) {
             self.import_dialog(&ctx);
         }
@@ -1717,7 +1807,8 @@ impl Workbench {
             let hint = if view == TreeView::Geometry {
                 "Geometry > Import or drag a STEP, IGES or BREP file into the window."
             } else {
-                "File > Open (Ctrl+O) or drag a .plx or .inp file into the window."
+                "File > New Model, then Geometry > Import or drag a STEP or .inp file into \
+                 the window."
             };
             ui.weak(format!("{text}.\n{hint}"));
             ui.separator();
@@ -1726,6 +1817,7 @@ impl Workbench {
             .and_then(|m| m.geometry.as_ref())
             .map(|g| g.mesh_items.iter().map(|i| i.name.clone()).collect())
             .unwrap_or_default();
+        self.tree.linked = self.linked_tree_items(view);
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
@@ -1742,8 +1834,169 @@ impl Workbench {
         self.tree_response(ui.ctx(), view, response);
     }
 
+    /// The items of the tree in `view` that another analysis owns, with its name.
+    fn linked_tree_items(&self, view: TreeView) -> HashMap<TreeItem, String> {
+        let mut linked = HashMap::new();
+        let Some(model) = &self.model else {
+            return linked;
+        };
+        for (path, source) in &self.incoming.paths {
+            let items = match view {
+                TreeView::Results => Vec::new(),
+                TreeView::Geometry
+                    if path[0] == crate::links::GEOMETRY || path[0] == crate::links::MESH =>
+                {
+                    let mut items = vec![TreeItem::Group("Parts"), TreeItem::Group("Mesh Setup")];
+                    items.extend(
+                        (0..self.geometry.as_ref().map_or(0, |g| g.parts.len()))
+                            .map(TreeItem::Part),
+                    );
+                    let setup = model.geometry.as_ref().map_or(0, |g| g.mesh_items.len());
+                    items.extend((0..setup).map(TreeItem::MeshItem));
+                    items
+                }
+                TreeView::Geometry => Vec::new(),
+                TreeView::FeModel if path[0] == crate::links::MESH => {
+                    let mut items = vec![TreeItem::Mesh, TreeItem::Group("Parts")];
+                    items.extend((0..model.parts.len()).map(TreeItem::Part));
+                    items
+                }
+                TreeView::FeModel => crate::links::tree_items(&model.fe, path),
+            };
+            for item in items {
+                linked.insert(item, source.clone());
+            }
+        }
+        linked
+    }
+
+    /// The analysis a tree item comes from, if another analysis owns it.
+    fn linked_source(&self, view: TreeView, item: &TreeItem) -> Option<(Vec<String>, String)> {
+        let source = self.tree.linked.get(item)?;
+        let path = match view {
+            TreeView::Geometry => vec![crate::links::GEOMETRY.to_owned()],
+            _ => (self.model.as_ref()).and_then(|m| crate::links::path_of(&m.fe, item))?,
+        };
+        // The link that covers it: a whole category rather than the item in it.
+        let path = (self.incoming.paths.iter())
+            .find(|(prefix, s)| s == source && crate::links::covers(prefix, &path))
+            .map_or(path, |(prefix, _)| prefix.clone());
+        Some((path, source.clone()))
+    }
+
+    /// Keeps the user from changing in the tree what another analysis owns: a double-click
+    /// asks whether to open that analysis or unlink the item, other changes are refused.
+    fn guard_linked(&mut self, view: TreeView, response: &mut TreeResponse) {
+        if self.tree.linked.is_empty() {
+            return;
+        }
+        if let Some(item) = &response.open
+            && let Some(linked) = self.linked_source(view, item)
+        {
+            response.open = None;
+            self.linked_prompt = Some(linked);
+        }
+        let mut refused: Option<String> = None;
+        let mut check = |item: Option<&TreeItem>, this: &Self| {
+            let linked = item.and_then(|item| this.linked_source(view, item));
+            if let Some((path, source)) = linked {
+                refused = Some(format!(
+                    "{} comes from {source}: change it there, or unlink it first.",
+                    crate::links::label(&path)
+                ));
+                true
+            } else {
+                false
+            }
+        };
+        if check(response.delete.as_ref(), self) {
+            response.delete = None;
+        }
+        if check(response.toggle_active.as_ref(), self) {
+            response.toggle_active = None;
+        }
+        if check(response.swap_master_slave.as_ref(), self) {
+            response.swap_master_slave = None;
+        }
+        if let Some((step, _)) = response.move_step
+            && check(Some(&TreeItem::Step(step)), self)
+        {
+            response.move_step = None;
+        }
+        if let Some(kind) = &response.create
+            && check(new_item_container(kind).as_ref(), self)
+        {
+            response.create = None;
+        }
+        let mesh = TreeItem::Mesh;
+        let geometry = TreeItem::Group("Mesh Setup");
+        let meshing = response.generate_mesh
+            || response.mesh_part.is_some()
+            || response.transform_part.is_some()
+            || response.merge_parts;
+        if meshing
+            && (check(Some(&mesh), self)
+                || self.tree.linked.contains_key(&TreeItem::Group("Parts")))
+        {
+            if refused.is_none() {
+                refused = Some("The mesh comes from another analysis: mesh it there.".into());
+            }
+            response.generate_mesh = false;
+            response.mesh_part = None;
+            response.transform_part = None;
+            response.merge_parts = false;
+        }
+        if response.mesh_defaults && self.tree.linked.contains_key(&geometry) {
+            refused = Some("The geometry comes from another analysis: set it up there.".into());
+            response.mesh_defaults = false;
+        }
+        if let Some(line) = refused {
+            self.output.push(line);
+        }
+    }
+
+    /// Asks what to do about a linked item that was double-clicked.
+    fn linked_prompt_window(&mut self, ctx: &egui::Context) {
+        let Some((path, source)) = &self.linked_prompt else {
+            return;
+        };
+        let mut close = false;
+        let mut open = true;
+        egui::Window::new("Linked Item")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "{} comes from the analysis {source}. Change it there, or unlink it: this \
+                     analysis then keeps its own copy.",
+                    crate::links::label(path)
+                ));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button(format!("Open {source}")).clicked() {
+                        self.requests.push(Request::OpenAnalysis(source.clone()));
+                        close = true;
+                    }
+                    if ui.button("Unlink").clicked() {
+                        self.requests.push(Request::Unlink(path.clone()));
+                        close = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if close || !open {
+            self.linked_prompt = None;
+        }
+    }
+
     /// Acts on what the user picked in the tree or in a part's context menu in the 3D view.
-    fn tree_response(&mut self, ctx: &egui::Context, view: TreeView, response: TreeResponse) {
+    fn tree_response(&mut self, ctx: &egui::Context, view: TreeView, mut response: TreeResponse) {
+        self.guard_linked(view, &mut response);
         for (index, visible) in response.visibility {
             if let Some(part) = self.shown_mut().and_then(|m| m.parts.get_mut(index)) {
                 part.visible = visible;
@@ -3276,6 +3529,15 @@ impl Workbench {
     /// date stays as it is.
     fn solve(&mut self, ctx: &egui::Context) {
         if self.meshing.is_some() || self.analysis.as_ref().is_some_and(Analysis::is_running) {
+            return;
+        }
+        // A submodel needs the results of its global model; the project solves that first.
+        if !self.upstream_missing.is_empty() {
+            self.output.push(format!(
+                "{} has no results yet: it is solved first.",
+                self.upstream_missing.join(", ")
+            ));
+            self.requests.push(Request::SolveChain);
             return;
         }
         let Some(status) = self.status() else {
@@ -6669,4 +6931,26 @@ mod tests {
         assert_eq!(imported.path, std::path::Path::new("/tmp/neu.plx"));
         assert_eq!(imported.path, saved.path);
     }
+}
+
+/// The container a new item goes into, to find whether another analysis owns it.
+fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
+    Some(match kind {
+        NewItem::Material => TreeItem::Group("Materials"),
+        NewItem::Section => TreeItem::Group("Sections"),
+        NewItem::InitialCondition => TreeItem::Group("Initial Conditions"),
+        NewItem::Step => TreeItem::Group("Steps"),
+        NewItem::BoundaryCondition(s)
+        | NewItem::Load(s)
+        | NewItem::FieldOutput(s)
+        | NewItem::HistoryOutput(s)
+        | NewItem::DefinedField(s) => TreeItem::Step(*s),
+        NewItem::Constraint => TreeItem::Group("Constraints"),
+        NewItem::SurfaceInteraction | NewItem::ContactPair | NewItem::Tie | NewItem::NodeTie => {
+            TreeItem::Group("Contacts")
+        }
+        NewItem::Amplitude => TreeItem::Group("Amplitudes"),
+        NewItem::MeshSetupItem => TreeItem::Group("Mesh Setup"),
+        _ => return None,
+    })
 }

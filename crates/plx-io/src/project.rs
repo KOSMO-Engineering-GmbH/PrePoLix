@@ -76,9 +76,14 @@ pub struct ProjectAnalysis {
 pub struct Link {
     pub source: u64,
     pub target: u64,
-    /// The tree path of what is taken: a whole category such as `["Materials"]`, or one
-    /// item of it such as `["Materials", "Steel"]`.
+    /// The path of what is taken in the source's block: a cell such as `["Mesh"]`, a
+    /// category of the setup such as `["Setup", "Materials"]`, or one item of it such as
+    /// `["Setup", "Materials", "Steel"]`; `["Results", step]` is the results of a step.
     pub item: Vec<String>,
+    /// Where the target takes it, when that is not the same place: the step of a submodel
+    /// that takes the results of a global step, `["Results", step]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slot: Vec<String>,
 }
 
 /// The files of a finished analysis kept in the project file: the input file CalculiX ran,
@@ -450,7 +455,14 @@ mod tests {
         saved.links.push(Link {
             source: 1,
             target: 2,
-            item: vec!["Materials".into(), "Steel".into()],
+            item: vec!["Setup".into(), "Materials".into(), "Steel".into()],
+            slot: Vec::new(),
+        });
+        saved.links.push(Link {
+            source: 1,
+            target: 2,
+            item: vec!["Results".into(), "Step-1".into()],
+            slot: vec!["Results".into(), "Step-2".into()],
         });
         save_project(&path, &saved).unwrap();
         let mut project = read_project(&path).unwrap();

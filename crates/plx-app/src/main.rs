@@ -22,6 +22,7 @@ mod hot_spot_dialog;
 mod hot_spots;
 mod icons;
 mod keywords;
+mod links;
 mod material_library;
 mod mesh_tools;
 mod meshing;
@@ -131,6 +132,7 @@ mod tests {
             ("history_table.rs", include_str!("history_table.rs")),
             ("icons.rs", include_str!("icons.rs")),
             ("keywords.rs", include_str!("keywords.rs")),
+            ("links.rs", include_str!("links.rs")),
             ("material_library.rs", include_str!("material_library.rs")),
             ("main.rs", include_str!("main.rs")),
             ("model.rs", include_str!("model.rs")),
