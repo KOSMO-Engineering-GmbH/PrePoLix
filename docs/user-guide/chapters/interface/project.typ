@@ -6,8 +6,7 @@
 
 A PrePoLix project (`.plx`) holds several analyses, like a project of Ansys Workbench. PrePoLix
 starts with the *project window*. It shows each analysis as a block in the project schematic;
-each analysis opens in a window of its own (@main-window), which looks like the main window of
-PrePoMax. Several analysis windows can be open at the same time, next to the project window.
+each analysis opens in a window of its own (@main-window). Several analysis windows can be open at the same time, next to the project window.
 
 #screenshot("project-window.png", [Project window with three analyses: #ui("Cantilever
   continued") continues #ui("Cantilever") after its last step (green wire), #ui("Axial-load")

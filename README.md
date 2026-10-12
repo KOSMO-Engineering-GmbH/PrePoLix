@@ -5,14 +5,14 @@
 <h1 align="center">PrePoLix</h1>
 
 PrePoLix is a graphical pre- and post-processor for the finite element solver
-[CalculiX](http://www.calculix.de/). It is a rebuild of [PrePoMax](https://prepomax.fs.um.si/) in
-Rust, limited to CalculiX, and runs on **Linux and Windows**. The goal is the same workflow and look as
-PrePoMax: import a geometry, mesh it, set up materials, loads and steps, run CalculiX and look at
-the results, all in one window and without editing input files by hand.
+[CalculiX](http://www.calculix.de/). It is written in
+Rust and runs on **Linux and Windows**. Organise your analyses as a project of linked nodes, import a
+geometry, mesh it, set up materials, loads and steps, run CalculiX and look at the results, all
+without editing input files by hand.
 
 ![PrePoLix main window with a result](docs/images/readme-hero.png)
 
-> PrePoLix is a hobby project under active development. It is not affiliated with PrePoMax or
+> PrePoLix is a hobby project under active development. It is not affiliated with
 > CalculiX. Expect rough edges and please report what you find in the
 > [issue tracker](https://github.com/KwentiN-ui/prepolix/issues).
 
@@ -30,7 +30,7 @@ the results, all in one window and without editing input files by hand.
 - Boundary conditions, loads (pressure, surface and body loads, centrifugal, moments), amplitudes,
   initial conditions and defined fields.
 - Contact pairs and ties, constraints, rigid bodies, pre-tension, submodeling.
-- Node and element sets are created implicitly from your selection, as in PrePoMax.
+- Node and element sets are created implicitly from your selection.
 - Unit systems with unit-aware input, model check, and a keyword editor for anything the GUI does not cover.
 
 **Analysis**
@@ -142,6 +142,9 @@ Building from source, project layout, tests and releases are described in
 ## License
 
 PrePoLix is licensed under the GPL-3.0-or-later, see [LICENSE](LICENSE).
+
+Parts of the workflow and several defaults were inspired by [PrePoMax](https://prepomax.fs.um.si/)
+(GPL-3.0) by Matej Borovinšek; thanks to the PrePoMax project.
 
 Gmsh is licensed under the GPL-2.0-or-later with an exception for OpenCASCADE, Netgen and METIS,
 and OpenCASCADE under the LGPL-2.1 with exception; both are compatible with the GPL-3.0. If you

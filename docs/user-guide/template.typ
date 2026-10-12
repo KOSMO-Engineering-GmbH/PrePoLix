@@ -73,7 +73,7 @@
     image("../../assets/icon/prepolix.svg", alt: "")
     html.elem("div", {
       html.elem("h1", [PrePoLix User Guide])
-      html.elem("p", [A pre- and post-processor for CalculiX, modelled on PrePoMax. Version
+      html.elem("p", [A pre- and post-processor for CalculiX, Version
         #version.])
     })
   })
@@ -103,7 +103,7 @@
     #v(0.2em)
     #text(size: 18pt)[User Guide]
     #v(1em)
-    #text(size: 12pt)[A pre- and post-processor for CalculiX, modelled on PrePoMax]
+    #text(size: 12pt)[A pre- and post-processor for CalculiX]
     #v(1fr)
     #text(size: 11pt)[Version #version]
   ]

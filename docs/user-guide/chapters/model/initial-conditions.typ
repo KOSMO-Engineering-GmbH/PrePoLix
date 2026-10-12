@@ -14,7 +14,7 @@ The region can be a selection, parts, a node set or a surface.
   [Angular velocity], [A rotation of the region about an axis: #ui("X"), #ui("Y"), #ui("Z") is a
     point on the axis, #ui("Axis") its direction and #ui("Rotational speed") the speed in
     radians per time (the dialog shows it in rpm). Every node gets the velocity
-    $v = omega thin n times (x - p)$ of this rotation, as PrePoMax does; a positive speed turns
+    $v = omega thin n times (x - p)$ of this rotation; a positive speed turns
     counter-clockwise about the axis.],
 )
 

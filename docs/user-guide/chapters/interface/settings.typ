@@ -12,7 +12,7 @@ portable Windows version in the folder `Settings` next to `prepolix.exe` (@porta
 === Graphics
 
 #fields(
-  [Color theme], [#ui("Light") is PrePoMax's light look, #ui("Dark") shows dark panels, a dark
+  [Color theme], [#ui("Light") is the light look, #ui("Dark") shows dark panels, a dark
     3D background and light text over the model. #ui("System") (default) follows the light or
     dark mode of the operating system and switches along with it. Icons, tree symbols, plots and
     annotations change with the theme; exported SVG plots and the images of the user guide stay

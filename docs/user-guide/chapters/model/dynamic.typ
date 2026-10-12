@@ -20,7 +20,7 @@ the dialog.
     the increment from the highest frequency you want to resolve, about a tenth to a twentieth
     of its period.],
   [Rayleigh damping], [Damping of the whole model, written as `*DAMPING, ALPHA=, BETA=` in the
-    step like PrePoMax does. #ui("Alpha (mass)") has the unit of a frequency, #ui("Beta
+    step. #ui("Alpha (mass)") has the unit of a frequency, #ui("Beta
     (stiffness)") that of a time. For a damping ratio ζ at the circular frequency ω,
     α = 2ζω damps the low modes and β = 2ζ/ω the high ones.],
 )

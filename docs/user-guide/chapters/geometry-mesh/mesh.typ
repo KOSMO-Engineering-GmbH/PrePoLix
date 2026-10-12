@@ -29,14 +29,14 @@ switches to the #ui("FE Model") tab.
 )
 
 Solids and lines can only be meshed in 3D models. Faces are meshed in both: in a 3D model they
-become shells, which, as in PrePoMax, get their thickness from a #ui("Shell") section; a solid
+become shells, which get their thickness from a #ui("Shell") section; a solid
 section on shells is reported as an invalid section.
 
 #screenshot("shell-mesh-3d.png", [A disk imported into a 3D model and meshed with `S6` shells])
 
 === Changing the element type <element-type>
 
-As in PrePoMax, a part on the #ui("FE Model") tab can be given another element type with the
+A part on the #ui("FE Model") tab can be given another element type with the
 same nodes: double-click the part and choose it in the #ui("Element type") box, then #ui("OK").
 A part with several element types has one box per type.
 
