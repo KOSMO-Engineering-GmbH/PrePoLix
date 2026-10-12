@@ -82,7 +82,8 @@ the green square takes the state of another analysis (@data-links).
 === Working with the schematic
 
 - *Double-click* a block to open its analysis in its own window. If the window is open
-  already, it comes to the front. The header of an open analysis says #ui("(open)").
+  already, it comes to the front; while the analysis is solved in the background, it opens
+  once the solve is done. The header of an open analysis says #ui("(open)").
   Double-clicking a row opens the window in the matching workspace: #ui("Geometry") and
   #ui("Mesh") in the Geometry workspace, #ui("Setup") and its categories in the FE Model
   workspace, and #ui("Results") in the Results workspace.
@@ -98,7 +99,8 @@ the green square takes the state of another analysis (@data-links).
 
 #fields(
   [Open], [Opens the analysis window.],
-  [Solve], [Opens the analysis and solves it, like #ui("Solve") in its window (@analysis).],
+  [Solve], [Solves the analysis, like #ui("Solve") in its window (@analysis): in the background
+    with the solution monitor if its window is closed (@solution-monitor), else in its window.],
   [#ui("Split After") > step], [Moves the steps after the chosen step into a new analysis that
     continues this one from the state after it (@split-merge). Only for analyses with more than
     one step.],
@@ -146,14 +148,15 @@ properties first (@new-analysis).
   [Project > Show All Blocks (#key("Home"))], [Fits all blocks of the schematic into the
     view.],
   [Project > Update Project], [Solves every analysis that is not up to date (@update-project).],
+  [Project > Solution Monitor], [Shows the analyses being solved with the output of CalculiX
+    (@solution-monitor).],
   [Tools > Settings ...], [The settings (@settings); they apply to all windows.],
   [Help], [#ui("User Guide") opens this guide, #ui("Check for Updates ...") looks
     for a new version.],
 )
 
-The toolbar holds #ui("New Project"), #ui("Open"), #ui("Save"), #ui("Update Project") and
-the button that stops the update. Stopping the update lets the running CalculiX jobs finish; use
-#ui("Stop") in the analysis window to kill one.
+The toolbar holds #ui("New Project"), #ui("Open"), #ui("Save"), #ui("Update Project"), the
+button that stops the update and kills the running CalculiX jobs, and #ui("Solution Monitor").
 
 Closing the project window closes PrePoLix with all analysis windows. Closing an analysis
 window (or #menu("File", "Close Analysis") in it) keeps the analysis in the project, with all
@@ -176,7 +179,37 @@ first (@mesh-block).
   analyses on one computer are worth it when CalculiX spends its time in the equation solver on
   few threads; set #ui("Threads") times #ui("Parallel analyses") to at most the number of
   processor cores.
-- Windows that the update opens close again when their analysis is solved. If CalculiX fails,
-  the window stays open with the monitor; only the analyses that depend on the failed one are
-  skipped, independent ones go on. The output pane sums up with #ui("Project updated") or
-  #ui("Update finished with errors").
+- An analysis whose window is closed is solved in the background, without opening its window:
+  PrePoLix meshes its geometry if the mesh is missing or out of date, writes the input file,
+  runs CalculiX and keeps the results in the project, as #ui("Solve") in the window does. The
+  cells of its block show the progress. An analysis whose window is open is solved in its
+  window, which shows the new results when it is done.
+- If CalculiX fails, only the analyses that depend on the failed one are skipped, independent
+  ones go on. The output pane sums up with #ui("Project updated") or
+  #ui("Update finished with errors"); the solution monitor tells what went wrong.
+
+=== Solution monitor <solution-monitor>
+
+The project window has its own monitor, like the monitor of an analysis window (@analysis) but
+for all analyses of the project. It opens when an update or #ui("Solve") on a block starts;
+#menu("Project", "Solution Monitor") or the monitor button in the toolbar shows and hides it.
+
+#screenshot("solution-monitor.png", [Solution monitor after Update Project solved three
+  analyses in the background])
+
+The list shows each analysis being solved, queued or done, with its status (preparing,
+meshing, running, keeping results, solved, failed or stopped), its running time and the current
+step and increment of CalculiX. Analyses solved in their open window are marked
+#ui("(window)"). Below the list is the output of the analysis picked in it: the lines of
+PrePoLix (meshing, model checks, restart, keeping the results) around those of CalculiX, which
+#ui("Filter") narrows down to the lines containing a text.
+
+#fields(
+  [Stop], [Kills CalculiX for the picked analysis, or takes it out of the queue. It is not
+    solved; the update goes on with independent analyses.],
+  [Stop All], [Stops the update and every solve.],
+  [Open Analysis], [Opens the window of the picked analysis in the Results workspace; a
+    double-click on its name does the same. An analysis still being solved in the background
+    opens once it is done.],
+  [Clear Finished], [Removes the analyses that are done from the list.],
+)

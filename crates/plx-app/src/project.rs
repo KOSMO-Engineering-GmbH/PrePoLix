@@ -24,6 +24,7 @@ use crate::model::PROJECT_EXTENSION;
 use crate::model_properties::{DialogResult, ModelPropertiesDialog};
 use crate::node_icons::{self, NodeIcon};
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
+use crate::solution_monitor::{BackgroundSolve, Outcome};
 use crate::status::{self, AnalysisStatus, CellState};
 use crate::tree::TreeView;
 use crate::tree_icons::StepGlyph;
@@ -79,6 +80,8 @@ struct Node {
     /// What a mesh block meshes, and the fingerprint of what its mesh was made from.
     primitive: Option<MeshPrimitive>,
     generated: Option<u64>,
+    /// Solved in the background, its window closed.
+    solving: bool,
 }
 
 impl Node {
@@ -105,6 +108,7 @@ impl Node {
             space,
             primitive: None,
             generated: None,
+            solving: false,
         };
         node.refresh_closed();
         node
@@ -229,7 +233,7 @@ impl Node {
                 &data.model,
                 &data.mesh_inputs,
                 data.results.as_ref(),
-                false,
+                self.solving,
             ));
         }
     }
@@ -374,10 +378,15 @@ pub struct ProjectApp {
     new_analysis: Option<(egui::Pos2, ModelPropertiesDialog)>,
     /// A project file being read on a worker thread, with notes on its conversion.
     opening: Option<(PathBuf, Receiver<Opened>)>,
-    /// Analyses Update Project still has to solve, in order, and those it solves, with
-    /// whether the update opened their window.
+    /// Analyses Update Project still has to solve, in order, and those it solves.
     update_queue: VecDeque<u64>,
-    updating: Vec<(u64, bool)>,
+    updating: Vec<u64>,
+    /// Analyses solved without their window, running and done, for the solution monitor.
+    solves: Vec<BackgroundSolve>,
+    /// Analyses solved in their open window, for the solution monitor.
+    window_runs: Vec<u64>,
+    /// The solution monitor, with the analysis whose output it shows and its filter.
+    monitor: Option<Monitor>,
     /// Files given on the command line, imported into the first analysis once it is open.
     startup_import: Vec<PathBuf>,
     /// Fingerprint of the geometry or mesh a link last copied into its target, by target and
@@ -438,6 +447,9 @@ impl ProjectApp {
             opening: None,
             update_queue: VecDeque::new(),
             updating: Vec::new(),
+            solves: Vec::new(),
+            window_runs: Vec::new(),
+            monitor: None,
             startup_import: Vec::new(),
             applied: HashMap::new(),
             last_sync: None,
@@ -711,6 +723,18 @@ impl ProjectApp {
             }
             None => return,
         }
+        // Solved in the background: the window opens with the new results.
+        if let Some(solve) = (self.solves.iter_mut()).find(|s| s.id == id && s.active()) {
+            if !solve.open_when_done {
+                let line = format!(
+                    "{} is being solved; its window opens once the solve is done.",
+                    solve.name
+                );
+                self.output.push(line);
+            }
+            solve.open_when_done = true;
+            return;
+        }
         let path = self.model_path();
         let folder = crate::analysis::job_name(&self.project_name());
         let (render_state, settings) = (self.render_state.clone(), self.settings.clone());
@@ -793,8 +817,7 @@ impl ProjectApp {
         self.graph = Snarl::new();
         self.graph_generation += 1;
         self.path = None;
-        self.update_queue.clear();
-        self.updating.clear();
+        self.forget_solves();
         self.output.push("New project".into());
     }
 
@@ -867,8 +890,7 @@ impl ProjectApp {
                     )
                 });
                 self.path = Some(path);
-                self.update_queue.clear();
-                self.updating.clear();
+                self.forget_solves();
             }
             Err(error) => self.output.push(format!("Not opened: {error}")),
         }
@@ -994,6 +1016,11 @@ impl ProjectApp {
         if !self.close_window(id) {
             return;
         }
+        for solve in self.solves.iter_mut().filter(|s| s.id == id) {
+            solve.stop();
+        }
+        self.solves.retain(|s| s.id != id);
+        self.updating.retain(|&solving| solving != id);
         if let Some(graph_id) = self.graph_node(id) {
             self.graph.remove_node(graph_id);
         }
@@ -1050,22 +1077,37 @@ impl ProjectApp {
         }
     }
 
-    /// Works through Update Project: opens the next analyses and solves them, as many at a
-    /// time as the settings allow; an analysis waits for those it takes data from.
+    /// Works through Update Project: solves the next analyses, as many at a time as the
+    /// settings allow; an analysis waits for those it takes data from. An analysis whose
+    /// window is closed is solved in the background without opening it; one whose window is
+    /// open is solved there and shows its results.
     fn run_update(&mut self, ctx: &egui::Context) {
-        for (id, opened) in std::mem::take(&mut self.updating) {
-            let Some(node) = self.node(id) else {
+        for id in std::mem::take(&mut self.updating) {
+            let background = (self.solves.iter().rev()).find(|s| s.id == id);
+            let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) else {
                 continue;
             };
-            let Some(window) = &mut node.window else {
-                continue;
+            let outcome = match (background, &mut node.window) {
+                (Some(solve), _) if solve.active() => {
+                    self.updating.push(id);
+                    continue;
+                }
+                (Some(solve), _) => solve.outcome(),
+                (None, Some(window)) => {
+                    if window.waiting() || window.solving() || window.is_running() {
+                        self.updating.push(id);
+                        continue;
+                    }
+                    None
+                }
+                (None, None) => None,
             };
-            if window.waiting() || window.solving() || window.is_running() {
-                self.updating.push((id, opened));
-                continue;
-            }
-            // Done: solved, or stopped by an error the window shows.
-            let failed = window.current_status().is_some_and(|s| s.needs_solve());
+            // Done: solved, or stopped by an error the monitor shows.
+            let failed = matches!(outcome, Some(Outcome::Failed | Outcome::Stopped))
+                || match &node.window {
+                    Some(window) => window.current_status().is_some_and(|s| s.needs_solve()),
+                    None => node.status.as_ref().is_some_and(|s| s.needs_solve()),
+                };
             let name = node.name.clone();
             if failed {
                 // What depends on it is not solved; independent analyses go on.
@@ -1077,17 +1119,16 @@ impl ProjectApp {
                 self.update_queue
                     .retain(|queued| !dependent.contains(queued));
                 self.output.push(if skipped.is_empty() {
-                    format!("{name} could not be solved.")
+                    format!("{name} could not be solved; the solution monitor tells why.")
                 } else {
                     format!(
-                        "{name} could not be solved; {} not updated.",
+                        "{name} could not be solved; {} not updated. The solution monitor \
+                         tells why.",
                         skipped.join(", ")
                     )
                 });
-            } else if opened {
-                // Windows the update opened close again, as Workbench solves in the
-                // background; the window stays open to show what went wrong.
-                self.close_window(id);
+            } else {
+                self.output.push(format!("{name} solved"));
             }
             if self.updating.is_empty() && self.update_queue.is_empty() {
                 self.output.push(if failed {
@@ -1106,8 +1147,7 @@ impl ProjectApp {
         while self.updating.len() < parallel {
             // The first queued analysis whose sources are neither queued nor solving.
             let busy = |source: u64| {
-                self.update_queue.contains(&source)
-                    || self.updating.iter().any(|(id, _)| *id == source)
+                self.update_queue.contains(&source) || self.updating.contains(&source)
             };
             let ready = self.update_queue.iter().position(|&id| {
                 !(self.links.iter()).any(|l| l.target == id && l.source != id && busy(l.source))
@@ -1115,13 +1155,361 @@ impl ProjectApp {
             let Some(id) = ready.and_then(|index| self.update_queue.remove(index)) else {
                 return;
             };
-            let opened = self.node(id).is_some_and(|n| n.window.is_none());
-            self.open_window(ctx, id, None);
-            self.updating.push((id, opened));
-            if let Some(window) = self.node(id).and_then(|n| n.window.as_mut()) {
-                window.solve_when_loaded();
+            if self.start_solve(ctx, id) {
+                self.updating.push(id);
             }
         }
+    }
+
+    /// Starts solving the analysis: in its window if it is open, else in the background
+    /// from the project's data. Returns whether it started.
+    fn start_solve(&mut self, ctx: &egui::Context, id: u64) -> bool {
+        let incoming = self.incoming(id);
+        let path = self.model_path();
+        let mut work_dir = self.settings.solver.work_dir();
+        work_dir.push(crate::analysis::job_name(&self.project_name()));
+        let settings = self.settings.solver.clone();
+        let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) else {
+            return false;
+        };
+        if let Some(window) = &mut node.window {
+            window.solve_when_loaded();
+            self.solves.retain(|s| s.id != id);
+            self.window_runs.retain(|&run| run != id);
+            self.window_runs.push(id);
+            self.monitor.get_or_insert_default().selected = Some(id);
+            return true;
+        }
+        let Some(data) = node.data.clone() else {
+            return false;
+        };
+        work_dir.push(crate::analysis::job_name(&node.name));
+        node.solving = true;
+        node.refresh_closed();
+        let solve =
+            BackgroundSolve::start(ctx, path, data, settings, work_dir, incoming.continuation);
+        // A run of the same analysis before is replaced in the monitor.
+        self.solves.retain(|s| s.id != id);
+        self.window_runs.retain(|&run| run != id);
+        self.solves.push(solve);
+        self.monitor.get_or_insert_default().selected = Some(id);
+        true
+    }
+
+    /// Polls the background solves and puts what a finished one made into its analysis.
+    fn poll_solves(&mut self, ctx: &egui::Context) {
+        let mut finished = Vec::new();
+        for solve in self.solves.iter_mut().filter(|s| s.active()) {
+            solve.poll(ctx);
+            if !solve.active() {
+                finished.push(solve.id);
+            }
+        }
+        for id in finished {
+            let Some(solve) = self.solves.iter_mut().find(|s| s.id == id) else {
+                continue;
+            };
+            let solved = solve.take_solved();
+            let open = std::mem::take(&mut solve.open_when_done);
+            // What running the executable found out about it is kept.
+            let probed = solve.solver();
+            let (detected, keywords) = (probed.detected.clone(), probed.keywords.clone());
+            if self.settings.solver.executable == probed.executable
+                && (detected != self.settings.solver.detected
+                    || keywords != self.settings.solver.keywords)
+            {
+                self.settings.solver.detected = detected;
+                self.settings.solver.keywords = keywords;
+                self.share_settings();
+            }
+            let Some(node) = self.node(id) else {
+                continue;
+            };
+            node.solving = false;
+            if let (Some(solved), Some(data)) = (solved, &mut node.data) {
+                if let Some((mesh, mesh_inputs)) = solved.meshed {
+                    data.mesh = mesh;
+                    data.mesh_inputs = mesh_inputs;
+                    // Reference points at the centre of a selection follow the new mesh.
+                    data.model.update_reference_points(&data.mesh);
+                }
+                if let Some(results) = solved.results {
+                    data.results = Some(results);
+                }
+            }
+            node.refresh_closed();
+            self.sync_due = true;
+            if open {
+                self.open_window(ctx, id, None);
+            }
+        }
+    }
+
+    /// Stops Update Project: nothing more is started, and what runs is stopped.
+    fn stop_update(&mut self) {
+        self.update_queue.clear();
+        for id in std::mem::take(&mut self.updating) {
+            if let Some(window) = self.node(id).and_then(|n| n.window.as_mut()) {
+                window.stop_solve();
+            }
+        }
+        for solve in &mut self.solves {
+            solve.stop();
+        }
+        self.output.push("Update stopped".into());
+    }
+
+    /// Stops what runs and forgets the runs, for another project.
+    fn forget_solves(&mut self) {
+        for solve in &mut self.solves {
+            solve.stop();
+        }
+        self.solves.clear();
+        self.window_runs.clear();
+        self.update_queue.clear();
+        self.updating.clear();
+    }
+
+    /// The lines of the solution monitor's list: the analyses solved in the background and
+    /// in their windows, then those queued.
+    fn monitor_rows(&self) -> Vec<MonitorRow> {
+        let mut rows: Vec<MonitorRow> = (self.solves.iter())
+            .map(|solve| MonitorRow {
+                id: solve.id,
+                name: self.name_of(solve.id),
+                state: solve.state_text().to_owned(),
+                seconds: Some(solve.seconds()),
+                progress: solve.progress(),
+                active: solve.active(),
+            })
+            .collect();
+        for &id in &self.window_runs {
+            let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+                continue;
+            };
+            let Some(window) = &node.window else {
+                continue;
+            };
+            let updating = self.updating.contains(&id);
+            let run = window.run();
+            let state = match run {
+                Some(run) if run.is_running() => "running".to_owned(),
+                _ if updating => "preparing".to_owned(),
+                Some(run) => crate::analysis::Analysis::status_text(run.status()).to_owned(),
+                None => "not solved".to_owned(),
+            };
+            rows.push(MonitorRow {
+                id,
+                name: format!("{} (window)", node.name),
+                state,
+                seconds: run.map(|r| r.seconds()),
+                progress: run.filter(|r| r.is_running()).and_then(|r| r.progress()),
+                active: updating || window.is_running(),
+            });
+        }
+        for &id in &self.update_queue {
+            rows.push(MonitorRow {
+                id,
+                name: self.name_of(id),
+                state: "queued".into(),
+                seconds: None,
+                progress: None,
+                active: true,
+            });
+        }
+        rows
+    }
+
+    /// PrePoMax's monitor for the whole project: the analyses being solved, with their
+    /// state, and the output of the one picked.
+    fn monitor_window(&mut self, ctx: &egui::Context) {
+        let Some(monitor) = &self.monitor else {
+            return;
+        };
+        let rows = self.monitor_rows();
+        let selected = monitor.selected;
+        let mut filter = monitor.filter.clone();
+        let mut open = true;
+        let (mut pick, mut stop, mut stop_all, mut open_analysis, mut clear) =
+            (None, None, false, None, false);
+        let output: Vec<String> = match selected {
+            Some(id) => match (self.solves.iter()).find(|s| s.id == id) {
+                Some(solve) => solve.output().into_iter().map(str::to_owned).collect(),
+                None => (self.nodes.iter().find(|n| n.id == id))
+                    .and_then(|n| n.window.as_ref()?.run())
+                    .map(|run| run.output().to_vec())
+                    .unwrap_or_default(),
+            },
+            None => Vec::new(),
+        };
+        egui::Window::new("Solution Monitor")
+            .open(&mut open)
+            .collapsible(false)
+            .default_size([760.0, 480.0])
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                let row_height = ui.spacing().interact_size.y + 6.0;
+                let list_height = ((rows.len().max(1) + 1) as f32 * row_height).min(200.0);
+                egui::ScrollArea::vertical()
+                    .id_salt("monitor list")
+                    .max_height(list_height)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        egui::Grid::new("monitor rows")
+                            .num_columns(5)
+                            .min_col_width(16.0)
+                            .striped(true)
+                            .spacing([16.0, 4.0])
+                            .show(ui, |ui| {
+                                for title in ["", "Analysis", "Status", "Time", "Progress"] {
+                                    ui.strong(title);
+                                }
+                                ui.end_row();
+                                if rows.is_empty() {
+                                    ui.label("");
+                                    ui.weak(
+                                        "Nothing solved yet: Update Project solves the \
+                                             analyses that are not up to date.",
+                                    );
+                                    ui.end_row();
+                                }
+                                for row in &rows {
+                                    let size = egui::vec2(16.0, 16.0);
+                                    if row.active && row.state != "queued" {
+                                        ui.add_sized(size, egui::Spinner::new());
+                                    } else {
+                                        ui.allocate_space(size);
+                                    }
+                                    let label =
+                                        ui.selectable_label(selected == Some(row.id), &row.name);
+                                    if label.clicked() {
+                                        pick = Some(row.id);
+                                    }
+                                    if label.double_clicked() {
+                                        open_analysis = Some(row.id);
+                                    }
+                                    ui.label(&row.state);
+                                    ui.label(
+                                        row.seconds
+                                            .map_or_else(String::new, |s| format!("{s:.1} s")),
+                                    );
+                                    ui.label(row.progress.as_deref().unwrap_or(""));
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label("Filter:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut filter)
+                            .hint_text("Show only lines containing ...")
+                            .desired_width(240.0),
+                    );
+                    if ui
+                        .add_enabled(!filter.is_empty(), egui::Button::new("Clear"))
+                        .clicked()
+                    {
+                        filter.clear();
+                    }
+                });
+                let height = ui.available_height() - 36.0;
+                let area = egui::ScrollArea::both()
+                    .id_salt(("monitor output", selected))
+                    .max_height(height.max(80.0))
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true);
+                if filter.is_empty() {
+                    crate::virtual_table::lines(ui, area, &output);
+                } else {
+                    let needle = filter.to_lowercase();
+                    let shown: Vec<&String> = (output.iter())
+                        .filter(|line| line.to_lowercase().contains(&needle))
+                        .collect();
+                    crate::virtual_table::lines(ui, area, &shown);
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let row = rows.iter().find(|r| Some(r.id) == selected);
+                    let active = row.is_some_and(|r| r.active);
+                    if ui
+                        .add_enabled(active, egui::Button::new("Stop"))
+                        .on_hover_text("Stops the solve of the analysis picked in the list")
+                        .clicked()
+                    {
+                        stop = selected;
+                    }
+                    let any = rows.iter().any(|r| r.active);
+                    if ui
+                        .add_enabled(any, egui::Button::new("Stop All"))
+                        .on_hover_text("Stops Update Project and every solve")
+                        .clicked()
+                    {
+                        stop_all = true;
+                    }
+                    let tip = "Opens the window of the analysis picked in the list, with its \
+                               results";
+                    if ui
+                        .add_enabled(row.is_some(), egui::Button::new("Open Analysis"))
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        open_analysis = selected;
+                    }
+                    let finished = rows.iter().any(|r| !r.active);
+                    if ui
+                        .add_enabled(finished, egui::Button::new("Clear Finished"))
+                        .clicked()
+                    {
+                        clear = true;
+                    }
+                });
+            });
+        if let Some(monitor) = &mut self.monitor {
+            monitor.filter = filter;
+            if pick.is_some() {
+                monitor.selected = pick;
+            }
+        }
+        if let Some(id) = stop {
+            self.stop_solve(id);
+        }
+        if stop_all {
+            self.stop_update();
+        }
+        if clear {
+            self.solves.retain(BackgroundSolve::active);
+            let updating = self.updating.clone();
+            self.window_runs.retain(|id| updating.contains(id));
+        }
+        if let Some(id) = open_analysis {
+            self.open_window(ctx, id, Some(TreeView::Results));
+        }
+        if !open {
+            self.monitor = None;
+        }
+    }
+
+    /// Stops the solve of one analysis; a queued one is taken out of the queue.
+    fn stop_solve(&mut self, id: u64) {
+        self.update_queue.retain(|&queued| queued != id);
+        if let Some(solve) = (self.solves.iter_mut()).find(|s| s.id == id && s.active()) {
+            solve.stop();
+        }
+        if let Some(window) = self.node(id).and_then(|n| n.window.as_mut()) {
+            window.stop_solve();
+        }
+    }
+
+    fn toggle_monitor(&mut self) {
+        self.monitor = match self.monitor.take() {
+            Some(_) => None,
+            None => Some(Monitor {
+                selected: self.updating.first().copied(),
+                ..Default::default()
+            }),
+        };
     }
 
     /// The analyses that take data from `id`, directly or through others.
@@ -1186,6 +1574,13 @@ impl ProjectApp {
                 if ui.add(update).on_hover_text(UPDATE_TIP).clicked() {
                     self.update_project();
                 }
+                if ui
+                    .button("Solution Monitor")
+                    .on_hover_text(MONITOR_TIP)
+                    .clicked()
+                {
+                    self.toggle_monitor();
+                }
             });
             ui.menu_button("Tools", |ui| {
                 if ui.button("Settings …").clicked() {
@@ -1242,9 +1637,12 @@ impl ProjectApp {
             }
             ui.add_space(4.0);
             if icons::button(ui, Icon::Stop, "Stop Update Project", updating, false).clicked() {
-                self.update_queue.clear();
-                self.updating.clear();
-                self.output.push("Update stopped".into());
+                self.stop_update();
+            }
+            ui.add_space(4.0);
+            let shown = self.monitor.is_some();
+            if icons::button(ui, Icon::Monitor, MONITOR_TIP, true, shown).clicked() {
+                self.toggle_monitor();
             }
         });
     }
@@ -2791,7 +3189,9 @@ impl eframe::App for ProjectApp {
             self.update_after_sync = false;
             self.update_project();
         }
+        self.poll_solves(&ctx);
         self.run_update(&ctx);
+        self.monitor_window(&ctx);
         self.analysis_windows(&ctx);
     }
 }
@@ -4175,6 +4575,27 @@ const MATERIALS_TIP: &str = "Adds a block of materials kept in the project: anal
 /// Tooltip of Update Project.
 const UPDATE_TIP: &str = "Update Project: solves every analysis that is not up to date, one \
      after the other, and keeps the new results.";
+
+const MONITOR_TIP: &str = "Solution Monitor: the analyses being solved, with the output of \
+     CalculiX";
+
+/// The project window's solution monitor: which analysis' output it shows, and the text
+/// the output is filtered by.
+#[derive(Default)]
+struct Monitor {
+    selected: Option<u64>,
+    filter: String,
+}
+
+/// A line of the solution monitor's list.
+struct MonitorRow {
+    id: u64,
+    name: String,
+    state: String,
+    seconds: Option<f32>,
+    progress: Option<String>,
+    active: bool,
+}
 
 /// The project file stored at the last exit, if it still exists. It is stored as an
 /// `Option`, so it has to be read back as one.

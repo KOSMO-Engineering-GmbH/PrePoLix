@@ -17,7 +17,7 @@ use plx_model::{
     Region, Section, SectionKind, Step,
 };
 
-const LENGTH: f64 = 100.0;
+pub(crate) const LENGTH: f64 = 100.0;
 const WIDTH: f64 = 10.0;
 const HEIGHT: f64 = 10.0;
 const YOUNG: f64 = 210_000.0;
@@ -482,7 +482,7 @@ fn component_values(frd: &FrdImport, field: &str, component: &str, nodes: &[Node
         .collect()
 }
 
-fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
+pub(crate) fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
     let mut step = Step::new_static("Step-1");
     step.boundary_conditions.push(BoundaryCondition {
         name: "Fixed-1".into(),
@@ -526,7 +526,7 @@ fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
 }
 
 /// The beam as 10 x 2 x 2 quadratic hexahedra (C3D20R), x along the length.
-fn beam_mesh() -> FeMesh {
+pub(crate) fn beam_mesh() -> FeMesh {
     const DIVISIONS: [u32; 3] = [10, 2, 2];
     let size = [LENGTH, WIDTH, HEIGHT];
     // Nodes on a lattice of half element size; the id encodes the lattice position.
@@ -599,7 +599,7 @@ fn nodes_where(mesh: &FeMesh, on: impl Fn([f64; 3]) -> bool) -> Vec<NodeId> {
 }
 
 /// Element faces whose corners all lie where `on` holds.
-fn faces_where(mesh: &FeMesh, on: impl Fn([f64; 3]) -> bool) -> Vec<(ElementId, u8)> {
+pub(crate) fn faces_where(mesh: &FeMesh, on: impl Fn([f64; 3]) -> bool) -> Vec<(ElementId, u8)> {
     let mut faces = Vec::new();
     for element in mesh.elements() {
         for (index, face) in element.shape.faces().iter().enumerate() {
