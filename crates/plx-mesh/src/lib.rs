@@ -8,6 +8,7 @@ mod jacobian;
 mod line_joints;
 mod mesh;
 mod skin;
+pub mod structured;
 mod transform;
 
 pub use cad::{CadEntity, CadMap};
