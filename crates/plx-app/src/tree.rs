@@ -291,8 +291,8 @@ pub(crate) fn row_label(
             ui.painter().rect(
                 rect,
                 0.0,
-                crate::style::HOVER_FILL,
-                egui::Stroke::new(1.0, crate::style::HIGHLIGHT),
+                crate::style::hover_fill(),
+                egui::Stroke::new(1.0, crate::style::highlight()),
                 egui::StrokeKind::Inside,
             );
         }
@@ -545,9 +545,10 @@ const LINE_OFFSET: f32 = 9.0;
 /// as egui would blur rectangles of a single pixel.
 fn dotted(mesh: &mut Mesh, ppp: f32, a: Pos2, b: Pos2) {
     let px = |v: f32| (v * ppp).floor() as i32;
+    let color = crate::style::adapt(LINE);
     let mut dot = |x: i32, y: i32| {
         let min = pos2(x as f32 / ppp, y as f32 / ppp);
-        mesh.add_colored_rect(Rect::from_min_size(min, Vec2::splat(1.0 / ppp)), LINE);
+        mesh.add_colored_rect(Rect::from_min_size(min, Vec2::splat(1.0 / ppp)), color);
     };
     let (x0, y0, x1, y1) = (px(a.x), px(a.y), px(b.x), px(b.y));
     if x0 == x1 {
@@ -599,7 +600,7 @@ fn expander(ui: &mut Ui, openness: f32, response: &Response) {
     let mut mesh = Mesh::default();
     let mut fill = |x: f32, y: f32, w: f32, h: f32, color: Color32| {
         let rect = Rect::from_min_size(min + vec2(x, y), vec2(w, h));
-        mesh.add_colored_rect(rect, color);
+        mesh.add_colored_rect(rect, crate::style::adapt(color));
     };
     fill(0.0, 0.0, 9.0, 9.0, Color32::from_rgb(145, 145, 145));
     fill(1.0, 1.0, 7.0, 7.0, Color32::WHITE);

@@ -331,7 +331,7 @@ impl HistoryTable {
                      becomes the x axis.",
                 );
                 if let Some(message) = &self.message {
-                    ui.colored_label(Color32::from_rgb(200, 0, 0), message);
+                    ui.colored_label(crate::style::error(), message);
                 }
                 ui.separator();
                 if let Some(plot) = self.grid(ui, &table, sets, kind) {
@@ -467,9 +467,9 @@ impl HistoryTable {
 
     fn paint(&self, painter: &egui::Painter, table: &Columns, origin: egui::Pos2, view: Rect) {
         let font = egui::FontId::proportional(13.0);
-        let text = Color32::from_gray(20);
-        let line = Stroke::new(1.0, Color32::from_gray(215));
-        let selected = Color32::from_rgb(204, 228, 247);
+        let text = crate::style::plot_text();
+        let line = Stroke::new(1.0, crate::style::adapt(Color32::from_gray(215)));
+        let selected = crate::style::pressed_fill();
         let first = table.column_at(view.min.x);
         let last = table.column_at(view.max.x);
         let top_row = ((view.min.y - HEADER_HEIGHT).max(0.0) / ROW_HEIGHT) as usize;
@@ -482,7 +482,7 @@ impl HistoryTable {
                     pos2(origin.x + view.min.x, y),
                     vec2(view.width(), ROW_HEIGHT),
                 );
-                painter.rect_filled(band, 0.0, Color32::from_gray(246));
+                painter.rect_filled(band, 0.0, crate::style::faint());
             }
             for column in first..=last {
                 let cell = Rect::from_min_size(
@@ -513,7 +513,7 @@ impl HistoryTable {
             pos2(origin.x + view.min.x, top),
             vec2(view.width(), HEADER_HEIGHT),
         );
-        painter.rect_filled(band, 0.0, Color32::from_gray(236));
+        painter.rect_filled(band, 0.0, crate::style::adapt(Color32::from_gray(236)));
         let x_column = self.selection.columns.first().copied();
         for column in first..=last {
             let cell = Rect::from_min_size(
@@ -521,7 +521,12 @@ impl HistoryTable {
                 vec2(table.width(column), HEADER_HEIGHT),
             );
             if self.selection.columns.contains(&column) {
-                painter.rect_filled(cell, 0.0, Color32::from_rgb(178, 211, 238));
+                let fill = if crate::style::dark() {
+                    Color32::from_rgb(40, 95, 150)
+                } else {
+                    Color32::from_rgb(178, 211, 238)
+                };
+                painter.rect_filled(cell, 0.0, fill);
             }
             let mut title = table.title(column).to_string();
             if x_column == Some(column) && self.selection.columns.len() > 1 {
@@ -532,18 +537,18 @@ impl HistoryTable {
                 egui::Align2::CENTER_CENTER,
                 title,
                 egui::FontId::proportional(13.0),
-                Color32::BLACK,
+                crate::style::text(),
             );
             painter.vline(
                 cell.right(),
                 cell.y_range(),
-                Stroke::new(1.0, Color32::from_gray(190)),
+                Stroke::new(1.0, crate::style::adapt(Color32::from_gray(190))),
             );
         }
         painter.hline(
             band.x_range(),
             band.bottom(),
-            Stroke::new(1.0, Color32::from_gray(160)),
+            Stroke::new(1.0, crate::style::adapt(Color32::from_gray(160))),
         );
     }
 }

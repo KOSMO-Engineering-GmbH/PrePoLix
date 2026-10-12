@@ -455,7 +455,7 @@ impl FeatureDialog {
                     self.plane_results(ui, model, cut);
                 }
                 if let Some(error) = &self.error {
-                    ui.colored_label(Color32::from_rgb(200, 0, 0), error);
+                    ui.colored_label(crate::style::error(), error);
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -572,7 +572,7 @@ impl FeatureDialog {
                 ui.label("Plane");
                 if fe.planes.is_empty() {
                     ui.colored_label(
-                        Color32::from_rgb(200, 0, 0),
+                        crate::style::error(),
                         "Create a Plane under Features first.",
                     );
                 } else {
@@ -609,7 +609,7 @@ impl FeatureDialog {
         };
         let plane = model.fe.plane(&result.plane);
         if let Some(Err(error)) = plane.map(|p| p.resolve(&model.fe)) {
-            ui.colored_label(Color32::from_rgb(200, 0, 0), error);
+            ui.colored_label(crate::style::error(), error);
             return;
         }
         let header = format!("{} {}", field.name, component.name);
@@ -624,7 +624,7 @@ impl FeatureDialog {
         });
         let Some((cut, [min, max])) = cut.and_then(|c| Some((c, c.extremes?))) else {
             ui.colored_label(
-                Color32::from_rgb(200, 0, 0),
+                crate::style::error(),
                 "The plane does not cut any visible part.",
             );
             return;
@@ -720,7 +720,7 @@ impl FeatureDialog {
         let points = match &located.points {
             Ok(points) => points,
             Err(error) => {
-                ui.colored_label(Color32::from_rgb(200, 0, 0), error);
+                ui.colored_label(crate::style::error(), error);
                 return;
             }
         };
@@ -742,7 +742,7 @@ impl FeatureDialog {
         });
         if inside == 0 {
             ui.colored_label(
-                Color32::from_rgb(200, 0, 0),
+                crate::style::error(),
                 "The path does not pass through the mesh anywhere.",
             );
             return;
@@ -1288,7 +1288,7 @@ fn position_row(ui: &mut Ui, point: &ReferencePoint, model: &Model) {
             format_value(p[1] as f32),
             format_value(p[2] as f32)
         )),
-        Err(error) => ui.colored_label(Color32::from_rgb(200, 0, 0), error),
+        Err(error) => ui.colored_label(crate::style::error(), error),
     };
     ui.end_row();
 }
@@ -1381,7 +1381,7 @@ fn point_ref_rows(
                     format_value(r.position[1] as f32),
                     format_value(r.position[2] as f32)
                 )),
-                None => ui.colored_label(Color32::from_rgb(200, 0, 0), "does not exist"),
+                None => ui.colored_label(crate::style::error(), "does not exist"),
             };
             ui.end_row();
         }
@@ -1448,11 +1448,11 @@ pub(crate) fn draw_plot(
     axes: &Axes,
     markers: bool,
 ) {
-    painter.rect_filled(rect, 0.0, Color32::WHITE);
+    painter.rect_filled(rect, 0.0, crate::style::label_fill());
     let top = if axes.y_label.is_empty() { 10.0 } else { 24.0 };
     let area = Rect::from_min_max(rect.min + vec2(64.0, top), rect.max - vec2(12.0, 28.0));
-    let axis_stroke = Stroke::new(1.0, Color32::from_gray(80));
-    let grid = Stroke::new(1.0, Color32::from_gray(225));
+    let axis_stroke = Stroke::new(1.0, crate::style::adapt(Color32::from_gray(80)));
+    let grid = Stroke::new(1.0, crate::style::plot_grid());
     let (mut x0, mut x1) = (
         distances.first().copied().unwrap_or(0.0),
         distances.last().copied().unwrap_or(1.0),
@@ -1483,7 +1483,7 @@ pub(crate) fn draw_plot(
         )
     };
     let font = egui::FontId::proportional(12.0);
-    let text = Color32::from_gray(40);
+    let text = crate::style::plot_text();
     for k in 0..=4 {
         let t = k as f64 / 4.0;
         let y = y0 + (y1 - y0) * t;
@@ -1552,25 +1552,25 @@ pub(crate) fn draw_plot(
             .collect();
         painter.extend(egui::Shape::dashed_line(
             &line,
-            Stroke::new(1.5, Color32::BLACK),
+            Stroke::new(1.5, crate::style::text()),
             6.0,
             4.0,
         ));
         for &[d, s] in &marks.support {
             if s.is_finite() {
-                painter.circle_filled(to_screen(d, s), 4.0, MARK);
+                painter.circle_filled(to_screen(d, s), 4.0, crate::style::lift(MARK));
             }
         }
         if marks.hot_spot.is_finite() {
             let p = to_screen(0.0, marks.hot_spot);
-            painter.circle_filled(p, 4.5, MARK);
+            painter.circle_filled(p, 4.5, crate::style::lift(MARK));
             // Below the dot, where the notch peak does not rise, on white over the dashes.
             let text = format!("S_hs = {}", format_value(marks.hot_spot as f32));
-            let galley = painter.layout_no_wrap(text, font.clone(), MARK);
+            let galley = painter.layout_no_wrap(text, font.clone(), crate::style::lift(MARK));
             let at = p + vec2(8.0, 10.0);
             let back = Rect::from_min_size(at, galley.size()).expand(2.0);
-            painter.rect_filled(back, 2.0, Color32::from_white_alpha(220));
-            painter.galley(at, galley, MARK);
+            painter.rect_filled(back, 2.0, crate::style::plot_label_fill(220));
+            painter.galley(at, galley, crate::style::lift(MARK));
         }
     }
     if markers {
@@ -1587,13 +1587,13 @@ pub(crate) fn draw_plot(
             });
         if let Some((&x, &y)) = nearest {
             let p = to_screen(x, y);
-            painter.circle_stroke(p, 4.0, Stroke::new(1.5, Color32::BLACK));
+            painter.circle_stroke(p, 4.0, Stroke::new(1.5, crate::style::text()));
             outer.text(
                 p + vec2(6.0, -6.0),
                 egui::Align2::LEFT_BOTTOM,
                 format!("{}: {}", format_value(x as f32), format_value(y as f32)),
                 font,
-                Color32::BLACK,
+                crate::style::text(),
             );
         }
     }

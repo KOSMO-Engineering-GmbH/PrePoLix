@@ -4,7 +4,7 @@ use egui::{Color32, Pos2, Rect, Response, Sense, Shape, Stroke, Ui, Vec2, pos2, 
 
 use plx_render::StandardView as ViewIcon;
 
-use crate::style::{HIGHLIGHT, HOVER_FILL, PRESSED_FILL};
+use crate::style::{highlight, hover_fill, pressed_fill};
 
 const BUTTON: Vec2 = vec2(24.0, 22.0);
 const ICON: f32 = 16.0;
@@ -71,24 +71,25 @@ pub fn button(ui: &mut Ui, icon: Icon, tooltip: &str, enabled: bool, checked: bo
         let hovered = enabled && response.hovered();
         if checked || hovered {
             let fill = if checked || response.is_pointer_button_down_on() {
-                PRESSED_FILL
+                pressed_fill()
             } else {
-                HOVER_FILL
+                hover_fill()
             };
             painter.rect(
                 rect.shrink(1.0),
                 0.0,
                 fill,
-                Stroke::new(1.0, HIGHLIGHT),
+                Stroke::new(1.0, highlight()),
                 egui::StrokeKind::Inside,
             );
         }
         let area = Rect::from_center_size(rect.center(), Vec2::splat(ICON));
         let mut shapes = Vec::new();
         paint(&mut shapes, icon, area);
-        if !enabled {
-            for shape in &mut shapes {
-                fade(shape);
+        for shape in &mut shapes {
+            map_colors(shape, &crate::style::adapt);
+            if !enabled {
+                map_colors(shape, &grey);
             }
         }
         painter.extend(shapes);
@@ -105,9 +106,10 @@ pub fn dialog_button(ui: &mut Ui, icon: Icon, tooltip: &str, enabled: bool) -> R
         let area = Rect::from_center_size(response.rect.center(), Vec2::splat(ICON));
         let mut shapes = Vec::new();
         paint(&mut shapes, icon, area);
-        if !enabled {
-            for shape in &mut shapes {
-                fade(shape);
+        for shape in &mut shapes {
+            map_colors(shape, &crate::style::adapt);
+            if !enabled {
+                map_colors(shape, &grey);
             }
         }
         ui.painter().extend(shapes);
@@ -115,26 +117,32 @@ pub fn dialog_button(ui: &mut Ui, icon: Icon, tooltip: &str, enabled: bool) -> R
     response
 }
 
-fn fade(shape: &mut Shape) {
-    let grey = |c: Color32| {
-        let l = ((c.r() as u32 + c.g() as u32 + c.b() as u32) / 3) as u8;
-        Color32::from_rgba_unmultiplied(l, l, l, c.a() / 2)
-    };
+/// The colour of a disabled icon: grey and half transparent.
+fn grey(c: Color32) -> Color32 {
+    let l = ((c.r() as u32 + c.g() as u32 + c.b() as u32) / 3) as u8;
+    Color32::from_rgba_unmultiplied(l, l, l, c.a() / 2)
+}
+
+fn map_colors(shape: &mut Shape, f: &dyn Fn(Color32) -> Color32) {
     match shape {
         Shape::Path(path) => {
-            path.fill = grey(path.fill);
+            path.fill = f(path.fill);
             if let egui::epaint::PathStroke {
                 color: egui::epaint::ColorMode::Solid(c),
                 ..
             } = &mut path.stroke
             {
-                *c = grey(*c);
+                *c = f(*c);
             }
         }
-        Shape::LineSegment { stroke, .. } => stroke.color = grey(stroke.color),
+        Shape::LineSegment { stroke, .. } => stroke.color = f(stroke.color),
         Shape::Rect(r) => {
-            r.fill = grey(r.fill);
-            r.stroke.color = grey(r.stroke.color);
+            r.fill = f(r.fill);
+            r.stroke.color = f(r.stroke.color);
+        }
+        Shape::Circle(c) => {
+            c.fill = f(c.fill);
+            c.stroke.color = f(c.stroke.color);
         }
         _ => {}
     }

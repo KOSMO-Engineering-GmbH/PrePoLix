@@ -12,8 +12,6 @@ use plx_model::{
     UnitSystem,
 };
 
-const ERROR: egui::Color32 = egui::Color32::from_rgb(200, 0, 0);
-
 /// The open dialog with its draft.
 pub struct ModelPropertiesDialog {
     pub draft: ModelProperties,
@@ -100,8 +98,8 @@ impl ModelPropertiesDialog {
                 group(ui, "Model Type", |ui| model_type(ui, draft));
                 group(ui, "Unit System", |ui| {
                     egui::Frame::new()
-                        .fill(crate::style::WINDOW)
-                        .stroke(egui::Stroke::new(1.0, crate::style::BORDER))
+                        .fill(crate::style::window())
+                        .stroke(egui::Stroke::new(1.0, crate::style::border()))
                         .inner_margin(4)
                         .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
@@ -139,7 +137,10 @@ impl ModelPropertiesDialog {
                     ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap());
                 }
                 if let Some(error) = &error {
-                    ui.add(egui::Label::new(egui::RichText::new(error).color(ERROR)).wrap());
+                    ui.add(
+                        egui::Label::new(egui::RichText::new(error).color(crate::style::error()))
+                            .wrap(),
+                    );
                 }
                 ui.add_space(4.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -293,7 +294,7 @@ fn group(ui: &mut egui::Ui, title: &str, contents: impl FnOnce(&mut egui::Ui)) {
     ui.add_space(4.0);
     ui.strong(title);
     egui::Frame::new()
-        .stroke(egui::Stroke::new(1.0, crate::style::BORDER))
+        .stroke(egui::Stroke::new(1.0, crate::style::border()))
         .inner_margin(6)
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());

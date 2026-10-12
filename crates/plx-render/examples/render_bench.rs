@@ -82,6 +82,7 @@ fn main() {
         let options = DisplayOptions {
             mesh_edges,
             contour: Some(palette),
+            ..Default::default()
         };
         let mut draw = |camera: &mut Camera| {
             camera.orbit(3.0, 1.0);

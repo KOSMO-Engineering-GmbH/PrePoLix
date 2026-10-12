@@ -216,7 +216,7 @@ impl HotSpotDialog {
                 ui.separator();
                 self.results(ui, model, plot_height);
                 if let Some(error) = &self.error {
-                    ui.colored_label(egui::Color32::from_rgb(200, 0, 0), error);
+                    ui.colored_label(crate::style::error(), error);
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -344,7 +344,7 @@ impl HotSpotDialog {
             }
         });
         for warning in &plot.warnings {
-            ui.colored_label(egui::Color32::from_rgb(170, 90, 0), warning);
+            ui.colored_label(crate::style::warning(), warning);
         }
     }
 }

@@ -21,8 +21,10 @@ const SURFACE_BIAS_CONSTANT: i32 = 2;
 pub const WIDE_EDGE_PX: f32 = 3.0;
 
 /// PrePoMax's background gradient: Gainsboro at the top, WhiteSmoke at the bottom.
-const BACKGROUND_TOP: [f32; 4] = [220.0 / 255.0, 220.0 / 255.0, 220.0 / 255.0, 1.0];
-const BACKGROUND_BOTTOM: [f32; 4] = [245.0 / 255.0, 245.0 / 255.0, 245.0 / 255.0, 1.0];
+pub const BACKGROUND: [[f32; 4]; 2] = [
+    [220.0 / 255.0, 220.0 / 255.0, 220.0 / 255.0, 1.0],
+    [245.0 / 255.0, 245.0 / 255.0, 245.0 / 255.0, 1.0],
+];
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -41,6 +43,8 @@ struct Globals {
     clip: [f32; 4],
     /// x: 1 when the section view is on, y: how far behind the plane surfaces still show.
     clip_options: [f32; 4],
+    /// Colour of the wireframe of the undeformed shape in rgb.
+    wireframe: [f32; 4],
     palette: [[f32; 4]; PALETTE_SLOTS as usize],
 }
 
@@ -66,6 +70,11 @@ pub struct DisplayOptions {
     pub mesh_edges: bool,
     /// Colour surfaces by their normalized vertex scalars in these bands.
     pub contour: Option<ContourPalette>,
+    /// Background gradient as RGBA fractions, top and bottom.
+    pub background: [[f32; 4]; 2],
+    /// Colour of the wireframe of the undeformed shape as RGB fractions; black on the light
+    /// background.
+    pub wireframe: [f32; 3],
 }
 
 /// Colours of the contour bands, minimum first, each covering an equal share of the
@@ -95,6 +104,8 @@ impl Default for DisplayOptions {
         Self {
             mesh_edges: true,
             contour: None,
+            background: BACKGROUND,
+            wireframe: [0.0; 3],
         }
     }
 }
@@ -114,6 +125,7 @@ pub struct ViewportRenderer {
     background_pipeline: wgpu::RenderPipeline,
     surface_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
+    wireframe_pipeline: wgpu::RenderPipeline,
     mesh_edge_pipeline: wgpu::RenderPipeline,
     wide_edge_pipeline: wgpu::RenderPipeline,
     parts: Vec<GpuMesh>,
@@ -254,6 +266,15 @@ impl ViewportRenderer {
             depth_state(false, wgpu::CompareFunction::LessEqual, Default::default()),
             Some(wgpu::BlendState::ALPHA_BLENDING),
         );
+        let wireframe_pipeline = pipeline(
+            "viewport wireframe",
+            "vs_wireframe",
+            "fs_edge",
+            &[Some(vertex_layout.clone())],
+            wgpu::PrimitiveTopology::LineList,
+            depth_state(false, wgpu::CompareFunction::LessEqual, Default::default()),
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+        );
         // Mesh edges index the surface vertices and take their colour from the shader.
         let mesh_edge_pipeline = pipeline(
             "viewport mesh edges",
@@ -304,6 +325,7 @@ impl ViewportRenderer {
             background_pipeline,
             surface_pipeline,
             edge_pipeline,
+            wireframe_pipeline,
             mesh_edge_pipeline,
             wide_edge_pipeline,
             parts: Vec::new(),
@@ -387,8 +409,8 @@ impl ViewportRenderer {
             view_proj: camera.view_proj(aspect).to_cols_array_2d(),
             lights: camera.light_directions().map(|l| l.extend(0.0).into()),
             view_dir: (-camera.forward()).extend(0.0).into(),
-            background_top: BACKGROUND_TOP,
-            background_bottom: BACKGROUND_BOTTOM,
+            background_top: options.background[0],
+            background_bottom: options.background[1],
             edge: [
                 self.targets.width as f32,
                 self.targets.height as f32,
@@ -411,6 +433,12 @@ impl ViewportRenderer {
                 // Section faces lie on the plane; a fraction of a pixel keeps them visible.
                 0.25 * camera.pixel_size(self.targets.width as f32, self.targets.height as f32),
                 0.0,
+                0.0,
+            ],
+            wireframe: [
+                options.wireframe[0],
+                options.wireframe[1],
+                options.wireframe[2],
                 0.0,
             ],
             palette: palette(options.contour),
@@ -483,13 +511,16 @@ impl ViewportRenderer {
                     }
                 }
             }
+            pass.set_pipeline(&self.wireframe_pipeline);
+            for (part, _) in visible().filter(|(_, whole)| *whole) {
+                if let Some(lines) = &part.wireframe_edges {
+                    pass.set_vertex_buffer(0, lines.buffer.slice(..));
+                    pass.draw(0..lines.count, 0..1);
+                }
+            }
             pass.set_pipeline(&self.edge_pipeline);
-            for (part, whole) in visible() {
-                let lines = [
-                    part.wireframe_edges.as_ref().filter(|_| whole),
-                    part.feature_edges.as_ref(),
-                ];
-                for lines in lines.into_iter().flatten() {
+            for (part, _) in visible() {
+                if let Some(lines) = &part.feature_edges {
                     pass.set_vertex_buffer(0, lines.buffer.slice(..));
                     pass.draw(0..lines.count, 0..1);
                 }

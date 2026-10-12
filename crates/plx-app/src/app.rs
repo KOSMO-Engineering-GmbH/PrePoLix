@@ -217,6 +217,7 @@ impl PrepolixApp {
             .and_then(|s| eframe::get_value(s, settings::STORAGE_KEY))
             .unwrap_or_default();
         settings.upgrade();
+        crate::style::set_theme(&cc.egui_ctx, settings.graphics.theme);
         plx_mesher::set_library_path(settings.gmsh.library());
         let mut app = Self {
             workbench: Workbench {
@@ -946,6 +947,8 @@ impl eframe::App for PrepolixApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.handle_load_events();
         let ctx = ui.ctx().clone();
+        // Under the System theme, the operating system may switch between light and dark.
+        crate::style::sync(&ctx);
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.open_dialog(&ctx);
         }
@@ -997,13 +1000,13 @@ impl eframe::App for PrepolixApp {
         // PrePoMax's fixed layout: tree on the left over the full height, 3D view with the
         // output below it; only the separators move.
         let pane = egui::Frame::new()
-            .fill(crate::style::WINDOW)
-            .stroke(egui::Stroke::new(1.0, crate::style::BORDER));
+            .fill(crate::style::window())
+            .stroke(egui::Stroke::new(1.0, crate::style::border()));
         egui::Panel::left("tree")
             .resizable(true)
             .default_size(280.0)
             .size_range(160.0..=700.0)
-            .frame(egui::Frame::new().fill(crate::style::CONTROL))
+            .frame(egui::Frame::new().fill(crate::style::control()))
             .show(ui, |ui| {
                 let selected_tab = self.workbench.tree_tabs(ui);
                 // Tabs sit flush on the pane: their bottom border is the pane's top border.
@@ -1018,7 +1021,7 @@ impl eframe::App for PrepolixApp {
                     ui.painter().hline(
                         tab.x_range().shrink(1.0),
                         tab.bottom() - 0.5,
-                        egui::Stroke::new(1.0, crate::style::WINDOW),
+                        egui::Stroke::new(1.0, crate::style::window()),
                     );
                 }
             });
@@ -1473,16 +1476,16 @@ impl Workbench {
                 let galley = ui.painter().layout_no_wrap(
                     view.title().to_string(),
                     egui::TextStyle::Body.resolve(ui.style()),
-                    egui::Color32::BLACK,
+                    crate::style::text(),
                 );
                 let size = galley.size() + egui::vec2(16.0, 8.0);
                 let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
                 let fill = if selected {
-                    crate::style::WINDOW
+                    crate::style::window()
                 } else if response.hovered() {
-                    crate::style::HOVER_FILL
+                    crate::style::hover_fill()
                 } else {
-                    crate::style::CONTROL
+                    crate::style::control()
                 };
                 let rect = if selected {
                     selected_rect = Some(rect);
@@ -1495,13 +1498,13 @@ impl Workbench {
                     rect,
                     0.0,
                     fill,
-                    egui::Stroke::new(1.0, crate::style::BORDER),
+                    egui::Stroke::new(1.0, crate::style::border()),
                     egui::StrokeKind::Inside,
                 );
                 ui.painter().galley(
                     rect.center() - galley.size() * 0.5,
                     galley,
-                    egui::Color32::BLACK,
+                    crate::style::text(),
                 );
                 if response.clicked() {
                     self.set_tree_view(view);
@@ -1753,11 +1756,9 @@ impl Workbench {
                                 ui.separator();
                             }
                             let (kind, color) = match finding.severity() {
-                                plx_model::Severity::Error => {
-                                    ("Error", egui::Color32::from_rgb(200, 0, 0))
-                                }
+                                plx_model::Severity::Error => ("Error", crate::style::error()),
                                 plx_model::Severity::Warning => {
-                                    ("Warning", egui::Color32::from_rgb(170, 110, 0))
+                                    ("Warning", crate::style::warning())
                                 }
                             };
                             ui.horizontal(|ui| {
@@ -5387,6 +5388,9 @@ impl Workbench {
             self.output
                 .push("The changed Gmsh library is loaded after a restart".into());
         }
+        if new.graphics.theme != self.settings.graphics.theme {
+            crate::style::set_theme(ctx, new.graphics.theme);
+        }
         if new != self.settings {
             self.settings = new;
             self.update_contour();
@@ -5433,7 +5437,7 @@ impl Workbench {
                 properties::show(ui, shown, &item, name, types);
                 if let Some(error) = error.as_ref().filter(|_| part.is_some()) {
                     ui.add_space(4.0);
-                    ui.colored_label(egui::Color32::from_rgb(200, 0, 0), error);
+                    ui.colored_label(crate::style::error(), error);
                 }
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
