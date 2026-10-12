@@ -2,26 +2,40 @@
 
 = Running CalculiX <analysis>
 
-== Running an analysis
+== Solving an analysis
 
-A model has one analysis, #ui("Analysis-1"). It uses the CalculiX settings under
-#menu("Tools", "Settings ...", "CalculiX") (@settings).
+Each analysis of the project is solved in its window. CalculiX uses the settings under
+#menu("Tools", "Settings ...", "CalculiX") (@settings) and runs in the folder
+`<work directory>/<project name>/<analysis name>`, so the analyses of a project never overwrite
+each other's files.
+
+#screenshot("solve-toolbar.png", [Solve, Stop and Monitor in the toolbar of an analysis window,
+  with the state of the solution])
 
 #fields(
-  [Run Analysis (#key("F5"))], [Writes `Analysis-1.inp` to the work directory and starts
-    CalculiX. Old result files of the analysis in that directory are deleted first.],
+  [Solve (#key("F5"))], [Makes the analysis up to date, like #ui("Update") in Ansys
+    Workbench: first it meshes the parts whose mesh is missing or out of date, then it runs
+    CalculiX if the results are missing or out of date, and keeps the new results. If nothing
+    changed since the last run, it only says so.],
+  [Solve Again], [Runs CalculiX even if the results are up to date.],
   [Check Model], [Lets CalculiX only read and check the model (`*NO ANALYSIS`), without solving
     it.],
-  [Kill Analysis], [Stops a running analysis.],
+  [Stop], [Stops meshing for a solve, or the running CalculiX job.],
   [Monitor], [Shows the monitor window.],
-  [Open Results], [Opens the result file of the last run and binds it to the project
-    (@bind-result).],
+  [Open Results], [Opens the results the analysis keeps on the #ui("Results") tab.],
+  [Remove Results], [Drops the results the analysis keeps (@bind-result).],
 )
 
-These commands are in the #ui("Analysis") menu and in the context menu of #ui("Analysis-1").
-Before CalculiX starts, PrePoLix refuses to run a model without mesh, without step or with all
-steps deactivated, and it stops if the input file cannot be written (for example because a region
-is empty).
+#ui("Solve"), #ui("Stop") and #ui("Monitor") are also in the toolbar, next to the state of the
+solution; all commands are in the #ui("Analysis") menu. Which cells are out of date is decided
+as in the project schematic (@project-window): changing a load makes only the solution out of
+date, changing the meshing settings of a part makes its mesh out of date, and result paths or
+planes change nothing that CalculiX needs.
+
+The input file is named after the analysis, for example `Cantilever.inp`. Old result files of
+the analysis in its folder are deleted before CalculiX starts. PrePoLix refuses to run a model
+without mesh, without step or with all steps deactivated, and it stops if the input file cannot
+be written (for example because a region is empty).
 
 === Monitor
 
@@ -43,22 +57,21 @@ The status at the end is #ui("completed"), #ui("finished with errors, results av
 in the output and adds a line "Possible cause: ..." with a remedy, for example for distorted
 elements, missing material data, rigid body motion or missing convergence.
 
-== Results saved with the project <bind-result>
+== Results kept with the project <bind-result>
 
-When you open the results of a run (#ui("Results") in the monitor or in the context menu of
-#ui("Analysis-1"), or #menu("Analysis", "Open Results")), PrePoLix binds them to the project: the
-input file, the result file (`.frd`) and the history output (`.dat`) of the run are saved in the
-project file with the next #menu("File", "Save"). The output pane shows how much the files add to
-the project file; they are stored compressed, at about a third of their size (a 236 MB result file
-adds about 100 MB). Binding a large result takes a few seconds and runs in the background. A new
-run replaces the bound result as soon as you open its results.
+When a run is finished, its analysis keeps the results: the input file, the result file
+(`.frd`) and the history output (`.dat`) of the run are saved in the project file with the next
+#menu("File", "Save Project"), together with a fingerprint of what the run was made from. The
+results open on the #ui("Results") tab. The output pane shows how much the files add to the
+project file; they are stored compressed, at about a third of their size (a 236 MB result file
+adds about 100 MB). Keeping a large result takes a few seconds and runs in the background. A new
+run replaces the results the analysis keeps.
 
-When a project with a bound result is opened, PrePoLix writes the files to
-`Bound_Results/<project name>` in the work directory and opens the result on the #ui("Results")
-tab. #ui("Analysis-1") then shows the status of the bound run, its tooltip says that a result is
-bound, and #ui("Results") in its context menu opens the bound result again.
+When an analysis with kept results is opened, PrePoLix writes the files to `Kept_Results` in
+the folder of the analysis and opens the results on the #ui("Results") tab. The project
+schematic and the toolbar of the analysis window show whether they are still up to date.
 
-What you defined on the bound result is saved with it and comes back as you left it: derived
+What you defined on the kept results is saved with them and comes back as you left it: derived
 field and history outputs, transformations, hot spots, the reference points, coordinate systems
 and planes of the results, result paths and plane results, and the increment, field and component
 shown. The view comes back too: the camera of the #ui("Results") tab, #menu("View", "Mesh Edges"),
@@ -66,13 +79,10 @@ the deformation and its factor, #ui("Show Undeformed"), the color levels, hidden
 annotations of the query tool and the plots of result paths. PrePoLix takes all of this from the
 open result each time the project is saved.
 
-#screenshot("bound-result-restored.png", [A bound result reopened with its symmetry
+#screenshot("bound-result-restored.png", [Kept results reopened with their symmetry
   transformation and the component shown when the project was saved])
 
-#screenshot("bind-result.png", [Context menu of an analysis with a bound result])
-
-When the analysis runs again, its new results take over all of this from the results before,
-whether they were bound or only open, so the view, transformations, paths and plots stay as they
+When the analysis runs again, its new results take over all of this from the results before, so the view, transformations, paths and plots stay as they
 were. Annotations of the query tool and hot spots on picked nodes or faces refer to nodes and
 elements of the mesh; they are kept only if the mesh did not change. After remeshing they are
 dropped, reference points placed on picked nodes or faces stay at their last position, and the
@@ -81,14 +91,13 @@ output pane lists what was dropped.
 #screenshot("rerun-keeps-view.png", [The results of a new run, shown from the front without mesh
   edges like the results before])
 
-#ui("Remove Bound Result") in the context menu of #ui("Analysis-1") removes the bound result;
-save the project to drop it from the file. Opening the results of the same run again does not bind
-them again; the next run does.
+#menu("Analysis", "Remove Results") drops the kept results; save the project to remove them
+from the file.
 
-To send only the mesh and the model definition, use #menu("File", "Save Without Results ...").
-It saves a copy without the bound result under a new name (proposed as
-`<project name>-without-results.plx`); the open project stays on its own file and keeps its
-result. The entry is available while a result is bound.
+To send only the meshes and the model definitions, use
+#menu("File", "Save Project Without Results ..."). It saves a copy without the kept results under
+a new name (proposed as `<project name>-without-results.plx`); the open project stays on its own
+file and keeps its results.
 
 == Model check <model-check>
 

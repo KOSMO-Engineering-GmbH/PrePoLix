@@ -7,7 +7,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use egui::collapsing_header::CollapsingState;
 use egui::epaint::Mesh;
 use egui::{Color32, Pos2, Rect, Response, Shape, Ui, Vec2, WidgetText, pos2, vec2};
-use plx_job::JobStatus;
 use plx_model::{FeModel, Finding, ModelItem, SetKind, Severity};
 
 use crate::features::{FeatureItem, FeatureKind};
@@ -66,7 +65,6 @@ pub enum TreeItem {
     HistoryOutput(usize, usize),
     /// A defined field of a step, by step and index.
     DefinedField(usize, usize),
-    Analysis,
     /// Features of the FE model or of the shown results, by index.
     ReferencePoint(usize),
     CoordinateSystem(usize),
@@ -208,8 +206,6 @@ pub struct TreeResponse {
     pub swap_master_slave: Option<TreeItem>,
     /// Hide (`false`) or show the symbols of constraints, boundary conditions or loads.
     pub symbol_visibility: Vec<(TreeItem, bool)>,
-    /// An entry of the analysis' context menu, or the monitor by double click.
-    pub analysis: Option<AnalysisAction>,
     /// Open the material library.
     pub material_library: bool,
     /// Open the default meshing parameters of the geometry.
@@ -228,32 +224,6 @@ pub struct TreeResponse {
     pub findings: Option<Vec<Finding>>,
     /// Show the results on a plane, by index, or none.
     pub plane_result: Option<Option<usize>>,
-}
-
-/// What the user asked of the analysis, PrePoMax's analysis context menu.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AnalysisAction {
-    /// Edit the job: executable, work directory and threads, which are settings here.
-    Edit,
-    Run,
-    CheckModel,
-    Monitor,
-    Results,
-    Kill,
-    /// Drop the results bound to the project, to share only mesh and definition.
-    RemoveBoundResult,
-}
-
-/// What the tree shows of the analysis job.
-#[derive(Clone, Copy, Debug)]
-pub struct JobState {
-    pub status: JobStatus,
-    /// A results file is there to be opened.
-    pub results: bool,
-    /// Results are bound to the project.
-    pub bound: bool,
-    /// The analysis ran since the program started; its monitor can be shown.
-    pub ran: bool,
 }
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
@@ -408,7 +378,8 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
             containers.remove(0);
             (TreeItem::StepGroup(s, "BCs"), containers)
         }
-        ModelItem::Analysis => (TreeItem::Analysis, vec![TreeItem::Group("Analyses")]),
+        // The analysis has no item; what CalculiX reported shows on the model.
+        ModelItem::Analysis => (TreeItem::Model, vec![]),
         ModelItem::InitialCondition(i) => (
             TreeItem::InitialCondition(i),
             vec![TreeItem::Group("Initial Conditions"), TreeItem::Model],
@@ -721,8 +692,6 @@ struct Tree<'a> {
     view: TreeView,
     state: &'a mut TreeState,
     response: TreeResponse,
-    /// The analysis job: its status is the icon of the analysis.
-    job: Option<JobState>,
     /// Rows of the open branches, innermost last, for the connector lines.
     levels: Vec<Vec<Row>>,
     /// Inside an item being expanded or collapsed: the state all branches take.
@@ -834,11 +803,7 @@ impl Tree<'_> {
                 }
             });
         }
-        if response.double_clicked() && item == TreeItem::Analysis {
-            // Unlike PrePoMax, which edits the job, a double click reopens the monitor: the
-            // job settings are global settings here.
-            self.response.analysis = Some(AnalysisAction::Monitor);
-        } else if response.double_clicked() {
+        if response.double_clicked() {
             match creates {
                 // PrePoMax creates an item when its container is double-clicked.
                 Some(kind) => self.response.create = Some(kind),
@@ -857,14 +822,6 @@ impl Tree<'_> {
                     | TreeItem::HotSpot(_)
                     | TreeItem::MeshItem(_)
             );
-        if item == TreeItem::Analysis {
-            if self.job.is_some_and(|j| j.bound) {
-                response = response.on_hover_text(
-                    "A result is bound to this analysis: it is saved with the project.",
-                );
-            }
-            response.context_menu(|ui| self.analysis_menu(ui));
-        }
         if creates.is_some() || editable {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -977,50 +934,6 @@ impl Tree<'_> {
         response
     }
 
-    /// PrePoMax's context menu of an analysis. Duplicating and deleting are shown but
-    /// disabled, as there is one analysis only.
-    fn analysis_menu(&mut self, ui: &mut Ui) {
-        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-        let running = self.job.is_some_and(|j| j.status == JobStatus::Running);
-        let results = self.job.is_some_and(|j| j.results) && !running;
-        let single = "There is only one analysis.";
-        let mut action = |ui: &mut Ui, enabled: bool, text: &str, action: AnalysisAction| {
-            if ui.add_enabled(enabled, egui::Button::new(text)).clicked() {
-                self.response.analysis = Some(action);
-            }
-        };
-        action(ui, true, "Edit …", AnalysisAction::Edit);
-        ui.add_enabled(false, egui::Button::new("Duplicate"))
-            .on_disabled_hover_text(single);
-        ui.separator();
-        action(ui, !running, "Run", AnalysisAction::Run);
-        action(ui, !running, "Check Model", AnalysisAction::CheckModel);
-        action(
-            ui,
-            self.job.is_some_and(|j| j.ran),
-            "Monitor",
-            AnalysisAction::Monitor,
-        );
-        action(ui, results, "Results", AnalysisAction::Results);
-        action(ui, running, "Kill", AnalysisAction::Kill);
-        ui.separator();
-        // Results opened from the analysis are bound to the project and saved with it.
-        let bound = self.job.is_some_and(|j| j.bound);
-        action(
-            ui,
-            bound,
-            "Remove Bound Result",
-            AnalysisAction::RemoveBoundResult,
-        );
-        ui.separator();
-        // An analysis has no children, as in PrePoMax the entries are there all the same.
-        ui.add_enabled(false, egui::Button::new("Expand All"));
-        ui.add_enabled(false, egui::Button::new("Collapse All"));
-        ui.separator();
-        ui.add_enabled(false, egui::Button::new("Delete"))
-            .on_disabled_hover_text(single);
-    }
-
     /// PrePoMax's image of a node; containers without an own image get the dotted line.
     fn icon(&self, item: &TreeItem, open: bool) -> TreeIcon {
         if self.inactive.contains(item) {
@@ -1071,14 +984,7 @@ impl Tree<'_> {
             TreeItem::StepGroup(_, "BCs") => TreeIcon::BoundaryCondition,
             TreeItem::StepGroup(_, "Loads") => TreeIcon::Load,
             TreeItem::StepGroup(_, "Defined Fields") => TreeIcon::DefinedField,
-            TreeItem::Group("Analyses") => TreeIcon::Analysis,
             TreeItem::Group(HOT_SPOTS) => TreeIcon::HotSpot,
-            TreeItem::Analysis => match self.job.map(|j| j.status) {
-                Some(JobStatus::Running) => TreeIcon::Running,
-                Some(JobStatus::Completed) => TreeIcon::Finished,
-                Some(JobStatus::FailedWithResults) => TreeIcon::Warning,
-                _ => TreeIcon::NoResult,
-            },
             _ => dots,
         }
     }
@@ -1382,7 +1288,6 @@ pub fn show(
     view: TreeView,
     model: Option<&mut Model>,
     mesh_items: &[String],
-    job: Option<JobState>,
     solver_findings: &[Finding],
     state: &mut TreeState,
 ) -> TreeResponse {
@@ -1390,7 +1295,6 @@ pub fn show(
         view,
         state,
         response: TreeResponse::default(),
-        job,
         levels: vec![Vec::new()],
         forced_open: None,
         findings: HashMap::new(),
@@ -1475,7 +1379,6 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
         }
     }
     let fe = model.as_ref().map(|m| m.fe.clone()).unwrap_or_default();
-    let has_model = model.is_some();
     tree.branch(ui, TreeItem::Model, "Model", true, |tree, ui| {
         tree.mesh(ui, model);
         tree.features(ui, &fe);
@@ -1626,19 +1529,6 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             }
         });
     });
-    if has_model {
-        tree.branch(
-            ui,
-            TreeItem::Group("Analyses"),
-            "Analyses (1)",
-            true,
-            |tree, ui| {
-                tree.leaf(ui, TreeItem::Analysis, ANALYSIS_NAME);
-            },
-        );
-    } else {
-        tree.leaf(ui, TreeItem::Group("Analyses"), "Analyses");
-    }
 }
 
 /// Container of the hot spot definitions.
@@ -1663,9 +1553,6 @@ pub fn feature(item: &TreeItem) -> Option<FeatureItem> {
     };
     Some(FeatureItem { kind, index })
 }
-
-/// Name of the analysis job, PrePoMax's first default.
-pub const ANALYSIS_NAME: &str = "Analysis-1";
 
 /// A name with the names of its children, e.g. a field with its components.
 type NamedList = (String, Vec<String>);

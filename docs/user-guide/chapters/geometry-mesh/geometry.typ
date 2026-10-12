@@ -39,10 +39,9 @@ parts*, for example a mesh written by #menu("File", "Export Deformed Mesh (.inp)
 - A part, set or surface whose name is already taken gets a number appended: the second `PART-1`
   becomes `PART-1-2`.
 - Only the mesh is read: nodes, elements, sets and surfaces. Materials, steps and loads of the
-  file are skipped and listed in the output window. To open an input file as a model of its own,
-  use #menu("File", "Open ...") instead.
+  file are skipped and listed in the output window.
 - Into an empty model the mesh decides the model space (a mesh of plane stress elements makes a 2D
-  model). A 2D mesh cannot be added to a 3D model or the other way round.
+  model); as the model space belongs to the project, all its analyses take it over. A 2D mesh cannot be added to a 3D model or the other way round.
 
 #screenshot("mesh-import.png", [A deformed mesh imported next to the original part])
 

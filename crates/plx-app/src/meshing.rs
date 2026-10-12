@@ -996,6 +996,9 @@ pub struct PartMeshes {
 /// Mesh generation running on a worker thread.
 pub struct MeshingJob {
     pub started: Instant,
+    /// The geometry as it is meshed, with its meshing settings: what the new meshes are
+    /// made from, even if the settings change while they are generated.
+    pub geometry: Geometry,
     receiver: Receiver<Result<PartMeshes, String>>,
 }
 
@@ -1003,6 +1006,7 @@ impl MeshingJob {
     /// Meshes the named parts, or all parts with `None`.
     pub fn start(geometry: Geometry, parts: Option<Vec<String>>, ctx: &egui::Context) -> Self {
         let (sender, receiver) = std::sync::mpsc::channel();
+        let meshed = geometry.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             let result = (|| {
@@ -1023,6 +1027,7 @@ impl MeshingJob {
         });
         Self {
             started: Instant::now(),
+            geometry: meshed,
             receiver,
         }
     }

@@ -5,8 +5,10 @@
 This chapter walks through a complete static analysis of a plate with a hole that is fixed at one
 end and pulled at the other. Each step links to the chapter with the details.
 
-+ *Create the model.* #menu("File", "New ...") opens #ui("Model Properties"). Keep #ui("3D") and
-  the unit system #ui("mm, ton, s, °C") (@model-properties).
++ *Create the analysis.* In the project window, #menu("Project", "New Analysis") adds a block
+  to the project schematic; double-click it to open the analysis in its own window
+  (@project-window). #menu("Project", "Model Space and Units ...") sets the model space and the
+  unit system; keep #ui("3D") and #ui("mm, ton, s, °C") (@model-properties).
 + *Import the geometry.* #menu("Geometry", "Import ...") reads the STEP file of the plate. It
   appears as part `SOLID-1` on the #ui("Geometry") tab (@geometry-import).
 + *Mesh it.* #menu("Mesh", "Default Mesh Parameters ...") sets the element size, #ui("Mesh All
@@ -20,10 +22,12 @@ end and pulled at the other. Each step links to the chapter with the details.
   face of the plate in the 3D view (@boundary-conditions, @selection).
 + *Load.* #menu("Model", "Create Load ..."), type #ui("Surface Traction") with `F1` = 20000 N on
   the opposite end face (@loads).
-+ *Run.* #menu("Analysis", "Run Analysis") or #key("F5"). The monitor shows the progress
++ *Solve.* #ui("Solve") in the toolbar or #key("F5"). The monitor shows the progress
   (@analysis). If the tree shows warning signs, click them first (@model-check).
 + *Look at the results.* Click #ui("Results") in the monitor. Select #ui("STRESS") >
   #ui("MISES") in the tree to see the von Mises stress around the hole (@results).
-+ *Save the project.* #menu("File", "Save") writes a `.plx` file with geometry, mesh and model.
++ *Save the project.* #menu("File", "Save Project") writes a `.plx` file with all analyses of
+  the project: geometry, mesh, model and results. The project schematic now shows the analysis
+  as up to date; change a load, and its solution turns out of date until you solve again.
 
 #screenshot("main-window.png", [The plate with support (green) and load (blue arrow) on the FE Model tab])

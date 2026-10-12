@@ -2,27 +2,29 @@
 
 == Files and projects <files>
 
-=== File menu
+=== File menu of an analysis window
+
+The #ui("File") menu of the project window is described in @project-window. The analysis
+window has these entries:
 
 #fields(
-  [New ... (#key("Ctrl+N"))], [Opens #ui("Model Properties") for a new, empty model
-    (@model-properties). The space and units chosen last are preset. OK closes the current model
-    and all results *without asking to save*.],
-  [Open ... (#key("Ctrl+O"))], [Opens a project (`.plx`), a CalculiX mesh (`.inp`), a result file
-    (`.frd`) or a CAD file (`.step`, `.stp`, `.iges`, `.igs`, `.brep`). Large files load in the
-    background.],
-  [Save (#key("Ctrl+S"))], [Saves the project. A model that was not opened from a `.plx` file
-    is saved with #ui("Save As").],
-  [Save As ... (#key("Ctrl+Shift+S"))], [Saves the project under a new name.],
-  [Save Without Results ...], [Saves a copy without the result bound to the analysis
+  [New Model ... (#key("Ctrl+N"))], [Opens #ui("Model Properties") for a new, empty model
+    of this analysis (@model-properties). OK replaces the analysis' model and its results
+    *without asking*.],
+  [Import ...], [Imports CAD geometry or the mesh of input files (@geometry-import,
+    @mesh-import).],
+  [Save Project (#key("Ctrl+S"))], [Saves the project with all its analyses. A project that
+    has no file yet is saved with #ui("Save Project As").],
+  [Save Project As ... (#key("Ctrl+Shift+S"))], [Saves the project under a new name.],
+  [Save Project Without Results ...], [Saves a copy without the results the analyses keep
     (@bind-result).],
-  [Export CalculiX Input File ...], [Writes the input file exactly as #ui("Run Analysis")
-    would (@export-inp).],
+  [Export CalculiX Input File ...], [Writes the input file exactly as #ui("Solve") would
+    (@export-inp).],
   [Export Deformed Mesh (.inp) ...], [Writes the displayed deformed mesh of the current result
     as a mesh-only input file (@export-deformed).],
   [Export VTU ... / Export VTK ...], [Write the current results, one increment or a time
     series, for ParaView and other VTK programs (@export-vtk).],
-  [Exit], [Closes PrePoLix. There is no prompt for unsaved changes.],
+  [Close Analysis], [Closes the window; the analysis stays in the project.],
 )
 
 #note[PrePoLix does not ask about unsaved changes. Save regularly. Changes of the model can be
@@ -30,20 +32,18 @@
 
 === What each file type does
 
-/ `.plx` (PrePoLix project): geometry, mesh setup, mesh and FE model in one file, and the result
-  bound to the analysis, if any (@bind-result). Saving writes a
-  temporary file first and then replaces the old one, so a crash during saving cannot destroy the
-  project. A project written by a newer version of PrePoLix is refused.
-/ `.inp` (CalculiX input): *only the mesh* is imported: nodes, elements, `*NSET`, `*ELSET`
-  (also `GENERATE`), `*SURFACE` and files referenced with `*INCLUDE`. Every element set named in
-  `*ELEMENT, ELSET=...` becomes a part. All other keywords (materials, steps, ...) are skipped and
-  listed in the output pane. The model space follows the element types: `CPS`, `CPE` and `CAX`
-  elements give a 2D model.
-/ `.frd` (CalculiX results): added to the results on the #ui("Results") tab; the FE model is not
-  touched. Opening the same file again reloads it and keeps its hot spots, paths and planes. A
-  `.dat` file with the same name next to it is read as well (history output).
-/ CAD files: #menu("File", "Open ...") replaces the model with the geometry. To *add* geometry
-  to an existing model use #menu("Geometry", "Import ...") (@geometry-import).
+/ `.plx` (PrePoLix project): all analyses of the project, each with its geometry, mesh setup,
+  mesh, FE model and the results it keeps (@bind-result), and the place of its block in the
+  schematic. Saving writes a temporary file first and then replaces the old one, so a crash
+  during saving cannot destroy the project. A project written by a newer version of PrePoLix
+  is refused, and so are projects saved by PrePoLix 0.2.6 and older, which held one model only.
+/ `.inp` (CalculiX input): imported with #menu("Geometry", "Import ...") (@mesh-import). *Only
+  the mesh* is read: nodes, elements, `*NSET`, `*ELSET` (also `GENERATE`), `*SURFACE` and files
+  referenced with `*INCLUDE`. Every element set named in `*ELEMENT, ELSET=...` becomes a part.
+  All other keywords (materials, steps, ...) are skipped and listed in the output pane.
+/ `.frd` (CalculiX results): the results of the analysis' own runs. Result files from elsewhere
+  are not opened.
+/ CAD files: imported with #menu("Geometry", "Import ...") (@geometry-import).
 
 Supported element types of `.inp` meshes: `C3D4`, `C3D6`, `C3D8`, `C3D10`, `C3D15`, `C3D20` with
 their `R` and `I` variants, `S3`, `S4`, `S6`, `S8`, `M3D` membranes, `CPS`/`CPE`/`CAX` plane and
@@ -51,8 +51,11 @@ axisymmetric elements, `B31`, `B32`, `T3D2` and `T3D3`.
 
 === Drag and drop and command line
 
-Files can be dropped onto the window. Several CAD files dropped together are combined into one
-geometry; otherwise only the first dropped file is opened.
+A project file dropped onto the project window or an analysis window opens in the project
+window. CAD files and input files dropped onto an analysis window are imported into it; several
+CAD files dropped together are combined into one geometry.
 
-On the command line, `prepolix model.plx results.frd` opens all files in order. Without files,
-PrePoLix reopens the last saved project that was open at exit.
+On the command line, `prepolix project.plx` opens the project. Other files, for example
+`prepolix plate.step`, start a new project with one analysis named after the first file, into
+which the files are imported. Without files, PrePoLix reopens the last saved project that was
+open at exit.

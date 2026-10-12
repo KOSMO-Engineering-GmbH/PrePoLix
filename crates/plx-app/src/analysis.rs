@@ -9,13 +9,19 @@ use plx_model::EquationSolver;
 
 use crate::model::Model;
 use crate::settings::Solver;
-use crate::tree::ANALYSIS_NAME;
 
 /// Lines of solver output kept for the monitor window.
 const MAX_OUTPUT_LINES: usize = 5000;
 
 pub struct Analysis {
     job: Job,
+    /// Name of the analysis, also of its input and results files.
+    name: String,
+    /// Fingerprint of the model the run solves, see [`plx_model::fingerprint::solve_input`];
+    /// kept with its results to tell when they are out of date.
+    pub input: u64,
+    /// Started by Solve: the results are opened and kept once the run ends.
+    pub open_when_done: bool,
     output: Vec<String>,
     /// Text typed into the monitor's filter field; only output lines containing it are shown.
     filter: String,
@@ -33,6 +39,25 @@ pub enum MonitorEvent {
     None,
     /// Open the results of the run.
     OpenResults,
+}
+
+/// The analysis name as the name of its files: CalculiX takes no spaces in them, and the
+/// file system no path separators.
+pub fn job_name(name: &str) -> String {
+    let name: String = (name.trim().chars())
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if name.is_empty() {
+        "Analysis".into()
+    } else {
+        name
+    }
 }
 
 /// Copies the results file of a submodel's global model next to the input file `<name>.inp`
@@ -78,14 +103,17 @@ pub fn stage_global_results(
 }
 
 impl Analysis {
-    /// Writes `Analysis-1.inp` into the work directory and starts CalculiX on it; steps left
-    /// at the default solver use `default_solver`, see [`Solver::default_solver`]. With
-    /// `check_model` CalculiX only reads and checks the model (PrePoMax's "Check Model").
+    /// Writes the input file of the analysis `name` into `work_dir` and starts CalculiX on
+    /// it; steps left at the default solver use `default_solver`, see
+    /// [`Solver::default_solver`]. With `check_model` CalculiX only reads and checks the model
+    /// (PrePoMax's "Check Model").
     pub fn start(
         solver: &Solver,
         model: &Model,
         default_solver: EquationSolver,
         check_model: bool,
+        name: &str,
+        work_dir: &std::path::Path,
     ) -> Result<Self, String> {
         if model.fe.steps.is_empty() && !check_model {
             return Err(
@@ -98,8 +126,8 @@ impl Analysis {
         let heading = format!("PrePoLix: {}", model.file_name());
         let mut fe = model.fe.clone();
         fe.resolve_default_solver(default_solver);
-        let work_dir = solver.work_dir();
-        stage_global_results(&mut fe, &work_dir, ANALYSIS_NAME)?;
+        let job_name = job_name(name);
+        stage_global_results(&mut fe, work_dir, &job_name)?;
         let write = if check_model {
             plx_io::inp::write_check_inp
         } else {
@@ -114,21 +142,20 @@ impl Analysis {
         } else {
             plx_io::inp::keywords::input_keywords(&input)
         };
-        let copied = copy_result_files(&fe, &work_dir);
+        let copied = copy_result_files(&fe, work_dir);
         let job_solver = solver.job_solver();
         let hint = "Check the executable under Tools > Settings > CalculiX.";
         if let Some(message) = crate::settings::missing_executable(&job_solver.executable) {
             return Err(format!("CalculiX not started: {message}. {hint}"));
         }
-        let job = Job::start(&job_solver, &work_dir, ANALYSIS_NAME, &input).map_err(|e| {
+        let job = Job::start(&job_solver, work_dir, &job_name, &input).map_err(|e| {
             format!(
                 "CalculiX ({}) not started: {e}. {hint}",
                 job_solver.executable.display()
             )
         })?;
         let mut output = vec![format!(
-            "{} {} in {}",
-            ANALYSIS_NAME,
+            "{name} {} in {}",
             if check_model {
                 "model check started"
             } else {
@@ -141,6 +168,9 @@ impl Analysis {
             output,
             filter: String::new(),
             job,
+            name: name.to_owned(),
+            input: plx_model::fingerprint::solve_input(&model.mesh, &model.fe),
+            open_when_done: false,
             started: Instant::now(),
             finished: None,
             status: JobStatus::Running,
@@ -212,7 +242,7 @@ impl Analysis {
         let mut event = MonitorEvent::None;
         let mut open = self.monitor;
         let status = self.job.poll();
-        egui::Window::new(format!("Monitor: {ANALYSIS_NAME}"))
+        egui::Window::new(format!("Monitor: {}", self.name))
             .open(&mut open)
             .collapsible(false)
             .default_size([620.0, 380.0])

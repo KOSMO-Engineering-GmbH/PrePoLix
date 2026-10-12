@@ -1,20 +1,19 @@
 #import "../../template.typ": *
 
-= The User Interface
+== Analysis window <main-window>
 
-== Main window <main-window>
+Each analysis of the project opens in a window of its own, the main window of PrePoMax. Its
+title shows the name of the analysis and of the project. The layout is fixed, as in PrePoMax.
+Only the separators between the panes can be moved.
 
-The layout of the main window is fixed, as in PrePoMax. Only the separators between the panes can
-be moved. PrePoLix remembers the window size and position.
-
-#screenshot("main-window.png", [Main window with a model on the FE Model tab])
+#screenshot("analysis-window.png", [Analysis window with a solved model on the FE Model tab])
 
 From top to bottom the window contains:
 
 / Menu bar: #ui("File"), #ui("Edit"), #ui("View"), #ui("Geometry"), #ui("Mesh"),
   #ui("Model"), #ui("Interaction"), #ui("Analysis"), #ui("Results"), #ui("Tools"),
-  #ui("Help"). #ui("Edit") has no entries yet. #menu("Help", "User Guide") opens this guide
-  in the web browser (@offline-guide).
+  #ui("Help"). #ui("Edit") holds Undo and Redo (@undo). #menu("Help", "User Guide") opens
+  this guide in the web browser (@offline-guide).
 / Toolbar: two rows. The first row holds the file, view and display buttons, the second row the
   result controls (@results-toolbar). The result row is always there but greyed out outside the
   #ui("Results") tab, so the 3D view does not jump when you switch tabs.
@@ -30,7 +29,8 @@ From top to bottom the window contains:
 === Toolbar, first row
 
 #fields(
-  [New, Open, Save], [As in the #ui("File") menu (@files).],
+  [New Model, Save], [As in the #ui("File") menu (@files): an empty model for the analysis,
+    and saving the project.],
   [Import Geometry], [Imports STEP, IGES or BREP files and adds them to the geometry
     (@geometry-import), or the mesh of input files (`.inp`) as mesh parts (@mesh-import).],
   [Zoom to Fit], [Fits the visible parts into the view.],
@@ -46,17 +46,21 @@ From top to bottom the window contains:
   [Query], [Opens and closes the query window (@query). The button stays pressed while it is
     open.],
   [Remove Annotations], [Deletes all query labels of the model shown.],
+  [Solve, Stop, Monitor], [Solve the analysis, stop meshing or CalculiX, and show the monitor
+    (@analysis). Next to them, the state of the solution: #ui("Not solved"),
+    #ui("Solution up to date"), #ui("Solution out of date") and so on. #ui("Problems") appears
+    when CalculiX reported problems in the last run and lists them.],
 )
 
-Buttons that cannot be used at the moment are greyed out, for example #ui("Save") without a
-model or #ui("Open") while a file is still loading.
+Buttons that cannot be used at the moment are greyed out, for example #ui("Stop") while
+nothing runs.
 
 == Model tree <model-tree>
 
 The tree on the left has three tabs:
 
 / Geometry: imported CAD parts and the mesh setup (@geometry).
-/ FE Model: mesh parts, materials, sections, constraints, contacts, steps and the analysis.
+/ FE Model: mesh parts, materials, sections, constraints, contacts and steps.
 / Results: the opened result files with their fields, history outputs, paths, planes and hot
   spots (@results).
 
@@ -67,8 +71,7 @@ has no mesh yet opens on the #ui("Geometry") tab, opening a result file switches
 === Working with tree items
 
 - *Double-click* an item to open its dialog. Double-clicking a container (for example
-  #ui("Materials")) creates a new item in it. Double-clicking #ui("Analysis-1") opens the
-  monitor.
+  #ui("Materials")) creates a new item in it.
 - *Right-click* an item for its context menu (see below).
 - *Del* deletes the selected item after asking "Delete the selected item?"; #key("Ctrl+Z") brings it back (@undo).
 - *Space* activates or deactivates the selected item while the mouse is over the tree.

@@ -12,7 +12,9 @@ with #ui("Create ...") in the context menu of their container in the tree.
 == Model properties <model-properties>
 
 #menu("Model", "Model Properties ...") (or a double-click on #ui("Model") in the tree) sets
-the basic properties of the model. The same dialog opens for #menu("File", "New ...").
+the basic properties of the model. The same dialog opens for #menu("File", "New Model ...").
+The model space and the unit system belong to the project: changing them here changes them for
+all analyses of the project (@project-window).
 
 #screenshot("model-properties.png", [Model properties])
 

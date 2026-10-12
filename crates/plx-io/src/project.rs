@@ -1,6 +1,7 @@
-//! Project files (`.plx`): the mesh and the FE model in RON, written by serde, and the
-//! results the user bound to the analysis.
+//! Project files (`.plx`): the analyses of a project, each with its geometry, mesh, FE model
+//! in RON, written by serde, and the results the user bound to it.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -14,21 +15,70 @@ use plx_model::{FeModel, Geometry, PROJECT_FORMAT};
 use plx_results::ResultsSettings;
 use serde::{Deserialize, Serialize};
 
-/// A prepolix project as saved in a `.plx` file: the mesh and the analysis set up on it.
-/// Like PrePoMax's `.pmx` it stores what the user defined, not the CalculiX input file.
+/// A prepolix project as saved in a `.plx` file: its analyses, like the systems of an Ansys
+/// Workbench project. Like PrePoMax's `.pmx` it stores what the user defined, not the
+/// CalculiX input files.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     pub format: u32,
-    /// CAD geometry the mesh is generated from; projects made from an input file have none.
+    /// Model space and unit system of every analysis of the project.
+    #[serde(default)]
+    pub space: plx_model::ModelSpace,
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    pub analyses: Vec<ProjectAnalysis>,
+    /// Data one analysis takes from another; kept for the links between analyses, which
+    /// are not made yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
+}
+
+impl Default for Project {
+    fn default() -> Self {
+        Self {
+            format: PROJECT_FORMAT,
+            space: Default::default(),
+            units: Default::default(),
+            analyses: Vec::new(),
+            links: Vec::new(),
+        }
+    }
+}
+
+/// An analysis of a project: what a whole project was before projects held several, with
+/// its name and its place in the project schematic.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProjectAnalysis {
+    /// Stays the same when the analysis is renamed, for links to it.
+    pub id: u64,
+    pub name: String,
+    /// Position of its block in the project schematic.
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// CAD geometry the mesh is generated from; analyses made from an input file have none.
     #[serde(default)]
     pub geometry: Option<Geometry>,
     pub mesh: FeMesh,
     #[serde(default)]
     pub model: FeModel,
-    /// Results of a finished analysis the user bound to the project, restored when it is
-    /// opened; projects without them are only mesh and definition.
+    /// Fingerprint of the meshing inputs of each part of the geometry when it was meshed,
+    /// see [`plx_model::fingerprint::mesh_input`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mesh_inputs: BTreeMap<String, u64>,
+    /// Results of a finished run the analysis keeps, restored when it is opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub results: Option<BoundResults>,
+}
+
+/// Data an analysis takes from another one instead of having its own, like Ansys Workbench's
+/// links between cells, but down to single items of the model tree.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Link {
+    pub source: u64,
+    pub target: u64,
+    /// The tree path of what is taken: a whole category such as `["Materials"]`, or one
+    /// item of it such as `["Materials", "Steel"]`.
+    pub item: Vec<String>,
 }
 
 /// The files of a finished analysis kept in the project file: the input file CalculiX ran,
@@ -37,6 +87,10 @@ pub struct Project {
 pub struct BoundResults {
     /// The analysis the results belong to.
     pub analysis: String,
+    /// Fingerprint of what the run solved, see [`plx_model::fingerprint::solve_input`];
+    /// the results are out of date once the analysis' fingerprint differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<u64>,
     /// CalculiX reported errors but wrote results.
     #[serde(default)]
     pub with_errors: bool,
@@ -80,24 +134,16 @@ pub enum ProjectError {
     Format { path: PathBuf, message: String },
     #[error("{path} comes from a newer PrePoLix version (format {format})")]
     Newer { path: PathBuf, format: u32 },
+    #[error(
+        "{path} comes from an older PrePoLix version (format {format}) with a single model, \
+         which cannot be opened: import its input file into a new analysis instead"
+    )]
+    Older { path: PathBuf, format: u32 },
 }
 
 /// Writes the project; a crash while saving leaves an existing file intact.
-pub fn save_project(
-    path: &Path,
-    geometry: Option<&Geometry>,
-    mesh: &FeMesh,
-    model: &FeModel,
-    results: Option<&BoundResults>,
-) -> Result<(), ProjectError> {
-    let project = Project {
-        format: PROJECT_FORMAT,
-        geometry: geometry.cloned(),
-        mesh: mesh.clone(),
-        model: model.clone(),
-        results: results.cloned(),
-    };
-    let text = ron::to_string(&project).map_err(|e| ProjectError::Format {
+pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> {
+    let text = ron::to_string(project).map_err(|e| ProjectError::Format {
         path: path.to_owned(),
         message: e.to_string(),
     })?;
@@ -110,22 +156,38 @@ pub fn save_project(
     std::fs::rename(&temporary, path).map_err(io)
 }
 
+/// The format of a project file, read before the rest, which depends on it.
+#[derive(Deserialize)]
+struct Header {
+    format: u32,
+}
+
 pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
     let text = std::fs::read_to_string(path).map_err(|source| ProjectError::Io {
         path: path.to_owned(),
         source,
     })?;
-    let mut project: Project = ron::from_str(&text).map_err(|e| ProjectError::Format {
+    let format_error = |e: ron::error::SpannedError| ProjectError::Format {
         path: path.to_owned(),
         message: e.to_string(),
-    })?;
-    if project.format > PROJECT_FORMAT {
+    };
+    let header: Header = ron::from_str(&text).map_err(format_error)?;
+    if header.format > PROJECT_FORMAT {
         return Err(ProjectError::Newer {
             path: path.to_owned(),
-            format: project.format,
+            format: header.format,
         });
     }
-    project.model.migrate();
+    if header.format < PROJECT_FORMAT {
+        return Err(ProjectError::Older {
+            path: path.to_owned(),
+            format: header.format,
+        });
+    }
+    let mut project: Project = ron::from_str(&text).map_err(format_error)?;
+    for analysis in &mut project.analyses {
+        analysis.model.migrate();
+    }
     Ok(project)
 }
 
@@ -138,6 +200,7 @@ pub fn bind_results(
 ) -> Result<BoundResults, ProjectError> {
     let mut bound = BoundResults {
         analysis: analysis.to_owned(),
+        input: None,
         with_errors,
         files: Vec::new(),
         settings: None,
@@ -223,6 +286,27 @@ mod tests {
 
     use super::*;
     use crate::inp::read_inp;
+
+    /// A project with one analysis of this data.
+    fn single(
+        geometry: Option<&Geometry>,
+        mesh: &FeMesh,
+        model: &FeModel,
+        results: Option<&BoundResults>,
+    ) -> Project {
+        Project {
+            analyses: vec![ProjectAnalysis {
+                id: 1,
+                name: "Analysis-1".into(),
+                geometry: geometry.cloned(),
+                mesh: mesh.clone(),
+                model: model.clone(),
+                results: results.cloned(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn projects_read_back_what_was_saved() {
@@ -354,13 +438,34 @@ mod tests {
             ],
             part_names: vec!["SOLID-1".into()],
         };
-        save_project(&path, Some(&geometry), &mesh, &model, None).unwrap();
-        let project = read_project(&path).unwrap();
+        let mut saved = single(Some(&geometry), &mesh, &model, None);
+        saved.analyses[0].mesh_inputs.insert("SOLID-1".into(), 42);
+        // A second, empty analysis next to it.
+        saved.analyses.push(ProjectAnalysis {
+            id: 2,
+            name: "Modal".into(),
+            position: [300.0, 20.0],
+            ..Default::default()
+        });
+        saved.links.push(Link {
+            source: 1,
+            target: 2,
+            item: vec!["Materials".into(), "Steel".into()],
+        });
+        save_project(&path, &saved).unwrap();
+        let mut project = read_project(&path).unwrap();
+        assert_eq!(project.links, saved.links);
+        let second = project.analyses.pop().unwrap();
+        assert_eq!((second.id, second.name.as_str()), (2, "Modal"));
+        assert_eq!(second.position, [300.0, 20.0]);
+        assert_eq!(second.mesh.element_count(), 0);
+        let project = project.analyses.pop().unwrap();
         assert_eq!(project.model, model);
         assert_eq!(project.geometry, Some(geometry));
         assert_eq!(project.mesh.elements(), mesh.elements());
         assert_eq!(project.mesh.coords(), mesh.coords());
         assert_eq!(project.mesh.node_sets, mesh.node_sets);
+        assert_eq!(project.mesh_inputs["SOLID-1"], 42);
 
         let newer = std::fs::read_to_string(&path).unwrap().replacen(
             &format!("format:{PROJECT_FORMAT}"),
@@ -371,6 +476,13 @@ mod tests {
         assert!(matches!(
             read_project(&path),
             Err(ProjectError::Newer { format: 99, .. })
+        ));
+        // Projects with a single model, from before analyses, are not read.
+        let older = "(format:1,geometry:None,mesh:(),model:())";
+        std::fs::write(&path, older).unwrap();
+        assert!(matches!(
+            read_project(&path),
+            Err(ProjectError::Older { format: 1, .. })
         ));
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -501,22 +613,19 @@ mod tests {
             },
             ..Default::default()
         });
-        save_project(&path, None, &mesh, &model, Some(&bound)).unwrap();
+        bound.input = Some(7);
+        save_project(&path, &single(None, &mesh, &model, Some(&bound))).unwrap();
         let project = read_project(&path).unwrap();
-        assert_eq!(project.results.as_ref(), Some(&bound));
+        assert_eq!(project.analyses[0].results.as_ref(), Some(&bound));
 
         let restored = restore_results(&bound, &dir.join("restored")).unwrap();
         assert_eq!(restored, dir.join("restored/Analysis-1.frd"));
         assert_eq!(std::fs::read_to_string(&restored).unwrap(), text);
 
         // Without bound results the project file has no trace of them.
-        save_project(&path, None, &mesh, &model, None).unwrap();
-        assert!(
-            !std::fs::read_to_string(&path)
-                .unwrap()
-                .contains("Analysis-1")
-        );
-        assert_eq!(read_project(&path).unwrap().results, None);
+        save_project(&path, &single(None, &mesh, &model, None)).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("files:"));
+        assert_eq!(read_project(&path).unwrap().analyses[0].results, None);
 
         let mut evil = bound.clone();
         evil.files[0].name = "../evil.frd".into();
