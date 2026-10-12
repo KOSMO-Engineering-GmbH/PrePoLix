@@ -67,6 +67,8 @@ portable Windows version in the folder `Settings` next to `prepolix.exe` (@porta
     test can take a while, particularly on Windows.],
 )
 
+#screenshot("calculix-test-running.png", [While #ui("Test CalculiX") runs])
+
 #screenshot("calculix-test.png", [Result of #ui("Test CalculiX")])
 
 *Keywords.* Older CalculiX versions lack keywords of newer features, for example
