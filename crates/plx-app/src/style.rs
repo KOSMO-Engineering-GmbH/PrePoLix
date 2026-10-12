@@ -158,6 +158,30 @@ pub fn pressed_fill() -> Color32 {
 pub fn faint() -> Color32 {
     palette().faint
 }
+/// Header band of a block in the project schematic: a muted blue-grey.
+pub fn node_header() -> Color32 {
+    if dark() {
+        Color32::from_rgb(52, 66, 84)
+    } else {
+        Color32::from_rgb(214, 223, 234)
+    }
+}
+/// Outline of the pins of the project schematic.
+pub fn pin_edge() -> Color32 {
+    if dark() {
+        Color32::from_rgb(20, 20, 22)
+    } else {
+        Color32::from_rgb(70, 70, 74)
+    }
+}
+/// Dots of the schematic's background.
+pub fn schematic_dot() -> Color32 {
+    if dark() {
+        Color32::from_rgb(70, 70, 74)
+    } else {
+        Color32::from_rgb(196, 196, 198)
+    }
+}
 /// Messages about errors and invalid input.
 pub fn error() -> Color32 {
     palette().error

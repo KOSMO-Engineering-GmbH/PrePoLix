@@ -17,9 +17,9 @@ use crate::icons::{self, Icon};
 use crate::links;
 use crate::model::PROJECT_EXTENSION;
 use crate::model_properties::{DialogResult, ModelPropertiesDialog};
+use crate::node_icons::{self, NodeIcon};
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::status::{self, AnalysisStatus, CellState};
-use crate::tree_icons::{self, TreeIcon};
 
 /// Storage key of the project file open at exit, reopened at the next start.
 const LAST_PROJECT_KEY: &str = "last_project";
@@ -2047,7 +2047,7 @@ struct Row {
     path: Vec<String>,
     text: String,
     depth: usize,
-    icon: TreeIcon,
+    icon: NodeIcon,
     state: Option<CellState>,
     /// Whether the row opens to show what is in it, and whether it is open.
     expander: Option<bool>,
@@ -2109,7 +2109,7 @@ fn block_rows(
                 None => "State".to_owned(),
             },
             depth: 0,
-            icon: TreeIcon::Step,
+            icon: NodeIcon::State,
             state: None,
             expander: None,
             input: true,
@@ -2121,8 +2121,8 @@ fn block_rows(
             linked_from: continues,
             path: state,
         },
-        cell(links::GEOMETRY, TreeIcon::Geometry, status.geometry, true),
-        cell(links::MESH, TreeIcon::Mesh, status.mesh, true),
+        cell(links::GEOMETRY, NodeIcon::Geometry, status.geometry, true),
+        cell(links::MESH, NodeIcon::Mesh, status.mesh, true),
     ];
     if !status.stale_parts.is_empty() {
         rows[1]
@@ -2131,7 +2131,7 @@ fn block_rows(
     }
     let setup = vec![links::SETUP.to_owned()];
     let setup_open = expanded.contains(&setup);
-    let mut row = cell(links::SETUP, TreeIcon::Steps, status.setup, true);
+    let mut row = cell(links::SETUP, NodeIcon::Setup, status.setup, true);
     row.expander = Some(setup_open);
     rows.push(row);
     if setup_open {
@@ -2183,13 +2183,8 @@ fn block_rows(
             }
         }
     }
-    rows.push(cell("Solution", TreeIcon::Analysis, status.solution, false));
-    rows.push(cell(
-        "Results",
-        TreeIcon::FieldOutput,
-        status.results,
-        false,
-    ));
+    rows.push(cell("Solution", NodeIcon::Solution, status.solution, false));
+    rows.push(cell("Results", NodeIcon::Results, status.results, false));
     for step in fe.map(|fe| fe.steps.as_slice()).unwrap_or_default() {
         let path = vec![links::RESULTS.to_owned(), step.name.clone()];
         let tip = if step.active {
@@ -2207,7 +2202,7 @@ fn block_rows(
         rows.push(Row {
             text: step.name.clone(),
             depth: 1,
-            icon: TreeIcon::Step,
+            icon: NodeIcon::Step,
             state: None,
             expander: None,
             input: true,
@@ -2228,17 +2223,17 @@ fn shown_row(rows: &[Row], path: &[String]) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
-/// The symbol of each cell and category of a block, as in the analysis tree.
-fn category_icon(category: &str) -> TreeIcon {
+/// The symbol of each category of the setup.
+fn category_icon(category: &str) -> NodeIcon {
     match category {
-        "Features" => TreeIcon::Features,
-        "Materials" => TreeIcon::Material,
-        "Sections" => TreeIcon::Section,
-        "Constraints" => TreeIcon::Constraints,
-        "Contacts" => TreeIcon::Contacts,
-        "Amplitudes" => TreeIcon::Amplitude,
-        "Initial Conditions" => TreeIcon::InitialConditions,
-        _ => TreeIcon::Step,
+        "Features" => NodeIcon::Features,
+        "Materials" => NodeIcon::Materials,
+        "Sections" => NodeIcon::Sections,
+        "Constraints" => NodeIcon::Constraints,
+        "Contacts" => NodeIcon::Contacts,
+        "Amplitudes" => NodeIcon::Amplitudes,
+        "Initial Conditions" => NodeIcon::InitialConditions,
+        _ => NodeIcon::Steps,
     }
 }
 
@@ -2377,7 +2372,8 @@ impl SnarlViewer<u64> for Viewer {
             toggled = response.clicked() && pointer.is_some_and(|p| p.x < arrow.right() + 2.0);
         }
         x += 12.0;
-        tree_icons::paint(painter, egui::pos2(x, middle - 8.0), row.icon);
+        let ink = ui.visuals().text_color().gamma_multiply(0.75);
+        node_icons::paint(painter, egui::pos2(x, middle - 7.0), row.icon, ink);
         x += 20.0;
         let color = if row.linked_from.is_some() {
             crate::style::adapt(egui::Color32::from_rgb(40, 110, 200))
@@ -2408,11 +2404,22 @@ impl SnarlViewer<u64> for Viewer {
         } else if response.double_clicked() {
             self.actions.push(Action::Open(id));
         }
+        let color = wire_color(&row.path);
         if row.path.first().is_some_and(|c| c == links::STATE) {
-            let color = wire_color(&row.path);
             PinInfo::square().with_fill(color).with_wire_color(color)
         } else if row.input {
-            PinInfo::circle().with_fill(wire_color(&row.path))
+            // A wire takes the mixed colour of its two pins: a wire from the results of a
+            // step is orange on both ends, whichever row takes them.
+            let results = (pin.remotes.iter()).any(|remote| {
+                self.row(snarl, remote.node, remote.output)
+                    .is_some_and(|(_, row)| row.path.first().is_some_and(|c| c == links::RESULTS))
+            });
+            let wire = if results {
+                wire_color(&[links::RESULTS.to_owned()])
+            } else {
+                color
+            };
+            PinInfo::circle().with_fill(color).with_wire_color(wire)
         } else {
             hidden_pin()
         }
@@ -2432,7 +2439,16 @@ impl SnarlViewer<u64> for Viewer {
         match self.row(snarl, pin.id.node, pin.id.output) {
             Some((_, row)) if row.output => {
                 let color = wire_color(&row.path);
-                PinInfo::circle().with_fill(color).with_wire_color(color)
+                // A wire takes the mixed colour of its two pins, so the results pin of a step
+                // whose wires all go to a State row gives them the green of a state link.
+                let state = vec![links::STATE.to_owned()];
+                let continues = !pin.remotes.is_empty()
+                    && (pin.remotes.iter()).all(|remote| {
+                        self.row(snarl, remote.node, remote.input)
+                            .is_some_and(|(_, row)| row.path == state)
+                    });
+                let wire = if continues { wire_color(&state) } else { color };
+                PinInfo::circle().with_fill(color).with_wire_color(wire)
             }
             _ => hidden_pin(),
         }
@@ -2440,6 +2456,27 @@ impl SnarlViewer<u64> for Viewer {
 
     fn has_body(&mut self, _node: &u64) -> bool {
         false
+    }
+
+    /// A grid of dots behind the blocks, like the background of a node editor.
+    fn draw_background(
+        &mut self,
+        _background: Option<&egui_snarl::ui::BackgroundPattern>,
+        viewport: &egui::Rect,
+        _snarl_style: &SnarlStyle,
+        _style: &egui::Style,
+        painter: &egui::Painter,
+        _snarl: &Snarl<u64>,
+    ) {
+        let color = crate::style::schematic_dot();
+        let first = |v: f32| (v / DOT_SPACING).floor() as i32;
+        let last = |v: f32| (v / DOT_SPACING).ceil() as i32;
+        for i in first(viewport.left())..=last(viewport.right()) {
+            for j in first(viewport.top())..=last(viewport.bottom()) {
+                let center = egui::pos2(i as f32 * DOT_SPACING, j as f32 * DOT_SPACING);
+                painter.circle_filled(center, 1.0, color);
+            }
+        }
     }
 
     fn connect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<u64>) {
@@ -2660,9 +2697,37 @@ fn node_menu(
     entry(ui, "Delete …", Action::Delete(id));
 }
 
+/// Spacing of the dots of the schematic's background.
+const DOT_SPACING: f32 = 24.0;
+
 fn schematic_style() -> SnarlStyle {
+    let border = egui::Stroke::new(1.0, crate::style::border());
     SnarlStyle {
         collapsible: Some(false),
+        // Blocks with rounded corners and a tinted header, like the nodes of a node editor.
+        node_frame: Some(
+            egui::Frame::new()
+                .fill(crate::style::window())
+                .stroke(border)
+                .corner_radius(6.0)
+                .inner_margin(egui::Margin::symmetric(4, 3)),
+        ),
+        header_frame: Some(
+            egui::Frame::new()
+                .fill(crate::style::node_header())
+                .corner_radius(egui::CornerRadius {
+                    nw: 6,
+                    ne: 6,
+                    sw: 0,
+                    se: 0,
+                })
+                .inner_margin(egui::Margin::symmetric(6, 4)),
+        ),
+        bg_frame: Some(egui::Frame::new().fill(crate::style::control())),
+        bg_pattern: Some(egui_snarl::ui::BackgroundPattern::NoPattern),
+        pin_size: Some(9.0),
+        pin_stroke: Some(egui::Stroke::new(1.0, crate::style::pin_edge())),
+        wire_width: Some(2.0),
         // Blocks are never magnified beyond their size, also when the view centres on them.
         max_scale: Some(1.0),
         min_scale: Some(0.3),

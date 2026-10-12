@@ -29,6 +29,7 @@ mod meshing;
 mod model;
 mod model_properties;
 mod motion_preview;
+mod node_icons;
 mod numeric;
 mod overlay;
 mod path_plot;
