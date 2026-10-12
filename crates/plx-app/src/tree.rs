@@ -103,6 +103,9 @@ pub struct TreeState {
     /// Items another analysis of the project owns, with its name: they are marked and
     /// cannot be changed here.
     pub linked: HashMap<TreeItem, String>,
+    /// Leave the linked items out of the FE Model tree; categories stay, so that items of
+    /// the analysis itself can be added to them.
+    pub hide_linked: bool,
 }
 
 impl TreeState {
@@ -1021,6 +1024,15 @@ impl Tree<'_> {
         }
     }
 
+    /// Whether `item` is left out because another analysis owns it. Categories and the mesh
+    /// stay, with their link sign.
+    fn hidden(&self, item: &TreeItem) -> bool {
+        self.state.hide_linked
+            && self.view == TreeView::FeModel
+            && self.state.linked.contains_key(item)
+            && !matches!(item, TreeItem::Group(_) | TreeItem::Mesh)
+    }
+
     /// A row: plus and minus box (or its space), icon and label. `check` adds a check box in
     /// front of the icon. Records the row for the connector lines of its branch.
     fn row(
@@ -1032,6 +1044,14 @@ impl Tree<'_> {
         item: TreeItem,
         text: impl Into<WidgetText>,
     ) -> (Row, Response, bool) {
+        if self.hidden(&item) {
+            let response = ui.interact(
+                egui::Rect::NOTHING,
+                ui.id().with("hidden"),
+                egui::Sense::hover(),
+            );
+            return (Row { y: 0.0, left: 0.0 }, response, false);
+        }
         ui.horizontal(|ui| {
             let left = ui.cursor().left();
             ui.spacing_mut().item_spacing.x = 0.0;
@@ -1093,6 +1113,9 @@ impl Tree<'_> {
         default_open: bool,
         body: impl FnOnce(&mut Self, &mut Ui),
     ) {
+        if self.hidden(&item) {
+            return;
+        }
         let id = ui.make_persistent_id((self.view, &item));
         let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, default_open);
         let outer = self.forced_open;
@@ -1160,9 +1183,15 @@ impl Tree<'_> {
 
     /// Parts with visibility and colour; of the mesh, or of the geometry.
     fn parts(&mut self, ui: &mut Ui, model: &mut Model) {
-        let parts = counted("Parts", model.parts.len());
+        let shown = (0..model.parts.len())
+            .filter(|i| !self.hidden(&TreeItem::Part(*i)))
+            .count();
+        let parts = counted("Parts", shown);
         self.branch(ui, TreeItem::Group("Parts"), parts, true, |tree, ui| {
             for (index, part) in model.parts.iter_mut().enumerate() {
+                if tree.hidden(&TreeItem::Part(index)) {
+                    continue;
+                }
                 let icon = part_icon(part);
                 let item = TreeItem::Part(index);
                 let (_, response, changed) =
@@ -1252,7 +1281,8 @@ impl Tree<'_> {
     }
 
     /// Container of model items, e.g. "Materials (2)".
-    fn container(&mut self, ui: &mut Ui, name: &'static str, items: Vec<(TreeItem, &str)>) {
+    fn container(&mut self, ui: &mut Ui, name: &'static str, mut items: Vec<(TreeItem, &str)>) {
+        items.retain(|(item, _)| !self.hidden(item));
         if items.is_empty() {
             self.leaf(ui, TreeItem::Group(name), name);
             return;
@@ -1270,8 +1300,9 @@ impl Tree<'_> {
         ui: &mut Ui,
         step: usize,
         name: &'static str,
-        items: Vec<(TreeItem, &str)>,
+        mut items: Vec<(TreeItem, &str)>,
     ) {
+        items.retain(|(item, _)| !self.hidden(item));
         let group = TreeItem::StepGroup(step, name);
         if items.is_empty() {
             self.leaf(ui, group, name);
@@ -1488,13 +1519,16 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             .collect();
         tree.container(ui, "Initial Conditions", initial);
         let steps = TreeItem::Group("Steps");
-        if fe.steps.is_empty() {
+        tree.step_count = fe.steps.len();
+        tree.step_types = fe.steps.iter().map(|s| StepGlyph::from(&s.kind)).collect();
+        let shown = (0..fe.steps.len())
+            .filter(|s| !tree.hidden(&TreeItem::Step(*s)))
+            .count();
+        if shown == 0 {
             tree.leaf(ui, steps, "Steps");
             return;
         }
-        tree.step_count = fe.steps.len();
-        tree.step_types = fe.steps.iter().map(|s| StepGlyph::from(&s.kind)).collect();
-        let text = counted("Steps", fe.steps.len());
+        let text = counted("Steps", shown);
         tree.branch(ui, steps, text, true, |tree, ui| {
             for (s, step) in fe.steps.iter().enumerate() {
                 if !step.active {
