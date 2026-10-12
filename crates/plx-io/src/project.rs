@@ -73,7 +73,7 @@ pub struct ProjectAnalysis {
 
 /// Data an analysis takes from another one instead of having its own, like Ansys Workbench's
 /// links between cells, but down to single items of the model tree.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
     pub source: u64,
     pub target: u64,
@@ -86,9 +86,15 @@ pub struct Link {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slot: Vec<String>,
     /// A state link (`["State", step]`): the steps of the source up to that step the target
-    /// took last time, which come before its own steps.
+    /// took last time, which come before its own steps. A link of a whole category: the
+    /// names of the items it took last time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inherited: Vec<String>,
+    /// A link of a whole category, which is a bundle of links of its items: the items the
+    /// target does not take, but keeps its own copies of. New items of the source are taken
+    /// as they come.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<String>,
 }
 
 /// The files of a finished analysis kept in the project file: the input file CalculiX ran,
@@ -466,15 +472,22 @@ mod tests {
             source: 1,
             target: 2,
             item: vec!["Setup".into(), "Materials".into(), "Steel".into()],
-            slot: Vec::new(),
-            inherited: Vec::new(),
+            ..Default::default()
+        });
+        saved.links.push(Link {
+            source: 1,
+            target: 2,
+            item: vec!["Setup".into(), "Sections".into()],
+            inherited: vec!["Solid".into(), "Shell".into()],
+            excluded: vec!["Beam".into()],
+            ..Default::default()
         });
         saved.links.push(Link {
             source: 1,
             target: 2,
             item: vec!["Results".into(), "Step-1".into()],
             slot: vec!["Results".into(), "Step-2".into()],
-            inherited: Vec::new(),
+            ..Default::default()
         });
         saved.links.push(Link {
             source: 1,
@@ -482,6 +495,7 @@ mod tests {
             item: vec!["State".into(), "Step-1".into()],
             slot: vec!["State".into()],
             inherited: vec!["Step-1".into()],
+            ..Default::default()
         });
         save_project(&path, &saved).unwrap();
         let mut project = read_project(&path).unwrap();
