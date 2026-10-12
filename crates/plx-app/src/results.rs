@@ -1152,30 +1152,116 @@ impl ResultsView {
     }
 }
 
+/// What a value of a field of CalculiX's results measures.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Measure {
+    Of(Quantity),
+    Per(Quantity, Quantity),
+}
+
+/// What the values of a component of a field of CalculiX's results measure, in the `.frd`
+/// file or, by the names of its blocks, in the `.dat` file; `None` for values without a
+/// unit, such as strains and phase angles, and for unknown fields.
+fn field_measure(field: &str, component: &str) -> Option<Measure> {
+    use Measure::{Of, Per};
+    use Quantity::*;
+    let component = component.to_ascii_uppercase();
+    match field.to_ascii_uppercase().as_str() {
+        "DISP" | "DISPR" | "DISPI" | "DISPLACEMENTS" | "RELATIVE_CONTACT_DISPLACEMENT" => {
+            Some(Of(Length))
+        }
+        "STRESS" | "STRESSR" | "STRESSI" | "ZZSTR" | "ZZSTRR" | "ZZSTRI" | "STRESSES"
+        | "CONTACT_STRESS" => Some(Of(Pressure)),
+        // Magnitudes and phase angles of complex results.
+        "PDISP" => (component.starts_with("MAG")).then_some(Of(Length)),
+        "PSTRESS" => (component.starts_with("MAG")).then_some(Of(Pressure)),
+        "FORC" | "FORCR" | "FORCI" | "FORCES" | "TOTAL_FORCE" => Some(Of(Force)),
+        "VELO" | "VELOCITIES" => Some(Of(Velocity)),
+        "ENER" | "INTERNAL_ENERGY_DENSITY" => Some(Per(Energy, Volume)),
+        "CELS"
+        | "INTERNAL_ENERGY"
+        | "TOTAL_INTERNAL_ENERGY"
+        | "KINETIC_ENERGY"
+        | "TOTAL_KINETIC_ENERGY"
+        | "CONTACT_PRINT_ENERGY"
+        | "CONTACT_SPRING_ENERGY"
+        | "TOTAL_CONTACT_SPRING_ENERGY" => Some(Of(Energy)),
+        "NDTEMP" | "TEMPERATURES" => Some(Of(Temperature)),
+        "FLUX" | "HEAT_FLUX" => Some(Per(Power, Area)),
+        "RFL"
+        | "HEAT_GENERATION"
+        | "TOTAL_HEAT_GENERATION"
+        | "BODY_HEATING"
+        | "TOTAL_BODY_HEATING" => Some(Of(Power)),
+        "VOLUME" | "TOTAL_VOLUME" => Some(Of(Volume)),
+        "CONTACT" => match component.as_str() {
+            "COPEN" | "CSLIP1" | "CSLIP2" => Some(Of(Length)),
+            "CPRESS" | "CSHEAR1" | "CSHEAR2" => Some(Of(Pressure)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The unit of a field of CalculiX's results in `units`, as PrePoMax shows it in the legend;
 /// `None` for fields without a unit, such as strains, and for unknown fields.
 pub fn field_unit(field: &str, component: &str, units: UnitSystem) -> Option<String> {
     let unit = |quantity| Some(units.unit(quantity).to_string()).filter(|u| !u.is_empty());
-    let per = |a, b| Some(format!("{}/{}", unit(a)?, unit(b)?));
-    match field.to_ascii_uppercase().as_str() {
-        "DISP" | "DISPR" | "DISPI" => unit(Quantity::Length),
-        "STRESS" | "STRESSR" | "STRESSI" | "ZZSTR" | "ZZSTRR" | "ZZSTRI" => {
-            unit(Quantity::Pressure)
+    let errors = ["ERROR", "ERRORR", "ERRORI", "HERROR", "HERRORR", "HERRORI"];
+    if errors.iter().any(|e| field.eq_ignore_ascii_case(e)) {
+        return Some("%".into());
+    }
+    match field_measure(field, component)? {
+        Measure::Of(quantity) => unit(quantity),
+        Measure::Per(a, b) => Some(format!("{}/{}", unit(a)?, unit(b)?)),
+    }
+}
+
+/// Converts a value CalculiX wrote, in the stored SI units ([`plx_model::STORED`]), into
+/// `units`.
+fn shown_value(value: f64, measure: Measure, units: UnitSystem) -> f64 {
+    match measure {
+        Measure::Of(quantity) => units.shown(value, quantity),
+        Measure::Per(a, b) => {
+            let stored = plx_model::STORED;
+            value * stored.factor_to(a, units) / stored.factor_to(b, units)
         }
-        "FORC" | "FORCR" | "FORCI" => unit(Quantity::Force),
-        "VELO" => unit(Quantity::Velocity),
-        "ENER" => per(Quantity::Energy, Quantity::Volume),
-        "CELS" => unit(Quantity::Energy),
-        "NDTEMP" => unit(Quantity::Temperature),
-        "FLUX" => per(Quantity::Power, Quantity::Area),
-        "RFL" => unit(Quantity::Power),
-        "ERROR" | "ERRORR" | "ERRORI" | "HERROR" | "HERRORR" | "HERRORI" => Some("%".into()),
-        "CONTACT" => match component.to_ascii_uppercase().as_str() {
-            "COPEN" | "CSLIP1" | "CSLIP2" => unit(Quantity::Length),
-            "CPRESS" | "CSHEAR1" | "CSHEAR2" => unit(Quantity::Pressure),
-            _ => None,
-        },
-        _ => None,
+    }
+}
+
+/// Converts the results of a run, which CalculiX wrote in the stored SI units as it got the
+/// model, into the units the analysis shows: the mesh they were computed on and the values
+/// of every field.
+pub fn convert_results(mesh: &mut FeMesh, increments: &mut [Increment], units: UnitSystem) {
+    let length = plx_model::STORED.factor_to(Quantity::Length, units);
+    if length != 1.0 {
+        mesh.scale(length);
+    }
+    for field in increments.iter_mut().flat_map(|i| i.fields.iter_mut()) {
+        for component in &mut field.components {
+            if let Some(measure) = field_measure(&field.name, &component.name) {
+                for value in &mut component.values {
+                    *value = shown_value(f64::from(*value), measure, units) as f32;
+                }
+            }
+        }
+    }
+}
+
+/// Converts history output CalculiX printed in the stored SI units into `units`.
+pub fn convert_history(sets: &mut [HistorySet], units: UnitSystem) {
+    for field in sets.iter_mut().flat_map(|s| s.fields.iter_mut()) {
+        for component in &mut field.components {
+            if let Some(measure) = field_measure(&field.name, &component.name) {
+                for value in component
+                    .entries
+                    .iter_mut()
+                    .flat_map(|e| e.values.iter_mut())
+                {
+                    *value = shown_value(*value, measure, units);
+                }
+            }
+        }
     }
 }
 
@@ -1285,6 +1371,27 @@ mod tests {
             value: number as f64,
             fields: vec![field],
         }
+    }
+
+    #[test]
+    fn results_in_si_are_shown_in_the_model_units() {
+        let mut mesh = FeMesh::default();
+        mesh.set_node(1, [1.0, 0.5, 0.0]);
+        let mut increments = vec![increment(1, 1, AnalysisKind::Static, &[[0.001, 0.0, 0.0]])];
+        increments[0].fields.push(Field {
+            name: "STRESS".into(),
+            components: vec![Component {
+                name: "SXX".into(),
+                values: vec![2.5e8],
+                derived: false,
+            }],
+        });
+        convert_results(&mut mesh, &mut increments, UnitSystem::MmTonSC);
+        assert_eq!(mesh.coords()[0], [1000.0, 500.0, 0.0]);
+        let disp = increments[0].field("DISP").unwrap();
+        assert!((disp.components[0].values[0] - 1.0).abs() < 1e-5);
+        let stress = increments[0].field("STRESS").unwrap();
+        assert!((stress.components[0].values[0] - 250.0).abs() < 1e-3);
     }
 
     #[test]

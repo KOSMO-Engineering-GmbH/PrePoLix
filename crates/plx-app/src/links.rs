@@ -8,7 +8,7 @@
 //! `["Mesh"]`, `["Setup"]`, `["Setup", "Materials"]`, `["Setup", "Materials", "Steel"]` or
 //! `["Results", "Step-1"]`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use plx_io::project::Link;
@@ -607,29 +607,6 @@ pub struct Incoming {
     pub paths: Vec<(Vec<String>, String)>,
 }
 
-impl Incoming {
-    /// The analysis the item at `path` comes from, if a link fills it.
-    pub fn source_of(&self, path: &[String]) -> Option<&str> {
-        (self.paths.iter())
-            .find(|(prefix, _)| covers(prefix, path))
-            .map(|(_, source)| source.as_str())
-    }
-
-    /// Whether anything of the cell or category at `path`, or `path` itself, is linked.
-    pub fn touches(&self, path: &[String]) -> bool {
-        (self.paths.iter()).any(|(p, _)| covers(path, p) || covers(p, path))
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.paths.is_empty()
-    }
-
-    /// The analyses the items come from.
-    pub fn sources(&self) -> BTreeSet<&str> {
-        self.paths.iter().map(|(_, s)| s.as_str()).collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -663,13 +640,17 @@ mod tests {
 
     #[test]
     fn an_item_replaces_the_one_of_the_same_name_and_leaves_the_others() {
-        let mut source = FeModel::default();
-        source.materials = vec![
-            material("Steel", 210_000.0),
-            material("Aluminium", 70_000.0),
-        ];
-        let mut target = FeModel::default();
-        target.materials = vec![material("Steel", 1.0), material("Rubber", 5.0)];
+        let source = FeModel {
+            materials: vec![
+                material("Steel", 210_000.0),
+                material("Aluminium", 70_000.0),
+            ],
+            ..Default::default()
+        };
+        let mut target = FeModel {
+            materials: vec![material("Steel", 1.0), material("Rubber", 5.0)],
+            ..Default::default()
+        };
         let steel = path(&["Setup", "Materials", "Steel"]);
         assert_ne!(fp(&source, &steel), fp(&target, &steel));
         apply_setup(&mut target, &source, &steel);

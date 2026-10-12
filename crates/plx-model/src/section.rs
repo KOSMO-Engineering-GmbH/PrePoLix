@@ -27,9 +27,10 @@ pub struct Section {
     pub kind: SectionKind,
 }
 
-/// PrePoMax's default thickness of 2D sections.
+/// PrePoMax's default thickness of 2D sections, one millimetre in SI units, as values are
+/// stored.
 pub fn unit_thickness() -> f64 {
-    1.0
+    1e-3
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -56,14 +57,15 @@ pub enum SectionKind {
 impl SectionKind {
     pub const ALL: [SectionKind; 5] = [
         SectionKind::Solid,
-        SectionKind::Truss { area: 1.0 },
+        // One square millimetre and one millimetre, in SI units.
+        SectionKind::Truss { area: 1e-6 },
         SectionKind::Beam(BeamSection::DEFAULT),
         SectionKind::Shell {
-            thickness: 1.0,
+            thickness: 1e-3,
             offset: 0.0,
         },
         SectionKind::Membrane {
-            thickness: 1.0,
+            thickness: 1e-3,
             offset: 0.0,
         },
     ];
@@ -212,7 +214,7 @@ pub struct BeamSection {
 
 impl BeamSection {
     pub const DEFAULT: BeamSection = BeamSection {
-        profile: BeamProfile::Rect { a: 1.0, b: 1.0 },
+        profile: BeamProfile::Rect { a: 1e-3, b: 1e-3 },
         orientation: BeamOrientation::Automatic,
         offset: [0.0, 0.0],
     };
@@ -240,17 +242,18 @@ pub enum BeamProfile {
 }
 
 impl BeamProfile {
+    /// The profiles with dimensions of a millimetre, in SI units.
     pub const ALL: [BeamProfile; 4] = [
-        BeamProfile::Rect { a: 1.0, b: 1.0 },
-        BeamProfile::Circ { radius: 1.0 },
+        BeamProfile::Rect { a: 1e-3, b: 1e-3 },
+        BeamProfile::Circ { radius: 1e-3 },
         BeamProfile::Pipe {
-            radius: 1.0,
-            thickness: 0.1,
+            radius: 1e-3,
+            thickness: 1e-4,
         },
         BeamProfile::Box {
-            a: 1.0,
-            b: 1.0,
-            t: [0.1; 4],
+            a: 1e-3,
+            b: 1e-3,
+            t: [1e-4; 4],
         },
     ];
 
@@ -474,6 +477,7 @@ mod tests {
         let text = r#"(name: "S", material: "M", region: Parts(["P"]))"#;
         let section: Section = ron::from_str(text).unwrap();
         assert_eq!(section.kind, SectionKind::Solid);
-        assert_eq!(section.thickness, 1.0);
+        // One millimetre, in SI units.
+        assert_eq!(section.thickness, 1e-3);
     }
 }

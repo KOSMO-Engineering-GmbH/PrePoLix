@@ -112,12 +112,20 @@ impl MaterialLibraryEditor {
         self.library.material(self.library_selected.as_deref()?)
     }
 
-    /// The material shown in the preview, the one selected in the list used last, with the
-    /// units of its values.
-    fn previewed(&self) -> Option<(&Material, UnitSystem)> {
+    /// The material shown in the preview, the one selected in the list used last, with its
+    /// values in the units they are shown in: those of the library, or of the model, whose
+    /// materials are stored in SI units.
+    fn previewed(&self) -> Option<(Material, UnitSystem)> {
         match self.side {
-            Side::Library => Some((self.selected_library_material()?, self.library.units)),
-            Side::Model => Some((self.materials.get(self.material_selected?)?, self.units)),
+            Side::Library => Some((
+                self.selected_library_material()?.clone(),
+                self.library.units,
+            )),
+            Side::Model => {
+                let mut material = self.materials.get(self.material_selected?)?.clone();
+                material.convert_units(&Conversion::new(plx_model::STORED, self.units));
+                Some((material, self.units))
+            }
         }
     }
 
@@ -127,7 +135,7 @@ impl MaterialLibraryEditor {
             return;
         };
         let mut material = material.clone();
-        material.convert_units(&Conversion::new(self.library.units, self.units));
+        material.convert_units(&Conversion::new(self.library.units, plx_model::STORED));
         material.name = name_for_model(
             &material.name,
             self.materials.iter().map(|m| m.name.as_str()),
@@ -144,7 +152,7 @@ impl MaterialLibraryEditor {
             return;
         };
         let mut material = self.materials[index].clone();
-        material.convert_units(&Conversion::new(self.units, self.library.units));
+        material.convert_units(&Conversion::new(plx_model::STORED, self.library.units));
         if let Some(path) = self.library.add_material(selected, &material) {
             self.library_changed = true;
             self.select_library(path);
@@ -548,7 +556,7 @@ impl MaterialLibraryEditor {
     /// material and their values, read only.
     fn preview_window(&mut self, ctx: &egui::Context, at: egui::Pos2) {
         let mut open = true;
-        let material = self.previewed().map(|(m, units)| (m.clone(), units));
+        let material = self.previewed();
         egui::Window::new("Material Properties")
             .open(&mut open)
             .collapsible(false)
@@ -837,7 +845,8 @@ mod tests {
         let LibraryResult::Ok(Some(materials)) = editor.accept() else {
             panic!("the model materials changed");
         };
-        assert_eq!(materials[0].elastic.unwrap().young, 210_000.0);
+        // Stored in SI units.
+        assert!((materials[0].elastic.unwrap().young - 2.1e11).abs() < 1.0);
     }
 
     #[test]
@@ -864,7 +873,7 @@ mod tests {
     fn preview_lists_the_material_models() {
         let editor = editor();
         let (material, units) = editor.previewed().unwrap();
-        let models = material_models(material, units);
+        let models = material_models(&material, units);
         let labels: Vec<&str> = models.iter().map(|(label, _)| *label).collect();
         assert_eq!(
             labels,
@@ -895,5 +904,14 @@ mod tests {
         editor.copy_to_library();
         let copy = editor.selected_library_material().unwrap();
         assert!((copy.elastic.unwrap().young - 210_000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn model_materials_are_stored_in_si_and_shown_in_the_model_units() {
+        let mut editor = editor_in(UnitSystem::MmTonSC);
+        editor.copy_to_model();
+        assert!((editor.materials[0].elastic.unwrap().young - 2.1e11).abs() < 1.0);
+        let (material, units) = editor.previewed().unwrap();
+        assert_eq!(material_models(&material, units)[1].1[0].1, "210000 MPa");
     }
 }

@@ -248,7 +248,13 @@ impl MeshToolDialog {
                 if replaced.is_empty() {
                     return Err(format!(
                         "No nodes lie within {} {} of another one.",
-                        numeric::format_physical(self.tolerance),
+                        numeric::format_physical(
+                            model
+                                .fe
+                                .properties
+                                .units
+                                .shown(self.tolerance, Quantity::Length)
+                        ),
                         model.fe.properties.units.unit(Quantity::Length)
                     ));
                 }

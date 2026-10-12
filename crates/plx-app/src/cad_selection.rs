@@ -367,7 +367,7 @@ mod tests {
         }
         let mut model = load(
             &testdata("platte_mit_loch.step"),
-            plx_model::UnitSystem::MmTonSC,
+            plx_model::UnitSystem::Unitless,
         )
         .unwrap()
         .model;

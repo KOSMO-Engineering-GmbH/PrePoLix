@@ -4,6 +4,7 @@
 
 use egui::Ui;
 use glam::DVec3;
+use plx_model::{Quantity, UnitSystem};
 
 use super::{Direction, Method, Parameters};
 
@@ -39,17 +40,25 @@ pub struct ExplodedDialog {
     model_center: DVec3,
     /// Steps of a sequential disassembly, shown as a hint.
     pub step_count: usize,
+    /// Units the model stores its coordinates in and the ones it shows.
+    units: (UnitSystem, UnitSystem),
 }
 
 impl ExplodedDialog {
     /// Edits the applied exploded view, or starts from the last used one.
-    pub fn new(applied: Option<Parameters>, last: &Parameters, model_center: DVec3) -> Self {
+    pub fn new(
+        applied: Option<Parameters>,
+        last: &Parameters,
+        model_center: DVec3,
+        units: (UnitSystem, UnitSystem),
+    ) -> Self {
         let draft = applied.clone().unwrap_or_else(|| last.clone());
         Self {
             draft,
             before: applied,
             model_center,
             step_count: 1,
+            units,
         }
     }
 
@@ -115,10 +124,18 @@ impl ExplodedDialog {
                         .enumerate()
                     {
                         ui.label(label);
+                        let (stored, shown) = self.units;
+                        let speed =
+                            stored.convert(self.model_center.length(), Quantity::Length, shown);
                         ui.add(
-                            egui::DragValue::new(&mut self.draft.center[axis])
-                                .speed(self.model_center.length().max(1.0) * 0.005)
-                                .max_decimals(6),
+                            crate::numeric::converted(
+                                &mut self.draft.center[axis],
+                                stored,
+                                shown,
+                                Quantity::Length,
+                            )
+                            .speed(speed.max(1.0) * 0.005)
+                            .suffix(format!(" {}", shown.unit(Quantity::Length))),
                         );
                         ui.end_row();
                     }
@@ -137,11 +154,17 @@ impl ExplodedDialog {
                         "Distance below which faces of two parts touch; \
                              0 takes one thousandth of the assembly diagonal.",
                     );
+                    let (stored, shown) = self.units;
                     ui.add(
-                        egui::DragValue::new(&mut self.draft.tolerance)
-                            .speed(0.001)
-                            .range(0.0..=f64::MAX)
-                            .max_decimals(6),
+                        crate::numeric::converted(
+                            &mut self.draft.tolerance,
+                            stored,
+                            shown,
+                            Quantity::Length,
+                        )
+                        .speed(0.001)
+                        .range(0.0..=f64::MAX)
+                        .suffix(format!(" {}", shown.unit(Quantity::Length))),
                     );
                     ui.end_row();
                 }

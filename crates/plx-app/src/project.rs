@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use egui_snarl::ui::{PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
 use plx_io::project::{Link, Project, ProjectAnalysis};
-use plx_model::{ModelSpace, UnitSystem};
+use plx_model::{ModelProperties, ModelSpace};
 
 use crate::app::{AnalysisWindow, Request};
 use crate::icons::{self, Icon};
@@ -37,10 +37,13 @@ struct Node {
     status: Option<AnalysisStatus>,
     /// Rows of its block that are open: the setup and its categories.
     expanded: BTreeSet<Vec<String>>,
+    /// Its model space, shown in the header of its block.
+    space: ModelSpace,
 }
 
 impl Node {
     fn new(id: u64, name: String, data: ProjectAnalysis) -> Self {
+        let space = data.model.properties.space;
         let mut node = Self {
             id,
             name,
@@ -49,6 +52,7 @@ impl Node {
             window_position: None,
             status: None,
             expanded: BTreeSet::new(),
+            space,
         };
         node.refresh_closed();
         node
@@ -139,6 +143,9 @@ enum Action {
     },
 }
 
+/// A project read from its file, with notes on its conversion, or why it could not be read.
+type Opened = Result<(Project, Vec<String>), String>;
+
 pub struct ProjectApp {
     render_state: egui_wgpu::RenderState,
     settings: Settings,
@@ -147,8 +154,6 @@ pub struct ProjectApp {
     output: Vec<String>,
     /// The project file; `None` until the project is saved.
     path: Option<PathBuf>,
-    space: ModelSpace,
-    units: UnitSystem,
     nodes: Vec<Node>,
     links: Vec<Link>,
     /// The schematic: a block per analysis, by its id.
@@ -159,10 +164,10 @@ pub struct ProjectApp {
     rename: Option<(u64, String)>,
     /// Analysis to delete once the user agrees.
     confirm_delete: Option<u64>,
-    /// Model space and unit system of the project, while their dialog is open.
-    properties_dialog: Option<ModelPropertiesDialog>,
-    /// A project file being read on a worker thread.
-    opening: Option<(PathBuf, Receiver<Result<Project, String>>)>,
+    /// The properties of a new analysis being asked for, with where its block goes.
+    new_analysis: Option<(egui::Pos2, ModelPropertiesDialog)>,
+    /// A project file being read on a worker thread, with notes on its conversion.
+    opening: Option<(PathBuf, Receiver<Opened>)>,
     /// Analyses Update Project still has to solve, in order, and the one it solves, with
     /// whether the update opened its window.
     update_queue: VecDeque<u64>,
@@ -205,8 +210,6 @@ impl ProjectApp {
         plx_mesher::set_library_path(settings.gmsh.library());
         let mut app = Self {
             render_state,
-            space: settings.new_model.space,
-            units: settings.new_model.units,
             settings,
             settings_window: None,
             updater: Default::default(),
@@ -218,7 +221,7 @@ impl ProjectApp {
             graph_generation: 0,
             rename: None,
             confirm_delete: None,
-            properties_dialog: None,
+            new_analysis: None,
             opening: None,
             update_queue: VecDeque::new(),
             updating: None,
@@ -242,7 +245,8 @@ impl ProjectApp {
         } else if !files.is_empty() {
             let name = (files[0].file_stem())
                 .map_or_else(|| "Analysis-1".into(), |s| s.to_string_lossy().into_owned());
-            let id = app.add_analysis(&name, egui::pos2(40.0, 40.0));
+            let properties = app.settings.new_model.clone();
+            let id = app.add_analysis(&name, egui::pos2(40.0, 40.0), properties);
             app.startup_import = files;
             app.open_window(&cc.egui_ctx, id);
         } else if let Some(path) = cc.storage.and_then(stored_last_project) {
@@ -278,8 +282,13 @@ impl ProjectApp {
         self.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1
     }
 
-    /// Adds an empty analysis in the project's model space and units; returns its id.
-    fn add_analysis(&mut self, name: &str, position: egui::Pos2) -> u64 {
+    /// Adds an empty analysis with these model properties; returns its id.
+    fn add_analysis(
+        &mut self,
+        name: &str,
+        position: egui::Pos2,
+        properties: ModelProperties,
+    ) -> u64 {
         let id = self.next_id();
         let name = self.unique_name(name);
         let mut data = ProjectAnalysis {
@@ -287,8 +296,7 @@ impl ProjectApp {
             name: name.clone(),
             ..Default::default()
         };
-        data.model.properties.space = self.space;
-        data.model.properties.units = self.units;
+        data.model.properties = properties;
         self.nodes.push(Node::new(id, name, data));
         self.graph.insert_node(position, id);
         id
@@ -374,8 +382,6 @@ impl ProjectApp {
         self.graph = Snarl::new();
         self.graph_generation += 1;
         self.path = None;
-        self.space = self.settings.new_model.space;
-        self.units = self.settings.new_model.units;
         self.update_queue.clear();
         self.updating = None;
         self.output.push("New project".into());
@@ -399,8 +405,25 @@ impl ProjectApp {
         let (sender, receiver) = std::sync::mpsc::channel();
         let (file, ctx) = (path.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let project = plx_io::project::read_project(&file).map_err(|e| e.to_string());
-            let _ = sender.send(project);
+            let project = plx_io::project::read_project(&file).map(|mut project| {
+                // Format 2 kept the values in the project's unit system.
+                let mut notes = Vec::new();
+                if project.format < plx_model::PROJECT_FORMAT {
+                    for analysis in &mut project.analyses {
+                        analysis.model.properties.space = project.space;
+                        analysis.model.properties.units = project.units;
+                        notes.extend(crate::model::migrate_to_si(analysis));
+                    }
+                    notes.push(
+                        "The project was converted for this version; once saved, it no \
+                         longer opens in older versions."
+                            .into(),
+                    );
+                    project.format = plx_model::PROJECT_FORMAT;
+                }
+                (project, notes)
+            });
+            let _ = sender.send(project.map_err(|e| e.to_string()));
             ctx.request_repaint();
         });
         self.opening = Some((path, receiver));
@@ -416,15 +439,14 @@ impl ProjectApp {
         let path = path.clone();
         self.opening = None;
         match result {
-            Ok(project) => {
+            Ok((project, notes)) => {
                 if !self.close_all_windows() {
                     return;
                 }
+                self.output.extend(notes);
                 self.nodes.clear();
                 self.graph = Snarl::new();
                 self.graph_generation += 1;
-                self.space = project.space;
-                self.units = project.units;
                 self.links = project.links;
                 self.applied.clear();
                 self.restoring.clear();
@@ -470,8 +492,6 @@ impl ProjectApp {
             analyses.push(data);
         }
         Project {
-            space: self.space,
-            units: self.units,
             analyses,
             links: self.links.clone(),
             ..Default::default()
@@ -659,40 +679,6 @@ impl ProjectApp {
         }
     }
 
-    /// Applies the project's model space and units to every analysis; `convert` converts
-    /// their values into the new units, otherwise the numbers stay and apply in them.
-    fn set_space_and_units(&mut self, space: ModelSpace, units: UnitSystem, convert: bool) {
-        // A 2D model space takes no solid elements, and so on.
-        for node in &self.nodes {
-            let mesh = match (&node.window, &node.data) {
-                (Some(window), _) => window.model().map(|m| &m.mesh),
-                (None, Some(data)) => Some(&data.mesh),
-                _ => None,
-            };
-            if let Some(error) = mesh.and_then(|m| crate::model_properties::space_error(space, m)) {
-                self.output
-                    .push(format!("Model space not changed: {}: {error}", node.name));
-                return;
-            }
-        }
-        self.space = space;
-        self.units = units;
-        for node in &mut self.nodes {
-            match &mut node.window {
-                Some(window) => window.set_space_and_units(space, units, convert),
-                None => {
-                    if let Some(data) = &mut node.data {
-                        let notes = crate::model::convert_analysis(data, space, units, convert);
-                        self.output.extend(notes);
-                    }
-                    node.refresh_closed();
-                }
-            }
-        }
-        self.output
-            .push(format!("Project: {}, {}", space.label(), units.label()));
-    }
-
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
@@ -726,20 +712,12 @@ impl ProjectApp {
                 }
             });
             ui.menu_button("Project", |ui| {
-                if ui.button("New Analysis").clicked() {
-                    let at = self.free_position();
-                    self.add_analysis("Analysis-1", at);
+                if ui.button("New Analysis …").clicked() {
+                    self.ask_new_analysis(self.free_position());
                 }
                 let update = egui::Button::new("Update Project");
                 if ui.add(update).on_hover_text(UPDATE_TIP).clicked() {
                     self.update_project();
-                }
-                ui.separator();
-                if ui.button("Model Space and Units …").clicked() {
-                    let mut properties = self.settings.new_model.clone();
-                    properties.space = self.space;
-                    properties.units = self.units;
-                    self.properties_dialog = Some(ModelPropertiesDialog::edit(properties));
                 }
             });
             ui.menu_button("Tools", |ui| {
@@ -778,8 +756,7 @@ impl ProjectApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
             if icons::button(ui, Icon::New, "New Analysis", true, false).clicked() {
-                let at = self.free_position();
-                self.add_analysis("Analysis-1", at);
+                self.ask_new_analysis(self.free_position());
             }
             let can_open = self.opening.is_none();
             if icons::button(ui, Icon::Open, "Open Project (Ctrl+O)", can_open, false).clicked() {
@@ -836,6 +813,7 @@ impl ProjectApp {
                 BlockView {
                     id: n.id,
                     name: n.name.clone(),
+                    space: n.space,
                     rows,
                     loading: n.window.as_ref().is_some_and(|w| w.model().is_none()),
                     open: n.window.is_some(),
@@ -912,6 +890,18 @@ impl ProjectApp {
                 "Not linked: {} of {from} cannot go to {} of {to}.",
                 links::label(&item),
                 links::label(&slot)
+            ));
+            return;
+        }
+        let space = |id: u64| self.nodes.iter().find(|n| n.id == id).map(|n| n.space);
+        if let (Some(a), Some(b)) = (space(source), space(target))
+            && a != b
+        {
+            self.output.push(format!(
+                "Not linked: {from} is {} and {to} {}; linked analyses need the same model \
+                 space.",
+                a.label(),
+                b.label()
             ));
             return;
         }
@@ -1229,9 +1219,7 @@ impl ProjectApp {
 
     fn act(&mut self, ctx: &egui::Context, action: Action) {
         match action {
-            Action::New(pos) => {
-                self.add_analysis("Analysis-1", pos);
-            }
+            Action::New(pos) => self.ask_new_analysis(pos),
             Action::Open(id) => self.open_window(ctx, id),
             Action::Solve(id) => self.solve_chain(id),
             Action::Rename(id) => {
@@ -1358,17 +1346,40 @@ impl ProjectApp {
         }
     }
 
-    fn properties_window(&mut self, ctx: &egui::Context) {
-        let Some(dialog) = &mut self.properties_dialog else {
+    /// Asks for the model space, unit system and type of a new analysis, whose block goes
+    /// to `position`; the last choice is proposed.
+    fn ask_new_analysis(&mut self, position: egui::Pos2) {
+        let properties = ModelProperties {
+            kind: plx_model::ModelKind::General,
+            global_results: None,
+            ..self.settings.new_model.clone()
+        };
+        self.new_analysis = Some((position, ModelPropertiesDialog::create(properties)));
+    }
+
+    fn new_analysis_window(&mut self, ctx: &egui::Context) {
+        let Some((position, dialog)) = &mut self.new_analysis else {
             return;
         };
-        let convert = dialog.convert;
+        let position = *position;
         match dialog.show(ctx, None, None) {
             DialogResult::Open => {}
-            DialogResult::Cancel => self.properties_dialog = None,
+            DialogResult::Cancel => self.new_analysis = None,
             DialogResult::Ok(properties) => {
-                self.properties_dialog = None;
-                self.set_space_and_units(properties.space, properties.units, convert);
+                self.new_analysis = None;
+                self.settings.new_model = ModelProperties {
+                    kind: plx_model::ModelKind::General,
+                    global_results: None,
+                    ..properties.clone()
+                };
+                let space = properties.space;
+                let id = self.add_analysis("Analysis-1", position, properties);
+                let name = self.name_of(id);
+                self.output.push(format!(
+                    "{name} created: {}, {}",
+                    space.label(),
+                    self.settings.new_model.units.label()
+                ));
             }
         }
     }
@@ -1447,6 +1458,9 @@ impl ProjectApp {
             if let Some(status) = window.status() {
                 node.status = Some(status);
             }
+            if let Some(model) = window.model() {
+                node.space = model.fe.properties.space;
+            }
         }
         if let Some(settings) = settings {
             self.settings = settings;
@@ -1460,9 +1474,6 @@ impl ProjectApp {
                 Request::Save(save_as) => self.save(save_as),
                 Request::SaveWithoutResults => self.save_without_results(),
                 Request::OpenProject(path) => self.open(ctx, path),
-                Request::SpaceAndUnits(space, units, convert) => {
-                    self.set_space_and_units(space, units, convert)
-                }
                 Request::SolveChain => self.solve_chain(id),
                 Request::OpenAnalysis(name) => {
                     if let Some(source) = self.nodes.iter().find(|n| n.name == name) {
@@ -1527,13 +1538,6 @@ impl eframe::App for ProjectApp {
                         .map_or_else(|| "not saved yet".into(), |p| p.display().to_string());
                     ui.label(format!("Project: {file}"));
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!(
-                        "Unit system: {}   Model space: {}",
-                        self.units.label(),
-                        self.space.label()
-                    ));
-                });
             });
         });
         let pane = egui::Frame::new()
@@ -1562,7 +1566,7 @@ impl eframe::App for ProjectApp {
         }
         self.rename_window(&ctx);
         self.confirm_delete_window(&ctx);
-        self.properties_window(&ctx);
+        self.new_analysis_window(&ctx);
         self.settings_window(&ctx);
         self.updater.show(&ctx, &mut self.output);
         self.sync_links(&ctx);
@@ -1594,6 +1598,7 @@ struct Row {
 struct BlockView {
     id: u64,
     name: String,
+    space: ModelSpace,
     rows: Vec<Row>,
     loading: bool,
     open: bool,
@@ -1787,6 +1792,9 @@ impl SnarlViewer<u64> for Viewer {
         let Some(block) = self.block(id) else {
             return;
         };
+        let (rect, icon) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+        paint_space(ui.painter(), rect, block.space, ui.visuals().text_color());
+        icon.on_hover_text(format!("Model space: {}", block.space.label()));
         let text = egui::RichText::new(&block.name).strong();
         let label = ui.add(
             egui::Label::new(text)
@@ -1989,6 +1997,75 @@ impl SnarlViewer<u64> for Viewer {
     ) {
         let id = snarl[node];
         node_menu(ui, id, &mut self.actions);
+    }
+}
+
+/// A symbol of the model space: a cube for 3D, a thin plate for plane stress, a long prism
+/// for plane strain and a profile turned about its axis for axisymmetric models.
+fn paint_space(painter: &egui::Painter, rect: egui::Rect, space: ModelSpace, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.2, color);
+    let p = |x: f32, y: f32| rect.min + egui::vec2(x, y);
+    let line = |points: &[egui::Pos2]| {
+        painter.add(egui::Shape::line(points.to_vec(), stroke));
+    };
+    match space {
+        ModelSpace::ThreeD => {
+            line(&[
+                p(2.0, 6.0),
+                p(11.0, 6.0),
+                p(11.0, 15.0),
+                p(2.0, 15.0),
+                p(2.0, 6.0),
+            ]);
+            line(&[p(2.0, 6.0), p(6.0, 2.0), p(15.0, 2.0), p(11.0, 6.0)]);
+            line(&[p(15.0, 2.0), p(15.0, 11.0), p(11.0, 15.0)]);
+        }
+        ModelSpace::PlaneStress => {
+            // A thin plate, loaded in its plane.
+            let face = [p(1.0, 4.0), p(13.0, 4.0), p(13.0, 14.0), p(1.0, 14.0)];
+            painter.add(egui::Shape::convex_polygon(
+                face.to_vec(),
+                color.gamma_multiply(0.25),
+                stroke,
+            ));
+            line(&[p(1.0, 4.0), p(3.0, 2.0), p(15.0, 2.0), p(13.0, 4.0)]);
+            line(&[p(15.0, 2.0), p(15.0, 12.0), p(13.0, 14.0)]);
+        }
+        ModelSpace::PlaneStrain => {
+            // A long body: a small section drawn out far into the depth.
+            line(&[
+                p(1.0, 9.0),
+                p(7.0, 9.0),
+                p(7.0, 15.0),
+                p(1.0, 15.0),
+                p(1.0, 9.0),
+            ]);
+            line(&[p(1.0, 9.0), p(9.0, 1.0), p(15.0, 1.0), p(7.0, 9.0)]);
+            line(&[p(15.0, 1.0), p(15.0, 7.0), p(7.0, 15.0)]);
+        }
+        ModelSpace::Axisymmetric => {
+            // The axis of revolution, the profile beside it and the turn about the axis.
+            let dash = egui::Stroke::new(1.0, color);
+            painter.extend(egui::Shape::dashed_line(
+                &[p(3.0, 0.5), p(3.0, 15.5)],
+                dash,
+                2.0,
+                1.5,
+            ));
+            let profile = [p(7.0, 5.0), p(12.0, 5.0), p(12.0, 13.0), p(7.0, 13.0)];
+            painter.add(egui::Shape::convex_polygon(
+                profile.to_vec(),
+                color.gamma_multiply(0.25),
+                stroke,
+            ));
+            let arc: Vec<egui::Pos2> = (0..=12)
+                .map(|i| {
+                    let t = std::f32::consts::PI * i as f32 / 12.0;
+                    p(3.0 + 6.0 * t.cos(), 2.5 + 1.8 * t.sin())
+                })
+                .collect();
+            line(&arc);
+        }
     }
 }
 

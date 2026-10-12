@@ -45,6 +45,23 @@ fn plate(quadratic: bool) -> (FeMesh, Vec<(ElementId, u8)>) {
     (mesh, faces)
 }
 
+/// The default moving load with its lengths in millimetres, as the plate's are.
+fn mm_default() -> MovingLoad {
+    let mut load = MovingLoad::default();
+    for length in [
+        &mut load.start,
+        &mut load.end,
+        &mut load.patch_length,
+        &mut load.patch_width,
+    ] {
+        *length *= 1000.0;
+    }
+    for wheel in &mut load.wheels {
+        wheel.along *= 1000.0;
+    }
+    load
+}
+
 fn one_wheel(position: f64) -> MovingLoad {
     MovingLoad {
         start: position,
@@ -55,7 +72,7 @@ fn one_wheel(position: f64) -> MovingLoad {
             across: 0.0,
             force: [0.0, 0.0, -1000.0],
         }],
-        ..MovingLoad::default()
+        ..mm_default()
     }
 }
 
@@ -77,7 +94,7 @@ fn stations_are_spread_evenly_from_start_to_end() {
         start: 2100.0,
         end: 30650.0,
         positions: 50,
-        ..MovingLoad::default()
+        ..mm_default()
     };
     let stations = load.stations();
     assert_eq!(stations.len(), 50);
@@ -183,7 +200,7 @@ fn the_path_follows_the_coordinate_system() {
 #[test]
 fn problems_are_reported() {
     let model = FeModel::default();
-    let mut load = MovingLoad::default();
+    let mut load = mm_default();
     assert_eq!(load.problem(&model, false), None);
     load.system = "Missing".into();
     assert!(load.problem(&model, false).is_some());

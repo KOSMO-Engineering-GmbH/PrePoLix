@@ -7,6 +7,9 @@ use plx_model::{Algorithm2d, Algorithm3d, MeshSetupItem, MeshSetupKind, UnitSyst
 
 use super::*;
 
+// The tests read CAD files without a unit system, in millimetres as they were drawn, so that
+// the sizes below are millimetres.
+
 fn testdata(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../testdata")
@@ -71,7 +74,7 @@ fn step_files_import_with_faces_and_edges() {
     if !gmsh_available() {
         return;
     }
-    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC).unwrap();
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless).unwrap();
     let display = &import.display;
     assert_eq!(display.solids, 1);
     // Four sides, top and bottom with the hole, and the hole's wall.
@@ -115,13 +118,13 @@ fn several_files_import_into_one_geometry() {
     if !gmsh_available() {
         return;
     }
-    let single = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC).unwrap();
-    let blocks = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC).unwrap();
+    let single = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless).unwrap();
+    let blocks = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless).unwrap();
     let paths = [
         testdata("platte_mit_loch.step"),
         testdata("zwei_bloecke.step"),
     ];
-    let import = import_cad_files(&paths, UnitSystem::MmTonSC).unwrap();
+    let import = import_cad_files(&paths, UnitSystem::Unitless).unwrap();
     let display = &import.display;
     assert_eq!(
         display.solids,
@@ -136,7 +139,7 @@ fn several_files_import_into_one_geometry() {
     // A file without geometry names itself in the error.
     let empty = std::env::temp_dir().join("prepolix-leer.brep");
     std::fs::write(&empty, "").unwrap();
-    let error = import_cad_files(&[paths[0].clone(), empty.clone()], UnitSystem::MmTonSC)
+    let error = import_cad_files(&[paths[0].clone(), empty.clone()], UnitSystem::Unitless)
         .unwrap_err()
         .to_string();
     let _ = std::fs::remove_file(&empty);
@@ -144,11 +147,12 @@ fn several_files_import_into_one_geometry() {
 }
 
 #[test]
-fn step_files_import_in_the_models_length_unit() {
+fn step_files_import_in_stored_si_units() {
     if !gmsh_available() {
         return;
     }
-    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MKgSC).unwrap();
+    // Whatever the unit system shown, the geometry is stored in metres.
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC).unwrap();
     assert!((width(&import.display) - 0.1).abs() < 1e-6);
     assert_eq!(import.geometry.meshing.max_size, 0.005);
     // Scaled back to millimetres, the plate is as wide as one read in millimetres.
@@ -166,7 +170,7 @@ fn quadratic_tetrahedra_follow_calculix_numbering() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC)
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless)
         .unwrap()
         .geometry;
     geometry.meshing.max_size = 8.0;
@@ -204,7 +208,7 @@ fn every_solid_becomes_a_part_and_size_controls_the_count() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless)
         .unwrap()
         .geometry;
     geometry.meshing.second_order = false;
@@ -237,7 +241,7 @@ fn a_remeshed_part_replaces_its_old_mesh_and_leaves_the_others() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless)
         .unwrap()
         .geometry;
     geometry.meshing.second_order = false;
@@ -314,7 +318,7 @@ fn meshes_record_where_the_cad_entities_lie() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC)
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless)
         .unwrap()
         .geometry;
     geometry.meshing.max_size = 8.0;
@@ -362,7 +366,7 @@ fn local_mesh_sizes_refine_faces_and_edges() {
     if !gmsh_available() {
         return;
     }
-    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC).unwrap();
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless).unwrap();
     let mut geometry = import.geometry;
     geometry.meshing.max_size = 8.0;
     geometry.meshing.second_order = false;
@@ -403,7 +407,7 @@ fn every_gmsh_algorithm_gives_valid_tetrahedra() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC)
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless)
         .unwrap()
         .geometry;
     geometry.meshing.max_size = 8.0;
@@ -439,13 +443,13 @@ fn invalid_sizes_and_files_are_reported() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless)
         .unwrap()
         .geometry;
     geometry.meshing.max_size = 0.0;
     assert!(generate_mesh(&geometry).is_err());
-    assert!(import_cad(&testdata("wuerfel_c3d10.inp"), UnitSystem::MmTonSC).is_err());
-    assert!(import_cad(&testdata("gibt_es_nicht.step"), UnitSystem::MmTonSC).is_err());
+    assert!(import_cad(&testdata("wuerfel_c3d10.inp"), UnitSystem::Unitless).is_err());
+    assert!(import_cad(&testdata("gibt_es_nicht.step"), UnitSystem::Unitless).is_err());
 }
 
 #[test]
@@ -678,7 +682,7 @@ fn a_deleted_part_leaves_the_others_with_their_names_and_local_sizes() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless)
         .unwrap()
         .geometry;
     geometry.meshing.second_order = false;
@@ -744,11 +748,11 @@ fn parts_deleted_together_are_renumbered_as_one_by_one() {
     if !gmsh_available() {
         return;
     }
-    let geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+    let geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless)
         .unwrap()
         .geometry;
     let paths = [testdata("platte_mit_loch.step")];
-    let three = add_cad_files(Some(&geometry), &paths, UnitSystem::MmTonSC, &[])
+    let three = add_cad_files(Some(&geometry), &paths, UnitSystem::Unitless, &[])
         .unwrap()
         .import
         .geometry;
@@ -781,7 +785,7 @@ fn a_deleted_mesh_part_takes_its_elements_and_nodes() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless)
         .unwrap()
         .geometry;
     geometry.meshing.second_order = false;
@@ -799,7 +803,7 @@ fn added_files_keep_the_old_parts_with_names_sizes_and_faces() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC)
+    let mut geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless)
         .unwrap()
         .geometry;
     // After a deletion the remaining block is SOLID-2 and has a local mesh size.
@@ -829,7 +833,7 @@ fn added_files_keep_the_old_parts_with_names_sizes_and_faces() {
     // A mesh part of the model is called SOLID-1, so the plate gets the next free name.
     let taken = ["SOLID-1".to_string()];
     let paths = [testdata("platte_mit_loch.step")];
-    let addition = add_cad_files(Some(&geometry), &paths, UnitSystem::MmTonSC, &taken).unwrap();
+    let addition = add_cad_files(Some(&geometry), &paths, UnitSystem::Unitless, &taken).unwrap();
     let combined = &addition.import.geometry;
     assert_eq!(addition.added, ["SOLID-3"]);
     let mut names = part_names(combined).unwrap();
@@ -857,7 +861,7 @@ fn added_files_keep_the_old_parts_with_names_sizes_and_faces() {
     );
     // The same block imported again lies on the old one but is a new part.
     let again = [testdata("zwei_bloecke.step")];
-    let addition = add_cad_files(Some(combined), &again, UnitSystem::MmTonSC, &[]).unwrap();
+    let addition = add_cad_files(Some(combined), &again, UnitSystem::Unitless, &[]).unwrap();
     let mut names = part_names(&addition.import.geometry).unwrap();
     names.sort();
     assert_eq!(names, ["SOLID-1", "SOLID-2", "SOLID-3", "SOLID-4"]);
@@ -865,7 +869,7 @@ fn added_files_keep_the_old_parts_with_names_sizes_and_faces() {
 
     // Into a model with a mesh but no geometry, the new parts avoid the mesh's names.
     let taken = ["SOLID-1".to_string(), "SOLID-2".to_string()];
-    let addition = add_cad_files(None, &again, UnitSystem::MmTonSC, &taken).unwrap();
+    let addition = add_cad_files(None, &again, UnitSystem::Unitless, &taken).unwrap();
     assert_eq!(addition.added, ["SOLID-3", "SOLID-4"]);
     assert_eq!(
         part_names(&addition.import.geometry).unwrap(),
@@ -964,9 +968,12 @@ fn split_faces_keep_their_outline_on_the_mesh() {
     if !gmsh_available() {
         return;
     }
-    let geometry = import_cad(&testdata("welle_mit_teilflaeche.step"), UnitSystem::MmTonSC)
-        .unwrap()
-        .geometry;
+    let geometry = import_cad(
+        &testdata("welle_mit_teilflaeche.step"),
+        UnitSystem::Unitless,
+    )
+    .unwrap()
+    .geometry;
     let mesh = generate_mesh(&geometry).unwrap().mesh;
     // Two cylinders, two end faces, the shoulder and the ring splitting the upper cylinder.
     assert_eq!(mesh.cad.faces.len(), 7);
@@ -992,7 +999,7 @@ fn parts_keep_the_names_of_the_cad_file() {
     if !gmsh_available() {
         return;
     }
-    let import = import_cad(&testdata("benannte_teile.step"), UnitSystem::MmTonSC).unwrap();
+    let import = import_cad(&testdata("benannte_teile.step"), UnitSystem::Unitless).unwrap();
     let names = ["OBEN", "STUETZE", "MEMBRAN"];
     assert_eq!(part_names(&import.geometry).unwrap(), names);
     let shown: Vec<&str> = (import.display.mesh.parts.iter())
@@ -1025,13 +1032,13 @@ fn parts_keep_the_names_of_the_cad_file() {
     assert_eq!(meshed, names);
 
     // Added to another geometry, the parts keep their names unless one is taken.
-    let blocks = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC).unwrap();
+    let blocks = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless).unwrap();
     let paths = [testdata("benannte_teile.step")];
     let taken = ["OBEN".to_string()];
     let addition =
-        add_cad_files(Some(&blocks.geometry), &paths, UnitSystem::MmTonSC, &taken).unwrap();
+        add_cad_files(Some(&blocks.geometry), &paths, UnitSystem::Unitless, &taken).unwrap();
     assert_eq!(addition.added, ["OBEN-2", "STUETZE", "MEMBRAN"]);
-    let addition = add_cad_files(None, &paths, UnitSystem::MmTonSC, &taken).unwrap();
+    let addition = add_cad_files(None, &paths, UnitSystem::Unitless, &taken).unwrap();
     assert_eq!(addition.added, ["OBEN-2", "STUETZE", "MEMBRAN"]);
     let shown: Vec<&str> = (addition.import.display.mesh.parts.iter())
         .map(|p| p.name.as_str())
@@ -1117,7 +1124,7 @@ fn extruded_parts_are_meshed_with_hexahedra_in_layers() {
     if !gmsh_available() {
         return;
     }
-    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC).unwrap();
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless).unwrap();
     let mut geometry = import.geometry;
     geometry.meshing.max_size = 4.0;
     for second_order in [false, true] {
@@ -1184,7 +1191,7 @@ fn source_faces_are_checked_to_be_an_end_of_an_extrusion() {
     if !gmsh_available() {
         return;
     }
-    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC).unwrap();
+    let import = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless).unwrap();
     let mut geometry = import.geometry;
     geometry.meshing.max_size = 5.0;
     let display = &import.display;
@@ -1250,7 +1257,7 @@ fn meshing_parameters_find_extrusions_and_keep_tetrahedra_for_the_rest() {
     if !gmsh_available() {
         return;
     }
-    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC)
+    let mut geometry = import_cad(&testdata("platte_mit_loch.step"), UnitSystem::Unitless)
         .unwrap()
         .geometry;
     geometry.meshing.max_size = 5.0;
@@ -1278,9 +1285,12 @@ fn meshing_parameters_find_extrusions_and_keep_tetrahedra_for_the_rest() {
 
     // A shaft with a split face is no extrusion of one face, and no body of revolution
     // without elements collapsing on its axis: it falls back to tetrahedra.
-    let mut shaft = import_cad(&testdata("welle_mit_teilflaeche.step"), UnitSystem::MmTonSC)
-        .unwrap()
-        .geometry;
+    let mut shaft = import_cad(
+        &testdata("welle_mit_teilflaeche.step"),
+        UnitSystem::Unitless,
+    )
+    .unwrap()
+    .geometry;
     shaft.meshing.hexahedra_where_possible = true;
     let mesh = generate_part_mesh(&shaft, "SOLID-1").unwrap().mesh;
     assert!(

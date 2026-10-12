@@ -371,6 +371,7 @@ pub fn marks(model: &Model, picked: &[NodeId]) -> QueryMarks {
     let units = model.units();
     let length = units.unit(Quantity::Length);
     let (length_unit, area_unit) = (length, units.unit(Quantity::Area));
+    let s = length_scale(model);
     marks.points = picked.iter().filter_map(|&id| position(id)).collect();
     for (owner, annotation) in model.query_annotations.iter().enumerate() {
         match annotation {
@@ -406,7 +407,7 @@ pub fn marks(model: &Model, picked: &[NodeId]) -> QueryMarks {
                 let length = edge_length(segments, true_position);
                 marks.markers.push(Marker {
                     position: (a + b) * 0.5,
-                    text: format!("Length: {} {length_unit}", number(length)),
+                    text: format!("Length: {} {length_unit}", number(length * s)),
                 });
             }
             Annotation::Surface { faces, .. } => {
@@ -418,7 +419,7 @@ pub fn marks(model: &Model, picked: &[NodeId]) -> QueryMarks {
                 let area = surface_area(faces, true_position);
                 marks.markers.push(Marker {
                     position: center,
-                    text: format!("Area: {} {area_unit}", number(area)),
+                    text: format!("Area: {} {area_unit}", number(area * s * s)),
                 });
             }
             Annotation::Part(index) => {
@@ -445,7 +446,7 @@ pub fn marks(model: &Model, picked: &[NodeId]) -> QueryMarks {
                 marks.lines.push(vec![pa, pb]);
                 marks.markers.push(Marker {
                     position: (pa + pb) * 0.5,
-                    text: format!("Distance: {} {length}", number(distance)),
+                    text: format!("Distance: {} {length}", number(distance * s)),
                 });
             }
             Annotation::Angle([a, b, c]) => {
@@ -481,7 +482,7 @@ pub fn marks(model: &Model, picked: &[NodeId]) -> QueryMarks {
                     .push(circle_polyline(model, center, radius, axis));
                 marks.markers.push(Marker {
                     position: model.to_render(center.to_array()),
-                    text: format!("Radius: {} {length}", number(radius)),
+                    text: format!("Radius: {} {length}", number(radius * s)),
                 });
             }
             Annotation::BoundingBox => {
@@ -511,7 +512,7 @@ pub fn marks(model: &Model, picked: &[NodeId]) -> QueryMarks {
                 ] {
                     marks.lines.push(vec![corner(a), corner(b)]);
                 }
-                let size = (max - min).as_dvec3();
+                let size = (max - min).as_dvec3() * s;
                 marks.markers.push(Marker {
                     position: (min + max) * 0.5,
                     text: format!(
@@ -556,6 +557,11 @@ fn row(item: &str, unit: &str, names: &str, values: &[String]) -> String {
     line
 }
 
+/// Factor from the lengths of the model as stored to those it shows.
+fn length_scale(model: &Model) -> f64 {
+    (model.stored_units()).factor_to(Quantity::Length, model.units())
+}
+
 fn xyz(p: DVec3) -> Vec<String> {
     vec![number(p.x), number(p.y), number(p.z)]
 }
@@ -575,6 +581,7 @@ fn node_lines(model: &Model, node: NodeId) -> Vec<String> {
         return Vec::new();
     };
     let length = model.units().unit(Quantity::Length);
+    let base = base * length_scale(model);
     let item = if model.is_geometry() {
         "Vertex"
     } else {
@@ -657,7 +664,7 @@ fn part_lines(model: &Model, index: usize) -> Vec<String> {
     };
     let mut lines = vec![String::new(), format!("Part name: {}", part.name)];
     if let Some((min, max)) = part.bounds {
-        let size = (max - min).as_dvec3();
+        let size = (max - min).as_dvec3() * length_scale(model);
         lines.push(row("Size", length, "x, y, z:", &xyz(size)));
     }
     lines.push(format!("{elements} {}", part.element_count));
@@ -700,7 +707,8 @@ fn bounding_box_lines(model: &Model) -> Vec<String> {
     let Some((min, max)) = model.visible_bounds() else {
         return vec!["Bounding box: nothing is visible".to_string()];
     };
-    let (min, max) = (model.model_point(min), model.model_point(max));
+    let s = length_scale(model);
+    let (min, max) = (model.model_point(min) * s, model.model_point(max) * s);
     let length = model.units().unit(Quantity::Length);
     let mut lines = vec![String::new(), "Bounding box".to_string()];
     if let Some(view) = &model.results {
@@ -739,6 +747,9 @@ fn distance_lines(model: &Model, [a, b]: [NodeId; 2]) -> Vec<String> {
         return Vec::new();
     };
     let length = model.units().unit(Quantity::Length);
+    let s = length_scale(model);
+    let (base_a, base_b) = (base_a * s, base_b * s);
+    let (def_a, def_b) = (def_a.map(|d| d * s), def_b.map(|d| d * s));
     let values = |d: DVec3| {
         let mut v = xyz(d);
         v.push(number(d.length()));
@@ -818,8 +829,9 @@ fn circle_lines(model: &Model, nodes: [NodeId; 3]) -> Vec<String> {
     let describe = |label: &str, axis_label: &str, circle: Option<(DVec3, f64, DVec3)>| match circle
     {
         Some((center, radius, axis)) => {
-            let mut values = xyz(center);
-            values.push(number(radius));
+            let s = length_scale(model);
+            let mut values = xyz(center * s);
+            values.push(number(radius * s));
             vec![
                 row(label, length, "x, y, z, R:", &values),
                 row(axis_label, "", "x, y, z:", &xyz(axis)),
@@ -1004,7 +1016,8 @@ fn deformed_position(model: &Model, node: NodeId) -> Option<DVec3> {
 
 fn edge_lines(model: &Model, part: usize, segments: &[[NodeId; 2]]) -> Vec<String> {
     let length = model.units().unit(Quantity::Length);
-    let base = edge_length(segments, |n| base_position(model, n));
+    let s = length_scale(model);
+    let base = edge_length(segments, |n| base_position(model, n)) * s;
     let name = model.parts.get(part).map_or("", |p| p.name.as_str());
     let mut lines = vec![
         String::new(),
@@ -1012,7 +1025,7 @@ fn edge_lines(model: &Model, part: usize, segments: &[[NodeId; 2]]) -> Vec<Strin
         row("Base", length, "L:", &[number(base)]),
     ];
     if model.results.is_some() {
-        let deformed = edge_length(segments, |n| deformed_position(model, n));
+        let deformed = edge_length(segments, |n| deformed_position(model, n)) * s;
         lines.push(row("Deformed", length, "L:", &[number(deformed)]));
         lines.push(row("Delta", length, "L:", &[number(deformed - base)]));
     }
@@ -1022,7 +1035,8 @@ fn edge_lines(model: &Model, part: usize, segments: &[[NodeId; 2]]) -> Vec<Strin
 
 fn surface_lines(model: &Model, part: usize, faces: &[Vec<NodeId>]) -> Vec<String> {
     let unit = model.units().unit(Quantity::Area);
-    let base = surface_area(faces, |n| base_position(model, n));
+    let s = length_scale(model).powi(2);
+    let base = surface_area(faces, |n| base_position(model, n)) * s;
     let name = model.parts.get(part).map_or("", |p| p.name.as_str());
     let mut lines = vec![
         String::new(),
@@ -1030,7 +1044,7 @@ fn surface_lines(model: &Model, part: usize, faces: &[Vec<NodeId>]) -> Vec<Strin
         row("Base", unit, "A:", &[number(base)]),
     ];
     if model.results.is_some() {
-        let deformed = surface_area(faces, |n| deformed_position(model, n));
+        let deformed = surface_area(faces, |n| deformed_position(model, n)) * s;
         lines.push(row("Deformed", unit, "A:", &[number(deformed)]));
         lines.push(row("Delta", unit, "A:", &[number(deformed - base)]));
     }

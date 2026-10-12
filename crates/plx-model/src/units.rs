@@ -199,6 +199,13 @@ impl Dimension {
 const POUND_FORCE: f64 = 4.448_221_615_260_5;
 const INCH: f64 = 0.0254;
 
+/// The unit system the values of every model are stored in: metre, kilogram, second and
+/// degree Celsius. An analysis' own unit system only says in which units its dialogs and
+/// views show the values, and in which units files without units are read, so analyses of
+/// different unit systems can take values and results from each other as they are.
+/// CalculiX gets the values in these units, too.
+pub const STORED: UnitSystem = UnitSystem::MKgSC;
+
 impl UnitSystem {
     /// In PrePoMax's order of the list.
     pub const ALL: [UnitSystem; 5] = [
@@ -332,6 +339,17 @@ impl UnitSystem {
             si
         };
         Some(si / self.si_factor(quantity)?)
+    }
+
+    /// A value as it is stored ([`STORED`]) in this system's units, to be shown. Without
+    /// units, it stays.
+    pub fn shown(self, stored: f64, quantity: Quantity) -> f64 {
+        STORED.convert(stored, quantity, self)
+    }
+
+    /// A value in this system's units as it is stored ([`STORED`]).
+    pub fn stored(self, value: f64, quantity: Quantity) -> f64 {
+        self.convert(value, quantity, STORED)
     }
 
     /// The value in the units of `target`. Without units on either side, it stays.

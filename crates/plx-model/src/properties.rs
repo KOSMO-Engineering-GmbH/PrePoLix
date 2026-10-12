@@ -32,17 +32,19 @@ impl ModelProperties {
             .flatten()
     }
 
-    /// Absolute zero and the Stefan-Boltzmann constant in the units of `units`; `None`
-    /// without units.
+    /// Absolute zero and the Stefan-Boltzmann constant as they are stored, in SI units
+    /// ([`crate::STORED`]); `None` for a model without units.
     pub fn standard_constants(units: UnitSystem) -> Option<(f64, f64)> {
         use crate::Quantity;
         if !units.has_units() {
             return None;
         }
-        let zero = crate::UnitSystem::MKgSC.convert(-273.15, Quantity::Temperature, units);
-        let sigma =
-            crate::UnitSystem::MKgSC.convert(5.670_374_419e-8, Quantity::StefanBoltzmann, units);
-        Some((zero, sigma))
+        let stored =
+            |value, quantity| crate::UnitSystem::MKgSC.convert(value, quantity, crate::STORED);
+        Some((
+            stored(-273.15, Quantity::Temperature),
+            stored(5.670_374_419e-8, Quantity::StefanBoltzmann),
+        ))
     }
 }
 

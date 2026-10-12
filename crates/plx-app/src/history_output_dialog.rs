@@ -598,7 +598,7 @@ mod tests {
     fn results() -> Model {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/kragbalken_c3d8.frd");
-        crate::model::load(&path, plx_model::UnitSystem::MmTonSC)
+        crate::model::load(&path, plx_model::UnitSystem::Unitless)
             .unwrap()
             .model
     }
@@ -646,7 +646,7 @@ mod tests {
     fn hot_spot_values_beside_a_moving_load() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/kragbalken_c3d20r.frd");
-        let mut model = crate::model::load(&path, plx_model::UnitSystem::MmTonSC)
+        let mut model = crate::model::load(&path, plx_model::UnitSystem::Unitless)
             .unwrap()
             .model;
         // A toe on the top face near the fixed end, the paths along the beam.

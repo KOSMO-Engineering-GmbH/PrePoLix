@@ -1,12 +1,12 @@
 //! PrePoMax's "Model Properties" dialog: the model space, the unit system and the physical
-//! constants, asked for a new model and editable later from the model's context.
+//! constants, asked for when an analysis is made. Its model space and unit system stay as
+//! they are then; the rest can be edited later from the model's context.
 
 use std::collections::BTreeMap;
 
 use crate::model::Model;
 use plx_mesh::{ElementFamily, ElementShape, FeMesh};
 use plx_mesher::CadEntity;
-use plx_model::convert::Conversion;
 use plx_model::{
     BASE_QUANTITIES, DERIVED_QUANTITIES, ModelKind, ModelProperties, ModelSpace, Quantity,
     UnitSystem,
@@ -15,17 +15,9 @@ use plx_model::{
 /// The open dialog with its draft.
 pub struct ModelPropertiesDialog {
     pub draft: ModelProperties,
-    /// Editing the properties of the open model rather than starting a new one.
+    /// Editing the properties of an analysis rather than making a new one: its model space
+    /// and unit system are fixed then.
     pub editing: bool,
-    /// The properties of the open model being edited.
-    original: ModelProperties,
-    /// Convert the model's values when its unit system changes, so that it stays the same
-    /// physically; otherwise its numbers are taken in the new units.
-    pub convert: bool,
-    /// Open the geometry import once the new model is created.
-    pub then_import: bool,
-    /// The units the draft's physical constants are given in.
-    constants_units: UnitSystem,
 }
 
 pub enum DialogResult {
@@ -35,25 +27,18 @@ pub enum DialogResult {
 }
 
 impl ModelPropertiesDialog {
-    pub fn new_model(properties: ModelProperties, then_import: bool) -> Self {
+    /// The properties of a new analysis, starting from `properties`.
+    pub fn create(properties: ModelProperties) -> Self {
         Self {
-            draft: properties.clone(),
+            draft: properties,
             editing: false,
-            original: properties.clone(),
-            convert: true,
-            then_import,
-            constants_units: properties.units,
         }
     }
 
     pub fn edit(properties: ModelProperties) -> Self {
         Self {
-            draft: properties.clone(),
+            draft: properties,
             editing: true,
-            original: properties.clone(),
-            convert: true,
-            then_import: false,
-            constants_units: properties.units,
         }
     }
 
@@ -81,6 +66,7 @@ impl ModelPropertiesDialog {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 ui.set_width(340.0);
                 let draft = &mut self.draft;
+                let fixed = self.editing;
                 group(ui, "Model Space", |ui| {
                     egui::Grid::new("model space")
                         .num_columns(2)
@@ -88,8 +74,15 @@ impl ModelPropertiesDialog {
                         .show(ui, |ui| {
                             for pair in ModelSpace::ALL.chunks(2) {
                                 for &space in pair {
-                                    ui.radio_value(&mut draft.space, space, space.label())
-                                        .on_hover_text(space.tooltip());
+                                    let radio =
+                                        egui::RadioButton::new(draft.space == space, space.label());
+                                    let clicked = ui
+                                        .add_enabled(!fixed || draft.space == space, radio)
+                                        .on_hover_text(space.tooltip())
+                                        .clicked();
+                                    if clicked && !fixed {
+                                        draft.space = space;
+                                    }
                                 }
                                 ui.end_row();
                             }
@@ -105,37 +98,24 @@ impl ModelPropertiesDialog {
                             ui.set_min_width(ui.available_width());
                             for units in UnitSystem::ALL {
                                 let selected = draft.units == units;
-                                if ui.selectable_label(selected, units.label()).clicked() {
+                                let label = egui::Button::selectable(selected, units.label());
+                                let clicked = ui.add_enabled(!fixed || selected, label).clicked();
+                                if clicked && !fixed {
                                     draft.units = units;
                                 }
                             }
                         });
                 });
                 group(ui, "Units", |ui| units_table(ui, draft.units));
-                // The constants follow a changed unit system when the model is converted
-                // or is new, so that they stay the same physically.
-                if self.constants_units != draft.units {
-                    if self.convert || !self.editing {
-                        let c = Conversion::new(self.constants_units, draft.units);
-                        c.option(&mut draft.absolute_zero, Quantity::Temperature);
-                        c.option(&mut draft.stefan_boltzmann, Quantity::StefanBoltzmann);
-                    }
-                    self.constants_units = draft.units;
-                }
                 group(ui, "Physical Constants", |ui| constants(ui, draft));
-                let (from, to) = (self.original.units, draft.units);
-                if self.editing && from != to {
-                    if from.has_units() && to.has_units() {
-                        ui.checkbox(&mut self.convert, "Convert the model values");
-                    }
-                    let note = if self.convert && from.has_units() && to.has_units() {
-                        "Mesh, geometry, materials, loads and all other values are \
-                         converted; the model stays physically the same."
-                    } else {
-                        "The numbers stay the same and apply in the new units."
-                    };
-                    ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap());
-                }
+                let note = if fixed {
+                    "The model space and the unit system are set when the analysis is made."
+                } else {
+                    "The model space and the unit system cannot be changed once the analysis \
+                     is made. The unit system only says in which units the analysis shows \
+                     and reads its values; they are stored in SI units."
+                };
+                ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap());
                 if let Some(error) = &error {
                     ui.add(
                         egui::Label::new(egui::RichText::new(error).color(crate::style::error()))

@@ -368,6 +368,7 @@ impl KeywordEditor {
                 });
                 ui.separator();
                 ui.horizontal(|ui| {
+                    ui.weak("Values in SI units: m, kg, s, N, Pa, degC.");
                     if !self.unplaced.is_empty() {
                         ui.label(format!(
                             "{} keyword(s) without a valid place in the changed model will not be written.",

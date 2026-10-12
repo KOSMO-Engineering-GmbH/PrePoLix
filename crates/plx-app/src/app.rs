@@ -65,9 +65,6 @@ pub enum Request {
     SaveWithoutResults,
     /// Open this project file instead of the open project.
     OpenProject(PathBuf),
-    /// Give the project, all its analyses, this model space and unit system; `true` converts
-    /// the values into the new units.
-    SpaceAndUnits(plx_model::ModelSpace, UnitSystem, bool),
     /// Solve the analyses this one takes global results from and have none yet, then this
     /// one.
     SolveChain,
@@ -104,10 +101,8 @@ struct Workbench {
     status: Option<(std::time::Instant, crate::status::AnalysisStatus)>,
     /// Campbell diagram window with its speed sweep; kept with its results while hidden.
     campbell: Option<crate::campbell::CampbellWindow>,
-    /// Open dialog of the model space and unit system, for a new or the open model.
+    /// Open dialog of the model properties.
     model_dialog: Option<ModelPropertiesDialog>,
-    /// The new model asked for the geometry import; the app opens the file dialog.
-    import_requested: bool,
     viewport: Viewport,
     /// The FE model workspace: mesh and analysis set up from an input or project file.
     model: Option<Model>,
@@ -260,7 +255,6 @@ impl AnalysisWindow {
                 linked_prompt: None,
                 status: None,
                 model_dialog: None,
-                import_requested: false,
                 viewport: Viewport::new(render_state),
                 model: None,
                 geometry: None,
@@ -415,25 +409,6 @@ impl AnalysisWindow {
         self.solve_when_loaded = true;
     }
 
-    /// Takes over the project's model space and unit system; `convert` converts the values
-    /// into the new units.
-    pub fn set_space_and_units(
-        &mut self,
-        space: plx_model::ModelSpace,
-        units: UnitSystem,
-        convert: bool,
-    ) {
-        let Some(model) = &self.workbench.model else {
-            return;
-        };
-        let properties = plx_model::ModelProperties {
-            space,
-            units,
-            ..model.fe.properties.clone()
-        };
-        self.workbench.set_model_properties(properties, convert);
-    }
-
     /// Opens the analysis of the project at `path` in the window, built on a worker thread.
     pub fn load(&mut self, ctx: &egui::Context, path: PathBuf, analysis: ProjectAnalysis) {
         let (sender, ctx) = (self.load_events.0.clone(), ctx.clone());
@@ -552,12 +527,9 @@ impl AnalysisWindow {
         self.workbench.cached_status()
     }
 
-    /// Geometry > Import. Without a model, PrePoMax first asks for the new model's
-    /// properties, so that a 2D geometry lands in a 2D model.
+    /// Geometry > Import, into the model space and units the analysis was made with.
     fn import(&mut self, ctx: &egui::Context) {
-        if self.workbench.model.is_none() {
-            self.workbench.new_model(true);
-        } else {
+        if self.workbench.model.is_some() {
             self.import_dialog(ctx);
         }
     }
@@ -658,11 +630,6 @@ impl AnalysisWindow {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
-                let new = egui::Button::new("New Model …").shortcut_text("Ctrl+N");
-                let tip = "Replaces the model of this analysis with an empty one.";
-                if ui.add(new).on_hover_text(tip).clicked() {
-                    self.workbench.new_model(false);
-                }
                 let import = egui::Button::new("Import …");
                 if ui.add_enabled(self.loading.is_none(), import).clicked() {
                     self.import(ui.ctx());
@@ -842,10 +809,6 @@ impl AnalysisWindow {
     fn tool_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
-            let new = "New Model (Ctrl+N)";
-            if icons::button(ui, Icon::New, new, true, false).clicked() {
-                self.workbench.new_model(false);
-            }
             let can_open = self.loading.is_none();
             let import = "Import Geometry (STEP, IGES, BREP) or mesh (INP)";
             if icons::button(ui, Icon::Import, import, can_open, false).clicked() {
@@ -1235,9 +1198,6 @@ impl AnalysisWindow {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
             self.workbench.requests.push(Request::Save(false));
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
-            self.workbench.new_model(false);
-        }
         // A focused text field undoes its own typing.
         if !ctx.egui_wants_keyboard_input() {
             // Ctrl+Z matches with Shift held too, so Redo is checked first.
@@ -1410,9 +1370,6 @@ impl AnalysisWindow {
         self.workbench.settings_window(&ctx);
         self.workbench.model_dialog_window(&ctx);
         self.workbench.linked_prompt_window(&ctx);
-        if std::mem::take(&mut self.workbench.import_requested) {
-            self.import_dialog(&ctx);
-        }
         self.workbench.update_explosion(&ctx);
         self.workbench.update_thick_shells();
         self.workbench.rebuild_if_results_changed();
@@ -1644,7 +1601,14 @@ impl Workbench {
                         rebuild = true;
                     }
                     if let Some(project) = &self.model {
-                        model.fe.add_missing_features(&project.fe);
+                        // Results are stored in the units they show; the FE model in SI ones.
+                        let mut features = project.fe.clone();
+                        let shown = model.units();
+                        features.convert_features(&plx_model::convert::Conversion::new(
+                            plx_model::STORED,
+                            shown,
+                        ));
+                        model.fe.add_missing_features(&features);
                     }
                     // Results read again, e.g. after the analysis ran once more, keep their
                     // colour scale.
@@ -1807,8 +1771,7 @@ impl Workbench {
             let hint = if view == TreeView::Geometry {
                 "Geometry > Import or drag a STEP, IGES or BREP file into the window."
             } else {
-                "File > New Model, then Geometry > Import or drag a STEP or .inp file into \
-                 the window."
+                "Geometry > Import or drag a STEP or .inp file into the window."
             };
             ui.weak(format!("{text}.\n{hint}"));
             ui.separator();
@@ -2253,9 +2216,18 @@ impl Workbench {
         }
     }
 
-    /// Where the moving loads of the FE model stand in the steps of its results.
+    /// Where the moving loads of the FE model stand in the steps of its results, in the
+    /// units the results show.
     fn moving_load_stations(&self) -> Vec<plx_model::LoadStations> {
-        (self.model.as_ref()).map_or_else(Vec::new, |project| plx_model::load_stations(&project.fe))
+        let Some(project) = &self.model else {
+            return Vec::new();
+        };
+        let units = project.fe.properties.units;
+        let mut stations = plx_model::load_stations(&project.fe);
+        for (_, position) in stations.iter_mut().flat_map(|s| s.steps.iter_mut()) {
+            *position = units.shown(*position, plx_model::Quantity::Length);
+        }
+        stations
     }
 
     fn edit_hot_spot(&mut self, index: usize) {
@@ -3005,10 +2977,15 @@ impl Workbench {
                     for warning in &part.warnings {
                         self.output.push(format!("Gmsh: {warning}"));
                     }
+                    let units = model.fe.properties.units;
+                    let size = |size: f64| {
+                        let size = units.shown(size, plx_model::Quantity::Length);
+                        crate::numeric::format_physical(size)
+                    };
                     for p in &part.mesh.parts {
                         let parameters = model.geometry.as_ref().map(|g| g.parameters(&p.name));
                         self.output.push(format!(
-                            "{}: {} elements (order {}, element size {} to {})",
+                            "{}: {} elements (order {}, element size {} to {} {})",
                             p.name,
                             p.elements.len(),
                             if parameters.is_some_and(|s| s.second_order) {
@@ -3016,8 +2993,9 @@ impl Workbench {
                             } else {
                                 1
                             },
-                            parameters.map_or(0.0, |s| s.min_size),
-                            parameters.map_or(0.0, |s| s.max_size),
+                            size(parameters.map_or(0.0, |s| s.min_size)),
+                            size(parameters.map_or(0.0, |s| s.max_size)),
+                            units.unit(plx_model::Quantity::Length),
                         ));
                     }
                     mesh = plx_mesher::merge_part(&mesh, part.mesh);
@@ -4729,7 +4707,7 @@ impl Workbench {
                 || path.display().to_string(),
                 |n| n.to_string_lossy().into_owned(),
             );
-            let import = match result {
+            let mut import = match result {
                 Ok(import) => *import,
                 Err(error) => {
                     self.output.push(format!("Error importing {name}: {error}"));
@@ -4742,16 +4720,18 @@ impl Workbench {
                 ));
                 continue;
             }
+            // The numbers of the input file are in the analysis' units; the mesh is stored in
+            // SI units.
+            let length = (model.fe.properties.units)
+                .factor_to(plx_model::Quantity::Length, plx_model::STORED);
+            if length != 1.0 {
+                import.mesh.scale(length);
+            }
+            // The model space of an analysis is set when it is made: plane stress, plane
+            // strain and axisymmetric elements take the type of the analysis' 2D space.
             let space = plx_model::ModelSpace::of_mesh(&import.mesh);
-            if model.mesh.element_count() == 0 && model.geometry.is_none() {
-                // Into an empty model, the mesh decides what the model is, as opening it does;
-                // the model space is the project's, so all its analyses take it over.
-                if model.fe.properties.space != space {
-                    let units = model.fe.properties.units;
-                    self.requests
-                        .push(Request::SpaceAndUnits(space, units, false));
-                }
-                model.fe.properties.space = space;
+            if space.is_2d() && model.fe.properties.space.is_2d() {
+                model.fe.properties.space.convert_mesh(&mut import.mesh);
             } else if space.is_2d() != model.fe.properties.space.is_2d() {
                 self.output.push(format!(
                     "Error importing {name}: its elements are {}, the model is {}",
@@ -5294,7 +5274,8 @@ impl Workbench {
         let center = model.mesh.bounds().map_or(glam::DVec3::ZERO, |(a, b)| {
             (glam::DVec3::from(a) + glam::DVec3::from(b)) * 0.5
         });
-        let mut dialog = ExplodedDialog::new(model.explosion.applied.clone(), &last, center);
+        let units = (model.stored_units(), model.units());
+        let mut dialog = ExplodedDialog::new(model.explosion.applied.clone(), &last, center, units);
         preview_explosion(model, &mut dialog, true);
         self.exploded_dialog = Some((dialog, which));
     }
@@ -5938,27 +5919,10 @@ impl Workbench {
         }
     }
 
-    /// The unit system CAD geometry is read in: that of an empty model it goes into, such as
-    /// one just created with File > New, else that of new models.
+    /// The unit system of the analysis, in which files without units are read and results
+    /// shown.
     fn import_units(&self) -> UnitSystem {
-        match &self.model {
-            Some(model) if model.mesh.element_count() == 0 && model.geometry.is_none() => {
-                model.fe.properties.units
-            }
-            _ => self.settings.new_model.units,
-        }
-    }
-
-    /// PrePoMax's File > New: asks for the model space and unit system of the new model,
-    /// with the last choice proposed. `then_import` opens the geometry import afterwards.
-    fn new_model(&mut self, then_import: bool) {
-        // The model space and units are the project's, those of the model replaced.
-        let mut proposed = self.settings.new_model.clone();
-        if let Some(model) = &self.model {
-            proposed.space = model.fe.properties.space;
-            proposed.units = model.fe.properties.units;
-        }
-        self.model_dialog = Some(ModelPropertiesDialog::new_model(proposed, then_import));
+        (self.model.as_ref()).map_or(self.settings.new_model.units, |m| m.fe.properties.units)
     }
 
     fn edit_model_properties(&mut self) {
@@ -5971,176 +5935,24 @@ impl Workbench {
         let Some(dialog) = &mut self.model_dialog else {
             return;
         };
-        let mesh = (self.model.as_ref())
-            .filter(|_| dialog.editing)
-            .map(|m| &m.mesh);
-        let geometry = self.geometry.as_ref().filter(|_| dialog.editing);
-        let result = dialog.show(ctx, mesh, geometry);
-        let (editing, then_import, convert) = (dialog.editing, dialog.then_import, dialog.convert);
+        let mesh = self.model.as_ref().map(|m| &m.mesh);
+        let result = dialog.show(ctx, mesh, self.geometry.as_ref());
         match result {
             DialogResult::Open => return,
             DialogResult::Cancel => {}
-            DialogResult::Ok(properties) if editing => {
-                let space_and_units =
-                    (self.model.as_ref()).map(|m| (m.fe.properties.space, m.fe.properties.units));
-                let changed = space_and_units != Some((properties.space, properties.units));
-                // The project applies a new model space or unit system to all its analyses.
-                if changed {
-                    self.requests.push(Request::SpaceAndUnits(
-                        properties.space,
-                        properties.units,
-                        convert,
-                    ));
-                }
-                let properties = match &self.model {
-                    Some(model) => plx_model::ModelProperties {
+            DialogResult::Ok(properties) => {
+                // The model space and the unit system stay as the analysis was made.
+                if let Some(model) = &mut self.model {
+                    model.fe.properties = plx_model::ModelProperties {
                         space: model.fe.properties.space,
                         units: model.fe.properties.units,
                         ..properties
-                    },
-                    None => properties,
-                };
-                self.set_model_properties(properties, false)
-            }
-            DialogResult::Ok(properties) => {
-                // New models propose the space and units, never a submodel's global results.
-                self.settings.new_model = plx_model::ModelProperties {
-                    kind: plx_model::ModelKind::General,
-                    global_results: None,
-                    ..properties.clone()
-                };
-                let space_and_units =
-                    (self.model.as_ref()).map(|m| (m.fe.properties.space, m.fe.properties.units));
-                if space_and_units.is_some_and(|s| s != (properties.space, properties.units)) {
-                    self.requests.push(Request::SpaceAndUnits(
-                        properties.space,
-                        properties.units,
-                        false,
-                    ));
+                    };
+                    self.results_changed = true;
                 }
-                self.create_model(properties);
-                self.import_requested = then_import;
             }
         }
         self.model_dialog = None;
-    }
-
-    /// Starts an empty model, to import geometry into or to save as a project.
-    fn create_model(&mut self, properties: plx_model::ModelProperties) {
-        self.close_model();
-        let mut model = Model::new(
-            std::path::Path::new("Untitled"),
-            plx_mesh::FeMesh::default(),
-        );
-        self.output.push(format!(
-            "New model: {}, {}",
-            properties.space.label(),
-            properties.units.label()
-        ));
-        model.fe.properties = properties;
-        self.model = Some(model);
-        self.set_tree_view(TreeView::Geometry);
-        self.viewport.set_parts(&[]);
-        self.frame_cache.clear();
-        self.update_contour();
-    }
-
-    /// Takes over changed model properties; a new model space retypes the mesh's surface
-    /// elements, as PrePoMax does. A new unit system converts the model with `convert`.
-    fn set_model_properties(&mut self, properties: plx_model::ModelProperties, convert: bool) {
-        let Some(model) = &mut self.model else {
-            return;
-        };
-        let old = model.fe.properties.clone();
-        if convert && old.units != properties.units {
-            self.convert_units(properties.units);
-        }
-        let Some(model) = &mut self.model else {
-            return;
-        };
-        model.fe.properties = properties.clone();
-        if old.space != properties.space {
-            let mut mesh = model.mesh.clone();
-            if properties.space.convert_mesh(&mut mesh) {
-                model.set_mesh(mesh);
-                self.results_changed = true;
-                self.highlighted = None;
-            }
-            self.output
-                .push(format!("Model space: {}", properties.space.label()));
-        }
-        if old.units != properties.units {
-            self.output
-                .push(format!("Unit system: {}", properties.units.label()));
-        }
-        self.results_changed = true;
-    }
-
-    /// Converts the open model into another unit system: its values, its mesh and its
-    /// geometry, which are scaled for the new length unit.
-    fn convert_units(&mut self, units: UnitSystem) {
-        let Some(model) = &mut self.model else {
-            return;
-        };
-        let conversion = plx_model::convert::Conversion::new(model.fe.properties.units, units);
-        let notes = model.fe.convert_units(units);
-        let factor = conversion.length_factor();
-        if factor != 1.0 {
-            if model.mesh.node_count() > 0 {
-                let mut mesh = model.mesh.clone();
-                mesh.scale(factor);
-                model.set_mesh(mesh);
-                self.highlighted = None;
-            }
-            if let Some(geometry) = &mut model.geometry {
-                geometry.convert_sizes(&conversion);
-                match plx_mesher::scale_geometry(geometry, factor) {
-                    Ok(scaled) => {
-                        *geometry = scaled;
-                        match plx_mesher::tessellate(geometry) {
-                            Ok(display) => {
-                                self.geometry = Some(Model::geometry_view(&model.path, display))
-                            }
-                            Err(error) => self
-                                .output
-                                .push(format!("Geometry cannot be displayed: {error}")),
-                        }
-                    }
-                    Err(error) => self
-                        .output
-                        .push(format!("Geometry could not be converted: {error}")),
-                }
-            }
-            self.frame_cache.clear();
-            self.view_command = Some(ViewCommand::Fit);
-        }
-        self.output.extend(notes);
-        self.output.push(format!(
-            "Model converted to {} (lengths × {factor})",
-            units.label()
-        ));
-    }
-
-    /// Removes the model and all results, like PrePoMax's File > New.
-    fn close_model(&mut self) {
-        if let Some(model) = self.model.take() {
-            self.output.push(format!("{} closed", model.file_name()));
-        }
-        self.geometry = None;
-        self.campbell = None;
-        self.mesh_setup = None;
-        self.mesh_item_editor = None;
-        self.meshing = None;
-        self.close_results(true);
-        self.tree.selected = None;
-        self.dialog = None;
-        self.section = None;
-        self.section_dialog = None;
-        self.exploded_dialog = None;
-        self.editor = None;
-        self.highlighted = None;
-        self.parked_camera = None;
-        self.results_changed = true;
     }
 
     /// Plays the animation and shows its window; marks the scene for rebuilding.
@@ -6513,6 +6325,9 @@ impl Workbench {
             global_origin: graphics.global_axes.then(|| model.global_origin()),
             show_scale_bar: graphics.scale_bar,
             length_unit: units.unit(plx_model::Quantity::Length),
+            length_factor: Some(
+                (model.stored_units()).factor_to(plx_model::Quantity::Length, units) as f32,
+            ),
             show_view_triad: graphics.view_triad,
             nodes: (model.highlight.nodes.iter())
                 .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))
@@ -6913,26 +6728,6 @@ fn timestamped(message: String) -> String {
     format!("{} {message}", chrono::Local::now().format("%H:%M:%S"))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn import_into_saved_new_model_keeps_the_project_file() {
-        let saved = Model::new(
-            std::path::Path::new("/tmp/neu.plx"),
-            plx_mesh::FeMesh::default(),
-        );
-        let mut imported = Model::new(
-            std::path::Path::new("/tmp/teil.step"),
-            plx_mesh::FeMesh::default(),
-        );
-        take_over_empty_model(&mut imported, &saved);
-        assert_eq!(imported.path, std::path::Path::new("/tmp/neu.plx"));
-        assert_eq!(imported.path, saved.path);
-    }
-}
-
 /// The container a new item goes into, to find whether another analysis owns it.
 fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
     Some(match kind {
@@ -6953,4 +6748,24 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
         NewItem::MeshSetupItem => TreeItem::Group("Mesh Setup"),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn import_into_saved_new_model_keeps_the_project_file() {
+        let saved = Model::new(
+            std::path::Path::new("/tmp/neu.plx"),
+            plx_mesh::FeMesh::default(),
+        );
+        let mut imported = Model::new(
+            std::path::Path::new("/tmp/teil.step"),
+            plx_mesh::FeMesh::default(),
+        );
+        take_over_empty_model(&mut imported, &saved);
+        assert_eq!(imported.path, std::path::Path::new("/tmp/neu.plx"));
+        assert_eq!(imported.path, saved.path);
+    }
 }

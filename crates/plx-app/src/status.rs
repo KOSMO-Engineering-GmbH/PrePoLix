@@ -53,17 +53,6 @@ pub struct AnalysisStatus {
 }
 
 impl AnalysisStatus {
-    /// The cells with their names, as the schematic lists them.
-    pub fn cells(&self) -> [(&'static str, CellState); 5] {
-        [
-            ("Geometry", self.geometry),
-            ("Mesh", self.mesh),
-            ("Setup", self.setup),
-            ("Solution", self.solution),
-            ("Results", self.results),
-        ]
-    }
-
     /// Whether there is something to solve: a mesh, or geometry to mesh, and a step.
     pub fn solvable(&self) -> bool {
         self.setup != CellState::Missing

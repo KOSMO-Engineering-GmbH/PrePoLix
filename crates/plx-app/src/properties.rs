@@ -194,8 +194,12 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
                 rows.push(("Element type", format!("{name} ({count})")));
             }
             if let Some((min, max)) = mesh.bounds() {
-                let size = [0, 1, 2].map(|k| format_value((max[k] - min[k]) as f32));
-                rows.push(("Dimensions", size.join(" × ")));
+                let size = [0, 1, 2].map(|k| {
+                    let length = model.shown(max[k] - min[k], plx_model::Quantity::Length);
+                    format_value(length as f32)
+                });
+                let unit = model.units().unit(plx_model::Quantity::Length);
+                rows.push(("Dimensions", format!("{} {unit}", size.join(" × "))));
             }
             rows.push(("Node Sets", mesh.node_sets.len().to_string()));
             rows.push(("Element Sets", mesh.element_sets.len().to_string()));

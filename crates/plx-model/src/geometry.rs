@@ -118,7 +118,8 @@ pub struct MeshingParameters {
 impl Default for MeshingParameters {
     fn default() -> Self {
         Self {
-            max_size: 1000.0,
+            // One metre; imports set sizes for the geometry's extent.
+            max_size: 1.0,
             min_size: 0.0,
             elements_per_curvature: 2.0,
             second_order: true,

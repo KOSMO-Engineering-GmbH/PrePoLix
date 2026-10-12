@@ -263,8 +263,9 @@ fn adopt_input_parts(mesh: &mut FeMesh, input: &Path) -> bool {
     }
 }
 
-/// Loads an input, results or CAD file. CAD geometry is read in the length unit of `units`,
-/// the unit system of the model it goes into. Project files hold several analyses and are
+/// Loads an input, results or CAD file for a model shown in `units`: the mesh of an input file
+/// and CAD geometry are stored in SI units, see [`plx_model::STORED`], and results are
+/// converted from them into `units`. Project files hold several analyses and are
 /// opened by the project window.
 pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     let start = Instant::now();
@@ -283,12 +284,14 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     let (mesh, warnings, skipped_keywords, included_files, increments) = if extension("frd") {
         let FrdImport {
             mut mesh,
-            increments,
+            mut increments,
             warnings,
             date,
             time,
             ..
         } = read_frd(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        // CalculiX ran in the stored SI units; the results show in the analysis' units.
+        crate::results::convert_results(&mut mesh, &mut increments, units);
         // The results group the elements by material; the input it ran, named like the
         // results, knows the parts.
         contact = companion_input(path).map(|input| adopt_input_parts(&mut mesh, &input));
@@ -301,12 +304,18 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
         )
     } else {
         let InpImport {
-            mesh,
+            mut mesh,
             warnings,
             skipped_keywords,
             files,
             ..
         } = read_inp(path).map_err(|e| e.to_string())?;
+        // The numbers of an input file are in the analysis' units; the mesh is stored in SI
+        // units.
+        let length = units.factor_to(plx_model::Quantity::Length, plx_model::STORED);
+        if length != 1.0 {
+            mesh.scale(length);
+        }
         // Plane stress, plane strain or axisymmetric elements make a 2D model.
         fe.properties.space = plx_model::ModelSpace::of_mesh(&mesh);
         let included = files.len().saturating_sub(1);
@@ -342,7 +351,8 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
             .find(|p| p.is_file());
         if let Some(dat) = dat {
             match plx_io::dat::read_dat(&dat) {
-                Ok(import) => {
+                Ok(mut import) => {
+                    crate::results::convert_history(&mut import.sets, units);
                     let warnings = view.set_file_history(import.sets, &model.mesh);
                     model.warnings.extend(import.warnings);
                     model.warnings.extend(warnings);
@@ -363,40 +373,50 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     })
 }
 
-/// Gives a closed analysis of a project the project's model space and unit system, as an
-/// open one takes them over in its window; `convert` converts its values, mesh and geometry
-/// into the new units. Returns notes on what could not be converted.
-pub fn convert_analysis(
-    data: &mut plx_io::project::ProjectAnalysis,
-    space: plx_model::ModelSpace,
-    units: UnitSystem,
-    convert: bool,
-) -> Vec<String> {
-    let mut notes = Vec::new();
-    let old = data.model.properties.clone();
-    if convert && old.units != units {
-        let conversion = plx_model::convert::Conversion::new(old.units, units);
-        notes.extend(data.model.convert_units(units));
-        let factor = conversion.length_factor();
-        if factor != 1.0 {
-            data.mesh.scale(factor);
-            if let Some(geometry) = &mut data.geometry {
-                geometry.convert_sizes(&conversion);
-                match plx_mesher::scale_geometry(geometry, factor) {
-                    Ok(scaled) => *geometry = scaled,
-                    Err(error) => notes.push(format!(
-                        "{}: geometry could not be converted: {error}",
-                        data.name
-                    )),
-                }
+/// Converts an analysis of a project of format 2, whose values were in its unit system, into
+/// SI units ([`plx_model::STORED`]), as format 3 stores them; the analysis keeps showing them
+/// in its unit system. Its kept results are in the old units and are dropped. Returns notes
+/// on what could not be converted.
+pub fn migrate_to_si(data: &mut plx_io::project::ProjectAnalysis) -> Vec<String> {
+    let units = data.model.properties.units;
+    let mut notes: Vec<String> = (data.model.convert_units(plx_model::STORED))
+        .into_iter()
+        .map(|note| format!("{}: {note}", data.name))
+        .collect();
+    data.model.properties.units = units;
+    let conversion = plx_model::convert::Conversion::new(units, plx_model::STORED);
+    let factor = conversion.length_factor();
+    if factor != 1.0 {
+        data.mesh.scale(factor);
+        if let Some(geometry) = &mut data.geometry {
+            let space = data.model.properties.space;
+            // Parts meshed from the geometry as it is stay meshed.
+            let current: Vec<String> = (data.mesh_inputs.iter())
+                .filter(|(part, print)| {
+                    plx_model::fingerprint::mesh_input(geometry, space, part) == **print
+                })
+                .map(|(part, _)| part.clone())
+                .collect();
+            geometry.convert_sizes(&conversion);
+            match plx_mesher::scale_geometry(geometry, factor) {
+                Ok(scaled) => *geometry = scaled,
+                Err(error) => notes.push(format!(
+                    "{}: geometry could not be converted: {error}",
+                    data.name
+                )),
+            }
+            for part in current {
+                let print = plx_model::fingerprint::mesh_input(geometry, space, &part);
+                data.mesh_inputs.insert(part, print);
             }
         }
     }
-    if old.space != space {
-        space.convert_mesh(&mut data.mesh);
+    if data.results.take().is_some() {
+        notes.push(format!(
+            "{}: its results were in the old units and are dropped; solve it again.",
+            data.name
+        ));
     }
-    data.model.properties.space = space;
-    data.model.properties.units = units;
     notes
 }
 
@@ -1448,11 +1468,25 @@ impl Model {
         self.shown_coords().get(index).copied()
     }
 
-    /// The unit system of the results, or of the FE model.
+    /// The unit system the model shows its values in: of the results, or of the FE model.
     pub fn units(&self) -> UnitSystem {
         self.results
             .as_ref()
             .map_or(self.fe.properties.units, |v| v.units)
+    }
+
+    /// The unit system the model's values are stored in: SI units for an FE model; results
+    /// are converted into the units they show when they are read.
+    pub fn stored_units(&self) -> UnitSystem {
+        match &self.results {
+            Some(view) => view.units,
+            None => plx_model::STORED,
+        }
+    }
+
+    /// A value of the model as it is shown.
+    pub fn shown(&self, value: f64, quantity: plx_model::Quantity) -> f64 {
+        self.stored_units().convert(value, quantity, self.units())
     }
 
     /// Where a node is drawn, relative to the model origin, including the shown deformation.
@@ -1562,8 +1596,35 @@ mod tests {
     }
 
     #[test]
+    fn old_projects_in_millimetres_are_migrated_to_si() {
+        let mut data = plx_io::project::ProjectAnalysis {
+            name: "A".into(),
+            ..Default::default()
+        };
+        data.mesh.set_node(1, [1000.0, 0.0, 0.0]);
+        data.model.properties.units = UnitSystem::MmTonSC;
+        data.model.materials.push(plx_model::Material {
+            name: "Steel".into(),
+            elastic: Some(plx_model::Elastic {
+                young: 210_000.0,
+                poisson: 0.3,
+            }),
+            ..Default::default()
+        });
+        data.results = Some(Default::default());
+        let notes = migrate_to_si(&mut data);
+        assert_eq!(data.mesh.coords()[0], [1.0, 0.0, 0.0]);
+        let young = data.model.materials[0].elastic.as_ref().unwrap().young;
+        assert!((young - 2.1e11).abs() < 1.0);
+        // The analysis keeps showing millimetres.
+        assert_eq!(data.model.properties.units, UnitSystem::MmTonSC);
+        assert!(data.results.is_none());
+        assert!(notes.iter().any(|n| n.contains("dropped")));
+    }
+
+    #[test]
     fn loads_testdata_with_part_summaries() {
-        let loaded = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::MmTonSC).unwrap();
+        let loaded = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::Unitless).unwrap();
         let model = &loaded.model;
         assert_eq!(model.included_files, 1);
         assert_eq!(model.parts.len(), 2);
@@ -1577,7 +1638,7 @@ mod tests {
 
     #[test]
     fn renamed_parts_keep_their_references() {
-        let mut model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::MmTonSC)
+        let mut model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::Unitless)
             .unwrap()
             .model;
         let (first, second) = (model.parts[0].name.clone(), model.parts[1].name.clone());
@@ -1605,7 +1666,7 @@ mod tests {
 
     #[test]
     fn chosen_element_types_survive_a_new_mesh() {
-        let mut model = load(&testdata("kragbalken_c3d8.inp"), UnitSystem::MmTonSC)
+        let mut model = load(&testdata("kragbalken_c3d8.inp"), UnitSystem::Unitless)
             .unwrap()
             .model;
         let original = model.mesh.clone();
@@ -1638,7 +1699,7 @@ mod tests {
 
     #[test]
     fn projects_open_with_their_fe_model() {
-        let mut model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::MmTonSC)
+        let mut model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::Unitless)
             .unwrap()
             .model;
         model.fe.steps.push(plx_model::Step::new_static("Step-1"));
@@ -1655,7 +1716,7 @@ mod tests {
 
     #[test]
     fn hidden_parts_do_not_count_for_fitting() {
-        let mut model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::MmTonSC)
+        let mut model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::Unitless)
             .unwrap()
             .model;
         model.parts[1].visible = false;
@@ -1665,7 +1726,7 @@ mod tests {
 
     #[test]
     fn loads_frd_results_with_deformation() {
-        let loaded = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC).unwrap();
+        let loaded = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::Unitless).unwrap();
         let model = &loaded.model;
         // The part of the input next to the results, not the material the file groups by.
         assert_eq!(model.parts[0].name, "EALL");
@@ -1691,7 +1752,7 @@ mod tests {
         let frd = dir.join("job.frd");
         std::fs::copy(testdata("kragbalken_c3d8.frd"), &frd).unwrap();
         std::fs::write(dir.join("job.inp"), "*CONTACT PAIR, INTERACTION=I\nA, B\n").unwrap();
-        let model = load(&frd, UnitSystem::MmTonSC).unwrap().model;
+        let model = load(&frd, UnitSystem::Unitless).unwrap().model;
         std::fs::remove_dir_all(&dir).ok();
         let view = model.results.unwrap();
         assert!(view.contact);
@@ -1701,7 +1762,7 @@ mod tests {
     #[test]
     fn transformed_copies_are_drawn_with_mirrored_values() {
         use plx_results::transformation::{SymmetryPlane, Transformation};
-        let mut model = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC)
+        let mut model = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::Unitless)
             .unwrap()
             .model;
         let single = model.render_meshes()[0].vertices.len();
@@ -1729,7 +1790,7 @@ mod tests {
 
     #[test]
     fn picking_finds_faces_and_nodes() {
-        let model = load(&testdata("kragbalken_c3d8.inp"), UnitSystem::MmTonSC)
+        let model = load(&testdata("kragbalken_c3d8.inp"), UnitSystem::Unitless)
             .unwrap()
             .model;
         // The beam spans 0..100 x 0..10 x 0..10; look straight down at x = 95, y = 5.
@@ -1800,7 +1861,7 @@ mod tests {
         if !gmsh_available() {
             return;
         }
-        let loaded = load(&testdata("zwei_bloecke.step"), UnitSystem::MmTonSC).unwrap();
+        let loaded = load(&testdata("zwei_bloecke.step"), UnitSystem::Unitless).unwrap();
         let view = loaded.geometry_view.unwrap();
         assert!(view.is_geometry());
         assert_eq!(view.parts.len(), 2);
@@ -1852,7 +1913,7 @@ mod tests {
         use plx_model::{
             BoundaryCondition, BoundaryKind, Elastic, Material, Region, Section, Step,
         };
-        let mut model = load(&testdata("platte_mit_loch.step"), UnitSystem::MmTonSC)
+        let mut model = load(&testdata("platte_mit_loch.step"), UnitSystem::Unitless)
             .unwrap()
             .model;
         let mut geometry = model.geometry.clone().unwrap();
@@ -1997,7 +2058,7 @@ mod tests {
             BoundaryCondition, BoundaryKind, Elastic, Load, LoadKind, Material, ModelSpace, Region,
             Section, Step,
         };
-        let mut model = load(&testdata("membran.step"), UnitSystem::MmTonSC)
+        let mut model = load(&testdata("membran.step"), UnitSystem::Unitless)
             .unwrap()
             .model;
         let mut geometry = model.geometry.clone().unwrap();
@@ -2182,10 +2243,10 @@ mod tests {
                 .collect()
         };
         assert_eq!(parts(&alone), [("S235".to_string(), vec![1, 2, 3])]);
-        let results = load(&frd, UnitSystem::MmTonSC).unwrap().model;
+        let results = load(&frd, UnitSystem::Unitless).unwrap().model;
         // Without the input the results keep the grouping of the file.
         std::fs::remove_file(dir.join("bloecke.inp")).unwrap();
-        let without_input = load(&frd, UnitSystem::MmTonSC).unwrap().model;
+        let without_input = load(&frd, UnitSystem::Unitless).unwrap().model;
         std::fs::remove_dir_all(&dir).unwrap();
         let expected: Vec<_> = (names.iter().zip(1..))
             .map(|(name, id)| (name.to_string(), vec![id]))
@@ -2197,12 +2258,12 @@ mod tests {
 
     #[test]
     fn file_without_elements_is_rejected() {
-        assert!(load(&testdata("platte_knoten.inp"), UnitSystem::MmTonSC).is_err());
+        assert!(load(&testdata("platte_knoten.inp"), UnitSystem::Unitless).is_err());
     }
 
     #[test]
     fn bound_results_open_with_what_was_defined_on_them() {
-        let mut model = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::MmTonSC)
+        let mut model = load(&testdata("kragbalken_c3d8.frd"), UnitSystem::Unitless)
             .unwrap()
             .model;
         let settings = plx_results::ResultsSettings {
