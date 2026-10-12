@@ -498,6 +498,22 @@ impl AnalysisWindow {
         (self.workbench.analysis.as_ref()).is_some_and(Analysis::is_running)
     }
 
+    /// The last CalculiX run of the window, for the project's solution monitor.
+    pub fn run(&self) -> Option<&Analysis> {
+        self.workbench.analysis.as_ref()
+    }
+
+    /// Stops a Solve: kills CalculiX, and a solve waiting for its mesh does not start.
+    pub fn stop_solve(&mut self) {
+        let workbench = &mut self.workbench;
+        workbench.solve_after_meshing = false;
+        self.solve_when_loaded = false;
+        if let Some(analysis) = (workbench.analysis.as_mut()).filter(|a| a.is_running()) {
+            analysis.kill();
+            workbench.output.push("Analysis killed".into());
+        }
+    }
+
     /// What keeps the window from closing or its data from being taken: work on a worker
     /// thread that would be lost.
     pub fn busy(&self) -> Option<&'static str> {
@@ -1193,6 +1209,70 @@ fn deleted_message(names: &[String]) -> String {
         names => format!("Parts {} deleted", names.join(", ")),
     }
 }
+/// Puts the meshes Gmsh made of parts of `geometry` into the model, as Mesh does; returns the
+/// lines that tell what was made, or why the meshes could not be used.
+pub(crate) fn merge_part_meshes(
+    model: &mut Model,
+    geometry: &plx_model::Geometry,
+    generated: crate::meshing::PartMeshes,
+    started: Option<std::time::Instant>,
+) -> Result<Vec<String>, String> {
+    let mut output = Vec::new();
+    let had_mesh = model.mesh.element_count() > 0;
+    let mut mesh = model.mesh.clone();
+    let space = model.fe.properties.space;
+    for mut part in generated.meshes {
+        space
+            .prepare_generated_mesh(&mut part.mesh)
+            .map_err(|error| format!("Meshing failed: {error}"))?;
+        // What each part is meshed from, to tell when its mesh is out of date.
+        for p in &part.mesh.parts {
+            let input = plx_model::fingerprint::mesh_input(geometry, space, &p.name);
+            model.mesh_inputs.insert(p.name.clone(), input);
+        }
+        for warning in &part.warnings {
+            output.push(format!("Gmsh: {warning}"));
+        }
+        let units = model.fe.properties.units;
+        let size = |size: f64| {
+            let size = units.shown(size, plx_model::Quantity::Length);
+            crate::numeric::format_physical(size)
+        };
+        for p in &part.mesh.parts {
+            let parameters = model.geometry.as_ref().map(|g| g.parameters(&p.name));
+            output.push(format!(
+                "{}: {} elements (order {}, element size {} to {} {})",
+                p.name,
+                p.elements.len(),
+                if parameters.is_some_and(|s| s.second_order) {
+                    2
+                } else {
+                    1
+                },
+                size(parameters.map_or(0.0, |s| s.min_size)),
+                size(parameters.map_or(0.0, |s| s.max_size)),
+                units.unit(plx_model::Quantity::Length),
+            ));
+        }
+        mesh = plx_mesher::merge_part(&mesh, part.mesh);
+    }
+    model.set_mesh(mesh);
+    let lost = lost_selections(&model.fe, &model.mesh);
+    if had_mesh && lost > 0 {
+        output.push(format!(
+            "Note: {lost} selections made of node or element numbers refer to the old mesh \
+             and must be selected again"
+        ));
+    }
+    output.push(format!(
+        "Mesh created: {} nodes, {} elements, {} parts ({} ms)",
+        model.mesh.node_count(),
+        model.mesh.element_count(),
+        model.parts.len(),
+        started.map_or(0, |s| s.elapsed().as_millis())
+    ));
+    Ok(output)
+}
 
 /// How many regions of the FE model consist of node or element numbers that a new mesh no
 /// longer has. Regions picked on the geometry are found on the new mesh again.
@@ -1462,7 +1542,7 @@ fn saved_camera(saved: plx_results::saved_view::SavedCamera) -> plx_render::Came
 }
 
 /// A file size in kB or MB.
-fn file_size(bytes: u64) -> String {
+pub(crate) fn file_size(bytes: u64) -> String {
     let kb = bytes as f64 / 1024.0;
     if kb < 1024.0 {
         format!("{kb:.0} kB")
@@ -3017,60 +3097,13 @@ impl Workbench {
         match result {
             Ok(generated) => {
                 let had_mesh = model.mesh.element_count() > 0;
-                let mut mesh = model.mesh.clone();
-                let space = model.fe.properties.space;
-                for mut part in generated.meshes {
-                    if let Err(error) = space.prepare_generated_mesh(&mut part.mesh) {
-                        self.output.push(format!("Meshing failed: {error}"));
+                match merge_part_meshes(model, &job.geometry, generated, started) {
+                    Ok(lines) => self.output.extend(lines),
+                    Err(error) => {
+                        self.output.push(error);
                         return;
                     }
-                    // What each part is meshed from, to tell when its mesh is out of date.
-                    for p in &part.mesh.parts {
-                        let input =
-                            plx_model::fingerprint::mesh_input(&job.geometry, space, &p.name);
-                        model.mesh_inputs.insert(p.name.clone(), input);
-                    }
-                    for warning in &part.warnings {
-                        self.output.push(format!("Gmsh: {warning}"));
-                    }
-                    let units = model.fe.properties.units;
-                    let size = |size: f64| {
-                        let size = units.shown(size, plx_model::Quantity::Length);
-                        crate::numeric::format_physical(size)
-                    };
-                    for p in &part.mesh.parts {
-                        let parameters = model.geometry.as_ref().map(|g| g.parameters(&p.name));
-                        self.output.push(format!(
-                            "{}: {} elements (order {}, element size {} to {} {})",
-                            p.name,
-                            p.elements.len(),
-                            if parameters.is_some_and(|s| s.second_order) {
-                                2
-                            } else {
-                                1
-                            },
-                            size(parameters.map_or(0.0, |s| s.min_size)),
-                            size(parameters.map_or(0.0, |s| s.max_size)),
-                            units.unit(plx_model::Quantity::Length),
-                        ));
-                    }
-                    mesh = plx_mesher::merge_part(&mesh, part.mesh);
                 }
-                model.set_mesh(mesh);
-                let lost = lost_selections(&model.fe, &model.mesh);
-                if had_mesh && lost > 0 {
-                    self.output.push(format!(
-                        "Note: {lost} selections made of node or element numbers refer \
-                         to the old mesh and must be selected again"
-                    ));
-                }
-                self.output.push(format!(
-                    "Mesh created: {} nodes, {} elements, {} parts ({} ms)",
-                    model.mesh.node_count(),
-                    model.mesh.element_count(),
-                    model.parts.len(),
-                    started.map_or(0, |s| s.elapsed().as_millis())
-                ));
                 self.highlighted = None;
                 self.mesh_item_editor = None;
                 self.set_tree_view(TreeView::FeModel);

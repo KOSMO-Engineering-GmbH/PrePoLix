@@ -331,6 +331,24 @@ impl Analysis {
         self.status
     }
 
+    /// How long the run has taken so far, or took.
+    pub fn seconds(&self) -> f32 {
+        (self.finished).unwrap_or_else(|| self.started.elapsed().as_secs_f32())
+    }
+
+    /// Where the run is: step, increment, iterations and time, once CalculiX tells.
+    pub fn progress(&self) -> Option<String> {
+        match self.job.progress() {
+            Some(p) => Some(format!(
+                "Step {}, increment {}, iterations {}, time {}",
+                p.step, p.increment, p.iterations, p.total_time
+            )),
+            // The .sta file only changes when an increment ends; until then the solver
+            // output tells where the run is.
+            None => live_progress(&self.output),
+        }
+    }
+
     pub fn kill(&mut self) {
         self.job.kill();
         self.poll();
@@ -363,23 +381,12 @@ impl Analysis {
                     if status == JobStatus::Running {
                         ui.spinner();
                     }
-                    let seconds = self
-                        .finished
-                        .unwrap_or_else(|| self.started.elapsed().as_secs_f32());
+                    let seconds = self.seconds();
                     ui.label(format!(
                         "Status: {} ({seconds:.1} s)",
                         Self::status_text(status)
                     ));
-                    let progress = match self.job.progress() {
-                        Some(p) => Some(format!(
-                            "Step {}, increment {}, iterations {}, time {}",
-                            p.step, p.increment, p.iterations, p.total_time
-                        )),
-                        // The .sta file only changes when an increment ends; until then the
-                        // solver output tells where the run is.
-                        None => live_progress(&self.output),
-                    };
-                    if let Some(text) = progress {
+                    if let Some(text) = self.progress() {
                         ui.separator();
                         ui.label(text);
                     }
