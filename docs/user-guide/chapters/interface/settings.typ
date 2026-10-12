@@ -65,3 +65,15 @@ checks the keywords of its own input file in the same way, including those of th
     the program, then the system path. A changed library is loaded after a restart.],
   [Test Gmsh], [Loads Gmsh and meshes a cube.],
 )
+
+=== Updates
+
+#fields(
+  [Check for updates at startup], [Asks GitHub for the latest release each time PrePoLix
+    starts and offers it if it is newer (default on). Turn it off to work without any request
+    to the internet; #menu("Help", "Check for Updates ...") still asks on demand.],
+  [Remind Again], [Shown after #ui("Skip This Version"): offers the skipped version again at
+    the next start.],
+)
+
+Below, the page says how this copy of PrePoLix is updated (@updates).

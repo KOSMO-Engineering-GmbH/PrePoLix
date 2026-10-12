@@ -70,6 +70,31 @@ the AppImage when a new release is published. The CalculiX
 work directory defaults to `/tmp/prepolix`. Alternatively build PrePoLix from source with a
 current stable Rust toolchain (`cargo run --release`), see the README of the repository.
 
+== Updates <updates>
+
+PrePoLix asks GitHub for the latest release when it starts and whenever you choose
+#menu("Help", "Check for Updates ..."). If a newer version exists, a window shows its release
+notes:
+
+#screenshot("update-available.png", [A newer release found at startup (Windows)])
+
+- #ui("Update Now") downloads the new version, checks its size and checksum and installs it.
+  With the *Windows installer*, Windows asks for administrator rights, PrePoLix closes, the
+  installer only shows its progress and starts PrePoLix again; the shortcuts and the `.plx`
+  association stay as you installed them. A *Linux AppImage* replaces its own file (it must be
+  writable) and restarts. Save your project before, since PrePoLix closes; the project that was
+  open is reopened when it was saved as a `.plx` file.
+- #ui("Open Release Page") opens the release on GitHub in the web browser. A PrePoLix built from
+  source offers only this.
+- #ui("Skip This Version") stops the reminder at startup until an even newer version is
+  released; #ui("Later") asks again at the next start.
+
+The check at startup runs in the background and stays silent when there is nothing new or no
+internet connection. It can be turned off under #menu("Tools", "Settings ...", "Updates")
+(@settings). A proxy is taken from the `HTTPS_PROXY` variable or, on Windows, from a proxy server
+entered in the Internet Options (automatic configuration scripts are not read). The connection is
+checked with the certificates of the system, so a company proxy that inspects HTTPS works too.
+
 == Starting PrePoLix
 
 Start PrePoLix from the start menu, by double-clicking a `.plx` file (Windows, if associated), or

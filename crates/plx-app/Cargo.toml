@@ -31,6 +31,9 @@ plx-results.workspace = true
 png.workspace = true
 rfd.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 ron.workspace = true

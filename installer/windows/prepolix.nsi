@@ -24,6 +24,11 @@ SetCompressor /SOLID lzma
 
 !include "MUI2.nsh"
 !include "x64.nsh"
+!include "FileFunc.nsh"
+!include "Sections.nsh"
+
+; 1 when PrePoLix runs the installer to update itself (Help > Check for Updates): /UPDATE.
+Var Update
 
 Name "${APPNAME} ${VERSION}"
 OutFile "${OUTFILE}"
@@ -46,11 +51,17 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "GNU GPL 3.0 or later"
 !define MUI_COMPONENTSPAGE_SMALLDESC
 
 !define MUI_WELCOMEPAGE_TEXT "This wizard installs ${APPNAME} ${VERSION}, a pre- and postprocessor for CalculiX.$\r$\n$\r$\nThe CalculiX solver (ccx) is included, so analyses run right after installation. Another CalculiX can be set under Tools > Settings.$\r$\n$\r$\n$_CLICK"
+; An update only shows the progress: the pages before and the finish page are skipped.
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfUpdate
 !insertmacro MUI_PAGE_WELCOME
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfUpdate
 !insertmacro MUI_PAGE_LICENSE "${STAGE}\LICENSE.txt"
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfUpdate
 !insertmacro MUI_PAGE_COMPONENTS
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfUpdate
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
+!define MUI_PAGE_CUSTOMFUNCTION_PRE SkipIfUpdate
 !define MUI_FINISHPAGE_RUN
 !define MUI_FINISHPAGE_RUN_TEXT "Run ${APPNAME}"
 !define MUI_FINISHPAGE_RUN_FUNCTION StartWithoutAdminRights
@@ -67,6 +78,47 @@ Function .onInit
     Abort
   ${EndIf}
   SetRegView 64
+  StrCpy $Update 0
+  ${GetParameters} $0
+  ClearErrors
+  ${GetOptions} $0 "/UPDATE" $1
+  ${IfNot} ${Errors}
+    StrCpy $Update 1
+    Call KeepChoices
+    Call WaitForPrepolix
+  ${EndIf}
+FunctionEnd
+
+Function SkipIfUpdate
+  ${If} $Update == 1
+    Abort
+  ${EndIf}
+FunctionEnd
+
+; PrePoLix closes once it has started the update; prepolix.exe cannot be replaced before.
+; Waits up to 30 seconds until it can be opened for writing.
+Function WaitForPrepolix
+  StrCpy $1 0
+  ${DoWhile} ${FileExists} "$INSTDIR\prepolix.exe"
+    ClearErrors
+    FileOpen $0 "$INSTDIR\prepolix.exe" a
+    ${IfNot} ${Errors}
+      FileClose $0
+      ${Break}
+    ${EndIf}
+    IntOp $1 $1 + 1
+    ${If} $1 > 60
+      ${Break}
+    ${EndIf}
+    Sleep 500
+  ${Loop}
+FunctionEnd
+
+; After an update PrePoLix starts again, as the logged-in user like from the finish page.
+Function .onInstSuccess
+  ${If} $Update == 1
+    Call StartWithoutAdminRights
+  ${EndIf}
 FunctionEnd
 
 ; The installer runs with administrator rights; prepolix itself should not, so it is started
@@ -146,6 +198,21 @@ Section "Open .plx projects with ${APPNAME}" SecAssociation
   ; SHCNE_ASSOCCHANGED: Explorer picks up the new icon and program right away.
   System::Call 'shell32::SHChangeNotify(i 0x08000000, i 0, p 0, p 0)'
 SectionEnd
+
+; An update keeps the shortcuts and the association as they were installed.
+Function KeepChoices
+  SetShellVarContext all
+  ${IfNot} ${FileExists} "$SMPROGRAMS\${APPNAME}.lnk"
+    !insertmacro UnselectSection ${SecStartMenu}
+  ${EndIf}
+  ${If} ${FileExists} "$DESKTOP\${APPNAME}.lnk"
+    !insertmacro SelectSection ${SecDesktop}
+  ${EndIf}
+  ReadRegStr $0 HKLM "Software\Classes\.plx" ""
+  ${If} $0 != "${PROGID}"
+    !insertmacro UnselectSection ${SecAssociation}
+  ${EndIf}
+FunctionEnd
 
 !insertmacro MUI_FUNCTION_DESCRIPTION_BEGIN
   !insertmacro MUI_DESCRIPTION_TEXT ${SecApp} "The program with the Gmsh library for geometry import and meshing and the CalculiX solver."

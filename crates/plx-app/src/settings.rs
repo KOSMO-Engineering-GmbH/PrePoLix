@@ -15,6 +15,7 @@ pub struct Settings {
     pub post: PostProcessing,
     pub solver: Solver,
     pub gmsh: Gmsh,
+    pub updates: Updates,
     /// Model space and unit system last chosen for a new model, proposed for the next one.
     pub new_model: plx_model::ModelProperties,
     /// Version of the stored settings, for [`Settings::upgrade`]; missing (0) in those of
@@ -33,6 +34,7 @@ impl Default for Settings {
             post: PostProcessing::default(),
             solver: Solver::default(),
             gmsh: Gmsh::default(),
+            updates: Updates::default(),
             new_model: plx_model::ModelProperties::default(),
             format: FORMAT,
         }
@@ -321,6 +323,25 @@ impl Gmsh {
     }
 }
 
+/// The check for a new release on GitHub, see [`crate::update`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Updates {
+    /// Ask GitHub for a new release when PrePoLix starts.
+    pub check_at_startup: bool,
+    /// Version the user chose to skip; the check at startup does not offer it again.
+    pub skipped: String,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self {
+            check_at_startup: true,
+            skipped: String::new(),
+        }
+    }
+}
+
 fn solvers_text(solvers: Option<&[EquationSolver]>) -> String {
     match solvers {
         None => "not checked yet".into(),
@@ -375,14 +396,16 @@ pub enum Page {
     PostProcessing,
     Solver,
     Gmsh,
+    Updates,
 }
 
 impl Page {
-    const ALL: [Page; 4] = [
+    const ALL: [Page; 5] = [
         Page::Graphics,
         Page::PostProcessing,
         Page::Solver,
         Page::Gmsh,
+        Page::Updates,
     ];
 
     fn title(self) -> &'static str {
@@ -391,6 +414,7 @@ impl Page {
             Page::PostProcessing => "Post-processing",
             Page::Solver => "CalculiX",
             Page::Gmsh => "Gmsh",
+            Page::Updates => "Updates",
         }
     }
 }
@@ -403,6 +427,7 @@ pub struct SettingsWindow {
     default_executable: String,
     solver_check: SolverCheck,
     gmsh_check: GmshCheck,
+    installation: crate::update::Installation,
 }
 
 /// State of the Gmsh test on the settings page.
@@ -442,6 +467,7 @@ impl SettingsWindow {
             default_executable: default_executable().display().to_string(),
             solver_check: SolverCheck::NotRun,
             gmsh_check: GmshCheck::NotRun,
+            installation: crate::update::Installation::detect(),
         }
     }
 
@@ -585,6 +611,23 @@ impl SettingsWindow {
                 self.solver_check_ui(ui);
             }
             Page::Gmsh => self.gmsh_ui(ui),
+            Page::Updates => {
+                let updates = &mut self.draft.updates;
+                ui.checkbox(&mut updates.check_at_startup, "Check for updates at startup")
+                    .on_hover_text(
+                        "Asks GitHub for the latest release when PrePoLix starts. Help > Check for Updates asks at any time.",
+                    );
+                if !updates.skipped.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("Version {} is skipped.", updates.skipped));
+                        if ui.button("Remind Again").clicked() {
+                            updates.skipped.clear();
+                        }
+                    });
+                }
+                ui.add_space(4.0);
+                ui.add(egui::Label::new(self.installation.description()).wrap());
+            }
         }
     }
 
@@ -785,6 +828,7 @@ mod tests {
         assert!(settings.post.min_label);
         assert!(settings.post.max_label);
         assert!(settings.graphics.global_axes);
+        assert!(settings.updates.check_at_startup);
     }
 
     #[test]
