@@ -804,28 +804,11 @@ impl ProjectApp {
         let (sender, receiver) = std::sync::mpsc::channel();
         let (file, ctx) = (path.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let project = plx_io::project::read_project(&file).map(|mut project| {
-                // Format 2 kept the values in the project's unit system.
-                let mut notes = Vec::new();
-                if project.format < 3 {
-                    let (space, units) = (project.space, project.units);
-                    for analysis in project.analyses_mut() {
-                        analysis.model.properties.space = space;
-                        analysis.model.properties.units = units;
-                        notes.extend(crate::model::migrate_to_si(analysis));
-                    }
-                    notes.push(
-                        "The project was converted for this version; once saved, it no \
-                         longer opens in older versions."
-                            .into(),
-                    );
-                }
-                // Format 3 differs only by what it lacks: state links; format 4 by what it
-                // lacks too: blocks besides analyses.
-                project.format = plx_model::PROJECT_FORMAT;
-                (project, notes)
-            });
-            let _ = sender.send(project.map_err(|e| e.to_string()));
+            // A panic while reading is reported like any other error, instead of leaving
+            // the project window waiting for the file forever.
+            let opened = std::panic::catch_unwind(|| read_opened(&file))
+                .unwrap_or_else(|panic| Err(panic_message(panic.as_ref())));
+            let _ = sender.send(opened);
             ctx.request_repaint();
         });
         self.opening = Some((path, receiver));
@@ -835,7 +818,7 @@ impl ProjectApp {
         let Some((path, receiver)) = &self.opening else {
             return;
         };
-        let Ok(result) = receiver.try_recv() else {
+        let Some(result) = received(receiver) else {
             return;
         };
         let path = path.clone();
@@ -2615,6 +2598,50 @@ impl ProjectApp {
     }
 }
 
+/// Reads a project file for the project window, converting older formats.
+fn read_opened(file: &Path) -> Opened {
+    let mut project = plx_io::project::read_project(file).map_err(|e| e.to_string())?;
+    // Format 2 kept the values in the project's unit system.
+    let mut notes = Vec::new();
+    if project.format < 3 {
+        let (space, units) = (project.space, project.units);
+        for analysis in project.analyses_mut() {
+            analysis.model.properties.space = space;
+            analysis.model.properties.units = units;
+            notes.extend(crate::model::migrate_to_si(analysis));
+        }
+        notes.push(
+            "The project was converted for this version; once saved, it no longer opens in \
+             older versions."
+                .into(),
+        );
+    }
+    // Format 3 differs only by what it lacks: state links; format 4 by what it lacks too:
+    // blocks besides analyses.
+    project.format = plx_model::PROJECT_FORMAT;
+    Ok((project, notes))
+}
+
+/// What the thread reading a project sent, once it is done; a thread that ended without
+/// sending anything failed.
+fn received(receiver: &Receiver<Opened>) -> Option<Opened> {
+    match receiver.try_recv() {
+        Ok(opened) => Some(opened),
+        Err(std::sync::mpsc::TryRecvError::Empty) => None,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Some(Err("reading the file stopped unexpectedly".into()))
+        }
+    }
+}
+
+/// The message of a panic, as far as it has one.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    let message = (panic.downcast_ref::<&str>().copied())
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown error");
+    format!("reading the file failed: {message}")
+}
+
 /// The workspace a double-click on the row at `path` opens the analysis in: Geometry and
 /// Mesh in the Geometry workspace, the setup in the FE Model workspace, Results in the
 /// Results workspace.
@@ -3787,6 +3814,29 @@ mod tests {
         }
 
         fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn a_reader_that_fails_ends_the_opening() {
+        // Still reading: nothing yet.
+        let (sender, receiver) = std::sync::mpsc::channel::<Opened>();
+        assert!(received(&receiver).is_none());
+        // A reader thread that panicked drops its sender without sending; the project
+        // window used to wait for it forever.
+        let reader = std::thread::spawn(move || {
+            let _sender = sender;
+            panic!("broken file");
+        });
+        assert!(reader.join().is_err());
+        assert!(matches!(received(&receiver), Some(Err(_))));
+        // A panic caught on the reader thread carries its message.
+        let panic = std::panic::catch_unwind(|| panic!("index out of bounds")).unwrap_err();
+        assert_eq!(
+            panic_message(panic.as_ref()),
+            "reading the file failed: index out of bounds"
+        );
+        let file = std::env::temp_dir().join("prepolix-missing-project.plx");
+        assert!(read_opened(&file).is_err());
     }
 
     #[test]
