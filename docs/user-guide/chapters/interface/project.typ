@@ -20,8 +20,8 @@ both.
 
 === Creating an analysis <new-analysis>
 
-#menu("Project", "New Analysis ..."), the first toolbar button or a right-click on the
-background of the schematic open #ui("Model Properties") for the new analysis
+#menu("Project", "New Analysis ..."), the first toolbar button, a right-click on the
+background of the schematic or #ui("Analysis") in the block search (@block-search) open #ui("Model Properties") for the new analysis
 (@model-properties). Choose its *model space* (3D, plane stress, plane strain or axisymmetric)
 and its *unit system* there.
 
@@ -88,11 +88,12 @@ the green square takes the state of another analysis (@data-links).
   #ui("Mesh") in the Geometry workspace, #ui("Setup") and its categories in the FE Model
   workspace, and #ui("Results") in the Results workspace.
 - *Drag* a block by its header to move it, drag the background to pan, and scroll to zoom.
-  Double-click the background to see all blocks.
+  #menu("Project", "Show All Blocks") (#key("Home")) fits all blocks into the view.
 - *Drag* from a pin on the right of a row to a pin on the left of a row of another block to
   link them (@links). Right-click a pin to remove its links.
 - *Right-click* a block for its context menu, or the background for #ui("New Analysis"),
   #ui("Add Materials") and #ui("Add Mesh") (@source-blocks).
+- *Double-click* the background to search the blocks to add there (@block-search).
 
 #screenshot("project-node-menu.png", [Context menu of an analysis])
 
@@ -110,6 +111,23 @@ the green square takes the state of another analysis (@data-links).
     Links to and from it are removed; analyses that took items from it keep their copies.],
 )
 
+==== Adding blocks by search <block-search>
+
+Like the add menu of Blender, a double-click into empty space of the schematic shows every kind
+of block PrePoLix can add, grouped as in the background menu. Just start typing: the search
+field has the focus and finds blocks by fuzzy matching, so letters in order are enough
+(#ui("rct") finds #ui("Rectangle")). It also knows other words for a block, such as
+#ui("hexahedra") for #ui("Box") or #ui("library") for #ui("Materials"). Search results show
+their group on the right.
+
+#key("Enter") adds the highlighted block, the best match while you type, where you
+double-clicked; #key("Up") and #key("Down") move the highlight, a click adds any block, and
+#key("Esc") or a click elsewhere closes the search. #ui("Analysis") asks for the model
+properties first (@new-analysis).
+
+#screenshot("node-picker.png", [All blocks after a double-click (left) and the search for
+  "mesh" (right)])
+
 === Menus and toolbar of the project window
 
 #fields(
@@ -126,6 +144,8 @@ the green square takes the state of another analysis (@data-links).
     (@materials-block).],
   [Project > Add Mesh], [Adds a block that meshes a box or a rectangle for analyses to link
     (@mesh-block).],
+  [Project > Show All Blocks (#key("Home"))], [Fits all blocks of the schematic into the
+    view.],
   [Project > Update Project], [Solves every analysis that is not up to date (@update-project).],
   [Tools > Settings ...], [The settings (@settings); they apply to all windows.],
   [Help], [#ui("User Guide") opens this guide, #ui("Check for Updates ...") looks
