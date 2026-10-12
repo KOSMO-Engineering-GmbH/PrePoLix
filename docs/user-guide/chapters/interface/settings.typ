@@ -50,6 +50,13 @@ portable Windows version in the folder `Settings` next to `prepolix.exe` (@porta
   [Work directory], [Where input and result files of a run are written. Empty means a `Temp`
     folder next to the PrePoLix program, or `<system temp>/prepolix` if that folder is not
     writable.],
+  [Restart files], [#ui("Keep the state after each step") (default on): CalculiX writes the
+    state after each step over time, so that solving again after a change starts after the
+    last unchanged step (@restart). Needs disk space next to the results.],
+  [Restart files per project], [Beyond this size (default 4096 MB) the oldest restart files
+    of the project are removed; an analysis without them is solved from the beginning.],
+  [Parallel analyses], [How many independent analyses #ui("Update Project") solves at the same
+    time (default 2), each with the threads above (@update-project).],
   [Equation solvers], [The direct solvers found in the CalculiX executable, for example
     PARDISO. Steps with the solver #ui("Default") use Pardiso when it is available, otherwise
     PaStiX, otherwise CalculiX's own choice.],

@@ -13,6 +13,7 @@
 #include "chapters/first-analysis.typ"
 
 #include "chapters/interface/project.typ"
+#include "chapters/interface/links.typ"
 #include "chapters/interface/main-window.typ"
 #include "chapters/interface/files.typ"
 #include "chapters/interface/undo.typ"

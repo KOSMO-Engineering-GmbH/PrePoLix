@@ -8,9 +8,6 @@ The #ui("File") menu of the project window is described in @project-window. The 
 window has these entries:
 
 #fields(
-  [New Model ... (#key("Ctrl+N"))], [Opens #ui("Model Properties") for a new, empty model
-    of this analysis (@model-properties). OK replaces the analysis' model and its results
-    *without asking*.],
   [Import ...], [Imports CAD geometry or the mesh of input files (@geometry-import,
     @mesh-import).],
   [Save Project (#key("Ctrl+S"))], [Saves the project with all its analyses. A project that
@@ -35,8 +32,11 @@ window has these entries:
 / `.plx` (PrePoLix project): all analyses of the project, each with its geometry, mesh setup,
   mesh, FE model and the results it keeps (@bind-result), and the place of its block in the
   schematic. Saving writes a temporary file first and then replaces the old one, so a crash
-  during saving cannot destroy the project. A project written by a newer version of PrePoLix
-  is refused, and so are projects saved by PrePoLix 0.2.6 and older, which held one model only.
+  during saving cannot destroy the project, together with the links between the analyses.
+  A project written by a newer version of PrePoLix is refused, and so are projects saved by
+  PrePoLix 0.2.6 and older, which held one model only. Projects of the first multi-analysis
+  format (one model space for all analyses) are converted on opening: their results are dropped
+  and have to be solved again, and once saved, the project no longer opens in older versions.
 / `.inp` (CalculiX input): imported with #menu("Geometry", "Import ...") (@mesh-import). *Only
   the mesh* is read: nodes, elements, `*NSET`, `*ELSET` (also `GENERATE`), `*SURFACE` and files
   referenced with `*INCLUDE`. Every element set named in `*ELEMENT, ELSET=...` becomes a part.
