@@ -14,6 +14,9 @@ use crate::numeric;
 use crate::selection::Target;
 use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft, face_target};
 
+/// The fixed width of the dialog's content, so it does not change with the type.
+pub(crate) const WIDTH: f32 = 440.0;
+
 /// PrePoMax's list of constraint types, with prepolix's spring connection added; `None` for
 /// those prepolix does not have yet.
 const TYPES: [(&str, Option<Type>); 5] = [
@@ -281,6 +284,11 @@ impl ConstraintDraft {
             });
         });
         ui.end_row();
+        hint(
+            ui,
+            "Ties are not constraints: create them with Interaction > Create Tie, they are \
+             listed under Contact Pairs.",
+        );
         name_row(ui, &mut self.constraint);
         let units = model.fe.properties.units;
         match &mut self.constraint {

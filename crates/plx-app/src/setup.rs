@@ -1791,11 +1791,19 @@ impl Editor {
     pub fn show(&mut self, ctx: &egui::Context, model: &Model) -> EditorResult {
         let mut result = EditorResult::Open;
         let mut open = true;
-        let window = egui::Window::new(self.title())
+        let mut window = egui::Window::new(self.title())
             .id(egui::Id::new("item editor"))
             .open(&mut open)
             .collapsible(false)
-            .resizable(false)
+            .resizable(false);
+        if matches!(self.draft, Draft::Constraint(_)) {
+            // The types differ in how much room their rows need; without a fixed width the
+            // window would jump between them, and egui never shrinks it again.
+            window = window
+                .min_width(crate::constraint_dialog::WIDTH)
+                .max_width(crate::constraint_dialog::WIDTH);
+        }
+        let window = window
             .pivot(egui::Align2::LEFT_TOP)
             .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
             .show(ctx, |ui| {
