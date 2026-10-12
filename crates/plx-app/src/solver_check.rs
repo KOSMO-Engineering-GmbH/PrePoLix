@@ -46,9 +46,29 @@ pub struct Report {
     pub version: Option<String>,
 }
 
+/// What the self test is doing, for the window shown while it runs.
+#[derive(Clone, Debug, Default)]
+pub struct Progress {
+    /// The running step, e.g. "Testing keywords".
+    pub step: String,
+    /// How far the step has come, if it has countable parts: (done, total).
+    pub count: Option<(usize, usize)>,
+}
+
+/// A [`Progress`] the test thread updates and the window reads.
+pub type SharedProgress = std::sync::Arc<std::sync::Mutex<Progress>>;
+
+fn set_step(progress: &SharedProgress, step: &str, count: Option<(usize, usize)>) {
+    if let Ok(mut p) = progress.lock() {
+        p.step = step.to_string();
+        p.count = count;
+    }
+}
+
 /// Runs all checks one after another; stops after the version check if CalculiX does not
 /// start at all.
-pub fn run(solver: &plx_job::Solver, work_dir: &Path) -> Report {
+pub fn run(solver: &plx_job::Solver, work_dir: &Path, progress: &SharedProgress) -> Report {
+    set_step(progress, "Starting CalculiX", None);
     let version = version(&solver.executable);
     let started = version.passed;
     let mut checks = vec![version];
@@ -56,10 +76,15 @@ pub fn run(solver: &plx_job::Solver, work_dir: &Path) -> Report {
     let mut keywords = None;
     if started {
         let dir = work_dir.join("SelfTest");
+        set_step(progress, "Solving cantilever with end load", None);
         checks.push(tip_force(solver, &dir));
+        set_step(progress, "Solving cantilever with pressure", None);
         checks.push(pressure(solver, &dir));
         let _ = std::fs::remove_dir_all(&dir);
-        solvers = available_solvers(solver, work_dir);
+        let on_solver = |done, total| {
+            set_step(progress, "Checking equation solvers", Some((done, total)));
+        };
+        solvers = available_solvers(solver, work_dir, &on_solver);
         let names = solvers.iter().flatten().filter_map(|s| s.keyword());
         let names = names.collect::<Vec<_>>().join(", ");
         checks.push(check(
@@ -74,7 +99,8 @@ pub fn run(solver: &plx_job::Solver, work_dir: &Path) -> Report {
         let written = (plx_io::inp::keywords::WRITTEN_KEYWORDS.iter())
             .map(|(k, _)| k.to_string())
             .collect::<Vec<_>>();
-        keywords = known_keywords(solver, work_dir, &written);
+        let on_keyword = |done, total| set_step(progress, "Checking keywords", Some((done, total)));
+        keywords = known_keywords(solver, work_dir, &written, &on_keyword);
         checks.push(keyword_check(keywords.as_ref(), written.len()));
     }
     Report {
@@ -158,10 +184,12 @@ pub fn known_keywords(
     solver: &plx_job::Solver,
     work_dir: &Path,
     keywords: &[String],
+    progress: &dyn Fn(usize, usize),
 ) -> Option<BTreeMap<String, bool>> {
     let dir = work_dir.join("Keywordtest");
     let mut known = BTreeMap::new();
-    for keyword in keywords {
+    for (index, keyword) in keywords.iter().enumerate() {
+        progress(index, keywords.len());
         let Ok(mut job) = Job::start(solver, &dir, "Keyword", &keyword_test_input(keyword)) else {
             let _ = std::fs::remove_dir_all(&dir);
             return None;
@@ -229,10 +257,15 @@ const OPTIONAL_SOLVERS: [EquationSolver; 3] = [
 /// Which optional solvers the executable was built with. CalculiX has no option to list them,
 /// so a single element is solved with each: a build without the library stops with
 /// "the PARDISO library is not linked". `None` if CalculiX does not start.
-pub fn available_solvers(solver: &plx_job::Solver, work_dir: &Path) -> Option<Vec<EquationSolver>> {
+pub fn available_solvers(
+    solver: &plx_job::Solver,
+    work_dir: &Path,
+    progress: &dyn Fn(usize, usize),
+) -> Option<Vec<EquationSolver>> {
     let dir = work_dir.join("Solvertest");
     let mut available = Vec::new();
-    for candidate in OPTIONAL_SOLVERS {
+    for (index, candidate) in OPTIONAL_SOLVERS.into_iter().enumerate() {
+        progress(index, OPTIONAL_SOLVERS.len());
         let keyword = candidate.keyword()?;
         let input = SINGLE_ELEMENT.replace("*Static", &format!("*Static, Solver={keyword}"));
         let Ok(mut job) = Job::start(solver, &dir, keyword, &input) else {
@@ -287,7 +320,10 @@ fn check(name: &'static str, passed: bool, message: String) -> CheckResult {
 
 /// The version `ccx -v` prints, e.g. "2.21".
 pub fn version_text(executable: &Path) -> Option<String> {
-    let output = Command::new(executable).arg("-v").output().ok()?;
+    let output = plx_job::hide_console(&mut Command::new(executable))
+        .arg("-v")
+        .output()
+        .ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
     text.lines()
         .find_map(|l| l.trim().strip_prefix("This is Version"))
@@ -300,7 +336,10 @@ fn version(executable: &Path) -> CheckResult {
     if let Some(message) = crate::settings::missing_executable(executable) {
         return check(NAME, false, message);
     }
-    match Command::new(executable).arg("-v").output() {
+    match plx_job::hide_console(&mut Command::new(executable))
+        .arg("-v")
+        .output()
+    {
         Ok(output) => {
             let text = String::from_utf8_lossy(&output.stdout);
             match text
@@ -600,12 +639,15 @@ mod tests {
             executable: "plx-does-not-exist".into(),
             threads: 1,
         };
-        let report = run(&solver, &std::env::temp_dir());
+        let report = run(&solver, &std::env::temp_dir(), &Default::default());
         assert_eq!(report.checks.len(), 1);
         assert!(!report.checks[0].passed);
         assert_eq!(report.solvers, None);
         assert_eq!(report.keywords, None);
-        assert_eq!(available_solvers(&solver, &std::env::temp_dir()), None);
+        assert_eq!(
+            available_solvers(&solver, &std::env::temp_dir(), &|_, _| {}),
+            None
+        );
     }
 
     #[test]
@@ -615,7 +657,7 @@ mod tests {
             return;
         }
         let dir = std::env::temp_dir().join(format!("plx-selftest-{}", std::process::id()));
-        let report = run(&plx_job::Solver::default(), &dir);
+        let report = run(&plx_job::Solver::default(), &dir, &Default::default());
         let _ = std::fs::remove_dir_all(&dir);
         for result in &report.checks {
             eprintln!("{}: {}", result.name, result.message);
@@ -639,7 +681,8 @@ mod tests {
             "*NOT A KEYWORD".into(),
             "*node print".into(),
         ];
-        let known = known_keywords(&plx_job::Solver::default(), &dir, &keywords).unwrap();
+        let known =
+            known_keywords(&plx_job::Solver::default(), &dir, &keywords, &|_, _| {}).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(known.len(), 3, "{known:?}");
         let unknown = unknown_of(&known, keywords.iter().map(String::as_str));

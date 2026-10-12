@@ -18,7 +18,7 @@ When results are opened, PrePoLix shows the #ui("Results") tab with the last inc
 / Model: the mesh of the results with its parts and sets, and the features (reference points,
   coordinate systems, planes) used for result evaluation.
 / Field Outputs: the fields of the result file with their components. Click a component to show
-  it. Names follow PrePoMax (`U1`, `S11`, ...). PrePoLix adds the displacement magnitude `ALL`,
+  it. Names follow the CalculiX result file (`U1`, `S11`, ...). PrePoLix adds the displacement magnitude `ALL`,
   `MISES`, `TRESCA`, the principal stresses and the signed maximum absolute principal stress.
 / History Outputs: values from the `.dat` file and history outputs you create (@history-outputs).
 / Hot Spot Stresses, Paths, Plane Results: evaluations described in the following sections.
@@ -68,14 +68,14 @@ Which of them appear is set under #menu("Tools", "Settings ...", "Post-processin
 Each result file has its own colour scale. Double-click the legend, choose #ui("Color Scale...")
 in its context menu, click #ui("...") next to #ui("Color levels") on the results toolbar, or use
 #menu("Results", "Color Scale ..."). Changes show at once; #ui("Cancel") restores the scale the
-dialog was opened with and #ui("Defaults") returns to PrePoMax's rainbow with automatic limits.
+dialog was opened with and #ui("Defaults") returns to the rainbow with automatic limits.
 
 #screenshot("color-scale-dialog.png", [Color Scale dialog with manual limits: values above 40 MPa
 and below 5 MPa are grey])
 
 #fields(
   [Spectrum], [Cool-warm, Rainbow (default), Rainbow desaturated, Turbo, Jet, Warm, Cool,
-    Cividis, Viridis, Plasma, Black body, Inferno, Kindlmann or Grayscale, as in PrePoMax.],
+    Cividis, Viridis, Plasma, Black body, Inferno, Kindlmann or Grayscale.],
   [Brightness], [Lightens the colours towards white, from 0 to 1 (default 0.2).],
   [Reverse colors], [Puts the maximum colour at the minimum and vice versa.],
   [Number of colors], [The colour bands, the same as #ui("Color levels") on the toolbar.],

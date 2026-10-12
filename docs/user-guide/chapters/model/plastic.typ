@@ -3,7 +3,7 @@
 === Plasticity <plasticity>
 
 #ui("Plasticity") in the material dialog adds von Mises plasticity with a tabular hardening
-curve, like PrePoMax's #ui("Plastic") property. It needs #ui("Elasticity") on the same
+curve. It needs #ui("Elasticity") on the same
 material.
 
 #screenshot("material-plastic.png", [Material with a hardening curve])

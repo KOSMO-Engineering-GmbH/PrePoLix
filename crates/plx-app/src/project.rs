@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+use crate::node_picker::{self, NodePicker};
 use egui_snarl::ui::{AnyPins, PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
 use plx_io::project::{Link, MaterialSet, MeshBlock, Project, ProjectAnalysis, ProjectNode};
@@ -24,6 +25,7 @@ use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::solution_monitor::{BackgroundSolve, Outcome};
 use crate::status::{self, AnalysisStatus, CellState};
 use crate::tree::TreeView;
+use crate::tree_icons::StepGlyph;
 
 /// Storage key of the project file open at exit, reopened at the next start.
 const LAST_PROJECT_KEY: &str = "last_project";
@@ -364,6 +366,10 @@ pub struct ProjectApp {
     mesh_block: Option<MeshBlockEditor>,
     /// Update Project made meshes anew and goes on once links took them.
     update_after_sync: bool,
+    /// The overview of blocks to add, open after a double-click into the schematic.
+    picker: Option<NodePicker>,
+    /// Show All Blocks was asked for: the view fits the blocks in the next frame.
+    show_all: bool,
     /// The properties of a new analysis being asked for, with where its block goes.
     new_analysis: Option<(egui::Pos2, ModelPropertiesDialog)>,
     /// A project file being read on a worker thread, with notes on its conversion.
@@ -431,6 +437,8 @@ impl ProjectApp {
             material_set: None,
             mesh_block: None,
             update_after_sync: false,
+            picker: None,
+            show_all: false,
             new_analysis: None,
             opening: None,
             update_queue: VecDeque::new(),
@@ -827,28 +835,11 @@ impl ProjectApp {
         let (sender, receiver) = std::sync::mpsc::channel();
         let (file, ctx) = (path.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let project = plx_io::project::read_project(&file).map(|mut project| {
-                // Format 2 kept the values in the project's unit system.
-                let mut notes = Vec::new();
-                if project.format < 3 {
-                    let (space, units) = (project.space, project.units);
-                    for analysis in project.analyses_mut() {
-                        analysis.model.properties.space = space;
-                        analysis.model.properties.units = units;
-                        notes.extend(crate::model::migrate_to_si(analysis));
-                    }
-                    notes.push(
-                        "The project was converted for this version; once saved, it no \
-                         longer opens in older versions."
-                            .into(),
-                    );
-                }
-                // Format 3 differs only by what it lacks: state links; format 4 by what it
-                // lacks too: blocks besides analyses.
-                project.format = plx_model::PROJECT_FORMAT;
-                (project, notes)
-            });
-            let _ = sender.send(project.map_err(|e| e.to_string()));
+            // A panic while reading is reported like any other error, instead of leaving
+            // the project window waiting for the file forever.
+            let opened = std::panic::catch_unwind(|| read_opened(&file))
+                .unwrap_or_else(|panic| Err(panic_message(panic.as_ref())));
+            let _ = sender.send(opened);
             ctx.request_repaint();
         });
         self.opening = Some((path, receiver));
@@ -858,7 +849,7 @@ impl ProjectApp {
         let Some((path, receiver)) = &self.opening else {
             return;
         };
-        let Ok(result) = receiver.try_recv() else {
+        let Some(result) = received(receiver) else {
             return;
         };
         let path = path.clone();
@@ -1565,27 +1556,15 @@ impl ProjectApp {
                 }
             });
             ui.menu_button("Project", |ui| {
-                if ui.button("New Analysis …").clicked() {
-                    self.ask_new_analysis(self.free_position());
+                if let Some(action) = add_block_menu(ui, self.free_position()) {
+                    let ctx = ui.ctx().clone();
+                    self.act(&ctx, action);
                 }
-                if ui
-                    .button("Add Materials")
-                    .on_hover_text(MATERIALS_TIP)
-                    .clicked()
-                {
-                    self.add_materials(self.free_position());
+                ui.separator();
+                let show_all = egui::Button::new("Show All Blocks").shortcut_text("Home");
+                if ui.add(show_all).clicked() {
+                    self.show_all = true;
                 }
-                ui.menu_button("Add Mesh", |ui| {
-                    for primitive in [
-                        MeshPrimitive::default_box(),
-                        MeshPrimitive::default_rectangle(),
-                    ] {
-                        let tip = mesh_tip(&primitive);
-                        if ui.button(primitive.label()).on_hover_text(tip).clicked() {
-                            self.add_mesh(self.free_position(), primitive);
-                        }
-                    }
-                });
                 ui.separator();
                 let update = egui::Button::new("Update Project");
                 if ui.add(update).on_hover_text(UPDATE_TIP).clicked() {
@@ -1674,11 +1653,22 @@ impl ProjectApp {
 
     fn schematic(&mut self, ui: &mut egui::Ui) -> Vec<Action> {
         let mut incoming: HashMap<u64, Vec<(Vec<String>, String)>> = HashMap::new();
+        let mut continuations: HashMap<u64, Continuation> = HashMap::new();
         let mut bundles: HashMap<u64, Vec<Bundle>> = HashMap::new();
         for link in &self.links {
             if let Some(source) = self.nodes.iter().find(|n| n.id == link.source) {
                 (incoming.entry(link.target).or_default())
                     .extend(links::filled_paths(link, &source.name));
+                if links::is_state(link) {
+                    continuations.insert(
+                        link.target,
+                        Continuation {
+                            source: source.name.clone(),
+                            step: link.item.get(1).cloned().unwrap_or_default(),
+                            inherited: link.inherited.clone(),
+                        },
+                    );
+                }
                 if links::is_bundle(link) {
                     bundles.entry(link.target).or_default().push(Bundle {
                         path: link.item.clone(),
@@ -1703,6 +1693,7 @@ impl ProjectApp {
                         &n.expanded,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                         bundles.get(&n.id).map_or(&[][..], Vec::as_slice),
+                        continuations.get(&n.id),
                     ),
                     (Kind::Analysis, None) => Vec::new(),
                 };
@@ -1728,22 +1719,45 @@ impl ProjectApp {
         let mut viewer = Viewer {
             nodes: blocks,
             actions: Vec::new(),
+            to_global: Default::default(),
+            show_all: std::mem::take(&mut self.show_all).then(|| ui.max_rect()),
         };
-        SnarlWidget::new()
+        let response = SnarlWidget::new()
             .id_salt(("project schematic", self.graph_generation))
             .style(schematic_style())
             .show(&mut self.graph, &mut viewer, ui);
+        // A double-click into empty space shows the blocks to add there, as in Blender.
+        if response.double_clicked()
+            && let Some(screen) = response.interact_pointer_pos()
+        {
+            let graph = viewer.to_global.inverse() * screen;
+            self.picker = Some(NodePicker::new(screen, graph));
+        }
+        if let Some(picker) = &mut self.picker {
+            let kinds = block_kinds();
+            let entries: Vec<_> = kinds.iter().map(|k| k.entry()).collect();
+            match picker.show(ui.ctx(), &entries) {
+                node_picker::Outcome::Open => {}
+                node_picker::Outcome::Closed => self.picker = None,
+                node_picker::Outcome::Picked(i) => {
+                    viewer.actions.push(kinds[i].action(picker.graph));
+                    self.picker = None;
+                }
+            }
+        }
         if self.nodes.is_empty() {
             ui.put(
                 egui::Rect::from_center_size(ui.max_rect().center(), egui::vec2(420.0, 60.0)),
                 egui::Label::new(
                     egui::RichText::new(
-                        "Project > New Analysis, or right-click here, adds an analysis.\n\
-                         Double-click an analysis to open it in its own window.\n\
-                         Project > Add Materials adds materials for analyses to link.",
+                        "Double-click here, or use the Project menu, to add an analysis,\n\
+                         materials or a mesh. Double-click an analysis to open it in its\n\
+                         own window.",
                     )
                     .weak(),
-                ),
+                )
+                // Clicks go through to the schematic below.
+                .selectable(false),
             );
         }
         viewer.actions
@@ -2092,8 +2106,10 @@ impl ProjectApp {
             self.output.push(format!("Not split while {reason}."));
             return;
         }
-        let tail: Vec<plx_model::Step> = fe.steps[index + 1..].to_vec();
-        let moved: Vec<String> = tail.iter().map(|s| s.name.clone()).collect();
+        let moved: Vec<String> = fe.steps[index + 1..]
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
         let position = (self.graph_node(id))
             .and_then(|g| self.graph.get_node_info(g))
             .map_or(self.free_position(), |info| {
@@ -2102,9 +2118,10 @@ impl ProjectApp {
         let Some(new) = self.continue_from(id, step.clone(), position) else {
             return;
         };
-        if let Some(data) = self.node(new).and_then(|n| n.data.as_mut()) {
-            data.model.steps = tail;
-        }
+        let kept = match self.node(new).and_then(|n| n.data.as_mut()) {
+            Some(data) => links::split_after(&fe, index, &mut data.model),
+            None => links::split_after(&fe, index, &mut plx_model::FeModel::default()),
+        };
         // What took the results or state of a moved step takes them from the new analysis.
         for link in &mut self.links {
             let moved_step = link.item.get(1).is_some_and(|s| moved.contains(s));
@@ -2112,8 +2129,6 @@ impl ProjectApp {
                 link.source = new;
             }
         }
-        let mut kept = fe.clone();
-        kept.steps.truncate(index + 1);
         let path = [links::SETUP.to_owned(), "Steps".to_owned()];
         self.set_steps(id, &kept, &path);
         self.output.push(format!(
@@ -2155,9 +2170,7 @@ impl ProjectApp {
         if !self.close_window(id) {
             return;
         }
-        let own = links::own_steps(&target, &link);
-        let moved: Vec<String> = own.iter().map(|s| s.name.clone()).collect();
-        source.steps.extend(own);
+        let moved = links::merge_into(&mut source, &target, &link);
         let path = [links::SETUP.to_owned(), "Steps".to_owned()];
         self.set_steps(link.source, &source, &path);
         // What took results or states of the merged analysis takes them from the other one.
@@ -2174,16 +2187,20 @@ impl ProjectApp {
         self.sync_due = true;
     }
 
-    /// Replaces the steps of an analysis with those of `fe`.
+    /// Replaces the steps and the user keywords of an analysis with those of `fe`.
     fn set_steps(&mut self, id: u64, fe: &plx_model::FeModel, path: &[String]) {
         let Some(node) = self.node(id) else {
             return;
         };
         match &mut node.window {
-            Some(window) => window.apply_setup(fe, path),
+            Some(window) => {
+                window.apply_setup(fe, path);
+                window.set_user_keywords(fe.user_keywords.clone());
+            }
             None => {
                 if let Some(data) = &mut node.data {
                     links::apply_setup(&mut data.model, fe, path);
+                    data.model.user_keywords = fe.user_keywords.clone();
                 }
                 node.refresh_closed();
             }
@@ -3013,6 +3030,50 @@ impl ProjectApp {
     }
 }
 
+/// Reads a project file for the project window, converting older formats.
+fn read_opened(file: &Path) -> Opened {
+    let mut project = plx_io::project::read_project(file).map_err(|e| e.to_string())?;
+    // Format 2 kept the values in the project's unit system.
+    let mut notes = Vec::new();
+    if project.format < 3 {
+        let (space, units) = (project.space, project.units);
+        for analysis in project.analyses_mut() {
+            analysis.model.properties.space = space;
+            analysis.model.properties.units = units;
+            notes.extend(crate::model::migrate_to_si(analysis));
+        }
+        notes.push(
+            "The project was converted for this version; once saved, it no longer opens in \
+             older versions."
+                .into(),
+        );
+    }
+    // Format 3 differs only by what it lacks: state links; format 4 by what it lacks too:
+    // blocks besides analyses.
+    project.format = plx_model::PROJECT_FORMAT;
+    Ok((project, notes))
+}
+
+/// What the thread reading a project sent, once it is done; a thread that ended without
+/// sending anything failed.
+fn received(receiver: &Receiver<Opened>) -> Option<Opened> {
+    match receiver.try_recv() {
+        Ok(opened) => Some(opened),
+        Err(std::sync::mpsc::TryRecvError::Empty) => None,
+        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+            Some(Err("reading the file stopped unexpectedly".into()))
+        }
+    }
+}
+
+/// The message of a panic, as far as it has one.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
+    let message = (panic.downcast_ref::<&str>().copied())
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("unknown error");
+    format!("reading the file failed: {message}")
+}
+
 /// The workspace a double-click on the row at `path` opens the analysis in: Geometry and
 /// Mesh in the Geometry workspace, the setup in the FE Model workspace, Results in the
 /// Results workspace.
@@ -3052,6 +3113,10 @@ impl eframe::App for ProjectApp {
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
             self.save(false);
+        }
+        let typing = ctx.memory(|m| m.focused().is_some());
+        if !typing && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Home)) {
+            self.show_all = true;
         }
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             (i.raw.dropped_files.iter())
@@ -3151,6 +3216,16 @@ struct Bundle {
     excluded: usize,
 }
 
+/// The state link into an analysis: what it continues from and the steps it takes over.
+struct Continuation {
+    source: String,
+    step: String,
+    inherited: Vec<String>,
+}
+
+/// Path of the row that lists the steps a continuation takes over from its source.
+const INHERITED: &str = "Inherited steps";
+
 /// How a block of the schematic looks: what the viewer needs of an analysis.
 struct BlockView {
     id: u64,
@@ -3173,6 +3248,7 @@ fn block_rows(
     expanded: &BTreeSet<Vec<String>>,
     incoming: &[(Vec<String>, String)],
     bundles: &[Bundle],
+    continuation: Option<&Continuation>,
 ) -> Vec<Row> {
     let from = |path: &[String]| {
         (incoming.iter())
@@ -3201,7 +3277,10 @@ fn block_rows(
     let mut rows = vec![
         Row {
             text: match &continues {
-                Some(source) => format!("State of {source}"),
+                Some(source) => match continuation {
+                    Some(c) => format!("After {} of {}", c.step, c.source),
+                    None => format!("State of {source}"),
+                },
                 None => "State".to_owned(),
             },
             depth: 0,
@@ -3303,7 +3382,58 @@ fn block_rows(
     }
     rows.push(cell("Solution", NodeIcon::Solution, status.solution, false));
     rows.push(cell("Results", NodeIcon::Results, status.results, false));
-    for step in fe.map(|fe| fe.steps.as_slice()).unwrap_or_default() {
+    let taken = continuation.map_or(&[][..], |c| c.inherited.as_slice());
+    if let Some(c) = continuation.filter(|c| !c.inherited.is_empty()) {
+        let path = vec![INHERITED.to_owned()];
+        let open = expanded.contains(&path);
+        let count = c.inherited.len();
+        rows.push(Row {
+            text: format!(
+                "{count} step{} from {}",
+                if count == 1 { "" } else { "s" },
+                c.source
+            ),
+            depth: 1,
+            icon: NodeIcon::Link,
+            state: None,
+            expander: Some(open),
+            input: false,
+            output: false,
+            linked_from: Some(c.source.clone()),
+            collection: false,
+            partial: false,
+            tip: format!(
+                "These steps are taken over from {} and solved there, not in this analysis. \
+                 Their results are in {}.",
+                c.source, c.source
+            ),
+            path: path.clone(),
+        });
+        for name in c.inherited.iter().filter(|_| open) {
+            let mut path = path.clone();
+            path.push(name.clone());
+            rows.push(Row {
+                text: name.clone(),
+                depth: 2,
+                icon: step_icon(fe, name),
+                state: None,
+                expander: None,
+                input: false,
+                output: false,
+                linked_from: None,
+                collection: false,
+                partial: false,
+                tip: format!("{name} is solved in {}", c.source),
+                path,
+            });
+        }
+    }
+    for step in fe
+        .map(|fe| fe.steps.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter(|s| !taken.contains(&s.name))
+    {
         let path = vec![links::RESULTS.to_owned(), step.name.clone()];
         let tip = if step.active {
             format!(
@@ -3320,7 +3450,7 @@ fn block_rows(
         rows.push(Row {
             text: step.name.clone(),
             depth: 1,
-            icon: NodeIcon::Step,
+            icon: NodeIcon::StepType(StepGlyph::from(&step.kind)),
             state: None,
             expander: None,
             input: true,
@@ -3416,6 +3546,105 @@ fn mesh_rows(node: &Node) -> Vec<Row> {
 }
 
 /// Tooltip of an Add Mesh entry.
+/// A kind of block the schematic adds: the menus and the picker list these, in this order.
+enum BlockKind {
+    Analysis,
+    Materials,
+    Mesh(MeshPrimitive),
+}
+
+fn block_kinds() -> Vec<BlockKind> {
+    vec![
+        BlockKind::Analysis,
+        BlockKind::Materials,
+        BlockKind::Mesh(MeshPrimitive::default_box()),
+        BlockKind::Mesh(MeshPrimitive::default_rectangle()),
+    ]
+}
+
+impl BlockKind {
+    fn entry(&self) -> node_picker::Entry {
+        let (category, label, keywords, tip) = match self {
+            Self::Analysis => (
+                "Analysis",
+                "Analysis",
+                "new model static frequency buckle dynamic heat steps solve calculix",
+                ANALYSIS_TIP,
+            ),
+            Self::Materials => (
+                "Materials",
+                "Materials",
+                "library elastic density",
+                MATERIALS_TIP,
+            ),
+            Self::Mesh(primitive) => {
+                let keywords = match primitive {
+                    MeshPrimitive::Box { .. } => "block cube hexahedra 3D structured",
+                    MeshPrimitive::Rectangle { .. } => "square quadrilaterals 2D structured",
+                };
+                ("Mesh", primitive.label(), keywords, mesh_tip(primitive))
+            }
+        };
+        node_picker::Entry {
+            category,
+            label,
+            keywords,
+            tip,
+        }
+    }
+
+    /// The text of its menu item.
+    fn menu_label(&self) -> &'static str {
+        match self {
+            Self::Analysis => "New Analysis …",
+            Self::Materials => "Add Materials",
+            Self::Mesh(primitive) => primitive.label(),
+        }
+    }
+
+    /// Adds its block at the position.
+    fn action(&self, pos: egui::Pos2) -> Action {
+        match self {
+            Self::Analysis => Action::New(pos),
+            Self::Materials => Action::AddMaterials(pos),
+            Self::Mesh(primitive) => Action::AddMesh(pos, primitive.clone()),
+        }
+    }
+}
+
+/// Menu items adding a block at the position: one per kind, the kinds of a group with more
+/// than one in a submenu.
+fn add_block_menu(ui: &mut egui::Ui, pos: egui::Pos2) -> Option<Action> {
+    let kinds = block_kinds();
+    let mut chosen = None;
+    let mut done: Vec<&str> = Vec::new();
+    for kind in &kinds {
+        let category = kind.entry().category;
+        if done.contains(&category) {
+            continue;
+        }
+        done.push(category);
+        let group: Vec<&BlockKind> = (kinds.iter())
+            .filter(|k| k.entry().category == category)
+            .collect();
+        let mut item = |ui: &mut egui::Ui, kind: &BlockKind, text: &str| {
+            if ui.button(text).on_hover_text(kind.entry().tip).clicked() {
+                chosen = Some(kind.action(pos));
+            }
+        };
+        if let [kind] = group[..] {
+            item(ui, kind, kind.menu_label());
+        } else {
+            ui.menu_button(format!("Add {category}"), |ui| {
+                for kind in group {
+                    item(ui, kind, kind.menu_label());
+                }
+            });
+        }
+    }
+    chosen
+}
+
 fn mesh_tip(primitive: &MeshPrimitive) -> &'static str {
     match primitive {
         MeshPrimitive::Box { .. } => {
@@ -3455,6 +3684,13 @@ fn shown_row(rows: &[Row], path: &[String]) -> Option<usize> {
         .map(|(index, _)| index)
 }
 
+/// The symbol of the type of the step called `name`.
+fn step_icon(fe: Option<&plx_model::FeModel>, name: &str) -> NodeIcon {
+    (fe.and_then(|fe| fe.steps.iter().find(|s| s.name == name))).map_or(NodeIcon::Step, |s| {
+        NodeIcon::StepType(StepGlyph::from(&s.kind))
+    })
+}
+
 /// The symbol of each category of the setup.
 fn category_icon(category: &str) -> NodeIcon {
     match category {
@@ -3483,6 +3719,10 @@ fn wire_color(path: &[String]) -> egui::Color32 {
 struct Viewer {
     nodes: Vec<BlockView>,
     actions: Vec<Action>,
+    /// From the schematic to the screen.
+    to_global: egui::emath::TSTransform,
+    /// Where the schematic is shown, when its view is to fit all blocks.
+    show_all: Option<egui::Rect>,
 }
 
 impl Viewer {
@@ -3625,10 +3865,20 @@ impl SnarlViewer<u64> for Viewer {
             toggled = response.clicked() && pointer.is_some_and(|p| p.x < arrow.right() + 2.0);
         }
         x += 12.0;
-        let ink = ui.visuals().text_color().gamma_multiply(0.75);
-        node_icons::paint(painter, egui::pos2(x, middle - 7.0), row.icon, ink);
+        let dim = row.path.first().is_some_and(|c| c == INHERITED) && row.path.len() > 1;
+        let mut faded = ui.painter().clone();
+        if dim {
+            faded.multiply_opacity(0.45);
+        }
+        let ink = ui
+            .visuals()
+            .text_color()
+            .gamma_multiply(if dim { 0.45 } else { 0.75 });
+        node_icons::paint(&faded, egui::pos2(x, middle - 7.0), row.icon, ink);
         x += 20.0;
-        let color = if row.linked_from.is_some() {
+        let color = if dim {
+            ui.visuals().text_color().gamma_multiply(0.5)
+        } else if row.linked_from.is_some() {
             crate::style::adapt(egui::Color32::from_rgb(40, 110, 200))
         } else {
             ui.visuals().text_color()
@@ -3787,30 +4037,36 @@ impl SnarlViewer<u64> for Viewer {
     }
 
     fn show_graph_menu(&mut self, pos: egui::Pos2, ui: &mut egui::Ui, _snarl: &mut Snarl<u64>) {
-        if ui.button("New Analysis").clicked() {
-            self.actions.push(Action::New(pos));
+        if let Some(action) = add_block_menu(ui, pos) {
+            self.actions.push(action);
             ui.close();
         }
-        if ui
-            .button("Add Materials")
-            .on_hover_text(MATERIALS_TIP)
-            .clicked()
-        {
-            self.actions.push(Action::AddMaterials(pos));
-            ui.close();
-        }
-        ui.menu_button("Add Mesh", |ui| {
-            for primitive in [
-                MeshPrimitive::default_box(),
-                MeshPrimitive::default_rectangle(),
-            ] {
-                let tip = mesh_tip(&primitive);
-                if ui.button(primitive.label()).on_hover_text(tip).clicked() {
-                    self.actions.push(Action::AddMesh(pos, primitive));
-                    ui.close();
-                }
+    }
+
+    fn current_transform(
+        &mut self,
+        to_global: &mut egui::emath::TSTransform,
+        snarl: &mut Snarl<u64>,
+    ) {
+        if let Some(view) = self.show_all.take() {
+            // The blocks, each about as large as it is drawn.
+            let blocks = (snarl.nodes_pos_ids()).fold(egui::Rect::NOTHING, |all, (_, pos, id)| {
+                let rows = self.block(*id).map_or(0, |b| b.rows.len() + b.steps.len());
+                let size = egui::vec2(260.0, 60.0 + 22.0 * rows as f32);
+                all.union(egui::Rect::from_min_size(pos, size))
+            });
+            if blocks.is_finite() {
+                let blocks = blocks.expand(40.0);
+                let scale = (view.width() / blocks.width())
+                    .min(view.height() / blocks.height())
+                    .clamp(MIN_SCALE, MAX_SCALE);
+                *to_global = egui::emath::TSTransform::new(
+                    view.center().to_vec2() - blocks.center().to_vec2() * scale,
+                    scale,
+                );
             }
-        });
+        }
+        self.to_global = *to_global;
     }
 
     /// Header bands tinted by the kind of block, like the node groups of Blender.
@@ -4085,10 +4341,16 @@ fn node_menu(
 /// Spacing of the dots of the schematic's background.
 const DOT_SPACING: f32 = 24.0;
 
+/// The zoom of the schematic: at most its true size, at least a third of it.
+const MAX_SCALE: f32 = 1.0;
+const MIN_SCALE: f32 = 0.3;
+
 fn schematic_style() -> SnarlStyle {
     let border = egui::Stroke::new(1.0, crate::style::border());
     SnarlStyle {
         collapsible: Some(false),
+        // A double-click into empty space shows the blocks to add instead.
+        centering: Some(false),
         // Blocks with rounded corners and a tinted header, like the nodes of a node editor.
         node_frame: Some(
             egui::Frame::new()
@@ -4114,8 +4376,8 @@ fn schematic_style() -> SnarlStyle {
         pin_stroke: Some(egui::Stroke::new(1.0, crate::style::pin_edge())),
         wire_width: Some(2.0),
         // Blocks are never magnified beyond their size, also when the view centres on them.
-        max_scale: Some(1.0),
-        min_scale: Some(0.3),
+        max_scale: Some(MAX_SCALE),
+        min_scale: Some(MIN_SCALE),
         // A row per pin, all of the same height, so that the rows line up with their pins.
         node_layout: Some(egui_snarl::ui::NodeLayout {
             kind: egui_snarl::ui::NodeLayoutKind::Coil,
@@ -4127,6 +4389,9 @@ fn schematic_style() -> SnarlStyle {
 }
 
 /// Tooltip of Add Materials.
+const ANALYSIS_TIP: &str = "Adds an analysis: a model of its own with geometry, mesh, setup \
+     and steps, solved with CalculiX. Double-click its block to open it in its own window.";
+
 const MATERIALS_TIP: &str = "Adds a block of materials kept in the project: analyses link \
      them one by one or all at once, so that they are defined in one place.";
 
@@ -4208,6 +4473,29 @@ mod tests {
         }
 
         fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn a_reader_that_fails_ends_the_opening() {
+        // Still reading: nothing yet.
+        let (sender, receiver) = std::sync::mpsc::channel::<Opened>();
+        assert!(received(&receiver).is_none());
+        // A reader thread that panicked drops its sender without sending; the project
+        // window used to wait for it forever.
+        let reader = std::thread::spawn(move || {
+            let _sender = sender;
+            panic!("broken file");
+        });
+        assert!(reader.join().is_err());
+        assert!(matches!(received(&receiver), Some(Err(_))));
+        // A panic caught on the reader thread carries its message.
+        let panic = std::panic::catch_unwind(|| panic!("index out of bounds")).unwrap_err();
+        assert_eq!(
+            panic_message(panic.as_ref()),
+            "reading the file failed: index out of bounds"
+        );
+        let file = std::env::temp_dir().join("prepolix-missing-project.plx");
+        assert!(read_opened(&file).is_err());
     }
 
     #[test]

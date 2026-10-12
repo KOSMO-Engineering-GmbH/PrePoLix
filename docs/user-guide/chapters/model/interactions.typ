@@ -19,14 +19,14 @@ Create them with #menu("Interaction", "Create Constraint ...") or with #ui("Crea
     are optional. With #ui("Nonlinear") the contact is solved nonlinearly, otherwise it is
     linearised in a linear step. Written as `GAPUNI` elements to fixed ground nodes.],
   [Surface To Surface Spring], [Springs between the nodes of a slave surface and the closest
-    points of a master surface, with total or per-area stiffness. Not available in PrePoMax.],
+    points of a master surface, with total or per-area stiffness.],
 )
 
 Surface-to-surface springs have a #ui("Master") and a #ui("Slave") region, each with its own
 #ui("...") button. Choose the finer mesh as slave. #ui("Swap Master/Slave") in the context
 menu exchanges the two.
 
-The 3D view of the FE model shows active constraints in yellow, as PrePoMax does, together with
+The 3D view of the FE model shows active constraints in yellow, together with
 the symbols of any step: a coil spring for each direction with stiffness, at each node of a
 point spring (at their centre for ten nodes or more), at the centre of a surface spring and at
 points spread over the slave surface of a surface-to-surface spring; cones pushing onto the
@@ -39,7 +39,7 @@ surface of a compression only support; and lines to the reference point of a rig
 #ui("Hide") in the context menu of a constraint removes its symbol from the 3D view, #ui("Show")
 brings it back; the tree marks a hidden constraint with an eye. #ui("Hide All") and
 #ui("Show All") in the context menu of #ui("Constraints") do this for all constraints at once.
-As in PrePoMax, a hidden constraint is still drawn while it is selected, and the setting is saved
+A hidden constraint is still drawn while it is selected, and the setting is saved
 with the project. Hiding changes only the view, not the analysis; #ui("Deactivate") leaves a
 constraint out of the input file.
 

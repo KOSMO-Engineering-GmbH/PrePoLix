@@ -353,6 +353,13 @@ impl AnalysisWindow {
         }
     }
 
+    /// Replaces the user keywords of the analysis, after its steps moved.
+    pub fn set_user_keywords(&mut self, keywords: Vec<plx_model::UserKeyword>) {
+        if let Some(model) = &mut self.workbench.model {
+            model.fe.user_keywords = keywords;
+        }
+    }
+
     /// Takes over the items `names` of a category of another analysis, see
     /// [`crate::links::apply_bundle`]; returns the names taken.
     pub fn apply_bundle(

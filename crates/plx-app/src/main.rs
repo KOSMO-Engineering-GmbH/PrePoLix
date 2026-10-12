@@ -32,6 +32,7 @@ mod model;
 mod model_properties;
 mod motion_preview;
 mod node_icons;
+mod node_picker;
 mod numeric;
 mod overlay;
 mod path_plot;
