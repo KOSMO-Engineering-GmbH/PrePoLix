@@ -9,8 +9,8 @@
 selected at once. Gmsh with OpenCASCADE reads the files, so Gmsh must be available
 (@settings).
 
-- If no model is open, #ui("Model Properties") opens first, so you can choose the model space
-  (3D or 2D) and the unit system before the geometry is read (@model-properties).
+- The geometry is read into the open analysis, in its model space and length unit (both were
+  chosen when the analysis was created, @new-analysis).
 - If the model already has geometry or a mesh, the imported parts are *added*. Existing parts keep
   their names, mesh settings and selections.
 - STEP and IGES files are converted to the length unit of the model. BREP files have no unit and
@@ -40,8 +40,9 @@ parts*, for example a mesh written by #menu("File", "Export Deformed Mesh (.inp)
   becomes `PART-1-2`.
 - Only the mesh is read: nodes, elements, sets and surfaces. Materials, steps and loads of the
   file are skipped and listed in the output window.
-- Into an empty model the mesh decides the model space (a mesh of plane stress elements makes a 2D
-  model); as the model space belongs to the project, all its analyses take it over. A 2D mesh cannot be added to a 3D model or the other way round.
+- The mesh must fit the model space of the analysis: a mesh of plane stress elements goes into a
+  2D plane stress analysis, solids into a 3D one. A 2D mesh cannot be added to a 3D analysis or
+  the other way round.
 
 #screenshot("mesh-import.png", [A deformed mesh imported next to the original part])
 

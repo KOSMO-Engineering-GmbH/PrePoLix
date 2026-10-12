@@ -142,7 +142,13 @@ pub fn paint(painter: &Painter, min: egui::Pos2, state: CellState) {
     let p = |x: f32, y: f32| pos2(min.x + x, min.y + y);
     let adapt = crate::style::adapt;
     match state {
-        CellState::UpToDate => tree_icons::paint(painter, min, TreeIcon::Finished),
+        CellState::UpToDate => {
+            // A plain tick.
+            painter.add(Shape::line(
+                vec![p(3.0, 8.5), p(6.5, 12.0), p(13.0, 4.5)],
+                Stroke::new(2.0, crate::style::ok()),
+            ));
+        }
         CellState::OutOfDate => {
             // A circular arrow: Update.
             let amber = adapt(Color32::from_rgb(220, 150, 0));
@@ -175,7 +181,12 @@ pub fn paint(painter: &Painter, min: egui::Pos2, state: CellState) {
             );
         }
         CellState::Running => tree_icons::paint(painter, min, TreeIcon::Running),
-        CellState::Failed => tree_icons::paint(painter, min, TreeIcon::NoResult),
+        CellState::Failed => {
+            // A plain cross.
+            let stroke = Stroke::new(2.0, crate::style::error());
+            painter.line_segment([p(3.5, 3.5), p(12.5, 12.5)], stroke);
+            painter.line_segment([p(12.5, 3.5), p(3.5, 12.5)], stroke);
+        }
         CellState::NotUsed => {
             painter.line_segment(
                 [p(4.0, 8.5), p(12.0, 8.5)],

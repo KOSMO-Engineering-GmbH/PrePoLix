@@ -57,6 +57,42 @@ The status at the end is #ui("completed"), #ui("finished with errors, results av
 in the output and adds a line "Possible cause: ..." with a remedy, for example for distorted
 elements, missing material data, rigid body motion or missing convergence.
 
+== Solving again from the last unchanged step <restart>
+
+CalculiX can write the state of the model after each step over time (static, dynamic, heat
+transfer, coupled and uncoupled temperature-displacement, visco) into a restart file, and
+PrePoLix asks it to (`*RESTART, WRITE` in every such step). When you change a later step of an
+analysis and solve again, CalculiX does not start from the beginning: it reads the state after
+the last unchanged step from the earlier run and solves only the rest. The monitor tells which
+of the two happened:
+
+#fields(
+  [Restart after step 2 of 3: ...], [The steps up to the second are unchanged; CalculiX reads
+    their state and solves the third. The results and the history output of the earlier steps are
+    joined with the new ones, so the results look as if all steps had been solved, and the input
+    file kept with the results is the full one, which runs on its own.],
+  [Full run: ...], [All steps are solved, with the reason: the model definition changed (a
+    material, a section, the mesh, a new set for a load), the first step changed, there is no
+    state of an earlier run, the states were written by another CalculiX, the restart files
+    are turned off, or the step to continue from is not a step over time (a frequency, buckle
+    or perturbation step leaves no state to continue from).],
+)
+
+#screenshot("monitor-restart.png", [Monitor of a run that continues after the first step])
+
+A restart that CalculiX cannot finish is solved once more in full, so a changed analysis always
+ends up solved. The state files stay in the folder of the analysis in the work directory, next
+to its results; they are not saved in the project file, and after a move to another computer
+the first run is a full one.
+
+Under #menu("Tools", "Settings ...", "CalculiX") (@settings), #ui("Keep the state after each
+step") turns the restart files off, and #ui("Restart files per project") limits the disk space
+they take (4096 MB by default): beyond it, the oldest state files of the project are removed,
+which only costs time, never correctness.
+
+The same mechanism lets one analysis continue another one after a step, through a state link
+in the project schematic (@state-links).
+
 == Results kept with the project <bind-result>
 
 When a run is finished, its analysis keeps the results: the input file, the result file
@@ -131,15 +167,24 @@ to run CalculiX by hand or on another computer. Deactivated items appear as comm
 == Submodels <submodel>
 
 A submodel computes a detail of a larger model more precisely. Its cut boundaries follow the
-displacements of the global model.
+displacements of the global model. Global model and submodel are two analyses of the project,
+linked in the schematic (@results-links):
 
-+ Compute the global model and keep its result file (`.frd`).
-+ In the submodel, open #menu("Model", "Model Properties ...") and set #ui("Model Type") to
-  #ui("Submodel"). Choose the global result file under #ui("Global results .frd").
-+ In a static step, create a boundary condition of type #ui("Submodel") on the cut faces. Choose
-  the #ui("Global step") and the displacement components.
-+ Run the analysis. PrePoLix copies the global results next to the input file and writes
++ Set up the global model in one analysis and the submodel, with its own finer mesh, in
+  another.
++ In the submodel, create a boundary condition of type #ui("Submodel") on the cut faces in a
+  static step, and choose the displacement components.
++ In the project schematic, drag the results of the global step (the row of the step below
+  #ui("Results") of the global analysis) to that step of the submodel. The output pane confirms
+  "takes the displacements of Step-1 of Global in Step-1 (submodel)". The link sets
+  #ui("Model Type") to #ui("Submodel") in the submodel's #ui("Model Properties") and the global
+  step of the boundary condition.
++ #ui("Solve") the submodel or #ui("Update Project"): the global model is solved first if it has
+  no results yet. PrePoLix copies the global results next to the input file and writes
   `*SUBMODEL` and `*BOUNDARY, SUBMODEL`.
+
+A result file from outside the project can still be chosen by hand under #ui("Global results
+.frd") in #ui("Model Properties") with #ui("Model Type") #ui("Submodel").
 
 #limitation[Only displacements can be transferred. The global result file must not be the result
 file of the submodel's own analysis.]

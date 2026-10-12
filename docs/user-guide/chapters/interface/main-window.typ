@@ -24,13 +24,13 @@ From top to bottom the window contains:
   keywords of an imported `.inp` that were skipped ("Not yet evaluated: ..."), unit conversions
   and the output of the query tool.
 / Status bar: on the left what is loaded ("bracket.plx: 12345 nodes, 6789 elements, 3 parts") or
-  what is running ("Meshing ..."), on the right the unit system and the model space.
+  what is running ("Meshing ..."), on the right the unit system and the model space of the
+  analysis.
 
 === Toolbar, first row
 
 #fields(
-  [New Model, Save], [As in the #ui("File") menu (@files): an empty model for the analysis,
-    and saving the project.],
+  [Save], [Saves the project, as #menu("File", "Save Project") (@files).],
   [Import Geometry], [Imports STEP, IGES or BREP files and adds them to the geometry
     (@geometry-import), or the mesh of input files (`.inp`) as mesh parts (@mesh-import).],
   [Zoom to Fit], [Fits the visible parts into the view.],
@@ -89,7 +89,9 @@ has no mesh yet opens on the #ui("Geometry") tab, opening a result file switches
   #ui("Contact Pairs"). A container that cannot
   take items explains why in a tooltip, for example "A frequency step has no loads."
 / Items: #ui("Edit ..."), #ui("Activate")/#ui("Deactivate"), #ui("Swap Master/Slave") (ties,
-  spring connections and contact pairs), #ui("Delete").
+  spring connections and contact pairs), #ui("Delete"). Items that come from another analysis
+  through a link are shown in blue with the name of that analysis; their commands are greyed
+  out, and a double-click offers to open that analysis or to unlink the item (@data-links).
 / Parts: #ui("Properties ..."), #ui("Hide")/#ui("Show"), #ui("Delete"); on the
   #ui("Geometry") tab also #ui("Create Mesh").
 

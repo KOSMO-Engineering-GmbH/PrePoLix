@@ -1,0 +1,188 @@
+#import "../../template.typ": *
+
+== Linking analyses <links>
+
+Analyses of a project share data through *links* in the project schematic: drag from a pin on
+the right of a row to the pin on the left of the matching row of another analysis. Three kinds
+of links exist, told apart by the colour of their wire:
+
+#table(
+  columns: (30%, 1fr),
+  stroke: (x, y) => if y == 0 { (bottom: 0.7pt) } else { (bottom: 0.3pt + luma(200)) },
+  inset: (x: 5pt, y: 4pt),
+  table.header([*Link*], [*Meaning*]),
+  [Data (blue)], [The target uses the geometry, the mesh, a category of the setup or a single
+    item of the source, for example one material (@data-links).],
+  [Results (orange)], [A step of the target takes the results of a step of the source: the
+    temperatures of a thermal step, the eigenmodes of a frequency step, or the displacements of
+    the global model of a submodel (@results-links).],
+  [State (green)], [The target continues the source from the state after one of its steps, as
+    further steps of the same CalculiX run (@state-links).],
+)
+
+The output pane of the project window says what each link does ("Axial-load takes Mesh from
+Cantilever") and why a link cannot be made:
+
+- the two analyses have different model spaces ("linked analyses need the same model space"; a
+  different unit system is fine);
+- the link would go back to an analysis that already comes before the source, and form a
+  cycle;
+- the item does not fit the slot, for example a material dropped on the mesh;
+- the target continues another analysis and takes its whole model from there (@state-links).
+
+Right-click a pin to remove its links, or use #ui("Unlink") in the analysis window. The target
+keeps a copy of what it took, which it can edit from then on.
+
+=== Linking data <data-links>
+
+A data link makes the target use what the source has, live: a change in the source reaches the
+target at once. Whole cells can be linked (#ui("Geometry"), #ui("Mesh")), a whole category of
+the setup (open #ui("Setup") with the arrow in front of it: #ui("Materials"), #ui("Sections"),
+#ui("Constraints") and so on) or a single item of a category (open the category: one material,
+one contact pair, one step). A linked category also passes on items added to it later.
+
+In the window of the target, linked items are read-only. A link sign marks them in the tree,
+and their tooltip names the analysis they come from and says that they change there. The
+commands that would change them are refused with the same hint; a double-click opens a small
+dialog instead of the item's own:
+
+#screenshot("linked-material.png", [A material taken from another analysis in the tree of the
+  target])
+
+#screenshot("linked-item-dialog.png", [Double-clicking a linked item])
+
+#fields(
+  [#ui("Open <analysis>")], [Opens the window of the source analysis to edit the item there.],
+  [Unlink], [Removes the link. The target keeps a copy of the item and can edit it.],
+)
+
+A linked mesh follows the source: when the source is meshed again, the target's solution is out
+of date.
+
+#note[A linked category replaces the whole category of the target, so its own materials, say,
+  are gone while the link exists. A linked single item replaces only the target's item of the
+  same name, or is added to the category.]
+
+=== Taking results of a step <results-links>
+
+The rows below #ui("Results") of a block are its steps. Drag the pin of a step to a row of
+another analysis; what the results are used for depends on where they are dropped:
+
+#table(
+  columns: (1fr, 1fr, 1.4fr),
+  stroke: (x, y) => if y == 0 { (bottom: 0.7pt) } else { (bottom: 0.3pt + luma(200)) },
+  inset: (x: 5pt, y: 4pt),
+  table.header([*Results of*], [*Dropped on*], [*Used as*]),
+  [a heat transfer, coupled or uncoupled temperature-displacement step],
+  [a step of another analysis],
+  [the temperatures of that step: a defined field named #ui("Linked Temperatures")
+    (`*TEMPERATURE, FILE=..., BSTEP=n`), see @defined-fields],
+  [the same],
+  [#ui("Initial Conditions") under #ui("Setup") of another analysis],
+  [the temperatures the analysis starts at (`*INITIAL CONDITIONS, TYPE=TEMPERATURE` on every
+    node)],
+  [a frequency step with #ui("Storage") on],
+  [a modal dynamics or steady state dynamics step],
+  [the eigenmodes these steps work on: the `.eig` file of the other run (@modal-dynamics)],
+  [any other step],
+  [a step of another analysis],
+  [the displacements on the cut boundary of a submodel (@submodel)],
+)
+
+#screenshot("temperature-links.png", [A heat transfer analysis giving its temperatures to a
+  structural analysis: one link to its initial conditions ("starts at the temperatures of
+  ..."), one to its step ("takes the temperatures of ... in Step-1")])
+
+- Temperatures and eigenmodes are transferred node by node, so both analyses need the same mesh:
+  link the mesh, or continue from a state (@state-links). Otherwise the output pane says why
+  nothing is taken. A submodel has its own, finer mesh.
+- A frequency step without #ui("Storage") cannot give its eigenmodes; the link is refused with
+  a hint to turn it on.
+- A step that works on the eigenmodes of another analysis needs no frequency step before it.
+  Its boundary conditions are written before the first step, because CalculiX takes no new
+  ones in a modal or steady state dynamics step.
+- Defined temperatures need initial temperatures: a link to #ui("Initial Conditions") provides
+  them, and the model check counts it (@model-check).
+- When the source has no results yet, #ui("Solve") and #ui("Update Project") solve it first.
+  When the source is solved again, the analyses that use its results are solved after it. A
+  source whose results are out of date is not solved again on its own; its block shows the
+  circular arrow, and #ui("Update Project") brings both up to date.
+- Before the run, PrePoLix copies the result files it needs next to the input file, because
+  CalculiX reads them from there.
+- #ui("Unlink") takes back what the link set: the defined field, the eigenmodes or the initial
+  temperatures.
+
+=== Continuing an analysis after a step <state-links>
+
+CalculiX solves the steps of a run one after the other, each starting from the state the step
+before it left. A *state link* lets an analysis take that state from a step of another analysis
+and continue with steps of its own, as if they stood behind that step in one input file. Where
+Ansys Workbench links a static analysis to a pre-stressed modal analysis, PrePoLix links any
+step to any following steps: a load history that branches after a pre-load into several load
+cases, a frequency step after a static step, or a modal dynamics step after the frequency step
+of another analysis.
+
+Drop the results of a step on the #ui("State") row at the top of another block. The target then
+*continues* the source:
+
+- It takes the geometry, the mesh, the whole setup and the steps up to and including that step
+  from the source. All of it is read-only in its window and marked with the link sign like
+  other linked items; the steps it took are listed before its own. New steps are added as
+  usual and are its own; as always, a new step starts with the boundary conditions and loads
+  of the step before it.
+- Its #ui("State") row reads #ui("State of <source>").
+- A state link replaces every other link of the target: while it continues another analysis,
+  nothing else can be linked to it.
+- #ui("Unlink") on the #ui("State") pin, or on a taken item in the window, makes the analysis
+  independent again. It keeps copies of the model and of the steps it took, so it still solves
+  the same problem, now on its own.
+
+#screenshot("continued-analysis.png", [The tree of an analysis that continues another one: the
+  model and the first two steps come from there, the third is its own])
+
+*Continue from here.* The quickest way to a continuation: drag the pin of a step to empty space
+and pick #ui("Continue from here") from the menu that opens. A new analysis named
+#ui("<source> continued") appears at that place, already continuing from that step, with the model
+space and unit system of the source. Open it and add its steps.
+
+#screenshot("continue-from-here-menu.png", [Dragging the results of a step to empty space])
+
+*Solving.* CalculiX solves only the own steps of the target: the run reads the state CalculiX
+wrote after the step in the source's run (`*RESTART, READ`) and continues. The monitor says so
+("Restart after step 2 of 3: the steps up to it are unchanged; CalculiX reads their state from
+Cantilever and solves the rest", or "from the earlier run" once the target has run before). The
+results of the target contain all steps, those of the source and its own, as if solved in one
+go.
+
+- When the source has no results yet, #ui("Solve") and #ui("Update Project") solve it first.
+- CalculiX takes no new sets after reading a state. PrePoLix therefore writes the sets the
+  target's steps need into the input file of the source as well. If they are missing because
+  the source was solved before the steps were added, the target is solved in full instead,
+  with the source's steps repeated in its own run; the results are the same, it only takes
+  longer. The monitor says #ui("Full run") and why.
+- CalculiX writes a state only after steps over time (static, dynamic, heat transfer, coupled
+  and uncoupled temperature-displacement, visco), not after a frequency, buckling or
+  perturbation step. A target that continues after such a step is solved in full as well.
+- The state files are kept in the work directory, not in the project file (@restart). On a
+  computer without them the target is solved in full.
+
+=== Split and merge <split-merge>
+
+The context menu of a block turns steps into continuations and back, without changing what is
+solved:
+
+#fields(
+  [#ui("Split After") > step], [The steps after the chosen step move to a new analysis that
+    continues this one from the state after it. Analyses that took results of those steps now
+    take them from the new analysis. The context menu offers every step but the last.],
+  [#ui("Merge into <analysis>")], [Only for an analysis that continues another one from its last
+    step. Its own steps go back to that analysis, links to its steps move along, and it is
+    removed from the project. An analysis that continues from an earlier step cannot be merged,
+    because its steps would have to go between the other's.],
+)
+
+#screenshot("split-after-menu.png", [Splitting an analysis after its first step])
+
+A split is useful when one of several load cases after a common pre-load should be computed
+without the others, or to show the branches of a load history in the schematic; a merge brings
+the steps back into one block when the branch is no longer needed.

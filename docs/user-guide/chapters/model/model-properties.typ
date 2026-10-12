@@ -11,10 +11,11 @@ with #ui("Create ...") in the context menu of their container in the tree.
 
 == Model properties <model-properties>
 
-#menu("Model", "Model Properties ...") (or a double-click on #ui("Model") in the tree) sets
-the basic properties of the model. The same dialog opens for #menu("File", "New Model ...").
-The model space and the unit system belong to the project: changing them here changes them for
-all analyses of the project (@project-window).
+#menu("Model", "Model Properties ...") (or a double-click on #ui("Model") in the tree) shows
+the basic properties of the model. The same dialog opens when an analysis is created
+(@new-analysis); the model space and the unit system are chosen there and fixed from then on.
+The dialog of an existing analysis shows them, but only the model type and the physical
+constants can still be changed. For another model space or unit system, create a new analysis.
 
 #screenshot("model-properties.png", [Model properties])
 
@@ -30,8 +31,8 @@ All 2D models must lie in the global X-Y plane. Hovering over a model space show
 on when to use it: plane stress for thin parts loaded in their plane, plane strain for long
 prismatic parts without strain out of the plane, axisymmetric for bodies of revolution.
 
-A change of the model space is refused if the mesh or geometry does not fit (for example solid
-elements in a 2D model). 2D elements are retyped when the space changes between the 2D variants.
+Geometry and meshes must fit the model space of their analysis: a 2D mesh from an input file
+cannot be imported into a 3D analysis, nor solids into a 2D one.
 
 #note(title: "Axisymmetric models")[As in CalculiX, forces in an axisymmetric model act on the
 full 360° circumference. Surface tractions are distributed according to the radius.]
@@ -39,8 +40,9 @@ full 360° circumference. Surface tractions are distributed according to the rad
 === Model type
 
 #ui("General model") or #ui("Submodel"). A submodel takes the displacements at its cut
-boundaries from a global model; choose its result file under #ui("Global results .frd")
-(@submodel).
+boundaries from a global model. A results link in the project schematic sets the type and the
+global results (@submodel); a result file from outside the project is chosen under
+#ui("Global results .frd").
 
 === Unit system <unit-systems>
 
@@ -52,10 +54,17 @@ boundaries from a global model; choose its result file under #ui("Global results
   [in, lbf·s²/in, s, °F], [US units. Force in lbf, stress in psi.],
 )
 
-The dialog lists the base and derived units of the chosen system. When you change the unit system
-of an existing model, #ui("Convert the model values") (default on) converts mesh, geometry,
-materials, loads and all other values to the new units. Without it, the numbers stay the same and
-are read in the new units.
+The dialog lists the base and derived units of the chosen system.
+
+*How values are stored.* PrePoLix stores every value of the mesh, the geometry and the model in
+SI units (m, kg, s, N, Pa; temperatures in °C), whatever the unit system of the analysis. The
+unit system only decides how values are *shown and typed*: a dialog of an analysis in mm, ton,
+s shows lengths in mm and stresses in MPa, and converts what you type. A value typed with
+another unit is converted too, for example `3 cm` in a length field becomes 30 mm. The input
+file CalculiX gets is therefore always in SI units, which the keyword editor says above its
+text (@keyword-editor); results are shown in the unit system of the analysis (legend, scale bar,
+queries, tables). Because of this, analyses of one project may use different unit systems and
+still share meshes, materials and results through links (@links).
 
 === Physical constants
 
