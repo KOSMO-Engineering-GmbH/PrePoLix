@@ -70,6 +70,23 @@ the AppImage when a new release is published. The CalculiX
 work directory defaults to `/tmp/prepolix`. Alternatively build PrePoLix from source with a
 current stable Rust toolchain (`cargo run --release`), see the README of the repository.
 
+=== Portable version for Windows <portable>
+
+Where installing is not possible, for example on a company computer without administrator
+rights, download `prepolix-<version>-windows-portable.zip` from the release page instead. Unpack
+it to any folder you can write to, for example in your documents or on a USB stick, and start `prepolix.exe` in the folder `PrePoLix-<version>`. The
+folder contains the same program, Gmsh, CalculiX and this guide as the installer, but PrePoLix
+does not register itself with Windows: there is no start menu entry and no file association, and
+nothing is written to the registry. Settings and the material library are kept in the folder
+`Settings` next to `prepolix.exe`, the CalculiX work directory defaults to the folder `Temp`
+there, and the settings window shows #ui("Portable mode") at its bottom. The file `portable.txt`
+switches this on; without it the settings go to `%APPDATA%\prepolix\data` as with the
+installer. To update, unpack the new version (the update window links to its ZIP file, see
+@updates) and copy the `Settings` folder over; to remove PrePoLix, delete the folder.
+
+#screenshot("portable.png", [The portable version under Windows: CalculiX and its work directory
+in the unpacked folder, the note at the bottom])
+
 == Updates <updates>
 
 PrePoLix asks GitHub for the latest release when it starts. If a newer version exists, a green
@@ -86,8 +103,10 @@ Nothing else happens: ignore it if you do not want to update. A click on the sym
   the installer only shows its progress and then starts PrePoLix again; the shortcuts and the
   `.plx` association stay as you installed them. Save your project before: the project that was
   open is reopened when it was saved as a `.plx` file.
-- #ui("Open Release Page") opens the release on GitHub. A PrePoLix built from source or unpacked
-  from a ZIP file offers only this.
+- #ui("Download ZIP") (portable version only, @portable) downloads the new portable ZIP file in
+  the web browser. Unpack it yourself and copy the `Settings` folder over.
+- #ui("Open Release Page") opens the release on GitHub. A PrePoLix built from source offers only
+  this.
 - #ui("Close") closes the window; the symbol stays until PrePoLix is closed.
 
 The Linux AppImage does not check at startup, since an AppImage manager such as Gear Lever or
@@ -100,9 +119,10 @@ checked with the certificates of the system, so a company proxy that inspects HT
 
 == Starting PrePoLix
 
-Start PrePoLix from the start menu, by double-clicking a `.plx` file (Windows, if associated), or
-from a terminal. Files given on the command line are opened in order, so a model and its results
-can be opened together:
+Start PrePoLix from the start menu, by double-clicking a `.plx` file (Windows, if associated),
+by double-clicking `prepolix.exe` in the portable folder (@portable), or from a terminal. Files
+given on the command line are opened in order, so a model and its results can be opened
+together:
 
 ```sh
 prepolix bracket.plx bracket.frd
@@ -114,7 +134,7 @@ PrePoLix reopens the project that was open when it was last closed, provided it 
 
 == This guide offline <offline-guide>
 
-The Windows installer and the Linux AppImage contain this guide as a web page.
+The Windows installer, the portable ZIP and the Linux AppImage contain this guide as a web page.
 #menu("Help", "User Guide") opens it in the default web browser; no internet connection is
 needed. On Linux PrePoLix hands the page to the browser through a small web server on your
 computer (address `http://127.0.0.1:<port>/`), because browsers installed as Snap or Flatpak

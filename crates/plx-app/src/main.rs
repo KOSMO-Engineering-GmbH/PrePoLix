@@ -31,6 +31,7 @@ mod motion_preview;
 mod numeric;
 mod overlay;
 mod path_plot;
+mod portable;
 mod properties;
 mod query;
 mod results;
@@ -64,6 +65,7 @@ fn main() -> eframe::Result {
             .with_icon(window_icon()),
         renderer: eframe::Renderer::Wgpu,
         persist_window: true,
+        persistence_path: portable::persistence_path(),
         ..Default::default()
     };
     eframe::run_native(

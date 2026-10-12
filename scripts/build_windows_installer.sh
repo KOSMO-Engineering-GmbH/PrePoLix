@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Builds the Windows installer for prepolix on Linux: cross-compiles prepolix.exe for
-# x86_64-pc-windows-gnu with MinGW, fetches the Gmsh DLL, builds the CalculiX solver and packs
-# everything with NSIS.
+# Builds the Windows installer and the portable ZIP for prepolix on Linux: cross-compiles
+# prepolix.exe for x86_64-pc-windows-gnu with MinGW, fetches the Gmsh DLL, builds the CalculiX
+# solver and packs everything with NSIS and, for the ZIP, with Python's zipfile.
 #
 #     scripts/build_windows_installer.sh
 #
@@ -9,7 +9,8 @@
 # and what scripts/build_ccx.sh needs for CalculiX on Windows,
 # and the Rust target:   rustup target add x86_64-pc-windows-gnu
 #
-# The installer ends up in target/windows-installer/prepolix-<version>-setup.exe.
+# The installer ends up in target/windows-installer/prepolix-<version>-setup.exe, the ZIP in
+# target/windows-installer/prepolix-<version>-windows-portable.zip.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -62,3 +63,31 @@ installer="$out/prepolix-$version-setup.exe"
 makensis -V2 -DVERSION="$version" -DSTAGE="$root/$stage" -DOUTFILE="$root/$installer" \
     installer/windows/prepolix.nsi
 echo "Installer: $installer ($(du -h "$installer" | cut -f1))"
+
+# The portable ZIP, like PrePoMax's: the same files in one folder, unpacked anywhere and started
+# without administrator rights or installation. portable.txt makes prepolix keep its settings
+# in a Settings folder beside it (crates/plx-app/src/portable.rs).
+portable="$out/prepolix-$version-windows-portable.zip"
+cat >"$stage/portable.txt" <<EOF
+PrePoLix $version, portable version
+
+Start prepolix.exe in this folder; no installation or administrator rights are needed.
+Settings and the material library are kept in the Settings folder next to it, CalculiX
+runs in the Temp folder. To remove PrePoLix, delete this folder.
+
+While this file exists, PrePoLix stays portable. Without it, settings go to
+%APPDATA%\prepolix like with the installer.
+EOF
+sed -i 's/\r$//; s/$/\r/' "$stage/portable.txt"
+rm -f "$portable"
+python3 - "$stage" "$portable" "PrePoLix-$version" <<'EOF'
+import os, sys, zipfile
+stage, archive, top = sys.argv[1:]
+with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+    for dirpath, dirnames, filenames in os.walk(stage):
+        dirnames.sort()
+        for name in sorted(filenames):
+            path = os.path.join(dirpath, name)
+            zf.write(path, os.path.join(top, os.path.relpath(path, stage)))
+EOF
+echo "Portable ZIP: $portable ($(du -h "$portable" | cut -f1))"

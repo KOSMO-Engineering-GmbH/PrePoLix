@@ -4,7 +4,8 @@
 
 #menu("Tools", "Settings ...") opens the settings window. The pages are listed on the left.
 #ui("Defaults") resets all pages, #ui("Apply") applies without closing. Settings are stored per
-user (`~/.local/share/prepolix` on Linux, `%APPDATA%\prepolix\data` on Windows).
+user (`~/.local/share/prepolix` on Linux, `%APPDATA%\prepolix\data` on Windows), by the
+portable Windows version in the folder `Settings` next to `prepolix.exe` (@portable).
 
 #screenshot("settings.png", [Settings, CalculiX page])
 

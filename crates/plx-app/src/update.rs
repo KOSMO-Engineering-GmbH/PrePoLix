@@ -2,8 +2,8 @@
 //! newer one shows a symbol next to the version in the menu bar; it opens a window with the
 //! release notes. The Windows installer is downloaded there and run with `/UPDATE`, which skips
 //! its pages, waits for PrePoLix to close and starts the new version. An AppImage is left to the
-//! system's AppImage manager; other builds (from source, the portable ZIP) only point to the
-//! release page.
+//! system's AppImage manager; the portable ZIP gets a link to the new ZIP, other builds (from
+//! source) only point to the release page.
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -57,6 +57,9 @@ impl std::fmt::Display for Version {
 pub enum Installation {
     /// Installed by the Windows installer (`uninstall.exe` next to the program).
     WindowsInstaller,
+    /// Unpacked from the portable Windows ZIP (`portable.txt` next to the program); the new
+    /// ZIP is downloaded in the browser and unpacked by hand.
+    Portable,
     /// Started from an AppImage, which an AppImage manager such as Gear Lever updates.
     AppImage,
     /// Built from source or installed otherwise; updated by hand.
@@ -68,7 +71,9 @@ impl Installation {
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(Path::to_path_buf));
-        if cfg!(windows) && exe_dir.is_some_and(|dir| dir.join("uninstall.exe").is_file()) {
+        if crate::portable::is_portable() {
+            Self::Portable
+        } else if cfg!(windows) && exe_dir.is_some_and(|dir| dir.join("uninstall.exe").is_file()) {
             Self::WindowsInstaller
         } else if cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some() {
             // The AppImage runtime names the file it was started from.
@@ -78,9 +83,18 @@ impl Installation {
         }
     }
 
-    /// Which file of a release updates this installation from within PrePoLix.
+    /// Which file of a release updates this installation.
     fn wants(&self, asset_name: &str) -> bool {
-        *self == Self::WindowsInstaller && asset_name.ends_with("-setup.exe")
+        match self {
+            Self::WindowsInstaller => asset_name.ends_with("-setup.exe"),
+            Self::Portable => asset_name.ends_with("-windows-portable.zip"),
+            Self::AppImage | Self::Other => false,
+        }
+    }
+
+    /// Whether PrePoLix installs the release's file itself ("Update Now").
+    fn installs_itself(&self) -> bool {
+        *self == Self::WindowsInstaller
     }
 
     /// Whether PrePoLix asks for updates at startup: not in an AppImage, whose manager does.
@@ -94,6 +108,10 @@ impl Installation {
             Self::WindowsInstaller => {
                 "Installed with the Windows installer: updates are downloaded and installed from \
                  within PrePoLix."
+            }
+            Self::Portable => {
+                "Portable version: new versions are announced with a link to the new ZIP file, \
+                 which you unpack yourself."
             }
             Self::AppImage => {
                 "Running as AppImage: an AppImage manager such as Gear Lever or AppImageLauncher \
@@ -620,7 +638,7 @@ fn release_ui(
             });
     }
     ui.add_space(4.0);
-    let installable = release.asset.is_some();
+    let installable = release.asset.is_some() && installation.installs_itself();
     let note = match installation {
         Installation::WindowsInstaller if installable => {
             "PrePoLix closes to install the update and starts again afterwards. Save your \
@@ -628,6 +646,14 @@ fn release_ui(
         }
         Installation::WindowsInstaller => {
             "The release has no installer. Download the new version from the release page."
+        }
+        Installation::Portable if release.asset.is_some() => {
+            "Download the new ZIP file and unpack it next to this folder. Copy the Settings \
+             folder over to keep your settings."
+        }
+        Installation::Portable => {
+            "The release has no portable ZIP file. Download the new version from the release \
+             page."
         }
         Installation::AppImage => "Your AppImage manager installs the new version.",
         Installation::Other => {
@@ -640,6 +666,16 @@ fn release_ui(
     ui.horizontal(|ui| {
         if installable && ui.button("Update Now").clicked() {
             update = true;
+        }
+        if *installation == Installation::Portable
+            && let Some(asset) = &release.asset
+            && ui
+                .button("Download ZIP")
+                .on_hover_text(&asset.name)
+                .clicked()
+        {
+            open_page(&asset.url, output);
+            close = true;
         }
         if ui.button("Open Release Page").clicked() {
             open_page(&release.page, output);
@@ -770,6 +806,8 @@ mod tests {
              "digest": "sha256:ABCDEF"},
             {"name": "prepolix-0.3.0-x86_64.AppImage.zsync", "size": 5,
              "browser_download_url": "https://example.com/a.zsync", "digest": null},
+            {"name": "prepolix-0.3.0-windows-portable.zip", "size": 77,
+             "browser_download_url": "https://example.com/portable.zip"},
             {"name": "prepolix-0.3.0-x86_64.AppImage", "size": 99,
              "browser_download_url": "https://example.com/a.AppImage"}
         ]
@@ -784,6 +822,13 @@ mod tests {
         assert_eq!(asset.name, "prepolix-0.3.0-setup.exe");
         assert_eq!(asset.size, 1234);
         assert_eq!(asset.sha256.as_deref(), Some("abcdef"));
+        // The portable version links to the new ZIP, but does not install it.
+        let portable = parse_release(RELEASE, &Installation::Portable).unwrap();
+        assert_eq!(
+            portable.asset.unwrap().url,
+            "https://example.com/portable.zip"
+        );
+        assert!(!Installation::Portable.installs_itself());
         // An AppImage manager updates the AppImage.
         let appimage = parse_release(RELEASE, &Installation::AppImage).unwrap();
         assert_eq!(appimage.asset, None);
