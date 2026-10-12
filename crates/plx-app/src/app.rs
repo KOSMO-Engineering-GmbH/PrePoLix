@@ -238,6 +238,8 @@ pub struct AnalysisWindow {
     import_when_loaded: Vec<PathBuf>,
     /// Whether to solve once the analysis is loaded, for Update Project.
     solve_when_loaded: bool,
+    /// The workspace to switch to once the analysis is loaded.
+    show_when_loaded: Option<TreeView>,
 }
 
 impl AnalysisWindow {
@@ -320,7 +322,13 @@ impl AnalysisWindow {
             loading: None,
             import_when_loaded: Vec::new(),
             solve_when_loaded: false,
+            show_when_loaded: None,
         }
+    }
+
+    /// Shows this workspace, as soon as the analysis is loaded.
+    pub fn show_workspace(&mut self, view: TreeView) {
+        self.show_when_loaded = Some(view);
     }
 
     /// Imports these files into the analysis as soon as it is loaded.
@@ -343,6 +351,24 @@ impl AnalysisWindow {
             self.workbench.results_changed = true;
             self.workbench.symbols_shown = None;
         }
+    }
+
+    /// Takes over the items `names` of a category of another analysis, see
+    /// [`crate::links::apply_bundle`]; returns the names taken.
+    pub fn apply_bundle(
+        &mut self,
+        source: &plx_model::FeModel,
+        link: &plx_io::project::Link,
+        names: &[String],
+        ahead: &[String],
+    ) -> Vec<String> {
+        let Some(model) = &mut self.workbench.model else {
+            return link.inherited.clone();
+        };
+        let taken = crate::links::apply_bundle(&mut model.fe, source, link, names, ahead);
+        self.workbench.results_changed = true;
+        self.workbench.symbols_shown = None;
+        taken
     }
 
     /// Makes the analysis continue `source` after its step `step`, see
@@ -1211,6 +1237,9 @@ impl AnalysisWindow {
             let import = std::mem::take(&mut self.import_when_loaded);
             if !import.is_empty() {
                 self.import_paths(import, &ctx);
+            }
+            if let Some(view) = self.show_when_loaded.take() {
+                self.workbench.set_tree_view(view);
             }
             if std::mem::take(&mut self.solve_when_loaded) {
                 self.workbench.solve(&ctx);

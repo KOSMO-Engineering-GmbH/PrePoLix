@@ -20,10 +20,12 @@ belongs to the project and travels with it.
 #screenshot("materials-block.png", [A materials block: Static takes S235, Modal takes all of
   them])
 
-Its rows are #ui("Materials"), which gives all of its materials, and one row per material.
-Drag a row to the #ui("Setup") row of an analysis, or to its #ui("Materials") row or a
-material once #ui("Setup") is open, as with links between analyses (@data-links). All of
-them also pass on materials added to the block later. In the analysis window the linked
+Its rows are #ui("Materials"), which gives all of its materials, and below it one row per
+material; the arrow in front of #ui("Materials") hides and shows them. Drag a row to the
+#ui("Setup") row of an analysis, or to its #ui("Materials") row or a material once
+#ui("Setup") is open, as with links between analyses (@data-links). A link of all materials
+also passes on materials added to the block later; while the block shows its materials, it is
+drawn as a wire per material. In the analysis window the linked
 materials carry the link sign and are read-only; #ui("Open Materials") in their dialog opens
 the block's editor.
 

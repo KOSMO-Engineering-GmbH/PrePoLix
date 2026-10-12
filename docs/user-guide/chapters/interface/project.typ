@@ -76,12 +76,17 @@ date. Within the solution, PrePoLix also remembers which steps are unchanged, so
 can start after them (@restart).
 
 The pins on both sides of a row take and give links. Blue wires carry data (geometry, mesh,
-setup items), orange wires carry results and green wires carry the state after a step.
+setup items), orange wires carry results and green wires carry the state after a step. A round
+pin on the left takes one wire, a tall one (the categories of the setup) takes any number, and
+the green square takes the state of another analysis (@data-links).
 
 === Working with the schematic
 
 - *Double-click* a block to open its analysis in its own window. If the window is open
   already, it comes to the front. The header of an open analysis says #ui("(open)").
+  Double-clicking a row opens the window in the matching workspace: #ui("Geometry") and
+  #ui("Mesh") in the Geometry workspace, #ui("Setup") and its categories in the FE Model
+  workspace, and #ui("Results") in the Results workspace.
 - *Drag* a block by its header to move it, drag the background to pan, and scroll to zoom.
   Double-click the background to see all blocks.
 - *Drag* from a pin on the right of a row to a pin on the left of a row of another block to

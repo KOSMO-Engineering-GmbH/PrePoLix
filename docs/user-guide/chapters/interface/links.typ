@@ -59,9 +59,38 @@ dialog instead of the item's own:
 A linked mesh follows the source: when the source is meshed again, the target's solution is out
 of date.
 
-#note[A linked category replaces the whole category of the target, so its own materials, say,
-  are gone while the link exists. A linked single item replaces only the target's item of the
-  same name, or is added to the category.]
+==== Pins: single values and collections
+
+The pins on the left of the rows have two shapes, like the sockets of a node editor:
+
+#table(
+  columns: (22%, 1fr),
+  stroke: (x, y) => if y == 0 { (bottom: 0.7pt) } else { (bottom: 0.3pt + luma(200)) },
+  inset: (x: 5pt, y: 4pt),
+  table.header([*Pin*], [*Takes*]),
+  [Round], [One value: the geometry, the mesh, the whole setup, a single item or the results
+    of a step. A new wire replaces the old one, and the output pane says so ("Modal no longer
+    takes Setup > Materials > Steel from Static").],
+  [Tall, rounded], [A collection: the categories of the setup (#ui("Materials"),
+    #ui("Sections"), #ui("Steps") and so on). It takes any number of wires, from one analysis
+    or from several, and the items of the target that are its own stay.],
+  [Green square], [The state after a step of another analysis (@state-links).],
+)
+
+#screenshot("project-pins.png", [The materials of Static linked to Modal as a whole: Steel and
+  Aluminium come through, Copper is left out and Rubber is Modal's own])
+
+A linked category is a bundle of links of its items. Open the category in both blocks to see a
+wire per item. Items the source gets later come through as well. To leave one item out,
+right-click its pin in the target, or double-click it in the tree of the target's window and
+choose #ui("Unlink"): the target keeps its copy and can edit it, and the pin of the category
+turns lighter, with a dot. Its tooltip counts the items that come through ("2 of 3 items from
+Static"). Drag the item's own wire again to take it back.
+
+When two links bring an item of the same name, the one made later wins. An own item of the target with the name of a linked one is covered by it, and its copy
+of the linked item stays once that item is left out or the link is removed. Linked steps come
+before the target's own steps, in the order of the links. A link of the whole #ui("Setup") is a
+single value: it takes all categories of the source in place of the target's.
 
 === Taking results of a step <results-links>
 

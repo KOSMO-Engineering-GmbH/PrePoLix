@@ -21,6 +21,7 @@ use crate::model_properties::{DialogResult, ModelPropertiesDialog};
 use crate::node_icons::{self, NodeIcon};
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::status::{self, AnalysisStatus, CellState};
+use crate::tree::TreeView;
 
 /// Storage key of the project file open at exit, reopened at the next start.
 const LAST_PROJECT_KEY: &str = "last_project";
@@ -76,6 +77,11 @@ impl Node {
 
     fn of_kind(kind: Kind, id: u64, name: String, data: ProjectAnalysis) -> Self {
         let space = data.model.properties.space;
+        // A materials block shows its materials at first.
+        let expanded = match kind {
+            Kind::Materials => BTreeSet::from([material_set_path()]),
+            _ => BTreeSet::new(),
+        };
         let mut node = Self {
             id,
             name,
@@ -84,7 +90,7 @@ impl Node {
             window: None,
             window_position: None,
             status: None,
-            expanded: BTreeSet::new(),
+            expanded,
             space,
         };
         node.refresh_closed();
@@ -187,6 +193,14 @@ impl Node {
 /// What a link copies into its target.
 enum Payload {
     Setup(Box<plx_model::FeModel>),
+    /// What a link of a category takes: the source's model, the names of the items it takes
+    /// and those linked items of the target that come before them, see
+    /// [`links::apply_bundle`].
+    Bundle {
+        fe: Box<plx_model::FeModel>,
+        names: Vec<String>,
+        ahead: Vec<String>,
+    },
     Geometry(Option<plx_model::Geometry>),
     Mesh(Box<links::MeshCopy>),
     /// The step of the source's results and their file, see [`links::apply_results`].
@@ -205,8 +219,8 @@ enum Action {
     New(egui::Pos2),
     /// A new materials block at the position.
     AddMaterials(egui::Pos2),
-    /// Open the analysis' window, on the tab of a cell if given.
-    Open(u64),
+    /// Open the analysis' window, in the workspace of a cell if given.
+    Open(u64, Option<TreeView>),
     Solve(u64),
     Rename(u64),
     Duplicate(u64),
@@ -349,7 +363,7 @@ impl ProjectApp {
             let properties = app.settings.new_model.clone();
             let id = app.add_analysis(&name, egui::pos2(40.0, 40.0), properties);
             app.startup_import = files;
-            app.open_window(&cc.egui_ctx, id);
+            app.open_window(&cc.egui_ctx, id, None);
         } else if let Some(path) = cc.storage.and_then(stored_last_project) {
             // Without files on the command line, the project open at the last exit opens.
             app.open(&cc.egui_ctx, path);
@@ -470,7 +484,7 @@ impl ProjectApp {
             .map(|(graph_id, _)| graph_id)
     }
 
-    fn open_window(&mut self, ctx: &egui::Context, id: u64) {
+    fn open_window(&mut self, ctx: &egui::Context, id: u64, view: Option<TreeView>) {
         match self.nodes.iter().find(|n| n.id == id).map(|n| n.kind) {
             Some(Kind::Analysis) => {}
             Some(Kind::Materials) => {
@@ -495,6 +509,9 @@ impl ProjectApp {
             // Brought to the front.
             let viewport = analysis_viewport(id);
             ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
+            if let (Some(view), Some(window)) = (view, &mut node.window) {
+                window.show_workspace(view);
+            }
             return;
         }
         let Some(data) = node.data.take() else {
@@ -503,6 +520,9 @@ impl ProjectApp {
         let mut window = AnalysisWindow::new(render_state, settings, &node.name);
         window.set_project_folder(folder);
         window.set_links(incoming, Vec::new());
+        if let Some(view) = view {
+            window.show_workspace(view);
+        }
         window.load(ctx, path, data);
         if !import.is_empty() {
             window.import_after_load(import);
@@ -885,7 +905,7 @@ impl ProjectApp {
                 return;
             };
             let opened = self.node(id).is_some_and(|n| n.window.is_none());
-            self.open_window(ctx, id);
+            self.open_window(ctx, id, None);
             self.updating.push((id, opened));
             if let Some(window) = self.node(id).and_then(|n| n.window.as_mut()) {
                 window.solve_when_loaded();
@@ -1029,22 +1049,34 @@ impl ProjectApp {
 
     fn schematic(&mut self, ui: &mut egui::Ui) -> Vec<Action> {
         let mut incoming: HashMap<u64, Vec<(Vec<String>, String)>> = HashMap::new();
+        let mut bundles: HashMap<u64, Vec<Bundle>> = HashMap::new();
         for link in &self.links {
             if let Some(source) = self.nodes.iter().find(|n| n.id == link.source) {
                 (incoming.entry(link.target).or_default())
                     .extend(links::filled_paths(link, &source.name));
+                if links::is_bundle(link) {
+                    bundles.entry(link.target).or_default().push(Bundle {
+                        path: link.item.clone(),
+                        source: source.name.clone(),
+                        taken: link.inherited.len(),
+                        excluded: link.excluded.len(),
+                    });
+                }
             }
         }
         let blocks: Vec<BlockView> = (self.nodes.iter())
             .map(|n| {
                 let fe = n.link_data().map(|d| d.fe);
                 let rows = match (n.kind, &n.status) {
-                    (Kind::Materials, _) => fe.map(material_rows).unwrap_or_default(),
+                    (Kind::Materials, _) => fe
+                        .map(|fe| material_rows(fe, &n.expanded))
+                        .unwrap_or_default(),
                     (Kind::Analysis, Some(status)) => block_rows(
                         status,
                         fe,
                         &n.expanded,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                        bundles.get(&n.id).map_or(&[][..], Vec::as_slice),
                     ),
                     (Kind::Analysis, None) => Vec::new(),
                 };
@@ -1100,14 +1132,31 @@ impl ProjectApp {
             let (Some(source), Some(target)) = (block(link.source), block(link.target)) else {
                 continue;
             };
-            let output = shown_row(&source.rows, &links::output_path(link));
-            let input = shown_row(&target.rows, links::slot(link));
+            // A link of a category is a bundle of links of its items: a wire per item
+            // between the rows that show it, one wire while both categories are closed.
+            let paths: Vec<(Vec<String>, Vec<String>)> =
+                if links::is_bundle(link) && !link.inherited.is_empty() {
+                    (link.inherited.iter())
+                        .map(|name| {
+                            let mut path = link.item.clone();
+                            path.push(name.clone());
+                            (path.clone(), path)
+                        })
+                        .collect()
+                } else {
+                    vec![(links::output_path(link), links::slot(link).to_vec())]
+                };
             let nodes = (self.graph_node(link.source), self.graph_node(link.target));
-            if let (Some(output), Some(input), (Some(from), Some(to))) = (output, input, nodes) {
-                wanted.insert((
-                    egui_snarl::OutPinId { node: from, output },
-                    egui_snarl::InPinId { node: to, input },
-                ));
+            for (output, input) in paths {
+                let output = shown_row(&source.rows, &output);
+                let input = shown_row(&target.rows, &input);
+                if let (Some(output), Some(input), (Some(from), Some(to))) = (output, input, nodes)
+                {
+                    wanted.insert((
+                        egui_snarl::OutPinId { node: from, output },
+                        egui_snarl::InPinId { node: to, input },
+                    ));
+                }
             }
         }
         let wires: Vec<_> = self.graph.wires().collect();
@@ -1210,13 +1259,45 @@ impl ProjectApp {
         } else {
             item.clone()
         };
+        // An item of a category the target takes from the same source already: taken
+        // again if it was left out.
+        if let [cell, category, name] = slot.as_slice()
+            && cell == links::SETUP
+            && !results
+            && let Some(bundle) = self.links.iter_mut().find(|l| {
+                l.source == source
+                    && l.target == target
+                    && links::is_bundle(l)
+                    && links::setup_category(l) == Some(category)
+            })
+        {
+            let text = match bundle.excluded.iter().position(|n| n == name) {
+                Some(at) => {
+                    bundle.excluded.remove(at);
+                    format!("{to} takes {name} from {from} again, with the rest of {category}.")
+                }
+                None => format!("{to} takes {name} from {from} already, with all of {category}."),
+            };
+            self.output.push(text);
+            self.sync_due = true;
+            return;
+        }
+        // What the source has of the category a category or an item goes to.
+        let source_entries = match slot.as_slice() {
+            [cell, category, ..] if cell == links::SETUP && !results => (self.nodes.iter())
+                .find(|n| n.id == source)
+                .and_then(Node::link_data)
+                .map(|d| links::entries(d.fe, category))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
         let usage = |link: &Link| links::ResultsUse::of(link);
         let new_usage = usage(&Link {
             source,
             target,
             item: item.clone(),
             slot: slot.clone(),
-            inherited: Vec::new(),
+            ..Default::default()
         });
         let overlaps = |link: &Link| {
             if link.target != target || links::is_results(link) != results {
@@ -1238,6 +1319,20 @@ impl ProjectApp {
                     };
             }
             let other = links::slot(link);
+            // A category is a collection: links of categories and items of it from other
+            // sources stay, and the later one wins an item both have.
+            if let ([a, b, ..], [c, d, ..]) = (other, slot.as_slice())
+                && a == links::SETUP
+                && c == links::SETUP
+            {
+                return b == d
+                    && match (other.len(), slot.len()) {
+                        (3, 3) => other == slot.as_slice(),
+                        (2, 2) => link.source == source,
+                        (3, 2) => link.source == source || source_entries.contains(&other[2]),
+                        _ => false,
+                    };
+            }
             let mesh_and_geometry = |a: &[String], b: &[String]| {
                 a.first().is_some_and(|c| c == links::MESH)
                     && b.first().is_some_and(|c| c == links::GEOMETRY)
@@ -1255,6 +1350,25 @@ impl ProjectApp {
                 links::label(&link.item),
                 self.name_of(link.source)
             ));
+        }
+        // An item a category link of another source offers too comes from here now.
+        if let [_, category, name] = slot.as_slice()
+            && !results
+        {
+            let others: Vec<String> = (self.links.iter())
+                .filter(|l| {
+                    l.target == target
+                        && links::is_bundle(l)
+                        && links::setup_category(l) == Some(category)
+                        && l.inherited.contains(name)
+                })
+                .map(|l| self.name_of(l.source))
+                .collect();
+            for other in others {
+                self.output.push(format!(
+                    "{to} takes {name} from {from} in place of {other}."
+                ));
+            }
         }
         let (what, step) = (links::label(&item), slot.get(1).map_or("", String::as_str));
         let text = match new_usage {
@@ -1280,7 +1394,7 @@ impl ProjectApp {
             target,
             slot: if results { slot } else { Vec::new() },
             item,
-            inherited: Vec::new(),
+            ..Default::default()
         });
         self.sync_due = true;
     }
@@ -1314,7 +1428,7 @@ impl ProjectApp {
             target,
             item: vec![links::STATE.to_owned(), step],
             slot: vec![links::STATE.to_owned()],
-            inherited: Vec::new(),
+            ..Default::default()
         });
         self.sync_due = true;
     }
@@ -1449,6 +1563,46 @@ impl ProjectApp {
             }
         }
         self.sync_due = true;
+    }
+
+    /// Leaves out an item of the categories that links take as a whole, named by the pin of
+    /// its row in the source or in the target: the target keeps its copy, which is its own
+    /// from then on.
+    fn exclude(
+        &mut self,
+        source: Option<&(u64, Vec<String>)>,
+        target: Option<&(u64, Vec<String>)>,
+    ) {
+        let item = |end: Option<&(u64, Vec<String>)>, id: u64, category: &[String]| {
+            end.map(|(at, path)| {
+                (*at == id && path.len() == category.len() + 1 && links::covers(category, path))
+                    .then(|| path[category.len()].clone())
+            })
+        };
+        let mut left_out = Vec::new();
+        for link in self.links.iter_mut().filter(|l| links::is_bundle(l)) {
+            let name = match (
+                item(source, link.source, &link.item),
+                item(target, link.target, &link.item),
+            ) {
+                (Some(Some(a)), Some(Some(b))) if a == b => a,
+                (Some(Some(a)), None) | (None, Some(Some(a))) => a,
+                _ => continue,
+            };
+            if link.inherited.contains(&name) && !link.excluded.contains(&name) {
+                link.excluded.push(name.clone());
+                link.inherited.retain(|n| *n != name);
+                left_out.push((link.source, link.target, name));
+            }
+        }
+        for (source, target, name) in left_out {
+            self.output.push(format!(
+                "{} no longer takes {name} from {}; it keeps its copy.",
+                self.name_of(target),
+                self.name_of(source)
+            ));
+            self.sync_due = true;
+        }
     }
 
     /// Removes the links that `remove` picks; the targets keep their copies. A target that
@@ -1701,6 +1855,53 @@ impl ProjectApp {
             }
             Some(links::SETUP) => {
                 let (data, own) = (data?, target.link_data()?);
+                if let Some(category) = links::setup_category(link) {
+                    // The links of a category and its items to the same target: a later one
+                    // wins an item both offer.
+                    let at = self.links.iter().position(|l| l == link)?;
+                    let same = |l: &&Link| {
+                        l.target == link.target && links::setup_category(l) == Some(category)
+                    };
+                    let offers = |l: &Link| -> Vec<String> {
+                        let Some(fe) = (self.nodes.iter())
+                            .find(|n| n.id == l.source)
+                            .and_then(Node::link_data)
+                            .map(|d| d.fe)
+                        else {
+                            return Vec::new();
+                        };
+                        let present = links::entries(fe, category);
+                        (links::offered(fe, l).into_iter())
+                            .filter(|name| present.contains(name))
+                            .collect()
+                    };
+                    let later: Vec<String> = self.links[at + 1..]
+                        .iter()
+                        .filter(same)
+                        .flat_map(offers)
+                        .collect();
+                    if links::is_bundle(link) {
+                        let names: Vec<String> = (links::offered(data.fe, link).into_iter())
+                            .filter(|name| !later.contains(name))
+                            .collect();
+                        if links::bundle_up_to_date(data.fe, own.fe, link, &names) {
+                            return None;
+                        }
+                        let ahead = self.links[..at]
+                            .iter()
+                            .filter(same)
+                            .flat_map(offers)
+                            .collect();
+                        return Some(Payload::Bundle {
+                            fe: Box::new(data.fe.clone()),
+                            names,
+                            ahead,
+                        });
+                    }
+                    if link.item.get(2).is_some_and(|name| later.contains(name)) {
+                        return None;
+                    }
+                }
                 if !links::exists(data, path)
                     || links::fingerprint(data, path) == links::fingerprint(own, path)
                 {
@@ -1758,6 +1959,20 @@ impl ProjectApp {
             }
             return inherited;
         }
+        if let Payload::Bundle { fe, names, ahead } = payload {
+            let taken = match &mut node.window {
+                Some(window) => {
+                    let taken = window.apply_bundle(&fe, link, &names, &ahead);
+                    window.message(format!("{} taken from {source}", links::label(path)));
+                    taken
+                }
+                None => {
+                    let model = &mut node.data.as_mut()?.model;
+                    links::apply_bundle(model, &fe, link, &names, &ahead)
+                }
+            };
+            return Some(taken);
+        }
         if let Some(window) = &mut node.window {
             match payload {
                 Payload::Setup(fe) => {
@@ -1773,7 +1988,7 @@ impl ProjectApp {
                     window.message(format!("Mesh taken from {source}"));
                 }
                 Payload::Results(global, file) => window.apply_results(link, global, file),
-                Payload::Chain { .. } => {}
+                Payload::Chain { .. } | Payload::Bundle { .. } => {}
             }
             return None;
         }
@@ -1798,7 +2013,7 @@ impl ProjectApp {
             Payload::Results(global, file) => {
                 links::apply_results(&mut data.model, link, global, file);
             }
-            Payload::Chain { .. } => {}
+            Payload::Chain { .. } | Payload::Bundle { .. } => {}
         }
         None
     }
@@ -1858,7 +2073,7 @@ impl ProjectApp {
             Action::AddMaterials(pos) => {
                 self.add_materials(pos);
             }
-            Action::Open(id) => self.open_window(ctx, id),
+            Action::Open(id, view) => self.open_window(ctx, id, view),
             Action::Solve(id) => self.solve_chain(id),
             Action::Rename(id) => {
                 let name = self
@@ -1892,13 +2107,16 @@ impl ProjectApp {
             }
             Action::Split(id, step) => self.split(id, step),
             Action::Merge(id) => self.merge(id),
-            Action::Unlink { source, target } => self.unlink(|link| {
-                source.as_ref().is_none_or(|(id, path)| {
-                    link.source == *id && links::covers(path, &links::output_path(link))
-                }) && target.as_ref().is_none_or(|(id, path)| {
-                    link.target == *id && links::covers(path, links::slot(link))
+            Action::Unlink { source, target } => {
+                self.exclude(source.as_ref(), target.as_ref());
+                self.unlink(|link| {
+                    source.as_ref().is_none_or(|(id, path)| {
+                        link.source == *id && links::covers(path, &links::output_path(link))
+                    }) && target.as_ref().is_none_or(|(id, path)| {
+                        link.target == *id && links::covers(path, links::slot(link))
+                    })
                 })
-            }),
+            }
         }
     }
 
@@ -2143,15 +2361,31 @@ impl ProjectApp {
                 Request::OpenAnalysis(name) => {
                     if let Some(source) = self.nodes.iter().find(|n| n.name == name) {
                         let source = source.id;
-                        self.open_window(ctx, source);
+                        self.open_window(ctx, source, None);
                     }
                 }
                 // Unlinking what a state link took makes the analysis independent.
-                Request::Unlink(path) => self.unlink(|l| {
-                    l.target == id && (links::covers(&path, links::slot(l)) || links::is_state(l))
-                }),
+                Request::Unlink(path) => {
+                    self.exclude(None, Some(&(id, path.clone())));
+                    self.unlink(|l| {
+                        l.target == id
+                            && (links::covers(&path, links::slot(l)) || links::is_state(l))
+                    });
+                }
             }
         }
+    }
+}
+
+/// The workspace a double-click on the row at `path` opens the analysis in: Geometry and
+/// Mesh in the Geometry workspace, the setup in the FE Model workspace, Results in the
+/// Results workspace.
+fn workspace_of(path: &[String]) -> Option<TreeView> {
+    match path.first().map(String::as_str) {
+        Some(links::GEOMETRY | links::MESH) => Some(TreeView::Geometry),
+        Some(links::SETUP) => Some(TreeView::FeModel),
+        Some(links::RESULTS) => Some(TreeView::Results),
+        _ => None,
     }
 }
 
@@ -2258,7 +2492,20 @@ struct Row {
     output: bool,
     /// The analysis a link fills the row from.
     linked_from: Option<String>,
+    /// Whether the row is a collection, whose pin takes any number of wires, and whether a
+    /// category link to it leaves out items.
+    collection: bool,
+    partial: bool,
     tip: String,
+}
+
+/// A link of a whole category to a block, for its row: from where, how many items it takes
+/// and how many it leaves out.
+struct Bundle {
+    path: Vec<String>,
+    source: String,
+    taken: usize,
+    excluded: usize,
 }
 
 /// How a block of the schematic looks: what the viewer needs of an analysis.
@@ -2282,6 +2529,7 @@ fn block_rows(
     fe: Option<&plx_model::FeModel>,
     expanded: &BTreeSet<Vec<String>>,
     incoming: &[(Vec<String>, String)],
+    bundles: &[Bundle],
 ) -> Vec<Row> {
     let from = |path: &[String]| {
         (incoming.iter())
@@ -2299,6 +2547,8 @@ fn block_rows(
             input: linkable,
             output: linkable,
             linked_from: from(&path),
+            collection: false,
+            partial: false,
             tip: format!("{name}: {}", state.text()),
             path,
         }
@@ -2322,6 +2572,8 @@ fn block_rows(
                   up to it, and CalculiX solves only its own steps."
                 .into(),
             linked_from: continues,
+            collection: false,
+            partial: false,
             path: state,
         },
         cell(links::GEOMETRY, NodeIcon::Geometry, status.geometry, true),
@@ -2344,6 +2596,27 @@ fn block_rows(
             let entries = fe
                 .map(|fe| links::entries(fe, category))
                 .unwrap_or_default();
+            let linked: Vec<&Bundle> = bundles.iter().filter(|b| b.path == path).collect();
+            let mut tip = if category == "Initial Conditions" {
+                "Initial Conditions: drag to another analysis to link them all, or drop the \
+                 results of a thermal step here to start at its temperatures"
+                    .to_owned()
+            } else {
+                format!("{category}: drag to another analysis to link them all")
+            };
+            tip.push_str(
+                ".\nA collection: it takes any number of links, and its own items stay. \
+                 Right-click an item's pin to leave it out of a linked category.",
+            );
+            for bundle in &linked {
+                tip.push_str(&format!(
+                    "\n{} of {} items from {}.",
+                    bundle.taken,
+                    bundle.taken + bundle.excluded,
+                    bundle.source
+                ));
+            }
+            let sources: Vec<&str> = linked.iter().map(|b| b.source.as_str()).collect();
             rows.push(Row {
                 text: if entries.is_empty() {
                     category.to_owned()
@@ -2356,14 +2629,11 @@ fn block_rows(
                 expander: (!entries.is_empty()).then_some(open),
                 input: true,
                 output: true,
-                linked_from: from(&path),
-                tip: if category == "Initial Conditions" {
-                    "Initial Conditions: drag to another analysis to link them all, or drop the \
-                     results of a thermal step here to start at its temperatures"
-                        .into()
-                } else {
-                    format!("{category}: drag to another analysis to link them all")
-                },
+                linked_from: from(&path)
+                    .or_else(|| (!sources.is_empty()).then(|| sources.join(", "))),
+                collection: links::is_collection(&path),
+                partial: linked.iter().any(|b| b.excluded > 0),
+                tip,
                 path: path.clone(),
             });
             if open {
@@ -2380,6 +2650,8 @@ fn block_rows(
                         input: true,
                         output: true,
                         linked_from: from(&path),
+                        collection: false,
+                        partial: false,
                         path,
                     });
                 }
@@ -2411,6 +2683,8 @@ fn block_rows(
             input: true,
             output: step.active,
             linked_from: from(&path),
+            collection: false,
+            partial: false,
             tip,
             path,
         });
@@ -2418,24 +2692,28 @@ fn block_rows(
     rows
 }
 
-/// The rows of a materials block: all materials, then each of them, to link to analyses.
-fn material_rows(fe: &plx_model::FeModel) -> Vec<Row> {
-    let path = vec![links::SETUP.to_owned(), "Materials".to_owned()];
+/// The rows of a materials block: all materials, then each of them while that row is open,
+/// to link to analyses.
+fn material_rows(fe: &plx_model::FeModel, expanded: &BTreeSet<Vec<String>>) -> Vec<Row> {
+    let path = material_set_path();
+    let open = expanded.contains(&path);
     let mut rows = vec![Row {
         text: format!("Materials ({})", fe.materials.len()),
         depth: 0,
         icon: NodeIcon::Materials,
         state: None,
-        expander: None,
+        expander: (!fe.materials.is_empty()).then_some(open),
         input: false,
         output: !fe.materials.is_empty(),
         linked_from: None,
+        collection: false,
+        partial: false,
         tip: "All materials: drag them to the Materials row of an analysis, which then takes \
               each of them, also those added here later"
             .into(),
         path: path.clone(),
     }];
-    for material in &fe.materials {
+    for material in fe.materials.iter().filter(|_| open) {
         let mut path = path.clone();
         path.push(material.name.clone());
         rows.push(Row {
@@ -2451,10 +2729,17 @@ fn material_rows(fe: &plx_model::FeModel) -> Vec<Row> {
             input: false,
             output: true,
             linked_from: None,
+            collection: false,
+            partial: false,
             path,
         });
     }
     rows
+}
+
+/// The row of all materials of a materials block, open when the block is added.
+fn material_set_path() -> Vec<String> {
+    vec![links::SETUP.to_owned(), "Materials".to_owned()]
 }
 
 /// "materials block" as "Materials Block", for window titles.
@@ -2579,7 +2864,7 @@ impl SnarlViewer<u64> for Viewer {
         }
         let (steps, continues, kind) = (block.steps.clone(), block.continues.clone(), block.kind);
         if label.double_clicked() {
-            self.actions.push(Action::Open(id));
+            self.actions.push(Action::Open(id, None));
         }
         let tip = match kind {
             Kind::Analysis => "Double-click opens the analysis in its own window.",
@@ -2609,7 +2894,7 @@ impl SnarlViewer<u64> for Viewer {
         snarl: &mut Snarl<u64>,
     ) -> impl egui_snarl::ui::SnarlPin + 'static {
         let Some((id, row)) = self.row(snarl, pin.id.node, pin.id.input) else {
-            return hidden_pin();
+            return BlockPin::single(hidden_pin());
         };
         let row = row.clone();
         let (rect, response) =
@@ -2677,11 +2962,11 @@ impl SnarlViewer<u64> for Viewer {
         if toggled || (row.expander.is_some() && response.double_clicked()) {
             self.actions.push(Action::Toggle(id, row.path.clone()));
         } else if response.double_clicked() {
-            self.actions.push(Action::Open(id));
+            self.actions.push(Action::Open(id, workspace_of(&row.path)));
         }
         let color = wire_color(&row.path);
         if row.path.first().is_some_and(|c| c == links::STATE) {
-            PinInfo::square().with_fill(color).with_wire_color(color)
+            BlockPin::single(PinInfo::square().with_fill(color).with_wire_color(color))
         } else if row.input {
             // A wire takes the mixed colour of its two pins: a wire from the results of a
             // step is orange on both ends, whichever row takes them.
@@ -2694,9 +2979,14 @@ impl SnarlViewer<u64> for Viewer {
             } else {
                 color
             };
-            PinInfo::circle().with_fill(color).with_wire_color(wire)
+            let info = PinInfo::circle().with_fill(color).with_wire_color(wire);
+            BlockPin {
+                info,
+                collection: row.collection,
+                partial: row.partial,
+            }
         } else {
-            hidden_pin()
+            BlockPin::single(hidden_pin())
         }
     }
 
@@ -2961,6 +3251,72 @@ fn paint_space(painter: &egui::Painter, rect: egui::Rect, space: ModelSpace, col
     }
 }
 
+/// The input pin of a row: round for a single value, which takes one wire, a new one in
+/// place of the old; a tall rounded rectangle for a collection, which takes any number of
+/// wires, like Blender's multi-input sockets.
+struct BlockPin {
+    info: PinInfo,
+    collection: bool,
+    /// A category link to the collection leaves out items: drawn lighter.
+    partial: bool,
+}
+
+impl BlockPin {
+    fn single(info: PinInfo) -> Self {
+        Self {
+            info,
+            collection: false,
+            partial: false,
+        }
+    }
+}
+
+impl egui_snarl::ui::SnarlPin for BlockPin {
+    fn pin_rect(&self, x: f32, y0: f32, y1: f32, size: f32) -> egui::Rect {
+        let size = if self.collection {
+            egui::vec2(size * 0.7, size * 1.4)
+        } else {
+            egui::vec2(size, size)
+        };
+        egui::Rect::from_center_size(egui::pos2(x, (y0 + y1) * 0.5), size)
+    }
+
+    fn draw(
+        self,
+        snarl_style: &SnarlStyle,
+        style: &egui::Style,
+        rect: egui::Rect,
+        painter: &egui::Painter,
+    ) -> egui_snarl::ui::PinWireInfo {
+        if !self.collection {
+            return self.info.draw(snarl_style, style, rect, painter);
+        }
+        let fill = self.info.get_fill(snarl_style, style);
+        let stroke = self.info.get_stroke(snarl_style, style);
+        let hovered = (painter.ctx().pointer_hover_pos()).is_some_and(|p| rect.contains(p));
+        let shown = if hovered || self.partial {
+            fill.lerp_to_gamma(egui::Color32::WHITE, 0.45)
+        } else {
+            fill
+        };
+        painter.rect(
+            rect,
+            rect.width() * 0.5,
+            shown,
+            stroke,
+            egui::StrokeKind::Middle,
+        );
+        if self.partial {
+            // A dot: not all items of the category come through the link.
+            painter.circle_filled(rect.center(), rect.width() * 0.18, fill);
+        }
+        egui_snarl::ui::PinWireInfo {
+            color: self.info.wire_color.unwrap_or(fill),
+            style: (self.info.wire_style).unwrap_or(egui_snarl::ui::WireStyle::Bezier5),
+        }
+    }
+}
+
 /// The pin of a row that takes or gives no link: there, but not to be seen.
 fn hidden_pin() -> PinInfo {
     PinInfo::circle()
@@ -2985,14 +3341,14 @@ fn node_menu(
     };
     if kind.is_source() {
         // Sources have no steps and are not solved.
-        entry(ui, "Edit …", Action::Open(id));
+        entry(ui, "Edit …", Action::Open(id, None));
         ui.separator();
         entry(ui, "Rename …", Action::Rename(id));
         entry(ui, "Duplicate", Action::Duplicate(id));
         entry(ui, "Delete …", Action::Delete(id));
         return;
     }
-    entry(ui, "Open", Action::Open(id));
+    entry(ui, "Open", Action::Open(id, None));
     entry(ui, "Solve", Action::Solve(id));
     ui.separator();
     let split = steps.len() > 1;
@@ -3151,7 +3507,7 @@ mod tests {
         let mut target = plx_model::FeModel::default();
         links::apply_setup(&mut target, data.fe, &steel);
         assert_eq!(target.materials, set.materials);
-        let rows = material_rows(data.fe);
+        let rows = material_rows(data.fe, &node.expanded);
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.output && !r.input));
         assert_eq!(rows[1].path, steel);
