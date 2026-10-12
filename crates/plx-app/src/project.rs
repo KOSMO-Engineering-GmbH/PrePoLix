@@ -1694,8 +1694,10 @@ impl ProjectApp {
             self.output.push(format!("Not split while {reason}."));
             return;
         }
-        let tail: Vec<plx_model::Step> = fe.steps[index + 1..].to_vec();
-        let moved: Vec<String> = tail.iter().map(|s| s.name.clone()).collect();
+        let moved: Vec<String> = fe.steps[index + 1..]
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
         let position = (self.graph_node(id))
             .and_then(|g| self.graph.get_node_info(g))
             .map_or(self.free_position(), |info| {
@@ -1704,9 +1706,10 @@ impl ProjectApp {
         let Some(new) = self.continue_from(id, step.clone(), position) else {
             return;
         };
-        if let Some(data) = self.node(new).and_then(|n| n.data.as_mut()) {
-            data.model.steps = tail;
-        }
+        let kept = match self.node(new).and_then(|n| n.data.as_mut()) {
+            Some(data) => links::split_after(&fe, index, &mut data.model),
+            None => links::split_after(&fe, index, &mut plx_model::FeModel::default()),
+        };
         // What took the results or state of a moved step takes them from the new analysis.
         for link in &mut self.links {
             let moved_step = link.item.get(1).is_some_and(|s| moved.contains(s));
@@ -1714,8 +1717,6 @@ impl ProjectApp {
                 link.source = new;
             }
         }
-        let mut kept = fe.clone();
-        kept.steps.truncate(index + 1);
         let path = [links::SETUP.to_owned(), "Steps".to_owned()];
         self.set_steps(id, &kept, &path);
         self.output.push(format!(
@@ -1757,9 +1758,7 @@ impl ProjectApp {
         if !self.close_window(id) {
             return;
         }
-        let own = links::own_steps(&target, &link);
-        let moved: Vec<String> = own.iter().map(|s| s.name.clone()).collect();
-        source.steps.extend(own);
+        let moved = links::merge_into(&mut source, &target, &link);
         let path = [links::SETUP.to_owned(), "Steps".to_owned()];
         self.set_steps(link.source, &source, &path);
         // What took results or states of the merged analysis takes them from the other one.
@@ -1776,16 +1775,20 @@ impl ProjectApp {
         self.sync_due = true;
     }
 
-    /// Replaces the steps of an analysis with those of `fe`.
+    /// Replaces the steps and the user keywords of an analysis with those of `fe`.
     fn set_steps(&mut self, id: u64, fe: &plx_model::FeModel, path: &[String]) {
         let Some(node) = self.node(id) else {
             return;
         };
         match &mut node.window {
-            Some(window) => window.apply_setup(fe, path),
+            Some(window) => {
+                window.apply_setup(fe, path);
+                window.set_user_keywords(fe.user_keywords.clone());
+            }
             None => {
                 if let Some(data) = &mut node.data {
                     links::apply_setup(&mut data.model, fe, path);
+                    data.model.user_keywords = fe.user_keywords.clone();
                 }
                 node.refresh_closed();
             }
