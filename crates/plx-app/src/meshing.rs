@@ -17,8 +17,6 @@ use crate::numeric;
 use crate::selection::{History, Operation, PartPicks, Picker};
 use crate::viewport::{BoxSelect, Preview};
 
-const ERROR: egui::Color32 = egui::Color32::from_rgb(200, 0, 0);
-
 /// The rows of the meshing parameters in a two-column grid.
 fn parameters_ui(ui: &mut egui::Ui, d: &mut MeshingParameters, units: UnitSystem) {
     ui.label("Max. element size");
@@ -99,7 +97,10 @@ impl MeshSetupWindow {
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| parameters_ui(ui, d, units));
                 if d.max_size <= 0.0 {
-                    ui.colored_label(ERROR, "The max. element size must be greater than 0.");
+                    ui.colored_label(
+                        crate::style::error(),
+                        "The max. element size must be greater than 0.",
+                    );
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -361,7 +362,7 @@ impl MeshItemEditor {
                 let current = type_index(&self.draft.kind);
                 // PrePoMax's list of item types; an edited item keeps its type.
                 egui::Frame::group(ui.style())
-                    .fill(crate::style::WINDOW)
+                    .fill(crate::style::window())
                     .show(ui, |ui| {
                         ui.set_min_width(360.0);
                         ui.add_enabled_ui(self.index.is_none(), |ui| {
@@ -388,7 +389,7 @@ impl MeshItemEditor {
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| self.form(ui));
                 if let Some(error) = &self.error {
-                    ui.colored_label(ERROR, error);
+                    ui.colored_label(crate::style::error(), error);
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {

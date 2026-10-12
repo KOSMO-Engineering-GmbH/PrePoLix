@@ -14,7 +14,6 @@ use crate::model::SECONDARY_HIGHLIGHT_COLOR;
 use crate::results::{Legend, format_legend_value, format_value};
 
 const MARGIN: f32 = 20.0;
-const TEXT: Color32 = Color32::BLACK;
 /// Legend band height; PrePoMax's boxes are a third wider than high.
 const BAND_HEIGHT: f32 = 18.0;
 const SCALE_BAR_WIDTH: f32 = 400.0;
@@ -197,7 +196,7 @@ pub fn draw(
     }
     if let Some(([a, b], name)) = &overlay.result_path {
         let (a, b) = (project(camera, rect, *a), project(camera, rect, *b));
-        let stroke = Stroke::new(2.5, PATH_COLOR);
+        let stroke = Stroke::new(2.5, crate::style::lift(PATH_COLOR));
         painter.line_segment([a, b], stroke);
         for end in [a, b] {
             painter.circle(end, 4.0, Color32::WHITE, stroke);
@@ -207,7 +206,7 @@ pub fn draw(
             Align2::LEFT_BOTTOM,
             name,
             font(),
-            PATH_COLOR,
+            crate::style::lift(PATH_COLOR),
         );
     }
     if overlay.show_scale_bar {
@@ -275,7 +274,7 @@ fn dash_dotted(painter: &Painter, a: Pos2, b: Pos2) {
         return;
     }
     let direction = (b - a) / length;
-    let stroke = Stroke::new(1.5, AXIS_COLOR);
+    let stroke = Stroke::new(1.5, crate::style::lift(AXIS_COLOR));
     let mut position = 0.0;
     'line: loop {
         for (dash, drawn) in PATTERN {
@@ -337,16 +336,16 @@ fn triad_buttons(
 /// A hot spot path: a line from the toe, a square on the toe and rings on the read-out
 /// points.
 fn draw_path(painter: &egui::Painter, points: &[Pos2]) {
-    const COLOR: Color32 = Color32::from_rgb(0, 70, 200);
+    let color = crate::style::lift(Color32::from_rgb(0, 70, 200));
     let Some((&toe, readouts)) = points.split_first() else {
         return;
     };
     if let Some(&last) = readouts.last() {
-        painter.line_segment([toe, last], egui::Stroke::new(1.5, COLOR));
+        painter.line_segment([toe, last], egui::Stroke::new(1.5, color));
     }
-    painter.rect_filled(Rect::from_center_size(toe, vec2(6.0, 6.0)), 0.0, COLOR);
+    painter.rect_filled(Rect::from_center_size(toe, vec2(6.0, 6.0)), 0.0, color);
     for &point in readouts {
-        painter.circle(point, 3.5, Color32::WHITE, egui::Stroke::new(1.5, COLOR));
+        painter.circle(point, 3.5, Color32::WHITE, egui::Stroke::new(1.5, color));
     }
 }
 
@@ -394,7 +393,7 @@ fn draw_legend(
     let titles: Vec<_> = legend
         .title
         .lines()
-        .map(|l| painter.layout_no_wrap(l.to_string(), font(), TEXT))
+        .map(|l| painter.layout_no_wrap(l.to_string(), font(), crate::style::viewport_text()))
         .collect();
     let levels = legend.levels();
     let above = legend.above.as_ref().filter(|o| o.shown);
@@ -410,7 +409,13 @@ fn draw_legend(
     labels.extend(below.iter().map(|o| o.value));
     let values: Vec<_> = labels
         .into_iter()
-        .map(|value| painter.layout_no_wrap(format_legend_value(value), font(), TEXT))
+        .map(|value| {
+            painter.layout_no_wrap(
+                format_legend_value(value),
+                font(),
+                crate::style::viewport_text(),
+            )
+        })
         .collect();
     let band = vec2(BAND_HEIGHT / 0.75, BAND_HEIGHT);
     let label_height = values.first().map_or(0.0, |g| g.size().y);
@@ -431,7 +436,11 @@ fn draw_legend(
     let mut top = frame.top();
     for galley in titles {
         let height = galley.size().y;
-        painter.galley(pos2(frame.left(), top), galley, TEXT);
+        painter.galley(
+            pos2(frame.left(), top),
+            galley,
+            crate::style::viewport_text(),
+        );
         top += height + 2.0;
     }
     top += 6.0;
@@ -442,13 +451,17 @@ fn draw_legend(
             cell,
             0.0,
             Color32::from_rgb(r, g, b),
-            Stroke::new(1.0, TEXT),
+            Stroke::new(1.0, crate::style::viewport_text()),
             StrokeKind::Middle,
         );
     }
     for (i, galley) in values.into_iter().enumerate() {
         let y = top + i as f32 * band.y - galley.size().y * 0.5;
-        painter.galley(pos2(frame.left() + band.x + 8.0, y), galley, TEXT);
+        painter.galley(
+            pos2(frame.left() + band.x + 8.0, y),
+            galley,
+            crate::style::viewport_text(),
+        );
     }
     response
 }
@@ -457,7 +470,7 @@ fn draw_legend(
 fn draw_status(ui: &Ui, painter: &Painter, rect: Rect, lines: &[String], offset: &mut Vec2) {
     let galleys: Vec<_> = lines
         .iter()
-        .map(|l| painter.layout_no_wrap(l.clone(), font(), TEXT))
+        .map(|l| painter.layout_no_wrap(l.clone(), font(), crate::style::viewport_text()))
         .collect();
     let width = galleys.iter().map(|g| g.size().x).fold(0.0, f32::max);
     let line_height = galleys.first().map_or(0.0, |g| g.size().y) + 2.0;
@@ -465,14 +478,19 @@ fn draw_status(ui: &Ui, painter: &Painter, rect: Rect, lines: &[String], offset:
         + vec2(2.0 * STATUS_PADDING, STATUS_PADDING);
     let default = pos2(rect.right() - MARGIN - size.x, rect.top() + MARGIN);
     let (frame, _) = drag_label(ui, rect, "status", default, size, offset, Sense::drag());
-    painter.rect_stroke(frame, 0.0, Stroke::new(1.0, TEXT), StrokeKind::Inside);
+    painter.rect_stroke(
+        frame,
+        0.0,
+        Stroke::new(1.0, crate::style::viewport_text()),
+        StrokeKind::Inside,
+    );
     for (i, galley) in galleys.into_iter().enumerate() {
         let pos = frame.min
             + vec2(
                 STATUS_PADDING,
                 STATUS_PADDING * 0.5 + i as f32 * line_height,
             );
-        painter.galley(pos, galley, TEXT);
+        painter.galley(pos, galley, crate::style::viewport_text());
     }
 }
 
@@ -498,7 +516,7 @@ fn draw_scale_bar(
                 true => format!("{} {unit}", format_value(value)),
                 false => format_value(value),
             };
-            painter.layout_no_wrap(text, font(), TEXT)
+            painter.layout_no_wrap(text, font(), crate::style::viewport_text())
         })
         .collect();
     // The outer labels are centred on the bar ends and stick out by half their width.
@@ -523,12 +541,22 @@ fn draw_scale_bar(
             pos2(left + i as f32 * field, top),
             vec2(field, SCALE_BAR_HEIGHT),
         );
-        let fill = if i % 2 == 0 { TEXT } else { Color32::WHITE };
-        painter.rect(cell, 0.0, fill, Stroke::new(1.0, TEXT), StrokeKind::Middle);
+        let fill = if i % 2 == 0 {
+            crate::style::viewport_text()
+        } else {
+            crate::style::label_fill()
+        };
+        painter.rect(
+            cell,
+            0.0,
+            fill,
+            Stroke::new(1.0, crate::style::viewport_text()),
+            StrokeKind::Middle,
+        );
     }
     for (i, galley) in labels.into_iter().enumerate() {
         let x = left + i as f32 * field - galley.size().x * 0.5;
-        painter.galley(pos2(x, frame.top()), galley, TEXT);
+        painter.galley(pos2(x, frame.top()), galley, crate::style::viewport_text());
     }
 }
 
@@ -560,7 +588,7 @@ fn draw_marker(
         return None;
     }
     let painter = ui.painter_at(rect);
-    let galley = painter.layout_no_wrap(text.to_string(), font(), TEXT);
+    let galley = painter.layout_no_wrap(text.to_string(), font(), crate::style::viewport_text());
     let size = galley.size() + 2.0 * MARKER_PADDING;
     // Above right of the point, or mirrored where the view ends.
     let automatic = || {
@@ -587,7 +615,10 @@ fn draw_marker(
         point.y.clamp(frame.top(), frame.bottom()),
     );
     if anchor.distance(point) > 1.0 {
-        painter.line_segment([anchor, point], Stroke::new(1.0, TEXT));
+        painter.line_segment(
+            [anchor, point],
+            Stroke::new(1.0, crate::style::viewport_text()),
+        );
         let direction = (point - anchor).normalized();
         let normal = direction.rot90();
         painter.add(egui::Shape::convex_polygon(
@@ -596,18 +627,22 @@ fn draw_marker(
                 point - direction * 9.0 + normal * 3.0,
                 point - direction * 9.0 - normal * 3.0,
             ],
-            TEXT,
+            crate::style::viewport_text(),
             Stroke::NONE,
         ));
     }
     painter.rect(
         frame,
         0.0,
-        Color32::WHITE,
-        Stroke::new(1.0, TEXT),
+        crate::style::label_fill(),
+        Stroke::new(1.0, crate::style::viewport_text()),
         StrokeKind::Inside,
     );
-    painter.galley(frame.min + MARKER_PADDING, galley, TEXT);
+    painter.galley(
+        frame.min + MARKER_PADDING,
+        galley,
+        crate::style::viewport_text(),
+    );
     Some(response)
 }
 
@@ -631,7 +666,7 @@ fn draw_feature(painter: &Painter, camera: &Camera, rect: Rect, feature: &Featur
             let color = if *selected {
                 SELECTED_FEATURE
             } else {
-                FEATURE_COLOR
+                crate::style::lift(FEATURE_COLOR)
             };
             painter.circle(point, 4.5, Color32::WHITE, Stroke::new(2.0, color));
             painter.circle_filled(point, 1.5, color);
@@ -660,15 +695,15 @@ fn draw_feature(painter: &Painter, camera: &Camera, rect: Rect, feature: &Featur
                 center,
                 30.0,
                 &[
-                    (x, "x", Color32::from_rgb(255, 0, 0)),
-                    (y, "y", Color32::from_rgb(0, 200, 0)),
-                    (z, "z", Color32::from_rgb(0, 0, 255)),
+                    (x, "x", crate::style::lift(Color32::from_rgb(255, 0, 0))),
+                    (y, "y", crate::style::lift(Color32::from_rgb(0, 200, 0))),
+                    (z, "z", crate::style::lift(Color32::from_rgb(0, 0, 255))),
                 ],
             );
             let color = if *selected {
                 SELECTED_FEATURE
             } else {
-                FEATURE_COLOR
+                crate::style::lift(FEATURE_COLOR)
             };
             painter.circle_filled(center, 3.0, color);
             painter.text(
@@ -689,7 +724,7 @@ fn draw_feature(painter: &Painter, camera: &Camera, rect: Rect, feature: &Featur
             let color = if *selected {
                 SELECTED_FEATURE
             } else {
-                FEATURE_COLOR
+                crate::style::lift(FEATURE_COLOR)
             };
             let corners: Vec<Pos2> = corners.iter().map(|&c| project(camera, rect, c)).collect();
             let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 24);
@@ -717,7 +752,11 @@ fn triad(painter: &Painter, camera: &Camera, center: Pos2, length: f32, full: bo
     let axes = [
         (Vec3::X, "X", Color32::from_rgb(255, 0, 0)),
         (Vec3::Y, "Y", Color32::from_rgb(0, 230, 0)),
-        (Vec3::Z, "Z", Color32::from_rgb(0, 0, 255)),
+        (
+            Vec3::Z,
+            "Z",
+            crate::style::lift(Color32::from_rgb(0, 0, 255)),
+        ),
     ];
     let screen = |axis: Vec3| vec2(axis.dot(camera.right()), -axis.dot(camera.up()));
     if full {
@@ -764,7 +803,30 @@ fn arrows(
             ));
         }
         let label_pos = center + v * length + v.normalized() * 9.0;
-        painter.text(label_pos, Align2::CENTER_CENTER, label, font(), TEXT);
+        // The light labels of the dark theme get a dark outline, as they may lie on the model.
+        if crate::style::dark() {
+            for offset in [
+                vec2(1.0, 0.0),
+                vec2(-1.0, 0.0),
+                vec2(0.0, 1.0),
+                vec2(0.0, -1.0),
+            ] {
+                painter.text(
+                    label_pos + offset,
+                    Align2::CENTER_CENTER,
+                    label,
+                    font(),
+                    crate::style::window(),
+                );
+            }
+        }
+        painter.text(
+            label_pos,
+            Align2::CENTER_CENTER,
+            label,
+            font(),
+            crate::style::viewport_text(),
+        );
     }
 }
 

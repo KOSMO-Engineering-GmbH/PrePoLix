@@ -172,7 +172,7 @@ impl GizmoState {
                 painter.circle(end, 4.0, stroke.color, Stroke::new(1.5, HALO));
             }
         }
-        let arrow = style(Handle::Arrow, ARROW_COLOR);
+        let arrow = style(Handle::Arrow, crate::style::lift(ARROW_COLOR));
         let [base, tip] = shapes.arrow;
         painter.line_segment([base, tip], halo(arrow));
         painter.line_segment([base, tip], arrow);

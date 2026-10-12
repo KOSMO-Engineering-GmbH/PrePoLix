@@ -100,9 +100,9 @@ pub fn extremes(data: &XyData) -> Option<[f64; 2]> {
 /// Draws the diagram into `rect` with the value under `hover`.
 pub fn paint(painter: &egui::Painter, rect: Rect, hover: Option<Pos2>, data: &XyData, axes: &Axes) {
     let painter = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
-    painter.rect_filled(rect, 0.0, Color32::WHITE);
+    painter.rect_filled(rect, 0.0, crate::style::label_fill());
     let font = egui::FontId::proportional(12.0);
-    let text = Color32::from_gray(40);
+    let text = crate::style::plot_text();
     let values = (data.curves.iter().chain(&data.guides)).flat_map(|(_, y)| y.iter().copied());
     let y_range = match (axes.y_range, data.y_max) {
         (Some([low, high]), _) if low.is_finite() && high.is_finite() && high > low => {
@@ -140,7 +140,7 @@ pub fn paint(painter: &egui::Painter, rect: Rect, hover: Option<Pos2>, data: &Xy
             area.bottom() - ((y - y0) / (y1 - y0)) as f32 * area.height(),
         )
     };
-    let grid = Stroke::new(1.0, Color32::from_gray(225));
+    let grid = Stroke::new(1.0, crate::style::plot_grid());
     let x_count = (area.width() / 90.0).max(2.0) as usize;
     let y_count = (area.height() / 50.0).max(2.0) as usize;
     for y in ticks(y0, y1, y_count) {
@@ -168,7 +168,7 @@ pub fn paint(painter: &egui::Painter, rect: Rect, hover: Option<Pos2>, data: &Xy
     painter.rect_stroke(
         area,
         0.0,
-        Stroke::new(1.0, Color32::from_gray(80)),
+        Stroke::new(1.0, crate::style::adapt(Color32::from_gray(80))),
         egui::StrokeKind::Inside,
     );
     painter.text(
@@ -188,7 +188,7 @@ pub fn paint(painter: &egui::Painter, rect: Rect, hover: Option<Pos2>, data: &Xy
             .collect();
         plot.extend(egui::Shape::dashed_line(
             &points,
-            Stroke::new(1.5, GUIDE),
+            Stroke::new(1.5, crate::style::adapt(GUIDE)),
             8.0,
             5.0,
         ));
@@ -198,10 +198,11 @@ pub fn paint(painter: &egui::Painter, rect: Rect, hover: Option<Pos2>, data: &Xy
         let last = points.iter().rev().find(|p| area.contains(**p));
         if let (Some(&first), Some(&last)) = (first, last) {
             let at = first.lerp(last, 0.8);
-            let galley = plot.layout_no_wrap(name.clone(), font.clone(), GUIDE);
+            let galley =
+                plot.layout_no_wrap(name.clone(), font.clone(), crate::style::adapt(GUIDE));
             let frame = Rect::from_min_size(at + vec2(2.0, -4.0 - galley.size().y), galley.size());
-            plot.rect_filled(frame.expand(1.0), 2.0, Color32::from_white_alpha(220));
-            plot.galley(frame.min, galley, GUIDE);
+            plot.rect_filled(frame.expand(1.0), 2.0, crate::style::plot_label_fill(220));
+            plot.galley(frame.min, galley, crate::style::adapt(GUIDE));
         }
     }
     for (index, (_, values)) in data.curves.iter().enumerate() {
@@ -246,7 +247,7 @@ pub fn paint(painter: &egui::Painter, rect: Rect, hover: Option<Pos2>, data: &Xy
             });
         if let Some((curve, x, y)) = nearest {
             let p = to_screen(x, y);
-            painter.circle_stroke(p, 4.5, Stroke::new(1.5, Color32::BLACK));
+            painter.circle_stroke(p, 4.5, Stroke::new(1.5, crate::style::text()));
             let label = format!(
                 "{}\n{}: {}\n{}",
                 lines[curve].0,
@@ -254,19 +255,19 @@ pub fn paint(painter: &egui::Painter, rect: Rect, hover: Option<Pos2>, data: &Xy
                 format_value(x as f32),
                 format_value(y as f32)
             );
-            let galley = painter.layout_no_wrap(label, font, Color32::BLACK);
+            let galley = painter.layout_no_wrap(label, font, crate::style::text());
             let mut at = p + vec2(8.0, -8.0 - galley.size().y);
             at.x = at.x.min(area.right() - galley.size().x - 4.0);
             at.y = at.y.max(area.top() + 2.0);
             let frame = Rect::from_min_size(at, galley.size()).expand(3.0);
-            painter.rect_filled(frame, 2.0, Color32::from_white_alpha(230));
+            painter.rect_filled(frame, 2.0, crate::style::plot_label_fill(230));
             painter.rect_stroke(
                 frame,
                 2.0,
-                Stroke::new(1.0, Color32::from_gray(150)),
+                Stroke::new(1.0, crate::style::adapt(Color32::from_gray(150))),
                 egui::StrokeKind::Inside,
             );
-            painter.galley(at, galley, Color32::BLACK);
+            painter.galley(at, galley, crate::style::text());
         }
     }
 }
@@ -281,7 +282,9 @@ fn legend(painter: &egui::Painter, area: Rect, data: &XyData, font: &egui::FontI
         return;
     }
     let galleys: Vec<_> = (entries.iter().take(shown))
-        .map(|(name, _)| painter.layout_no_wrap((*name).clone(), font.clone(), Color32::BLACK))
+        .map(|(name, _)| {
+            painter.layout_no_wrap((*name).clone(), font.clone(), crate::style::text())
+        })
         .collect();
     let width = galleys.iter().map(|g| g.size().x).fold(0.0, f32::max) + 30.0;
     let line = 16.0;
@@ -291,11 +294,11 @@ fn legend(painter: &egui::Painter, area: Rect, data: &XyData, font: &egui::FontI
         pos2(area.right() - width - 8.0, area.top() + 8.0),
         vec2(width, height),
     );
-    painter.rect_filled(frame, 2.0, Color32::from_white_alpha(230));
+    painter.rect_filled(frame, 2.0, crate::style::plot_label_fill(230));
     painter.rect_stroke(
         frame,
         2.0,
-        Stroke::new(1.0, Color32::from_gray(160)),
+        Stroke::new(1.0, crate::style::adapt(Color32::from_gray(160))),
         egui::StrokeKind::Inside,
     );
     for (index, (galley, (_, color))) in galleys.into_iter().zip(&entries).enumerate() {
@@ -308,7 +311,7 @@ fn legend(painter: &egui::Painter, area: Rect, data: &XyData, font: &egui::FontI
             None => {
                 painter.extend(egui::Shape::dashed_line(
                     &sample,
-                    Stroke::new(1.5, GUIDE),
+                    Stroke::new(1.5, crate::style::adapt(GUIDE)),
                     5.0,
                     3.0,
                 ));
@@ -317,7 +320,7 @@ fn legend(painter: &egui::Painter, area: Rect, data: &XyData, font: &egui::FontI
         painter.galley(
             pos2(frame.left() + 26.0, y - galley.size().y / 2.0),
             galley,
-            Color32::BLACK,
+            crate::style::text(),
         );
     }
     if extra > 0 {
@@ -327,7 +330,7 @@ fn legend(painter: &egui::Painter, area: Rect, data: &XyData, font: &egui::FontI
             egui::Align2::LEFT_CENTER,
             format!("… {} more", entries.len() - shown),
             font.clone(),
-            Color32::from_gray(80),
+            crate::style::adapt(Color32::from_gray(80)),
         );
     }
 }

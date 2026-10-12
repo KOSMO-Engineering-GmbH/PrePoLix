@@ -482,7 +482,7 @@ fn field_size(ui: &Ui) -> egui::Vec2 {
 /// Category header like PrePoMax's property grid.
 fn category(ui: &mut Ui, title: &str) {
     let header = egui::Frame::new()
-        .fill(crate::style::CONTROL)
+        .fill(crate::style::control())
         .inner_margin(egui::Margin::symmetric(4, 1));
     header.show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -495,7 +495,7 @@ fn group(ui: &mut Ui, title: &str, contents: impl FnOnce(&mut Ui)) {
     ui.add_space(4.0);
     ui.strong(title);
     egui::Frame::new()
-        .stroke(egui::Stroke::new(1.0, crate::style::BORDER))
+        .stroke(egui::Stroke::new(1.0, crate::style::border()))
         .inner_margin(6)
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());

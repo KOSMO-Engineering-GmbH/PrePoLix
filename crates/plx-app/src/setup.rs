@@ -1112,10 +1112,7 @@ fn symmetry_rows(ui: &mut egui::Ui, normal: &mut Option<[f64; 3]>, region: &Regi
         if let Some(first) = text.get_mut(0..1) {
             first.make_ascii_uppercase();
         }
-        ui.add(
-            egui::Label::new(egui::RichText::new(text).color(egui::Color32::from_rgb(200, 0, 0)))
-                .wrap(),
-        );
+        ui.add(egui::Label::new(egui::RichText::new(text).color(crate::style::error())).wrap());
         ui.end_row();
     }
     ui.label("");
@@ -1814,7 +1811,7 @@ impl Editor {
                         .show(ui, |ui| self.form(ui, model));
                 }
                 if let Some(error) = &self.error {
-                    ui.colored_label(egui::Color32::from_rgb(200, 0, 0), error);
+                    ui.colored_label(crate::style::error(), error);
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -2307,7 +2304,7 @@ impl Editor {
                         {
                             ui.label("");
                             ui.colored_label(
-                                egui::Color32::from_rgb(200, 0, 0),
+                                crate::style::error(),
                                 "Radiation needs the physical constants\n\
                                  (Model Properties).",
                             );

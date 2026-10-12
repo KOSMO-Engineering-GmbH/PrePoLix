@@ -2,7 +2,7 @@
 //! as an editable table and the curve they make; and the amplitude choice of the boundary
 //! condition and load dialogs.
 
-use egui::{Color32, Ui};
+use egui::Ui;
 use plx_model::units::parse_number;
 use plx_model::{Amplitude, AmplitudeTime, FeModel, Quantity, UnitSystem};
 
@@ -148,7 +148,7 @@ pub fn amplitude_form(
         ui.weak(note);
     }
     if let Some(problem) = amplitude.points_problem() {
-        ui.colored_label(Color32::from_rgb(200, 0, 0), problem);
+        ui.colored_label(crate::style::error(), problem);
     }
     let (times, factors): (Vec<f64>, Vec<f64>) =
         amplitude.points.iter().map(|[t, a]| (*t, *a)).unzip();
@@ -246,7 +246,7 @@ pub fn amplitude_row_with(
     {
         ui.label("");
         ui.colored_label(
-            Color32::from_rgb(200, 0, 0),
+            crate::style::error(),
             format!("Amplitude {name} does not exist"),
         );
         ui.end_row();

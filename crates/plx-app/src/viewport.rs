@@ -440,6 +440,8 @@ impl Viewport {
                     self.texture,
                 );
         }
+        self.options.background = crate::style::viewport_background();
+        self.options.wireframe = crate::style::viewport_wireframe();
         self.renderer
             .render(device, &self.render_state.queue, &self.camera, self.options);
         let painter = ui.painter_at(rect);

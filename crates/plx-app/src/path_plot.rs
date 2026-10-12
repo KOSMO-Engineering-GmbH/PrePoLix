@@ -423,13 +423,13 @@ fn draw_box(
         plot.placement.size = size;
     }
     let frame = Rect::from_min_size(rect.min + offset, size);
-    painter.rect_filled(frame, 0.0, Color32::WHITE);
+    painter.rect_filled(frame, 0.0, crate::style::label_fill());
     painter.text(
         frame.min + vec2(6.0, 3.0),
         egui::Align2::LEFT_TOP,
         plot.shown_title(),
         egui::FontId::proportional(13.0),
-        Color32::BLACK,
+        crate::style::text(),
     );
     let area = Rect::from_min_max(frame.min + vec2(0.0, TITLE_HEIGHT), frame.max);
     let hover = response.hover_pos().filter(|_| !response.dragged());
@@ -467,11 +467,11 @@ fn draw_box(
     painter.rect_stroke(
         frame,
         0.0,
-        Stroke::new(1.0, Color32::BLACK),
+        Stroke::new(1.0, crate::style::text()),
         StrokeKind::Inside,
     );
     // Grip lines in the resize corner.
-    let grip = Stroke::new(1.0, Color32::from_gray(140));
+    let grip = Stroke::new(1.0, crate::style::adapt(Color32::from_gray(140)));
     for d in [4.0, 8.0] {
         painter.line_segment([frame.max - vec2(d, 2.0), frame.max - vec2(2.0, d)], grip);
     }
@@ -558,13 +558,13 @@ fn draw_on_path(
             .collect();
         painter.extend(egui::Shape::dashed_line(
             &line,
-            Stroke::new(1.5, Color32::BLACK),
+            Stroke::new(1.5, crate::style::viewport_text()),
             6.0,
             4.0,
         ));
         for &[d, s] in marks.support.iter().chain([&[0.0, marks.hot_spot]]) {
             if s.is_finite() {
-                painter.circle_filled(on_path(d, s), 4.0, MARK);
+                painter.circle_filled(on_path(d, s), 4.0, crate::style::lift(MARK));
             }
         }
     }
@@ -590,7 +590,7 @@ fn draw_on_path(
             anchor(side),
             format_value(value as f32),
             font.clone(),
-            Color32::BLACK,
+            crate::style::viewport_text(),
         );
         let corners = [
             rect.left_top(),

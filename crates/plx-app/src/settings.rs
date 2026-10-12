@@ -52,6 +52,8 @@ impl Settings {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Graphics {
+    /// Light or dark colours, or as the operating system is set.
+    pub theme: crate::style::ThemeChoice,
     /// Axis triad at the global origin of the model.
     pub global_axes: bool,
     /// Axis triad in the bottom right corner showing the view direction.
@@ -62,6 +64,7 @@ pub struct Graphics {
 impl Default for Graphics {
     fn default() -> Self {
         Self {
+            theme: crate::style::ThemeChoice::System,
             global_axes: true,
             view_triad: true,
             scale_bar: true,
@@ -465,8 +468,8 @@ impl SettingsWindow {
             .show(ctx, |ui| {
                 ui.horizontal_top(|ui| {
                     egui::Frame::new()
-                        .fill(crate::style::WINDOW)
-                        .stroke(egui::Stroke::new(1.0, crate::style::BORDER))
+                        .fill(crate::style::window())
+                        .stroke(egui::Stroke::new(1.0, crate::style::border()))
                         .inner_margin(4)
                         .show(ui, |ui| {
                             ui.set_min_size(egui::vec2(130.0, 220.0));
@@ -517,6 +520,19 @@ impl SettingsWindow {
         match self.page {
             Page::Graphics => {
                 let g = &mut self.draft.graphics;
+                ui.horizontal(|ui| {
+                    ui.label("Color theme");
+                    egui::ComboBox::from_id_salt("color theme")
+                        .selected_text(g.theme.label())
+                        .show_ui(ui, |ui| {
+                            for choice in crate::style::ThemeChoice::ALL {
+                                ui.selectable_value(&mut g.theme, choice, choice.label());
+                            }
+                        });
+                })
+                .response
+                .on_hover_text("System follows the light or dark mode of the operating system.");
+                ui.add_space(4.0);
                 ui.checkbox(&mut g.global_axes, "Global axes at the origin");
                 ui.checkbox(
                     &mut g.view_triad,
@@ -662,14 +678,11 @@ impl SettingsWindow {
         });
         match &self.gmsh_check {
             GmshCheck::Done(Ok(text)) => {
-                ui.colored_label(egui::Color32::from_rgb(0, 128, 0), text);
+                ui.colored_label(crate::style::ok(), text);
             }
             GmshCheck::Done(Err(text)) => {
                 ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(text).color(egui::Color32::from_rgb(200, 0, 0)),
-                    )
-                    .wrap(),
+                    egui::Label::new(egui::RichText::new(text).color(crate::style::error())).wrap(),
                 );
             }
             _ => {}
@@ -725,9 +738,9 @@ impl SettingsWindow {
                 .show(ui, |ui| {
                     for result in results {
                         if result.passed {
-                            ui.colored_label(egui::Color32::from_rgb(0, 128, 0), "OK");
+                            ui.colored_label(crate::style::ok(), "OK");
                         } else {
-                            ui.colored_label(egui::Color32::from_rgb(200, 0, 0), "Error");
+                            ui.colored_label(crate::style::error(), "Error");
                         }
                         ui.vertical(|ui| {
                             ui.strong(result.name);
