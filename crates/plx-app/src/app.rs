@@ -132,6 +132,9 @@ struct Workbench {
     menu_part: Option<usize>,
     /// Which of the three trees is shown.
     tree_view: TreeView,
+    /// The workspace the project window asked for while the results bound to the analysis are
+    /// still to open; they must not switch to the Results tab then.
+    pinned_view: Option<TreeView>,
     output: Vec<String>,
     view_command: Option<ViewCommand>,
     /// The result selection or deformation changed; the scene must be rebuilt.
@@ -239,7 +242,7 @@ pub struct AnalysisWindow {
     /// Whether to solve once the analysis is loaded, for Update Project.
     solve_when_loaded: bool,
     /// The workspace to switch to once the analysis is loaded.
-    show_when_loaded: Option<TreeView>,
+    show_when_loaded: Option<Show>,
 }
 
 impl AnalysisWindow {
@@ -273,6 +276,7 @@ impl AnalysisWindow {
                 part_types: Vec::new(),
                 menu_part: None,
                 tree_view: TreeView::FeModel,
+                pinned_view: None,
                 output: Vec::new(),
                 view_command: None,
                 results_changed: false,
@@ -327,8 +331,8 @@ impl AnalysisWindow {
     }
 
     /// Shows this workspace, as soon as the analysis is loaded.
-    pub fn show_workspace(&mut self, view: TreeView) {
-        self.show_when_loaded = Some(view);
+    pub fn show_workspace(&mut self, show: Show) {
+        self.show_when_loaded = Some(show);
     }
 
     /// Imports these files into the analysis as soon as it is loaded.
@@ -1330,8 +1334,18 @@ impl AnalysisWindow {
             if !import.is_empty() {
                 self.import_paths(import, &ctx);
             }
-            if let Some(view) = self.show_when_loaded.take() {
+            if let Some(Show { view, step }) = self.show_when_loaded.take() {
                 self.workbench.set_tree_view(view);
+                if let (Some(name), Some(model)) = (step, &self.workbench.model)
+                    && let Some(i) = model.fe.steps.iter().position(|s| s.name == name)
+                {
+                    self.workbench.tree.selected = Some((TreeView::FeModel, TreeItem::Step(i)));
+                }
+                // The results bound to the analysis open after the model, without taking
+                // the view away again.
+                let bound =
+                    (self.workbench.model.as_ref()).is_some_and(|m| m.bound_results.is_some());
+                self.workbench.pinned_view = (bound && view != TreeView::Results).then_some(view);
             }
             if std::mem::take(&mut self.solve_when_loaded) {
                 self.workbench.solve(&ctx);
@@ -1690,7 +1704,8 @@ impl Workbench {
                         TreeView::Results,
                         TreeItem::Component(view.field, view.component),
                     ));
-                    self.set_tree_view(TreeView::Results);
+                    let shown = results_workspace(&mut self.pinned_view);
+                    self.set_tree_view(shown);
                     // Results of a 2D model are flat in z and seen from the front.
                     if model
                         .mesh
@@ -1892,6 +1907,7 @@ impl Workbench {
                     crate::style::text(),
                 );
                 if response.clicked() {
+                    self.pinned_view = None;
                     self.set_tree_view(view);
                 }
             }
@@ -6788,9 +6804,31 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
     })
 }
 
+/// What the project window asks of a window it opens: the workspace, and a step to select
+/// in the FE Model tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Show {
+    pub view: TreeView,
+    pub step: Option<String>,
+}
+
+/// The workspace after a results file opened: the Results tab, unless the project window
+/// asked for another one when it opened the analysis. The request is used up.
+fn results_workspace(pinned: &mut Option<TreeView>) -> TreeView {
+    pinned.take().unwrap_or(TreeView::Results)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bound_results_keep_the_workspace_the_project_window_asked_for() {
+        let mut pinned = Some(TreeView::Geometry);
+        assert_eq!(results_workspace(&mut pinned), TreeView::Geometry);
+        // Results opened later, e.g. by a solve, show the Results tab again.
+        assert_eq!(results_workspace(&mut pinned), TreeView::Results);
+    }
 
     #[test]
     fn import_into_saved_new_model_keeps_the_project_file() {
