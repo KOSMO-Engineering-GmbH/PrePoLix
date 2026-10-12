@@ -87,7 +87,7 @@ impl Job {
             }
         }
         std::fs::write(work_dir.join(format!("{name}.inp")), input)?;
-        let mut child = Command::new(&solver.executable)
+        let mut child = hide_console(&mut Command::new(&solver.executable))
             .arg(name)
             .current_dir(work_dir)
             .env("OMP_NUM_THREADS", solver.threads.max(1).to_string())
@@ -245,6 +245,18 @@ pub fn parse_sta(text: &str) -> Option<Progress> {
             increment_time: increment_time.parse().ok()?,
         })
     })
+}
+
+/// Keeps a child process from opening a console window on Windows, where every program
+/// started by a GUI program flashes one; elsewhere it changes nothing.
+pub fn hide_console(command: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // `CREATE_NO_WINDOW`
+        command.creation_flags(0x0800_0000);
+    }
+    command
 }
 
 #[cfg(test)]

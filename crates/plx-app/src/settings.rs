@@ -181,8 +181,11 @@ impl Solver {
     /// first time.
     pub fn default_solver(&mut self) -> EquationSolver {
         if self.solvers().is_none()
-            && let Some(solvers) =
-                crate::solver_check::available_solvers(&self.job_solver(), &self.work_dir())
+            && let Some(solvers) = crate::solver_check::available_solvers(
+                &self.job_solver(),
+                &self.work_dir(),
+                &|_, _| {},
+            )
         {
             self.detected = Some(DetectedSolvers {
                 executable: self.executable_key(),
@@ -217,7 +220,8 @@ impl Solver {
             .collect::<Vec<_>>();
         if !untested.is_empty() {
             let work_dir = self.work_dir();
-            if let Some(known) = crate::solver_check::known_keywords(&solver, &work_dir, &untested)
+            if let Some(known) =
+                crate::solver_check::known_keywords(&solver, &work_dir, &untested, &|_, _| {})
                 && let Some(detected) = self.keywords.as_mut()
             {
                 detected.known.extend(known);
@@ -462,7 +466,10 @@ enum GmshCheck {
 enum SolverCheck {
     #[default]
     NotRun,
-    Running(std::sync::mpsc::Receiver<crate::solver_check::Report>),
+    Running(
+        std::sync::mpsc::Receiver<crate::solver_check::Report>,
+        crate::solver_check::SharedProgress,
+    ),
     Done(Vec<crate::solver_check::CheckResult>),
 }
 
@@ -769,7 +776,7 @@ impl SettingsWindow {
 
     /// Button and results of the CalculiX self test, run with the settings in the window.
     fn solver_check_ui(&mut self, ui: &mut egui::Ui) {
-        if let SolverCheck::Running(receiver) = &self.solver_check
+        if let SolverCheck::Running(receiver, _) = &self.solver_check
             && let Ok(report) = receiver.try_recv()
         {
             if let Some(solvers) = report.solvers {
@@ -787,7 +794,7 @@ impl SettingsWindow {
             }
             self.solver_check = SolverCheck::Done(report.checks);
         }
-        let running = matches!(self.solver_check, SolverCheck::Running(_));
+        let running = matches!(self.solver_check, SolverCheck::Running(..));
         ui.horizontal(|ui| {
             let button = ui
                 .add_enabled(!running, egui::Button::new("Test CalculiX"))
@@ -798,17 +805,24 @@ impl SettingsWindow {
                 let (sender, receiver) = std::sync::mpsc::channel();
                 let (solver, work_dir) = (self.draft.solver.job_solver(), self.draft.solver.work_dir());
                 let ctx = ui.ctx().clone();
+                let progress = crate::solver_check::SharedProgress::default();
+                let thread_progress = progress.clone();
                 std::thread::spawn(move || {
-                    let _ = sender.send(crate::solver_check::run(&solver, &work_dir));
+                    let report = crate::solver_check::run(&solver, &work_dir, &thread_progress);
+                    let _ = sender.send(report);
                     ctx.request_repaint();
                 });
-                self.solver_check = SolverCheck::Running(receiver);
+                self.solver_check = SolverCheck::Running(receiver, progress);
             }
             if running {
                 ui.spinner();
                 ui.label("Test running …");
             }
         });
+        if let SolverCheck::Running(_, progress) = &self.solver_check {
+            let progress = progress.lock().map(|p| p.clone()).unwrap_or_default();
+            running_modal(ui.ctx(), &progress);
+        }
         if let SolverCheck::Done(results) = &self.solver_check {
             egui::Grid::new("solver check")
                 .num_columns(2)
@@ -832,6 +846,31 @@ impl SettingsWindow {
             }
         }
     }
+}
+
+/// Modal window over the application while the CalculiX self test runs, which takes a while
+/// on some systems.
+fn running_modal(ctx: &egui::Context, progress: &crate::solver_check::Progress) {
+    egui::Modal::new(egui::Id::new("solver check running")).show(ctx, |ui| {
+        ui.set_width(300.0);
+        ui.heading("Testing CalculiX");
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label("The test is running, please wait.");
+        });
+        ui.add_space(6.0);
+        let step = match progress.count {
+            Some((done, total)) => format!("{} ({} of {total})", progress.step, done + 1),
+            None => progress.step.clone(),
+        };
+        ui.label(step);
+        if let Some((done, total)) = progress.count {
+            ui.add(egui::ProgressBar::new(done as f32 / total.max(1) as f32));
+        }
+    });
+    // The test thread cannot wake the window for each step, so keep it fresh.
+    ctx.request_repaint_after(std::time::Duration::from_millis(100));
 }
 
 #[cfg(test)]

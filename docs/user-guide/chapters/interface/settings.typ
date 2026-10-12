@@ -62,7 +62,9 @@ portable Windows version in the folder `Settings` next to `prepolix.exe` (@porta
     PaStiX, otherwise CalculiX's own choice.],
   [Test CalculiX], [Starts CalculiX, computes a cantilever under a tip load and under pressure,
     compares the results with beam theory, checks which solvers are available and whether
-    CalculiX knows every keyword PrePoLix writes. Each test shows OK or an error.],
+    CalculiX knows every keyword PrePoLix writes. Each test shows OK or an error. While the test runs, a window over the
+    application shows the running step and, for the keyword check, how far it has come; the
+    test can take a while, particularly on Windows.],
 )
 
 #screenshot("calculix-test.png", [Result of #ui("Test CalculiX")])
