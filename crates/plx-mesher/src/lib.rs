@@ -113,8 +113,7 @@ pub struct GeneratedMesh {
     pub warnings: Vec<String>,
 }
 
-/// Reads a STEP, IGES or BREP file. STEP and IGES files are converted to the length unit of
-/// the model's unit system, millimetres without one; BREP files have no unit. The mesh setup
+/// Reads a STEP, IGES or BREP file in the stored SI units, see [`read_files`]. The mesh setup
 /// starts with PrePoMax's sizes for the geometry's extent.
 pub fn import_cad(path: &Path, units: UnitSystem) -> Result<CadImport, GmshError> {
     import_cad_files(&[path.to_path_buf()], units)
@@ -161,16 +160,24 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
     })
 }
 
-/// Reads CAD files into the open Gmsh model, STEP and IGES in the length unit of `units`.
+/// Reads CAD files into the open Gmsh model in the stored SI units ([`plx_model::STORED`]):
+/// STEP and IGES files know their unit; BREP files have none, and their numbers are taken in
+/// the length unit of `units`, the unit system of the model. Without a unit system, nothing
+/// is converted and STEP and IGES files are read in millimetres.
 fn read_files(gmsh: &Gmsh, paths: &[PathBuf], units: UnitSystem) -> Result<(), GmshError> {
-    let unit = match units {
-        UnitSystem::MKgSC | UnitSystem::MTonSC => "M",
-        UnitSystem::InLbSF => "INCH",
-        UnitSystem::MmTonSC | UnitSystem::Unitless => "MM",
-    };
+    let unit = if units.has_units() { "M" } else { "MM" };
+    let brep_scale = units.factor_to(plx_model::Quantity::Length, plx_model::STORED);
     gmsh.set_string("Geometry.OCCTargetUnit", unit)?;
     let imported = paths.iter().try_for_each(|path| {
-        let shapes = gmsh.import_shapes(path)?;
+        let scale = if is_step_file(path) || is_iges_file(path) {
+            1.0
+        } else {
+            brep_scale
+        };
+        gmsh.set_number("Geometry.OCCScaling", scale)?;
+        let shapes = gmsh.import_shapes(path);
+        gmsh.set_number("Geometry.OCCScaling", 1.0)?;
+        let shapes = shapes?;
         if shapes.is_empty() {
             return Err(GmshError::Other(format!(
                 "{} contains no geometry",
@@ -184,6 +191,11 @@ fn read_files(gmsh: &Gmsh, paths: &[PathBuf], units: UnitSystem) -> Result<(), G
     });
     gmsh.set_string("Geometry.OCCTargetUnit", "MM")?;
     imported
+}
+
+fn is_iges_file(path: &Path) -> bool {
+    (path.extension().and_then(|e| e.to_str()))
+        .is_some_and(|e| e.eq_ignore_ascii_case("iges") || e.eq_ignore_ascii_case("igs"))
 }
 
 fn is_step_file(path: &Path) -> bool {
@@ -692,7 +704,7 @@ fn renumber_mesh_items(
 /// Whether two bounding boxes are those of the same entity, read twice.
 fn same_box(a: &BoundingBox, b: &BoundingBox) -> bool {
     let size = (0..3).map(|k| a.1[k] - a.0[k]).fold(0.0, f64::max);
-    let tolerance = 1e-6 * size.max(1.0);
+    let tolerance = 1e-6 * size.max(1e-3);
     (0..3).all(|k| (a.0[k] - b.0[k]).abs() <= tolerance && (a.1[k] - b.1[k]).abs() <= tolerance)
 }
 

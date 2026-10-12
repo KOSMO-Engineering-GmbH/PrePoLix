@@ -35,7 +35,14 @@ pub fn solve_input(mesh: &FeMesh, fe: &FeModel) -> u64 {
         mesh_sets,
         element_types,
     } = fe;
-    hash.add_debug(properties);
+    // The global results of a submodel count by their folder and file name, which change
+    // with the global results they are; where the work directory is does not count.
+    let mut properties = properties.clone();
+    properties.global_results = (properties.global_results.as_deref()).map(|path| {
+        let parts: Vec<_> = path.components().rev().take(2).collect();
+        parts.into_iter().rev().collect()
+    });
+    hash.add_debug(&properties);
     hash.add_debug(materials);
     hash.add_debug(sections);
     hash.add_debug(constraints);
@@ -102,6 +109,18 @@ mod tests {
         fe.result_paths.push(ResultPath::new("Path-1"));
         assert_eq!(solve_input(&mesh, &fe), before);
         fe.steps.push(Step::new_static("Step-1"));
+        assert_ne!(solve_input(&mesh, &fe), before);
+    }
+
+    #[test]
+    fn global_results_count_by_folder_and_name() {
+        let mesh = FeMesh::default();
+        let mut fe = FeModel::default();
+        fe.properties.global_results = Some("/tmp/a/Global-1/global.frd".into());
+        let before = solve_input(&mesh, &fe);
+        fe.properties.global_results = Some("/home/b/Global-1/global.frd".into());
+        assert_eq!(solve_input(&mesh, &fe), before);
+        fe.properties.global_results = Some("/home/b/Global-2/global.frd".into());
         assert_ne!(solve_input(&mesh, &fe), before);
     }
 

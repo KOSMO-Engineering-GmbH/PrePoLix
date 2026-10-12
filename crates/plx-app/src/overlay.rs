@@ -41,6 +41,9 @@ pub struct Overlay {
     pub show_scale_bar: bool,
     /// Length unit written after the scale bar's last label, empty without units.
     pub length_unit: &'static str,
+    /// Factor from the lengths of the view to those the scale bar shows: the model is
+    /// stored in SI units; `None` for 1.
+    pub length_factor: Option<f32>,
     pub show_view_triad: bool,
     /// Selected nodes in render coordinates, drawn as highlighted points.
     pub nodes: Vec<Vec3>,
@@ -210,8 +213,15 @@ pub fn draw(
         );
     }
     if overlay.show_scale_bar {
-        let unit = overlay.length_unit;
-        draw_scale_bar(ui, &painter, rect, camera, unit, &mut offsets.scale_bar);
+        let (unit, factor) = (overlay.length_unit, overlay.length_factor.unwrap_or(1.0));
+        draw_scale_bar(
+            ui,
+            &painter,
+            rect,
+            camera,
+            (unit, factor),
+            &mut offsets.scale_bar,
+        );
     }
     if overlay.show_view_triad {
         let corner = rect.right_bottom() - vec2(24.0 + 45.0, 24.0 + 45.0);
@@ -501,10 +511,10 @@ fn draw_scale_bar(
     painter: &Painter,
     rect: Rect,
     camera: &Camera,
-    unit: &str,
+    (unit, factor): (&str, f32),
     offset: &mut Vec2,
 ) {
-    let world_per_point = camera.pixel_size(rect.width(), rect.height());
+    let world_per_point = camera.pixel_size(rect.width(), rect.height()) * factor;
     let Some((length, width)) = scale_bar_length(world_per_point) else {
         return;
     };

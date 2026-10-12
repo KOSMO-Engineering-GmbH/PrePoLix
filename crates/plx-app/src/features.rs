@@ -91,8 +91,8 @@ pub struct FeatureDialog {
     /// Nodes of the last picked point, shown highlighted.
     marked: BTreeSet<NodeId>,
     error: Option<String>,
-    /// Drag speed of coordinates, from the model size.
-    speed: f64,
+    /// How coordinates are shown and dragged.
+    speed: Coordinates,
     located: Option<Located>,
     /// The selection of a reference point at the centre of faces; clicks in the 3D view
     /// fill it while no point is picked.
@@ -208,7 +208,7 @@ impl FeatureDialog {
             picker: Picker::default(),
             marked: BTreeSet::new(),
             error: None,
-            speed: (size * 0.005).max(1e-9),
+            speed: Coordinates::of(model, size),
             located: None,
             region,
             plot_toggled: false,
@@ -919,6 +919,40 @@ impl FeatureDialog {
     }
 }
 
+/// How the coordinates of a feature are shown and dragged: stored in the model's units,
+/// shown in those it shows, dragged in steps fitting the model's size.
+#[derive(Clone, Copy, Debug)]
+struct Coordinates {
+    stored: plx_model::UnitSystem,
+    shown: plx_model::UnitSystem,
+    speed: f64,
+}
+
+impl Coordinates {
+    /// The components of a direction, which have no unit.
+    const DIRECTION: Self = Self {
+        stored: plx_model::STORED,
+        shown: plx_model::STORED,
+        speed: 0.01,
+    };
+
+    fn of(model: &Model, size: f64) -> Self {
+        let (stored, shown) = (model.stored_units(), model.units());
+        let size = stored.convert(size, plx_model::Quantity::Length, shown);
+        Self {
+            stored,
+            shown,
+            speed: (size * 0.005).max(1e-9),
+        }
+    }
+
+    fn field(self, value: &mut f64) -> egui::DragValue<'_> {
+        numeric::converted(value, self.stored, self.shown, plx_model::Quantity::Length)
+            .speed(self.speed)
+            .max_decimals(6)
+    }
+}
+
 fn names<T>(items: &[T], name: impl Fn(&T) -> &String) -> Vec<&str> {
     items.iter().map(|i| name(i).as_str()).collect()
 }
@@ -1025,7 +1059,7 @@ fn plane_rows(
     plane: &mut Plane,
     fe: &FeModel,
     picking: &mut Option<Slot>,
-    speed: f64,
+    speed: Coordinates,
 ) {
     let kind = match plane.source {
         PlaneSource::CoordinateSystem { .. } => 0,
@@ -1095,7 +1129,7 @@ fn plane_rows(
             });
             ui.end_row();
             ui.label("Distance");
-            ui.add(numeric::drag_value(offset).speed(speed).max_decimals(6));
+            ui.add(speed.field(offset));
             ui.end_row();
         }
         PlaneSource::ThreePoints { points } => {
@@ -1123,7 +1157,7 @@ fn plane_rows(
                 }
             });
             ui.end_row();
-            coordinate_rows(ui, normal, 0.01);
+            coordinate_rows(ui, normal, Coordinates::DIRECTION);
         }
     }
 }
@@ -1162,7 +1196,7 @@ fn reference_point_rows(
     model: &Model,
     region: &mut RegionDraft,
     picking: &mut Option<Slot>,
-    speed: f64,
+    speed: Coordinates,
 ) {
     let fe = &model.fe;
     const COORDINATES: usize = 0;
@@ -1257,12 +1291,12 @@ fn reference_point_rows(
             };
             for (k, axis) in axes.into_iter().enumerate() {
                 ui.label(format!("    {axis}"));
-                let step = if cylindrical && k == 1 { 0.5 } else { speed };
-                ui.add(
-                    numeric::drag_value(&mut coordinates[k])
-                        .speed(step)
-                        .max_decimals(6),
-                );
+                if cylindrical && k == 1 {
+                    let angle = numeric::drag_value(&mut coordinates[k]).speed(0.5);
+                    ui.add(angle.max_decimals(6));
+                } else {
+                    ui.add(speed.field(&mut coordinates[k]));
+                }
                 ui.end_row();
             }
             position_row(ui, point, model);
@@ -1282,12 +1316,15 @@ fn reference_point_rows(
 fn position_row(ui: &mut Ui, point: &ReferencePoint, model: &Model) {
     ui.label("Global position");
     match point.resolve(&model.fe, &model.mesh) {
-        Ok(p) => ui.weak(format!(
-            "({}, {}, {})",
-            format_value(p[0] as f32),
-            format_value(p[1] as f32),
-            format_value(p[2] as f32)
-        )),
+        Ok(p) => {
+            let p = p.map(|c| model.shown(c, plx_model::Quantity::Length));
+            ui.weak(format!(
+                "({}, {}, {})",
+                format_value(p[0] as f32),
+                format_value(p[1] as f32),
+                format_value(p[2] as f32)
+            ))
+        }
         Err(error) => ui.colored_label(crate::style::error(), error),
     };
     ui.end_row();
@@ -1306,7 +1343,7 @@ fn point_rows(
     slot: Slot,
     point: &mut [f64; 3],
     picking: &mut Option<Slot>,
-    speed: f64,
+    speed: Coordinates,
 ) {
     ui.label(RichText::new(label).strong());
     pick_button(ui, slot, picking);
@@ -1321,14 +1358,10 @@ fn pick_button(ui: &mut Ui, slot: Slot, picking: &mut Option<Slot>) {
     }
 }
 
-fn coordinate_rows(ui: &mut Ui, point: &mut [f64; 3], speed: f64) {
+fn coordinate_rows(ui: &mut Ui, point: &mut [f64; 3], speed: Coordinates) {
     for (k, axis) in ["X", "Y", "Z"].into_iter().enumerate() {
         ui.label(format!("    {axis}"));
-        ui.add(
-            numeric::drag_value(&mut point[k])
-                .speed(speed)
-                .max_decimals(6),
-        );
+        ui.add(speed.field(&mut point[k]));
         ui.end_row();
     }
 }
@@ -1341,7 +1374,7 @@ fn point_ref_rows(
     point: &mut PointRef,
     fe: &FeModel,
     picking: &mut Option<Slot>,
-    speed: f64,
+    speed: Coordinates,
 ) {
     ui.label(RichText::new(label).strong());
     let shown = match point {
@@ -1375,12 +1408,15 @@ fn point_ref_rows(
         PointRef::ReferencePoint(name) => {
             ui.label("");
             match fe.reference_point(name) {
-                Some(r) => ui.weak(format!(
-                    "({}, {}, {})",
-                    format_value(r.position[0] as f32),
-                    format_value(r.position[1] as f32),
-                    format_value(r.position[2] as f32)
-                )),
+                Some(r) => {
+                    let [x, y, z] = r.position.map(|v| {
+                        let v = speed
+                            .stored
+                            .convert(v, plx_model::Quantity::Length, speed.shown);
+                        format_value(v as f32)
+                    });
+                    ui.weak(format!("({x}, {y}, {z})"))
+                }
                 None => ui.colored_label(crate::style::error(), "does not exist"),
             };
             ui.end_row();

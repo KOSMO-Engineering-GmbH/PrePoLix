@@ -52,25 +52,26 @@ pub struct Wheel {
 }
 
 impl Default for MovingLoad {
-    /// Two wheels 1000 apart on a path along x, as a starting point for the dialog.
+    /// Two wheels 1 m apart on a path along x, as a starting point for the dialog; in SI
+    /// units like all stored values.
     fn default() -> Self {
         Self {
             system: GLOBAL.into(),
             travel_axis: 0,
             lateral_axis: 1,
             start: 0.0,
-            end: 1000.0,
+            end: 1.0,
             positions: 11,
-            patch_length: 100.0,
-            patch_width: 100.0,
+            patch_length: 0.1,
+            patch_width: 0.1,
             wheels: vec![
                 Wheel {
-                    along: -500.0,
+                    along: -0.5,
                     across: 0.0,
                     force: [0.0; 3],
                 },
                 Wheel {
-                    along: 500.0,
+                    along: 0.5,
                     across: 0.0,
                     force: [0.0; 3],
                 },

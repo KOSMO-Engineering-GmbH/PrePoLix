@@ -129,7 +129,7 @@ impl ContactSearchDialog {
     pub fn new(fe: &FeModel) -> Self {
         Self {
             // PrePoMax's 0.01 mm.
-            distance: UnitSystem::MmTonSC.convert(0.01, Quantity::Length, fe.properties.units),
+            distance: UnitSystem::MmTonSC.stored(0.01, Quantity::Length),
             angle: 35.0,
             group_by: GroupBy::Parts,
             ignore_hidden: true,
@@ -272,7 +272,7 @@ impl ContactSearchDialog {
                 // the properties beside it need more room, without end.
                 ui.horizontal_top(|ui| {
                     let size = egui::vec2(TABLE_WIDTH, 340.0);
-                    ui.allocate_ui(size, |ui| self.table(ui));
+                    ui.allocate_ui(size, |ui| self.table(ui, model.fe.properties.units));
                     ui.add_space(PROPERTY_GAP - 2.0 * ui.spacing().item_spacing.x);
                     ui.vertical(|ui| {
                         ui.set_width(PROPERTIES_WIDTH);
@@ -421,7 +421,7 @@ impl ContactSearchDialog {
         });
     }
 
-    fn table(&mut self, ui: &mut Ui) {
+    fn table(&mut self, ui: &mut Ui, units: UnitSystem) {
         egui::Frame::new()
             .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
             .fill(ui.visuals().extreme_bg_color)
@@ -431,12 +431,12 @@ impl ContactSearchDialog {
                 // Solid scroll bars take their own space instead of covering the last row.
                 ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
                 egui::ScrollArea::both().show(ui, |ui| {
-                    ui.vertical(|ui| self.rows_grid(ui));
+                    ui.vertical(|ui| self.rows_grid(ui, units));
                 });
             });
     }
 
-    fn rows_grid(&mut self, ui: &mut Ui) {
+    fn rows_grid(&mut self, ui: &mut Ui, units: UnitSystem) {
         // Selected rows are filled across all columns, as in PrePoMax's table.
         let selected: Vec<bool> = self.rows.iter().map(|r| r.selected).collect();
         let fill = ui.visuals().selection.bg_fill;
@@ -471,7 +471,7 @@ impl ContactSearchDialog {
                     "Surface interaction",
                     "Method",
                     "Adjust",
-                    "Distance",
+                    &format!("Distance [{}]", units.unit(Quantity::Length)),
                 ] {
                     ui.strong(title);
                 }
@@ -503,7 +503,7 @@ impl ContactSearchDialog {
                             String::new()
                         },
                         if row.adjust { "Yes" } else { "No" }.to_string(),
-                        format!("{}", row.distance),
+                        numeric::format_physical(units.shown(row.distance, Quantity::Length)),
                     ];
                     for cell in cells {
                         let mut text = egui::RichText::new(cell);

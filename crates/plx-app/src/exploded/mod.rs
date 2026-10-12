@@ -472,7 +472,7 @@ impl Assembly<'_> {
         for &index in rest {
             let mut moving = boxes[index];
             let mut step = direction.filter(moving.center() - global.center());
-            if step.length_squared() < 1e-6 * global.diagonal() {
+            if step.length_squared() < (1e-6 * global.diagonal()).powi(2) {
                 step = direction.filter(DVec3::ONE);
             }
             step = step.normalize_or_zero() * (0.01 * global.diagonal());

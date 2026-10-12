@@ -142,7 +142,7 @@ pub fn tie_form(ui: &mut Ui, model: &Model, tie: &mut Tie, regions: &mut MasterS
         "Slave nodes farther than this from the master surface are not tied. Untick to \
          let CalculiX choose a tolerance from the mesh.",
         &mut tie.position_tolerance,
-        0.05,
+        UnitSystem::MmTonSC.stored(0.05, Quantity::Length),
         length,
     );
     ui.label("");
@@ -255,7 +255,7 @@ pub fn contact_pair_form(
             "Slave nodes within this distance of the master surface are moved onto it. \
              Untick to move only nodes that penetrate the master surface.",
             &mut pair.adjustment_size,
-            0.01,
+            UnitSystem::MmTonSC.stored(0.01, Quantity::Length),
             length,
         );
     }
@@ -611,7 +611,8 @@ impl Rows<'_> {
                 );
                 let c0_text = "Optional parameter c0 of the linear curve, see \
                                *SURFACE BEHAVIOR in the CalculiX manual.";
-                self.optional(ui, ("c0", c0_text), c0, 1.0, Quantity::Length);
+                let c0_default = UnitSystem::MmTonSC.stored(1.0, Quantity::Length);
+                self.optional(ui, ("c0", c0_text), c0, c0_default, Quantity::Length);
             }
             SurfaceBehavior::Exponential { c0, p0 } => {
                 let c0_text = "Gap at which the contact pressure has dropped to 1 % of p0.";
@@ -663,7 +664,7 @@ impl Rows<'_> {
             ui,
             ("Stick slope", text),
             &mut friction.stick_slope,
-            1e5,
+            UnitSystem::MmTonSC.stored(1e5, Quantity::ForcePerVolume),
             Quantity::ForcePerVolume,
         );
     }

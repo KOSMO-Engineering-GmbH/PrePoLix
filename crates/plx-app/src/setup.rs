@@ -712,8 +712,9 @@ fn moving_rows(ui: &mut Ui, moving: &mut MovingLoad, fe: &FeModel, two_d: bool, 
     if stations.len() > 1 {
         ui.label("");
         ui.weak(format!(
-            "Spacing {}",
-            numeric::format_physical(stations[1] - stations[0])
+            "Spacing {} {}",
+            numeric::format_physical(units.shown(stations[1] - stations[0], Quantity::Length)),
+            units.unit(Quantity::Length)
         ));
         ui.end_row();
     }
@@ -806,11 +807,12 @@ fn moving_rows(ui: &mut Ui, moving: &mut MovingLoad, fe: &FeModel, two_d: bool, 
         std::array::from_fn(|k| moving.wheels.iter().map(|w| w.force[k]).sum::<f64>());
     ui.label("");
     ui.weak(format!(
-        "Total force ({})",
+        "Total force ({}) {}",
         (total.iter().take(if two_d { 2 } else { 3 }))
-            .map(|f| numeric::format_physical(*f))
+            .map(|f| numeric::format_physical(units.shown(*f, Quantity::Force)))
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", "),
+        units.unit(Quantity::Force)
     ));
     ui.end_row();
     for line in [
@@ -1367,7 +1369,7 @@ impl Editor {
                         .map(|m| m.name.clone())
                         .unwrap_or_default(),
                     region: Region::Parts(Vec::new()),
-                    thickness: 1.0,
+                    thickness: plx_model::unit_thickness(),
                     kind: SectionKind::Solid,
                 },
                 RegionDraft::new(ELEMENT_SOURCES, Target::Faces),
@@ -3724,8 +3726,10 @@ fn creep_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
         .on_hover_text("The material creeps in Visco steps; Static steps ignore the creep law.");
     ui.end_row();
     let mut creep = material.creep.unwrap_or_default();
+    ui.label("    A");
+    ui.add_enabled(creeps, creep_coefficient(&mut creep, units));
+    ui.end_row();
     for (label, value) in [
-        ("    A", &mut creep.a),
         ("    Stress exponent n", &mut creep.n),
         ("    Time exponent m", &mut creep.m),
     ] {
@@ -3740,6 +3744,24 @@ fn creep_rows(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     ));
     ui.end_row();
     material.creep = creeps.then_some(creep);
+}
+
+/// The field of Norton's coefficient A, stored for stresses in Pa and shown for stresses
+/// in the units of `units`: the strain rate A * stress^n stays the same, so A scales with
+/// the n-th power of the unit of stress. All unit systems measure time in seconds.
+pub fn creep_coefficient(creep: &mut plx_model::Creep, units: UnitSystem) -> egui::DragValue<'_> {
+    let pascal = units.si_factor(Quantity::Pressure).unwrap_or(1.0);
+    let factor = pascal.powf(creep.n);
+    let a = &mut creep.a;
+    egui::DragValue::from_get_set(move |shown| {
+        if let Some(shown) = shown {
+            *a = shown / factor;
+        }
+        *a * factor
+    })
+    .custom_parser(numeric::parse_number)
+    .custom_formatter(|v, _| numeric::format_physical(v))
+    .speed(0.0)
 }
 
 fn hardening_label(hardening: Hardening) -> &'static str {
@@ -3966,9 +3988,11 @@ fn sensitivity_form(ui: &mut Ui, settings: &mut SensitivityStep, units: UnitSyst
     ui.end_row();
     let mut filter = settings.filter_radius.is_some();
     if ui.checkbox(&mut filter, "Filter radius").changed() {
-        settings.filter_radius = filter.then_some(1.0);
+        settings.filter_radius =
+            filter.then_some(UnitSystem::MmTonSC.stored(1.0, Quantity::Length));
     }
-    let mut radius = settings.filter_radius.unwrap_or(1.0);
+    let mut radius =
+        (settings.filter_radius).unwrap_or(UnitSystem::MmTonSC.stored(1.0, Quantity::Length));
     let field = ui.add_enabled(
         filter,
         numeric::quantity(&mut radius, units, Quantity::Length).speed(0.1),

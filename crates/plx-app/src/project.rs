@@ -2,21 +2,23 @@
 //! blocks of a node graph, each with the state of its cells. An analysis opens in a window of
 //! its own, the [`AnalysisWindow`], which looks like PrePoMax's main window.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
 
 use egui_snarl::ui::{PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
 use plx_io::project::{Link, Project, ProjectAnalysis};
-use plx_model::{ModelSpace, UnitSystem};
+use plx_model::{ModelProperties, ModelSpace};
 
 use crate::app::{AnalysisWindow, Request};
 use crate::icons::{self, Icon};
+use crate::links;
 use crate::model::PROJECT_EXTENSION;
 use crate::model_properties::{DialogResult, ModelPropertiesDialog};
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
-use crate::status::{self, AnalysisStatus};
+use crate::status::{self, AnalysisStatus, CellState};
 use crate::tree_icons::{self, TreeIcon};
 
 /// Storage key of the project file open at exit, reopened at the next start.
@@ -33,12 +35,15 @@ struct Node {
     window_position: Option<egui::Pos2>,
     /// The state of its cells, as last found.
     status: Option<AnalysisStatus>,
-    /// Names of its steps, shown in its block.
-    steps: Vec<String>,
+    /// Rows of its block that are open: the setup and its categories.
+    expanded: BTreeSet<Vec<String>>,
+    /// Its model space, shown in the header of its block.
+    space: ModelSpace,
 }
 
 impl Node {
     fn new(id: u64, name: String, data: ProjectAnalysis) -> Self {
+        let space = data.model.properties.space;
         let mut node = Self {
             id,
             name,
@@ -46,7 +51,8 @@ impl Node {
             window: None,
             window_position: None,
             status: None,
-            steps: Vec::new(),
+            expanded: BTreeSet::new(),
+            space,
         };
         node.refresh_closed();
         node
@@ -63,7 +69,34 @@ impl Node {
                 data.results.as_ref(),
                 false,
             ));
-            self.steps = data.model.steps.iter().map(|s| s.name.clone()).collect();
+        }
+    }
+
+    /// What links read of the analysis; `None` while its window loads it.
+    fn link_data(&self) -> Option<links::Data<'_>> {
+        match (&self.window, &self.data) {
+            (Some(window), _) => window.model().map(|m| links::Data {
+                geometry: m.geometry.as_ref(),
+                mesh: &m.mesh,
+                fe: &m.fe,
+                mesh_inputs: &m.mesh_inputs,
+            }),
+            (None, Some(data)) => Some(links::Data {
+                geometry: data.geometry.as_ref(),
+                mesh: &data.mesh,
+                fe: &data.model,
+                mesh_inputs: &data.mesh_inputs,
+            }),
+            _ => None,
+        }
+    }
+
+    /// The results the analysis keeps.
+    fn bound_results(&self) -> Option<&plx_io::project::BoundResults> {
+        match (&self.window, &self.data) {
+            (Some(window), _) => window.model()?.bound_results.as_ref(),
+            (None, Some(data)) => data.results.as_ref(),
+            _ => None,
         }
     }
 
@@ -76,6 +109,15 @@ impl Node {
     }
 }
 
+/// What a link copies into its target.
+enum Payload {
+    Setup(Box<plx_model::FeModel>),
+    Geometry(Option<plx_model::Geometry>),
+    Mesh(Box<links::MeshCopy>),
+    /// The target's step, the global step and the global results file of a submodel.
+    Results(String, u32, PathBuf),
+}
+
 /// What the user did in the schematic, done after it is drawn.
 enum Action {
     New(egui::Pos2),
@@ -85,7 +127,24 @@ enum Action {
     Rename(u64),
     Duplicate(u64),
     Delete(u64),
+    /// Open or close a row of the block.
+    Toggle(u64, Vec<String>),
+    /// Link `item` of `source` to `slot` of `target`.
+    Link {
+        source: u64,
+        item: Vec<String>,
+        target: u64,
+        slot: Vec<String>,
+    },
+    /// Remove the links of a pin, or the one between two pins.
+    Unlink {
+        source: Option<(u64, Vec<String>)>,
+        target: Option<(u64, Vec<String>)>,
+    },
 }
+
+/// A project read from its file, with notes on its conversion, or why it could not be read.
+type Opened = Result<(Project, Vec<String>), String>;
 
 pub struct ProjectApp {
     render_state: egui_wgpu::RenderState,
@@ -95,8 +154,6 @@ pub struct ProjectApp {
     output: Vec<String>,
     /// The project file; `None` until the project is saved.
     path: Option<PathBuf>,
-    space: ModelSpace,
-    units: UnitSystem,
     nodes: Vec<Node>,
     links: Vec<Link>,
     /// The schematic: a block per analysis, by its id.
@@ -107,16 +164,25 @@ pub struct ProjectApp {
     rename: Option<(u64, String)>,
     /// Analysis to delete once the user agrees.
     confirm_delete: Option<u64>,
-    /// Model space and unit system of the project, while their dialog is open.
-    properties_dialog: Option<ModelPropertiesDialog>,
-    /// A project file being read on a worker thread.
-    opening: Option<(PathBuf, Receiver<Result<Project, String>>)>,
+    /// The properties of a new analysis being asked for, with where its block goes.
+    new_analysis: Option<(egui::Pos2, ModelPropertiesDialog)>,
+    /// A project file being read on a worker thread, with notes on its conversion.
+    opening: Option<(PathBuf, Receiver<Opened>)>,
     /// Analyses Update Project still has to solve, in order, and the one it solves, with
     /// whether the update opened its window.
     update_queue: VecDeque<u64>,
     updating: Option<(u64, bool)>,
     /// Files given on the command line, imported into the first analysis once it is open.
     startup_import: Vec<PathBuf>,
+    /// Fingerprint of the geometry or mesh a link last copied into its target, by target and
+    /// path: copied again once the source's differs.
+    applied: HashMap<(u64, Vec<String>), u64>,
+    /// When links last brought their targets up to date, and whether they have to again now.
+    last_sync: Option<Instant>,
+    sync_due: bool,
+    /// Global results being written for submodels, by the folder they are written to;
+    /// `None` once writing failed.
+    restoring: HashMap<PathBuf, Option<Receiver<Result<PathBuf, String>>>>,
 }
 
 impl ProjectApp {
@@ -144,8 +210,6 @@ impl ProjectApp {
         plx_mesher::set_library_path(settings.gmsh.library());
         let mut app = Self {
             render_state,
-            space: settings.new_model.space,
-            units: settings.new_model.units,
             settings,
             settings_window: None,
             updater: Default::default(),
@@ -157,11 +221,15 @@ impl ProjectApp {
             graph_generation: 0,
             rename: None,
             confirm_delete: None,
-            properties_dialog: None,
+            new_analysis: None,
             opening: None,
             update_queue: VecDeque::new(),
             updating: None,
             startup_import: Vec::new(),
+            applied: HashMap::new(),
+            last_sync: None,
+            sync_due: true,
+            restoring: HashMap::new(),
         };
         if app.settings.updates.check_at_startup && app.updater.installation().checks_at_startup() {
             app.updater.check(&cc.egui_ctx, false);
@@ -177,7 +245,8 @@ impl ProjectApp {
         } else if !files.is_empty() {
             let name = (files[0].file_stem())
                 .map_or_else(|| "Analysis-1".into(), |s| s.to_string_lossy().into_owned());
-            let id = app.add_analysis(&name, egui::pos2(40.0, 40.0));
+            let properties = app.settings.new_model.clone();
+            let id = app.add_analysis(&name, egui::pos2(40.0, 40.0), properties);
             app.startup_import = files;
             app.open_window(&cc.egui_ctx, id);
         } else if let Some(path) = cc.storage.and_then(stored_last_project) {
@@ -213,8 +282,13 @@ impl ProjectApp {
         self.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1
     }
 
-    /// Adds an empty analysis in the project's model space and units; returns its id.
-    fn add_analysis(&mut self, name: &str, position: egui::Pos2) -> u64 {
+    /// Adds an empty analysis with these model properties; returns its id.
+    fn add_analysis(
+        &mut self,
+        name: &str,
+        position: egui::Pos2,
+        properties: ModelProperties,
+    ) -> u64 {
         let id = self.next_id();
         let name = self.unique_name(name);
         let mut data = ProjectAnalysis {
@@ -222,8 +296,7 @@ impl ProjectApp {
             name: name.clone(),
             ..Default::default()
         };
-        data.model.properties.space = self.space;
-        data.model.properties.units = self.units;
+        data.model.properties = properties;
         self.nodes.push(Node::new(id, name, data));
         self.graph.insert_node(position, id);
         id
@@ -303,11 +376,12 @@ impl ProjectApp {
         }
         self.nodes.clear();
         self.links.clear();
+        self.applied.clear();
+        self.restoring.clear();
+        self.sync_due = true;
         self.graph = Snarl::new();
         self.graph_generation += 1;
         self.path = None;
-        self.space = self.settings.new_model.space;
-        self.units = self.settings.new_model.units;
         self.update_queue.clear();
         self.updating = None;
         self.output.push("New project".into());
@@ -331,8 +405,25 @@ impl ProjectApp {
         let (sender, receiver) = std::sync::mpsc::channel();
         let (file, ctx) = (path.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let project = plx_io::project::read_project(&file).map_err(|e| e.to_string());
-            let _ = sender.send(project);
+            let project = plx_io::project::read_project(&file).map(|mut project| {
+                // Format 2 kept the values in the project's unit system.
+                let mut notes = Vec::new();
+                if project.format < plx_model::PROJECT_FORMAT {
+                    for analysis in &mut project.analyses {
+                        analysis.model.properties.space = project.space;
+                        analysis.model.properties.units = project.units;
+                        notes.extend(crate::model::migrate_to_si(analysis));
+                    }
+                    notes.push(
+                        "The project was converted for this version; once saved, it no \
+                         longer opens in older versions."
+                            .into(),
+                    );
+                    project.format = plx_model::PROJECT_FORMAT;
+                }
+                (project, notes)
+            });
+            let _ = sender.send(project.map_err(|e| e.to_string()));
             ctx.request_repaint();
         });
         self.opening = Some((path, receiver));
@@ -348,16 +439,18 @@ impl ProjectApp {
         let path = path.clone();
         self.opening = None;
         match result {
-            Ok(project) => {
+            Ok((project, notes)) => {
                 if !self.close_all_windows() {
                     return;
                 }
+                self.output.extend(notes);
                 self.nodes.clear();
                 self.graph = Snarl::new();
                 self.graph_generation += 1;
-                self.space = project.space;
-                self.units = project.units;
                 self.links = project.links;
+                self.applied.clear();
+                self.restoring.clear();
+                self.sync_due = true;
                 for analysis in project.analyses {
                     let [x, y] = analysis.position;
                     self.graph.insert_node(egui::pos2(x, y), analysis.id);
@@ -399,8 +492,6 @@ impl ProjectApp {
             analyses.push(data);
         }
         Project {
-            space: self.space,
-            units: self.units,
             analyses,
             links: self.links.clone(),
             ..Default::default()
@@ -503,6 +594,7 @@ impl ProjectApp {
             self.output.push(format!("{} deleted", node.name));
         }
         self.links.retain(|l| l.source != id && l.target != id);
+        self.applied.retain(|(target, _), _| *target != id);
         self.update_queue.retain(|&queued| queued != id);
     }
 
@@ -511,9 +603,17 @@ impl ProjectApp {
     fn update_project(&mut self) {
         let mut skipped = Vec::new();
         self.update_queue.clear();
-        for node in &self.nodes {
+        // Sources before their targets; a submodel is solved again after its global model.
+        let ids: Vec<u64> = self.nodes.iter().map(|n| n.id).collect();
+        for id in links::order(&ids, &self.links) {
+            let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+                continue;
+            };
+            let after_source = (self.links.iter()).any(|l| {
+                l.target == id && links::is_results(l) && self.update_queue.contains(&l.source)
+            });
             match &node.status {
-                Some(status) if status.needs_solve() && status.solvable() => {
+                Some(status) if (status.needs_solve() || after_source) && status.solvable() => {
                     self.update_queue.push_back(node.id)
                 }
                 Some(status) if status.needs_solve() => skipped.push(node.name.clone()),
@@ -561,6 +661,11 @@ impl ProjectApp {
             if !failed && self.update_queue.is_empty() {
                 self.output.push("Project updated".into());
             }
+            // The analyses after it take its new results before they are solved.
+            self.sync_due = true;
+            return;
+        }
+        if self.sync_due || self.restoring.values().any(Option::is_some) {
             return;
         }
         let Some(id) = self.update_queue.pop_front() else {
@@ -572,40 +677,6 @@ impl ProjectApp {
         if let Some(window) = self.node(id).and_then(|n| n.window.as_mut()) {
             window.solve_when_loaded();
         }
-    }
-
-    /// Applies the project's model space and units to every analysis; `convert` converts
-    /// their values into the new units, otherwise the numbers stay and apply in them.
-    fn set_space_and_units(&mut self, space: ModelSpace, units: UnitSystem, convert: bool) {
-        // A 2D model space takes no solid elements, and so on.
-        for node in &self.nodes {
-            let mesh = match (&node.window, &node.data) {
-                (Some(window), _) => window.model().map(|m| &m.mesh),
-                (None, Some(data)) => Some(&data.mesh),
-                _ => None,
-            };
-            if let Some(error) = mesh.and_then(|m| crate::model_properties::space_error(space, m)) {
-                self.output
-                    .push(format!("Model space not changed: {}: {error}", node.name));
-                return;
-            }
-        }
-        self.space = space;
-        self.units = units;
-        for node in &mut self.nodes {
-            match &mut node.window {
-                Some(window) => window.set_space_and_units(space, units, convert),
-                None => {
-                    if let Some(data) = &mut node.data {
-                        let notes = crate::model::convert_analysis(data, space, units, convert);
-                        self.output.extend(notes);
-                    }
-                    node.refresh_closed();
-                }
-            }
-        }
-        self.output
-            .push(format!("Project: {}, {}", space.label(), units.label()));
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
@@ -641,20 +712,12 @@ impl ProjectApp {
                 }
             });
             ui.menu_button("Project", |ui| {
-                if ui.button("New Analysis").clicked() {
-                    let at = self.free_position();
-                    self.add_analysis("Analysis-1", at);
+                if ui.button("New Analysis …").clicked() {
+                    self.ask_new_analysis(self.free_position());
                 }
                 let update = egui::Button::new("Update Project");
                 if ui.add(update).on_hover_text(UPDATE_TIP).clicked() {
                     self.update_project();
-                }
-                ui.separator();
-                if ui.button("Model Space and Units …").clicked() {
-                    let mut properties = self.settings.new_model.clone();
-                    properties.space = self.space;
-                    properties.units = self.units;
-                    self.properties_dialog = Some(ModelPropertiesDialog::edit(properties));
                 }
             });
             ui.menu_button("Tools", |ui| {
@@ -693,8 +756,7 @@ impl ProjectApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
             if icons::button(ui, Icon::New, "New Analysis", true, false).clicked() {
-                let at = self.free_position();
-                self.add_analysis("Analysis-1", at);
+                self.ask_new_analysis(self.free_position());
             }
             let can_open = self.opening.is_none();
             if icons::button(ui, Icon::Open, "Open Project (Ctrl+O)", can_open, false).clicked() {
@@ -729,16 +791,38 @@ impl ProjectApp {
     }
 
     fn schematic(&mut self, ui: &mut egui::Ui) -> Vec<Action> {
-        let mut viewer = Viewer {
-            nodes: (self.nodes.iter())
-                .map(|n| BlockView {
+        let mut incoming: HashMap<u64, Vec<(Vec<String>, String)>> = HashMap::new();
+        for link in &self.links {
+            if let Some(source) = self.nodes.iter().find(|n| n.id == link.source) {
+                (incoming.entry(link.target).or_default())
+                    .push((links::slot(link).to_vec(), source.name.clone()));
+            }
+        }
+        let blocks: Vec<BlockView> = (self.nodes.iter())
+            .map(|n| {
+                let fe = n.link_data().map(|d| d.fe);
+                let rows = match &n.status {
+                    Some(status) => block_rows(
+                        status,
+                        fe,
+                        &n.expanded,
+                        incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                    ),
+                    None => Vec::new(),
+                };
+                BlockView {
                     id: n.id,
                     name: n.name.clone(),
-                    status: n.status.clone(),
-                    steps: n.steps.clone(),
+                    space: n.space,
+                    rows,
+                    loading: n.window.as_ref().is_some_and(|w| w.model().is_none()),
                     open: n.window.is_some(),
-                })
-                .collect(),
+                }
+            })
+            .collect();
+        self.sync_wires(&blocks);
+        let mut viewer = Viewer {
+            nodes: blocks,
             actions: Vec::new(),
         };
         SnarlWidget::new()
@@ -760,16 +844,384 @@ impl ProjectApp {
         viewer.actions
     }
 
+    /// Lets the wires of the schematic show the project's links, each between the rows its
+    /// ends are shown in.
+    fn sync_wires(&mut self, blocks: &[BlockView]) {
+        let block = |id: u64| blocks.iter().find(|b| b.id == id);
+        let mut wanted = std::collections::HashSet::new();
+        for link in &self.links {
+            let (Some(source), Some(target)) = (block(link.source), block(link.target)) else {
+                continue;
+            };
+            let output = shown_row(&source.rows, &link.item);
+            let input = shown_row(&target.rows, links::slot(link));
+            let nodes = (self.graph_node(link.source), self.graph_node(link.target));
+            if let (Some(output), Some(input), (Some(from), Some(to))) = (output, input, nodes) {
+                wanted.insert((
+                    egui_snarl::OutPinId { node: from, output },
+                    egui_snarl::InPinId { node: to, input },
+                ));
+            }
+        }
+        let wires: Vec<_> = self.graph.wires().collect();
+        for wire in wires {
+            if !wanted.remove(&wire) {
+                self.graph.disconnect(wire.0, wire.1);
+            }
+        }
+        for (from, to) in wanted {
+            self.graph.connect(from, to);
+        }
+    }
+
+    fn name_of(&self, id: u64) -> String {
+        (self.nodes.iter().find(|n| n.id == id)).map_or_else(String::new, |n| n.name.clone())
+    }
+
+    /// Links `item` of `source` to `slot` of `target`, in place of the links that fill the
+    /// same part of the target.
+    fn link(&mut self, source: u64, item: Vec<String>, target: u64, slot: Vec<String>) {
+        let (from, to) = (self.name_of(source), self.name_of(target));
+        if source == target {
+            return;
+        }
+        if !links::compatible(&item, &slot) {
+            self.output.push(format!(
+                "Not linked: {} of {from} cannot go to {} of {to}.",
+                links::label(&item),
+                links::label(&slot)
+            ));
+            return;
+        }
+        let space = |id: u64| self.nodes.iter().find(|n| n.id == id).map(|n| n.space);
+        if let (Some(a), Some(b)) = (space(source), space(target))
+            && a != b
+        {
+            self.output.push(format!(
+                "Not linked: {from} is {} and {to} {}; linked analyses need the same model \
+                 space.",
+                a.label(),
+                b.label()
+            ));
+            return;
+        }
+        if links::makes_cycle(&self.links, source, target) {
+            self.output.push(format!(
+                "Not linked: {to} comes before {from} already, and a link cannot go back."
+            ));
+            return;
+        }
+        let results = item.first().is_some_and(|c| c == links::RESULTS);
+        // A category or item links into the same place of the target; a step's results go
+        // to the step they are dropped on.
+        let slot = if results { slot } else { item.clone() };
+        let overlaps = |link: &Link| {
+            if link.target != target || links::is_results(link) != results {
+                return false;
+            }
+            if results {
+                // A submodel reads one global results file.
+                return link.source != source || links::slot(link) == slot.as_slice();
+            }
+            let other = links::slot(link);
+            let mesh_and_geometry = |a: &[String], b: &[String]| {
+                a.first().is_some_and(|c| c == links::MESH)
+                    && b.first().is_some_and(|c| c == links::GEOMETRY)
+            };
+            links::covers(other, &slot)
+                || links::covers(&slot, other)
+                || mesh_and_geometry(other, &slot)
+                || mesh_and_geometry(&slot, other)
+        };
+        let replaced: Vec<Link> = self.links.iter().filter(|l| overlaps(l)).cloned().collect();
+        self.links.retain(|l| !overlaps(l));
+        for link in replaced {
+            self.output.push(format!(
+                "{to} no longer takes {} from {}.",
+                links::label(&link.item),
+                self.name_of(link.source)
+            ));
+        }
+        let text = if results {
+            format!(
+                "{to} takes the displacements of {} of {from} in {} (submodel).",
+                links::label(&item),
+                slot.get(1).map_or("", String::as_str)
+            )
+        } else {
+            format!("{to} takes {} from {from}.", links::label(&item))
+        };
+        self.output.push(text);
+        self.applied.retain(|(id, _), _| *id != target);
+        self.links.push(Link {
+            source,
+            target,
+            slot: if results { slot } else { Vec::new() },
+            item,
+        });
+        self.sync_due = true;
+    }
+
+    /// Removes the links that `remove` picks; the targets keep their copies. A target that
+    /// loses its last results link is no submodel any more.
+    fn unlink(&mut self, remove: impl Fn(&Link) -> bool) {
+        let removed: Vec<Link> = self.links.iter().filter(|l| remove(l)).cloned().collect();
+        self.links.retain(|l| !remove(l));
+        for link in removed {
+            let target = link.target;
+            self.output.push(format!(
+                "{} no longer takes {} from {}; it keeps its copy.",
+                self.name_of(target),
+                links::label(&link.item),
+                self.name_of(link.source)
+            ));
+            self.applied
+                .retain(|(id, path), _| *id != target || path != &link.item);
+            let submodel = (self.links.iter()).any(|l| l.target == target && links::is_results(l));
+            if links::is_results(&link)
+                && !submodel
+                && let Some(node) = self.node(target)
+            {
+                match &mut node.window {
+                    Some(window) => window.clear_submodel(),
+                    None => {
+                        if let Some(data) = &mut node.data {
+                            links::clear_submodel(&mut data.model);
+                        }
+                        node.refresh_closed();
+                    }
+                }
+            }
+        }
+        self.sync_due = true;
+    }
+
+    /// Brings what the analyses take through links up to date with their sources: often
+    /// enough to look live, in the order of the links so that a chain is done in one go.
+    fn sync_links(&mut self, ctx: &egui::Context) {
+        self.poll_restoring();
+        let due = self.sync_due
+            || (self.last_sync).is_none_or(|t| t.elapsed() > Duration::from_millis(300));
+        if !due {
+            return;
+        }
+        self.sync_due = false;
+        self.last_sync = Some(Instant::now());
+        let ids: Vec<u64> = self.nodes.iter().map(|n| n.id).collect();
+        for target in links::order(&ids, &self.links) {
+            let to_target: Vec<Link> = (self.links.iter())
+                .filter(|l| l.target == target)
+                .cloned()
+                .collect();
+            let mut incoming = links::Incoming::default();
+            let mut missing = Vec::new();
+            for link in &to_target {
+                let source = self.name_of(link.source);
+                incoming
+                    .paths
+                    .push((links::slot(link).to_vec(), source.clone()));
+                if let Some(payload) = self.payload(link, &mut missing) {
+                    self.apply(target, &source, link, payload);
+                }
+            }
+            if let Some(node) = self.node(target) {
+                match &mut node.window {
+                    Some(window) => window.set_links(incoming, missing),
+                    None => node.refresh_closed(),
+                }
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(300));
+    }
+
+    /// What `link` has to copy into its target to bring it up to date with the source;
+    /// `None` when it is up to date or cannot be brought up to date now. Sources of results
+    /// links that have no results go to `missing`.
+    fn payload(&mut self, link: &Link, missing: &mut Vec<String>) -> Option<Payload> {
+        let source = self.nodes.iter().find(|n| n.id == link.source)?;
+        let target = self.nodes.iter().find(|n| n.id == link.target)?;
+        if let Some(window) = &target.window
+            && (window.busy().is_some() || window.model().is_none())
+        {
+            return None;
+        }
+        let data = source.link_data();
+        let path = &link.item;
+        match path.first().map(String::as_str) {
+            Some(links::RESULTS) => {
+                let step = path.get(1)?;
+                let Some(bound) = source.bound_results() else {
+                    missing.push(source.name.clone());
+                    return None;
+                };
+                let global = links::global_step_number(data?.fe, step)?;
+                let frd = bound.files.iter().find(|f| {
+                    Path::new(&f.name)
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("frd"))
+                })?;
+                let dir = (self.settings.solver.work_dir())
+                    .join(crate::analysis::job_name(&self.project_name()))
+                    .join(crate::analysis::job_name(&target.name))
+                    .join(format!(
+                        "Global-{}-{:016x}",
+                        crate::analysis::job_name(&source.name),
+                        bound.input.unwrap_or_default()
+                    ));
+                let file = dir.join(&frd.name);
+                if !file.is_file() {
+                    match self.restoring.get(&dir) {
+                        Some(Some(_)) => missing.push(source.name.clone()),
+                        Some(None) => {}
+                        None => {
+                            let (sender, receiver) = std::sync::mpsc::channel();
+                            let (bound, folder) = (bound.clone(), dir.clone());
+                            std::thread::spawn(move || {
+                                let written = plx_io::project::restore_results(&bound, &folder)
+                                    .map_err(|e| e.to_string());
+                                let _ = sender.send(written);
+                            });
+                            self.restoring.insert(dir, Some(receiver));
+                            missing.push(source.name.clone());
+                        }
+                    }
+                }
+                let step = links::slot(link).get(1)?.clone();
+                Some(Payload::Results(step, global, file))
+            }
+            Some(links::GEOMETRY | links::MESH) => {
+                let data = data?;
+                if !links::exists(data, path) {
+                    return None;
+                }
+                let print = links::fingerprint(data, path);
+                let key = (link.target, path.clone());
+                if self.applied.get(&key) == Some(&print) {
+                    return None;
+                }
+                self.applied.insert(key, print);
+                Some(if path[0] == links::MESH {
+                    Payload::Mesh(Box::new(links::MeshCopy::of(data)))
+                } else {
+                    Payload::Geometry(data.geometry.cloned())
+                })
+            }
+            Some(links::SETUP) => {
+                let (data, own) = (data?, target.link_data()?);
+                if !links::exists(data, path)
+                    || links::fingerprint(data, path) == links::fingerprint(own, path)
+                {
+                    return None;
+                }
+                Some(Payload::Setup(Box::new(data.fe.clone())))
+            }
+            _ => None,
+        }
+    }
+
+    /// Copies what a link takes into its target, see [`ProjectApp::payload`].
+    fn apply(&mut self, target: u64, source: &str, link: &Link, payload: Payload) {
+        let Some(node) = self.node(target) else {
+            return;
+        };
+        let path = &link.item;
+        if let Some(window) = &mut node.window {
+            match payload {
+                Payload::Setup(fe) => {
+                    window.apply_setup(&fe, path);
+                    window.message(format!("{} taken from {source}", links::label(path)));
+                }
+                Payload::Geometry(geometry) => {
+                    window.apply_geometry(geometry);
+                    window.message(format!("Geometry taken from {source}"));
+                }
+                Payload::Mesh(mesh) => {
+                    window.apply_mesh(*mesh);
+                    window.message(format!("Mesh taken from {source}"));
+                }
+                Payload::Results(step, global, file) => window.apply_submodel(&step, global, file),
+            }
+            return;
+        }
+        let Some(data) = &mut node.data else {
+            return;
+        };
+        match payload {
+            Payload::Setup(fe) => links::apply_setup(&mut data.model, &fe, path),
+            Payload::Geometry(geometry) => data.geometry = geometry,
+            Payload::Mesh(mesh) => {
+                let links::MeshCopy {
+                    geometry,
+                    mesh,
+                    mesh_inputs,
+                    mesh_sets,
+                    element_types,
+                } = *mesh;
+                data.geometry = geometry;
+                data.mesh = mesh;
+                data.mesh_inputs = mesh_inputs;
+                data.model.mesh_sets = mesh_sets;
+                data.model.element_types = element_types;
+            }
+            Payload::Results(step, global, file) => {
+                links::apply_submodel(&mut data.model, &step, global, file);
+            }
+        }
+    }
+
+    /// Picks up global results written for submodels.
+    fn poll_restoring(&mut self) {
+        let mut done = Vec::new();
+        for (dir, receiver) in &self.restoring {
+            if let Some(receiver) = receiver
+                && let Ok(result) = receiver.try_recv()
+            {
+                done.push((dir.clone(), result));
+            }
+        }
+        for (dir, result) in done {
+            match result {
+                Ok(_) => {
+                    self.restoring.remove(&dir);
+                }
+                Err(error) => {
+                    self.output
+                        .push(format!("Global results not written: {error}"));
+                    // Not tried again until the project is opened again.
+                    self.restoring.insert(dir, None);
+                }
+            }
+            self.sync_due = true;
+        }
+    }
+
+    /// Solves the analyses whose results `id` needs and that have none yet, in the order of
+    /// the links, then `id`.
+    fn solve_chain(&mut self, id: u64) {
+        let mut sources = Vec::new();
+        let mut queue = vec![id];
+        while let Some(target) = queue.pop() {
+            for link in self.links.iter().filter(|l| l.target == target) {
+                if links::is_results(link) && !sources.contains(&link.source) {
+                    sources.push(link.source);
+                    queue.push(link.source);
+                }
+            }
+        }
+        sources.retain(|s| (self.nodes.iter()).any(|n| n.id == *s && n.bound_results().is_none()));
+        sources.push(id);
+        let chain = links::order(&sources, &self.links);
+        self.update_queue.retain(|queued| !chain.contains(queued));
+        for id in chain.into_iter().rev() {
+            self.update_queue.push_front(id);
+        }
+    }
+
     fn act(&mut self, ctx: &egui::Context, action: Action) {
         match action {
-            Action::New(pos) => {
-                self.add_analysis("Analysis-1", pos);
-            }
+            Action::New(pos) => self.ask_new_analysis(pos),
             Action::Open(id) => self.open_window(ctx, id),
-            Action::Solve(id) => {
-                self.update_queue.retain(|&queued| queued != id);
-                self.update_queue.push_front(id);
-            }
+            Action::Solve(id) => self.solve_chain(id),
             Action::Rename(id) => {
                 let name = self
                     .nodes
@@ -780,6 +1232,27 @@ impl ProjectApp {
             }
             Action::Duplicate(id) => self.duplicate(id),
             Action::Delete(id) => self.confirm_delete = Some(id),
+            Action::Toggle(id, path) => {
+                if let Some(node) = self.node(id)
+                    && !node.expanded.remove(&path)
+                {
+                    node.expanded.insert(path);
+                }
+            }
+            Action::Link {
+                source,
+                item,
+                target,
+                slot,
+            } => self.link(source, item, target, slot),
+            Action::Unlink { source, target } => self.unlink(|link| {
+                source
+                    .as_ref()
+                    .is_none_or(|(id, path)| link.source == *id && links::covers(path, &link.item))
+                    && target.as_ref().is_none_or(|(id, path)| {
+                        link.target == *id && links::covers(path, links::slot(link))
+                    })
+            }),
         }
     }
 
@@ -873,17 +1346,40 @@ impl ProjectApp {
         }
     }
 
-    fn properties_window(&mut self, ctx: &egui::Context) {
-        let Some(dialog) = &mut self.properties_dialog else {
+    /// Asks for the model space, unit system and type of a new analysis, whose block goes
+    /// to `position`; the last choice is proposed.
+    fn ask_new_analysis(&mut self, position: egui::Pos2) {
+        let properties = ModelProperties {
+            kind: plx_model::ModelKind::General,
+            global_results: None,
+            ..self.settings.new_model.clone()
+        };
+        self.new_analysis = Some((position, ModelPropertiesDialog::create(properties)));
+    }
+
+    fn new_analysis_window(&mut self, ctx: &egui::Context) {
+        let Some((position, dialog)) = &mut self.new_analysis else {
             return;
         };
-        let convert = dialog.convert;
+        let position = *position;
         match dialog.show(ctx, None, None) {
             DialogResult::Open => {}
-            DialogResult::Cancel => self.properties_dialog = None,
+            DialogResult::Cancel => self.new_analysis = None,
             DialogResult::Ok(properties) => {
-                self.properties_dialog = None;
-                self.set_space_and_units(properties.space, properties.units, convert);
+                self.new_analysis = None;
+                self.settings.new_model = ModelProperties {
+                    kind: plx_model::ModelKind::General,
+                    global_results: None,
+                    ..properties.clone()
+                };
+                let space = properties.space;
+                let id = self.add_analysis("Analysis-1", position, properties);
+                let name = self.name_of(id);
+                self.output.push(format!(
+                    "{name} created: {}, {}",
+                    space.label(),
+                    self.settings.new_model.units.label()
+                ));
             }
         }
     }
@@ -959,9 +1455,11 @@ impl ProjectApp {
                 settings = Some(window.settings().clone());
             }
             // The block shows the state live.
-            node.status = window.status();
+            if let Some(status) = window.status() {
+                node.status = Some(status);
+            }
             if let Some(model) = window.model() {
-                node.steps = model.fe.steps.iter().map(|s| s.name.clone()).collect();
+                node.space = model.fe.properties.space;
             }
         }
         if let Some(settings) = settings {
@@ -971,13 +1469,20 @@ impl ProjectApp {
         for id in closing {
             self.close_window(id);
         }
-        for (_, request) in requests {
+        for (id, request) in requests {
             match request {
                 Request::Save(save_as) => self.save(save_as),
                 Request::SaveWithoutResults => self.save_without_results(),
                 Request::OpenProject(path) => self.open(ctx, path),
-                Request::SpaceAndUnits(space, units, convert) => {
-                    self.set_space_and_units(space, units, convert)
+                Request::SolveChain => self.solve_chain(id),
+                Request::OpenAnalysis(name) => {
+                    if let Some(source) = self.nodes.iter().find(|n| n.name == name) {
+                        let source = source.id;
+                        self.open_window(ctx, source);
+                    }
+                }
+                Request::Unlink(path) => {
+                    self.unlink(|l| l.target == id && links::covers(&path, links::slot(l)))
                 }
             }
         }
@@ -1033,13 +1538,6 @@ impl eframe::App for ProjectApp {
                         .map_or_else(|| "not saved yet".into(), |p| p.display().to_string());
                     ui.label(format!("Project: {file}"));
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!(
-                        "Unit system: {}   Model space: {}",
-                        self.units.label(),
-                        self.space.label()
-                    ));
-                });
             });
         });
         let pane = egui::Frame::new()
@@ -1068,21 +1566,192 @@ impl eframe::App for ProjectApp {
         }
         self.rename_window(&ctx);
         self.confirm_delete_window(&ctx);
-        self.properties_window(&ctx);
+        self.new_analysis_window(&ctx);
         self.settings_window(&ctx);
         self.updater.show(&ctx, &mut self.output);
+        self.sync_links(&ctx);
         self.run_update(&ctx);
         self.analysis_windows(&ctx);
     }
+}
+
+/// A row of a block: a cell of the analysis, a category or item of its setup, or a step
+/// whose results it has. Each row has a pin on either side to link it.
+#[derive(Clone, Debug)]
+struct Row {
+    path: Vec<String>,
+    text: String,
+    depth: usize,
+    icon: TreeIcon,
+    state: Option<CellState>,
+    /// Whether the row opens to show what is in it, and whether it is open.
+    expander: Option<bool>,
+    /// Whether the row takes a link (left pin) and gives one (right pin).
+    input: bool,
+    output: bool,
+    /// The analysis a link fills the row from.
+    linked_from: Option<String>,
+    tip: String,
 }
 
 /// How a block of the schematic looks: what the viewer needs of an analysis.
 struct BlockView {
     id: u64,
     name: String,
-    status: Option<AnalysisStatus>,
-    steps: Vec<String>,
+    space: ModelSpace,
+    rows: Vec<Row>,
+    loading: bool,
     open: bool,
+}
+
+/// The rows of an analysis' block: its cells, the setup opened as far as `expanded` says, and
+/// the steps whose results can drive a submodel.
+fn block_rows(
+    status: &AnalysisStatus,
+    fe: Option<&plx_model::FeModel>,
+    expanded: &BTreeSet<Vec<String>>,
+    incoming: &[(Vec<String>, String)],
+) -> Vec<Row> {
+    let from = |path: &[String]| {
+        (incoming.iter())
+            .find(|(slot, _)| links::covers(slot, path))
+            .map(|(_, source)| source.clone())
+    };
+    let cell = |name: &str, icon, state: CellState, linkable: bool| {
+        let path = vec![name.to_owned()];
+        Row {
+            text: name.to_owned(),
+            depth: 0,
+            icon,
+            state: Some(state),
+            expander: None,
+            input: linkable,
+            output: linkable,
+            linked_from: from(&path),
+            tip: format!("{name}: {}", state.text()),
+            path,
+        }
+    };
+    let mut rows = vec![
+        cell(links::GEOMETRY, TreeIcon::Geometry, status.geometry, true),
+        cell(links::MESH, TreeIcon::Mesh, status.mesh, true),
+    ];
+    if !status.stale_parts.is_empty() {
+        rows[1]
+            .tip
+            .push_str(&format!(" ({})", status.stale_parts.join(", ")));
+    }
+    let setup = vec![links::SETUP.to_owned()];
+    let setup_open = expanded.contains(&setup);
+    let mut row = cell(links::SETUP, TreeIcon::Steps, status.setup, true);
+    row.expander = Some(setup_open);
+    rows.push(row);
+    if setup_open {
+        for category in links::CATEGORIES {
+            let path = vec![links::SETUP.to_owned(), category.to_owned()];
+            let open = expanded.contains(&path);
+            let entries = fe
+                .map(|fe| links::entries(fe, category))
+                .unwrap_or_default();
+            rows.push(Row {
+                text: if entries.is_empty() {
+                    category.to_owned()
+                } else {
+                    format!("{category} ({})", entries.len())
+                },
+                depth: 1,
+                icon: category_icon(category),
+                state: None,
+                expander: (!entries.is_empty()).then_some(open),
+                input: true,
+                output: true,
+                linked_from: from(&path),
+                tip: format!("{category}: drag to another analysis to link them all"),
+                path: path.clone(),
+            });
+            if open {
+                for name in entries {
+                    let mut path = path.clone();
+                    path.push(name.clone());
+                    rows.push(Row {
+                        tip: format!("{name}: drag to another analysis to link it"),
+                        text: name,
+                        depth: 2,
+                        icon: category_icon(category),
+                        state: None,
+                        expander: None,
+                        input: true,
+                        output: true,
+                        linked_from: from(&path),
+                        path,
+                    });
+                }
+            }
+        }
+    }
+    rows.push(cell("Solution", TreeIcon::Analysis, status.solution, false));
+    rows.push(cell(
+        "Results",
+        TreeIcon::FieldOutput,
+        status.results,
+        false,
+    ));
+    for step in fe.map(|fe| fe.steps.as_slice()).unwrap_or_default() {
+        let path = vec![links::RESULTS.to_owned(), step.name.clone()];
+        let tip = if step.active {
+            format!(
+                "Results of {}: drag to a step of a submodel, which takes its displacements \
+                 from them",
+                step.name
+            )
+        } else {
+            format!("{} is deactivated and has no results", step.name)
+        };
+        rows.push(Row {
+            text: step.name.clone(),
+            depth: 1,
+            icon: TreeIcon::Step,
+            state: None,
+            expander: None,
+            input: true,
+            output: step.active,
+            linked_from: from(&path),
+            tip,
+            path,
+        });
+    }
+    rows
+}
+
+/// The row a path is shown in: the row itself, or the closed row it lies in.
+fn shown_row(rows: &[Row], path: &[String]) -> Option<usize> {
+    (rows.iter().enumerate())
+        .filter(|(_, row)| links::covers(&row.path, path))
+        .max_by_key(|(_, row)| row.path.len())
+        .map(|(index, _)| index)
+}
+
+/// The symbol of each cell and category of a block, as in the analysis tree.
+fn category_icon(category: &str) -> TreeIcon {
+    match category {
+        "Features" => TreeIcon::Features,
+        "Materials" => TreeIcon::Material,
+        "Sections" => TreeIcon::Section,
+        "Constraints" => TreeIcon::Constraints,
+        "Contacts" => TreeIcon::Contacts,
+        "Amplitudes" => TreeIcon::Amplitude,
+        "Initial Conditions" => TreeIcon::InitialConditions,
+        _ => TreeIcon::Step,
+    }
+}
+
+/// Colour of the wires of a link: data in blue, results in orange.
+fn wire_color(path: &[String]) -> egui::Color32 {
+    if path.first().is_some_and(|c| c == links::RESULTS) {
+        crate::style::adapt(egui::Color32::from_rgb(230, 130, 20))
+    } else {
+        crate::style::adapt(egui::Color32::from_rgb(40, 110, 200))
+    }
 }
 
 struct Viewer {
@@ -1094,18 +1763,16 @@ impl Viewer {
     fn block(&self, id: u64) -> Option<&BlockView> {
         self.nodes.iter().find(|n| n.id == id)
     }
-}
 
-/// The symbol of each cell of a block, as in the analysis tree.
-fn cell_icon(cell: &str) -> TreeIcon {
-    match cell {
-        "Geometry" => TreeIcon::Geometry,
-        "Mesh" => TreeIcon::Mesh,
-        "Setup" => TreeIcon::Steps,
-        "Solution" => TreeIcon::Analysis,
-        _ => TreeIcon::FieldOutput,
+    fn row(&self, snarl: &Snarl<u64>, node: NodeId, index: usize) -> Option<(u64, &Row)> {
+        let id = *snarl.get_node(node)?;
+        Some((id, self.block(id)?.rows.get(index)?))
     }
 }
+
+/// Width of the rows of a block.
+const ROW_WIDTH: f32 = 210.0;
+const ROW_HEIGHT: f32 = 20.0;
 
 impl SnarlViewer<u64> for Viewer {
     fn title(&mut self, node: &u64) -> String {
@@ -1125,6 +1792,9 @@ impl SnarlViewer<u64> for Viewer {
         let Some(block) = self.block(id) else {
             return;
         };
+        let (rect, icon) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+        paint_space(ui.painter(), rect, block.space, ui.visuals().text_color());
+        icon.on_hover_text(format!("Model space: {}", block.space.label()));
         let text = egui::RichText::new(&block.name).strong();
         let label = ui.add(
             egui::Label::new(text)
@@ -1133,6 +1803,9 @@ impl SnarlViewer<u64> for Viewer {
         );
         if block.open {
             ui.weak("(open)");
+        }
+        if block.loading {
+            ui.spinner();
         }
         if label.double_clicked() {
             self.actions.push(Action::Open(id));
@@ -1143,97 +1816,160 @@ impl SnarlViewer<u64> for Viewer {
             .context_menu(|ui| node_menu(ui, id, &mut self.actions));
     }
 
-    fn inputs(&mut self, _node: &u64) -> usize {
-        0
+    fn inputs(&mut self, node: &u64) -> usize {
+        self.block(*node).map_or(0, |b| b.rows.len())
     }
 
     fn show_input(
         &mut self,
-        _pin: &InPin,
-        _ui: &mut egui::Ui,
-        _snarl: &mut Snarl<u64>,
+        pin: &InPin,
+        ui: &mut egui::Ui,
+        snarl: &mut Snarl<u64>,
     ) -> impl egui_snarl::ui::SnarlPin + 'static {
-        PinInfo::default()
+        let Some((id, row)) = self.row(snarl, pin.id.node, pin.id.input) else {
+            return hidden_pin();
+        };
+        let row = row.clone();
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::click());
+        let painter = ui.painter();
+        if response.hovered() {
+            painter.rect_filled(rect, 2.0, crate::style::hover_fill());
+        }
+        let mut x = rect.left() + 2.0 + 14.0 * row.depth as f32;
+        let middle = rect.center().y;
+        let mut toggled = false;
+        if let Some(open) = row.expander {
+            let arrow =
+                egui::Rect::from_center_size(egui::pos2(x + 5.0, middle), egui::vec2(10.0, 10.0));
+            let color = ui.visuals().text_color();
+            let points = if open {
+                vec![
+                    arrow.left_top() + egui::vec2(1.0, 2.0),
+                    arrow.right_top() + egui::vec2(-1.0, 2.0),
+                    arrow.center_bottom() - egui::vec2(0.0, 1.0),
+                ]
+            } else {
+                vec![
+                    arrow.left_top() + egui::vec2(2.0, 1.0),
+                    arrow.right_center() - egui::vec2(1.0, 0.0),
+                    arrow.left_bottom() + egui::vec2(2.0, -1.0),
+                ]
+            };
+            painter.add(egui::Shape::convex_polygon(
+                points,
+                color,
+                egui::Stroke::NONE,
+            ));
+            let pointer = response.interact_pointer_pos();
+            toggled = response.clicked() && pointer.is_some_and(|p| p.x < arrow.right() + 2.0);
+        }
+        x += 12.0;
+        tree_icons::paint(painter, egui::pos2(x, middle - 8.0), row.icon);
+        x += 20.0;
+        let color = if row.linked_from.is_some() {
+            crate::style::adapt(egui::Color32::from_rgb(40, 110, 200))
+        } else {
+            ui.visuals().text_color()
+        };
+        painter.text(
+            egui::pos2(x, middle),
+            egui::Align2::LEFT_CENTER,
+            &row.text,
+            egui::TextStyle::Body.resolve(ui.style()),
+            color,
+        );
+        if let Some(state) = row.state {
+            let symbol = egui::pos2(rect.right() - 18.0, middle - 8.0);
+            status::paint(painter, symbol, state);
+        }
+        let mut tip = row.tip.clone();
+        if let Some(source) = &row.linked_from {
+            tip.push_str(&format!("\nLinked from {source}."));
+        }
+        if row.input || row.output {
+            tip.push_str("\nRight-click a pin to remove its links.");
+        }
+        let response = response.on_hover_text(tip);
+        if toggled || (row.expander.is_some() && response.double_clicked()) {
+            self.actions.push(Action::Toggle(id, row.path.clone()));
+        } else if response.double_clicked() {
+            self.actions.push(Action::Open(id));
+        }
+        if row.input {
+            PinInfo::circle().with_fill(wire_color(&row.path))
+        } else {
+            hidden_pin()
+        }
     }
 
-    fn outputs(&mut self, _node: &u64) -> usize {
-        0
+    fn outputs(&mut self, node: &u64) -> usize {
+        self.block(*node).map_or(0, |b| b.rows.len())
     }
 
     fn show_output(
         &mut self,
-        _pin: &OutPin,
-        _ui: &mut egui::Ui,
-        _snarl: &mut Snarl<u64>,
+        pin: &OutPin,
+        ui: &mut egui::Ui,
+        snarl: &mut Snarl<u64>,
     ) -> impl egui_snarl::ui::SnarlPin + 'static {
-        PinInfo::default()
+        ui.allocate_exact_size(egui::vec2(0.0, ROW_HEIGHT), egui::Sense::hover());
+        match self.row(snarl, pin.id.node, pin.id.output) {
+            Some((_, row)) if row.output => {
+                let color = wire_color(&row.path);
+                PinInfo::circle().with_fill(color).with_wire_color(color)
+            }
+            _ => hidden_pin(),
+        }
     }
 
     fn has_body(&mut self, _node: &u64) -> bool {
-        true
+        false
     }
 
-    fn show_body(
-        &mut self,
-        node: NodeId,
-        _inputs: &[InPin],
-        _outputs: &[OutPin],
-        ui: &mut egui::Ui,
-        snarl: &mut Snarl<u64>,
-    ) {
-        let id = snarl[node];
-        let Some(block) = self.block(id) else {
-            return;
-        };
-        let status = block.status.clone();
-        let steps = block.steps.clone();
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            let Some(status) = status else {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Loading …");
-                });
-                return;
-            };
-            for (cell, state) in status.cells() {
-                let (rect, response) =
-                    ui.allocate_exact_size(egui::vec2(180.0, 20.0), egui::Sense::click());
-                let painter = ui.painter();
-                if response.hovered() {
-                    painter.rect_filled(rect, 2.0, crate::style::hover_fill());
-                }
-                let icon = egui::pos2(rect.left() + 2.0, rect.center().y - 8.0);
-                tree_icons::paint(painter, icon, cell_icon(cell));
-                painter.text(
-                    egui::pos2(rect.left() + 24.0, rect.center().y),
-                    egui::Align2::LEFT_CENTER,
-                    cell,
-                    egui::TextStyle::Body.resolve(ui.style()),
-                    ui.visuals().text_color(),
-                );
-                let symbol = egui::pos2(rect.right() - 18.0, rect.center().y - 8.0);
-                status::paint(painter, symbol, state);
-                let mut tip = format!("{cell}: {}", state.text());
-                if cell == "Mesh" && !status.stale_parts.is_empty() {
-                    tip.push_str(&format!(" ({})", status.stale_parts.join(", ")));
-                }
-                if response.on_hover_text(tip).double_clicked() {
-                    self.actions.push(Action::Open(id));
-                }
-            }
-            if !steps.is_empty() {
-                ui.separator();
-                for step in &steps {
-                    ui.horizontal(|ui| {
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-                        tree_icons::paint(ui.painter(), rect.min, TreeIcon::Step);
-                        ui.label(step);
-                    });
-                }
-            }
-        });
+    fn connect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<u64>) {
+        let source = self.row(snarl, from.id.node, from.id.output);
+        let target = self.row(snarl, to.id.node, to.id.input);
+        if let (Some((source, item)), Some((target, slot))) = (source, target)
+            && item.output
+            && slot.input
+        {
+            self.actions.push(Action::Link {
+                source,
+                item: item.path.clone(),
+                target,
+                slot: slot.path.clone(),
+            });
+        }
+    }
+
+    fn disconnect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<u64>) {
+        let source = self.row(snarl, from.id.node, from.id.output);
+        let target = self.row(snarl, to.id.node, to.id.input);
+        if let (Some((source, item)), Some((target, slot))) = (source, target) {
+            self.actions.push(Action::Unlink {
+                source: Some((source, item.path.clone())),
+                target: Some((target, slot.path.clone())),
+            });
+        }
+    }
+
+    fn drop_outputs(&mut self, pin: &OutPin, snarl: &mut Snarl<u64>) {
+        if let Some((source, item)) = self.row(snarl, pin.id.node, pin.id.output) {
+            self.actions.push(Action::Unlink {
+                source: Some((source, item.path.clone())),
+                target: None,
+            });
+        }
+    }
+
+    fn drop_inputs(&mut self, pin: &InPin, snarl: &mut Snarl<u64>) {
+        if let Some((target, slot)) = self.row(snarl, pin.id.node, pin.id.input) {
+            self.actions.push(Action::Unlink {
+                source: None,
+                target: Some((target, slot.path.clone())),
+            });
+        }
     }
 
     fn has_graph_menu(&mut self, _pos: egui::Pos2, _snarl: &mut Snarl<u64>) -> bool {
@@ -1264,6 +2000,82 @@ impl SnarlViewer<u64> for Viewer {
     }
 }
 
+/// A symbol of the model space: a cube for 3D, a thin plate for plane stress, a long prism
+/// for plane strain and a profile turned about its axis for axisymmetric models.
+fn paint_space(painter: &egui::Painter, rect: egui::Rect, space: ModelSpace, color: egui::Color32) {
+    let stroke = egui::Stroke::new(1.2, color);
+    let p = |x: f32, y: f32| rect.min + egui::vec2(x, y);
+    let line = |points: &[egui::Pos2]| {
+        painter.add(egui::Shape::line(points.to_vec(), stroke));
+    };
+    match space {
+        ModelSpace::ThreeD => {
+            line(&[
+                p(2.0, 6.0),
+                p(11.0, 6.0),
+                p(11.0, 15.0),
+                p(2.0, 15.0),
+                p(2.0, 6.0),
+            ]);
+            line(&[p(2.0, 6.0), p(6.0, 2.0), p(15.0, 2.0), p(11.0, 6.0)]);
+            line(&[p(15.0, 2.0), p(15.0, 11.0), p(11.0, 15.0)]);
+        }
+        ModelSpace::PlaneStress => {
+            // A thin plate, loaded in its plane.
+            let face = [p(1.0, 4.0), p(13.0, 4.0), p(13.0, 14.0), p(1.0, 14.0)];
+            painter.add(egui::Shape::convex_polygon(
+                face.to_vec(),
+                color.gamma_multiply(0.25),
+                stroke,
+            ));
+            line(&[p(1.0, 4.0), p(3.0, 2.0), p(15.0, 2.0), p(13.0, 4.0)]);
+            line(&[p(15.0, 2.0), p(15.0, 12.0), p(13.0, 14.0)]);
+        }
+        ModelSpace::PlaneStrain => {
+            // A long body: a small section drawn out far into the depth.
+            line(&[
+                p(1.0, 9.0),
+                p(7.0, 9.0),
+                p(7.0, 15.0),
+                p(1.0, 15.0),
+                p(1.0, 9.0),
+            ]);
+            line(&[p(1.0, 9.0), p(9.0, 1.0), p(15.0, 1.0), p(7.0, 9.0)]);
+            line(&[p(15.0, 1.0), p(15.0, 7.0), p(7.0, 15.0)]);
+        }
+        ModelSpace::Axisymmetric => {
+            // The axis of revolution, the profile beside it and the turn about the axis.
+            let dash = egui::Stroke::new(1.0, color);
+            painter.extend(egui::Shape::dashed_line(
+                &[p(3.0, 0.5), p(3.0, 15.5)],
+                dash,
+                2.0,
+                1.5,
+            ));
+            let profile = [p(7.0, 5.0), p(12.0, 5.0), p(12.0, 13.0), p(7.0, 13.0)];
+            painter.add(egui::Shape::convex_polygon(
+                profile.to_vec(),
+                color.gamma_multiply(0.25),
+                stroke,
+            ));
+            let arc: Vec<egui::Pos2> = (0..=12)
+                .map(|i| {
+                    let t = std::f32::consts::PI * i as f32 / 12.0;
+                    p(3.0 + 6.0 * t.cos(), 2.5 + 1.8 * t.sin())
+                })
+                .collect();
+            line(&arc);
+        }
+    }
+}
+
+/// The pin of a row that takes or gives no link: there, but not to be seen.
+fn hidden_pin() -> PinInfo {
+    PinInfo::circle()
+        .with_fill(egui::Color32::TRANSPARENT)
+        .with_stroke(egui::Stroke::NONE)
+}
+
 /// The context menu of an analysis' block.
 fn node_menu(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
     let mut entry = |ui: &mut egui::Ui, text: &str, action: Action| {
@@ -1286,6 +2098,12 @@ fn schematic_style() -> SnarlStyle {
         // Blocks are never magnified beyond their size, also when the view centres on them.
         max_scale: Some(1.0),
         min_scale: Some(0.3),
+        // A row per pin, all of the same height, so that the rows line up with their pins.
+        node_layout: Some(egui_snarl::ui::NodeLayout {
+            kind: egui_snarl::ui::NodeLayoutKind::Coil,
+            min_pin_row_height: ROW_HEIGHT,
+            equal_pin_row_heights: true,
+        }),
         ..SnarlStyle::new()
     }
 }

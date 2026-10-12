@@ -14,9 +14,10 @@ pub fn drag_value<Num: Numeric>(value: &mut Num) -> egui::DragValue<'_> {
         .custom_formatter(|v, _| format_physical(v))
 }
 
-/// A field for a value of a physical quantity in the model's units, PrePoMax's typed
-/// converters: the unit stands after the number, and a value typed with another unit is
-/// converted, so "3 cm" becomes "30 mm" in a millimetre model.
+/// A field for a value of a physical quantity, stored in SI units ([`plx_model::STORED`]) and
+/// shown in the model's units, PrePoMax's typed converters: the unit stands after the number,
+/// and a value typed with another unit is converted, so "3 cm" becomes "30 mm" in a
+/// millimetre model.
 pub fn quantity(value: &mut f64, units: UnitSystem, quantity: Quantity) -> egui::DragValue<'_> {
     let unit = units.unit(quantity);
     let field = without_unit(value, units, quantity);
@@ -29,9 +30,25 @@ pub fn quantity(value: &mut f64, units: UnitSystem, quantity: Quantity) -> egui:
 
 /// A [`quantity`] field that does not show the unit, e.g. because a column title does.
 pub fn without_unit(value: &mut f64, units: UnitSystem, quantity: Quantity) -> egui::DragValue<'_> {
-    egui::DragValue::new(value)
-        .custom_parser(move |text| units.parse_value(text, quantity).ok())
-        .custom_formatter(|v, _| format_physical(v))
+    converted(value, plx_model::STORED, units, quantity)
+}
+
+/// A field without the unit for a value stored in `stored` units and shown in `shown` ones,
+/// e.g. a coordinate of results, which are stored in the units they show.
+pub fn converted(
+    value: &mut f64,
+    stored: UnitSystem,
+    shown: UnitSystem,
+    quantity: Quantity,
+) -> egui::DragValue<'_> {
+    egui::DragValue::from_get_set(move |new| {
+        if let Some(new) = new {
+            *value = shown.convert(new, quantity, stored);
+        }
+        stored.convert(*value, quantity, shown)
+    })
+    .custom_parser(move |text| shown.parse_value(text, quantity).ok())
+    .custom_formatter(|v, _| format_physical(v))
 }
 
 /// A [`quantity`] field for values that may be very small or large, such as a density of

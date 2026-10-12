@@ -21,14 +21,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     pub format: u32,
-    /// Model space and unit system of every analysis of the project.
-    #[serde(default)]
+    /// Model space and unit system of every analysis of a project of format 2, whose values
+    /// are in that unit system; since format 3 each analysis has its own, and all values are
+    /// stored in SI units ([`plx_model::STORED`]).
+    #[serde(default, skip_serializing)]
     pub space: plx_model::ModelSpace,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub units: plx_model::UnitSystem,
     pub analyses: Vec<ProjectAnalysis>,
-    /// Data one analysis takes from another; kept for the links between analyses, which
-    /// are not made yet.
+    /// Data one analysis takes from another.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
 }
@@ -76,9 +77,14 @@ pub struct ProjectAnalysis {
 pub struct Link {
     pub source: u64,
     pub target: u64,
-    /// The tree path of what is taken: a whole category such as `["Materials"]`, or one
-    /// item of it such as `["Materials", "Steel"]`.
+    /// The path of what is taken in the source's block: a cell such as `["Mesh"]`, a
+    /// category of the setup such as `["Setup", "Materials"]`, or one item of it such as
+    /// `["Setup", "Materials", "Steel"]`; `["Results", step]` is the results of a step.
     pub item: Vec<String>,
+    /// Where the target takes it, when that is not the same place: the step of a submodel
+    /// that takes the results of a global step, `["Results", step]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slot: Vec<String>,
 }
 
 /// The files of a finished analysis kept in the project file: the input file CalculiX ran,
@@ -156,6 +162,9 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
     std::fs::rename(&temporary, path).map_err(io)
 }
 
+/// The first format of projects with several analyses, which can still be opened.
+pub const FIRST_PROJECT_FORMAT: u32 = 2;
+
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
 struct Header {
@@ -178,7 +187,9 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
             format: header.format,
         });
     }
-    if header.format < PROJECT_FORMAT {
+    // Format 2 stored the values in the project's unit system; the project window converts
+    // them into SI units, which needs Gmsh for the geometry.
+    if header.format < FIRST_PROJECT_FORMAT {
         return Err(ProjectError::Older {
             path: path.to_owned(),
             format: header.format,
@@ -450,7 +461,14 @@ mod tests {
         saved.links.push(Link {
             source: 1,
             target: 2,
-            item: vec!["Materials".into(), "Steel".into()],
+            item: vec!["Setup".into(), "Materials".into(), "Steel".into()],
+            slot: Vec::new(),
+        });
+        saved.links.push(Link {
+            source: 1,
+            target: 2,
+            item: vec!["Results".into(), "Step-1".into()],
+            slot: vec!["Results".into(), "Step-2".into()],
         });
         save_project(&path, &saved).unwrap();
         let mut project = read_project(&path).unwrap();

@@ -1053,7 +1053,7 @@ mod tests {
     fn geometry_view() -> Option<(Geometry, Model)> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata/platte_mit_loch.step");
-        match crate::model::load(&path, plx_model::UnitSystem::MmTonSC) {
+        match crate::model::load(&path, plx_model::UnitSystem::Unitless) {
             Ok(loaded) => Some((loaded.model.geometry?, loaded.geometry_view?)),
             Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
                 eprintln!("Gmsh not available, test skipped: {error}");

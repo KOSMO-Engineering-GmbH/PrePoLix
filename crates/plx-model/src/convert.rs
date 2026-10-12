@@ -58,12 +58,32 @@ impl FeModel {
         }
         for section in &mut self.sections {
             c.value(&mut section.thickness, Quantity::Length);
-            if let crate::SectionKind::Shell { thickness, .. }
-            | crate::SectionKind::Membrane { thickness, .. } = &mut section.kind
-            {
-                c.value(thickness, Quantity::Length);
+            match &mut section.kind {
+                crate::SectionKind::Shell { thickness, .. }
+                | crate::SectionKind::Membrane { thickness, .. } => {
+                    c.value(thickness, Quantity::Length)
+                }
+                crate::SectionKind::Truss { area } => c.value(area, Quantity::Area),
+                crate::SectionKind::Beam(beam) => match &mut beam.profile {
+                    crate::BeamProfile::Rect { a, b } => {
+                        c.value(a, Quantity::Length);
+                        c.value(b, Quantity::Length);
+                    }
+                    crate::BeamProfile::Circ { radius } => c.value(radius, Quantity::Length),
+                    crate::BeamProfile::Pipe { radius, thickness } => {
+                        c.value(radius, Quantity::Length);
+                        c.value(thickness, Quantity::Length);
+                    }
+                    crate::BeamProfile::Box { a, b, t } => {
+                        c.value(a, Quantity::Length);
+                        c.value(b, Quantity::Length);
+                        c.all(t, Quantity::Length);
+                    }
+                },
+                crate::SectionKind::Solid => {}
             }
         }
+        self.convert_features(&c);
         for constraint in &mut self.constraints {
             constraint.convert_units(&c);
         }
@@ -230,11 +250,67 @@ impl FeModel {
             );
         }
         if !self.user_keywords.is_empty() {
-            notes.push(
-                "User keywords of the Keyword Editor were not converted; please check them.".into(),
-            );
+            notes.push(format!(
+                "User keywords of the Keyword Editor were not converted; please check them: \
+                 they have to be in {}.",
+                c.to.label()
+            ));
         }
         notes
+    }
+
+    /// Converts the positions of the features: reference points, coordinate systems, planes
+    /// and result paths, and the axis of cyclic symmetry.
+    pub fn convert_features(&mut self, c: &Conversion) {
+        let length = |p: &mut [f64; 3]| c.all(p, Quantity::Length);
+        let cylindrical: Vec<String> = (self.coordinate_systems.iter())
+            .filter(|s| s.kind == crate::CoordinateSystemKind::Cylindrical)
+            .map(|s| s.name.clone())
+            .collect();
+        for point in &mut self.reference_points {
+            length(&mut point.position);
+            if let crate::PointDefinition::Local {
+                system,
+                coordinates,
+            } = &mut point.definition
+            {
+                // The angle of cylindrical coordinates stays.
+                if cylindrical.contains(system) {
+                    c.value(&mut coordinates[0], Quantity::Length);
+                    c.value(&mut coordinates[2], Quantity::Length);
+                } else {
+                    length(coordinates);
+                }
+            }
+        }
+        for system in &mut self.coordinate_systems {
+            length(&mut system.origin);
+            length(&mut system.point_x);
+            length(&mut system.point_xy);
+        }
+        let point = |p: &mut crate::PointRef| {
+            if let crate::PointRef::Coordinates(p) = p {
+                c.all(p, Quantity::Length);
+            }
+        };
+        for plane in &mut self.planes {
+            match &mut plane.source {
+                crate::PlaneSource::PointNormal { point: p, .. } => point(p),
+                crate::PlaneSource::ThreePoints { points } => points.iter_mut().for_each(point),
+                crate::PlaneSource::CoordinateSystem { offset, .. } => {
+                    c.value(offset, Quantity::Length)
+                }
+            }
+        }
+        for path in &mut self.result_paths {
+            point(&mut path.start);
+            point(&mut path.end);
+        }
+        for tie in &mut self.ties {
+            if let Some(cyclic) = &mut tie.cyclic {
+                length(&mut cyclic.axis_point);
+            }
+        }
     }
 }
 

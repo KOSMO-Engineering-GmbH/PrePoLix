@@ -318,7 +318,7 @@ mod tests {
         // Cantilever 100 x 10 x 10, 100 N across at its end, solved by CalculiX 2.21 with
         // C3D20R. On top the bending stress rises linearly towards the support:
         // S11 = F (100 - x) (h / 2) / I = 0.6 (100 - x), so 30 at x = 50.
-        let mut results = load(&testdata("kragbalken_c3d20r.frd"), UnitSystem::MmTonSC)
+        let mut results = load(&testdata("kragbalken_c3d20r.frd"), UnitSystem::Unitless)
             .unwrap()
             .model;
         let toe = [40.0, 50.0, 60.0].map(|x| node_at(&results, [x, 5.0, 10.0]));
@@ -356,7 +356,7 @@ mod tests {
     fn plot_shows_the_edge_node_with_the_highest_stress() {
         // The cantilever of the test above: an edge across the top at x = 40 to 60 picks the
         // node nearest to the support, x = 40, where the bending stress is highest.
-        let results = load(&testdata("kragbalken_c3d20r.frd"), UnitSystem::MmTonSC)
+        let results = load(&testdata("kragbalken_c3d20r.frd"), UnitSystem::Unitless)
             .unwrap()
             .model;
         let toe = [40.0, 50.0, 60.0].map(|x| node_at(&results, [x, 5.0, 10.0]));

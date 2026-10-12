@@ -100,6 +100,9 @@ pub struct TreeState {
     more_parts: BTreeSet<usize>,
     /// Where the range of a Shift click starts: the part last clicked without Shift.
     anchor: Option<usize>,
+    /// Items another analysis of the project owns, with its name: they are marked and
+    /// cannot be changed here.
+    pub linked: HashMap<TreeItem, String>,
 }
 
 impl TreeState {
@@ -298,6 +301,27 @@ fn can_deactivate(item: &TreeItem) -> bool {
 }
 
 /// Warning sign next to an item with findings, PrePoMax's warning icon; a click explains them.
+/// The mark of an item another analysis owns: two chain links.
+fn link_sign(ui: &mut Ui) -> Response {
+    ui.add_space(3.0);
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::splat(tree_icons::SIZE), egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let color = crate::style::adapt(Color32::from_rgb(40, 110, 200));
+        let stroke = egui::Stroke::new(1.6, color);
+        let c = rect.center();
+        for offset in [-2.6, 2.6] {
+            let link = egui::Rect::from_center_size(
+                c + egui::vec2(offset, -offset * 0.8),
+                egui::vec2(7.5, 5.0),
+            );
+            ui.painter()
+                .rect_stroke(link, 2.5, stroke, egui::StrokeKind::Middle);
+        }
+    }
+    response
+}
+
 fn warning_sign(ui: &mut Ui) -> Response {
     ui.add_space(3.0);
     let (rect, response) =
@@ -745,6 +769,14 @@ impl Tree<'_> {
             inactive.then_some(INACTIVE)
         };
         let mut response = row_label(ui, self.is_selected(&item), color, text);
+        if let Some(source) = self.state.linked.get(&item) {
+            let tip = format!(
+                "Linked from {source}: it changes there. Double-click to open {source} or \
+                 unlink it."
+            );
+            link_sign(ui).on_hover_text(&tip);
+            response = response.on_hover_text(tip);
+        }
         let step_type = self.step_type_hint(&item);
         if findings.is_none()
             && let Some(hint) = &step_type

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -65,9 +65,14 @@ pub enum Request {
     SaveWithoutResults,
     /// Open this project file instead of the open project.
     OpenProject(PathBuf),
-    /// Give the project, all its analyses, this model space and unit system; `true` converts
-    /// the values into the new units.
-    SpaceAndUnits(plx_model::ModelSpace, UnitSystem, bool),
+    /// Solve the analyses this one takes global results from and have none yet, then this
+    /// one.
+    SolveChain,
+    /// Open the analysis of this name, which a linked item comes from.
+    OpenAnalysis(String),
+    /// Stop taking the item at this path from another analysis; the analysis keeps its
+    /// copy.
+    Unlink(Vec<String>),
 }
 
 struct Workbench {
@@ -84,15 +89,20 @@ struct Workbench {
     solve_after_meshing: bool,
     /// What the window asks of the project window.
     requests: Vec<Request>,
+    /// What the analysis takes from other analyses of the project; the window shows it but
+    /// does not change it.
+    incoming: crate::links::Incoming,
+    /// Analyses whose results this one needs as global model and that have none yet.
+    upstream_missing: Vec<String>,
+    /// A linked item was double-clicked: where it comes from, with its path.
+    linked_prompt: Option<(Vec<String>, String)>,
     /// The state of the analysis' cells and when it was found; finding it takes the
     /// fingerprints of mesh and model, so it is not done in every frame.
     status: Option<(std::time::Instant, crate::status::AnalysisStatus)>,
     /// Campbell diagram window with its speed sweep; kept with its results while hidden.
     campbell: Option<crate::campbell::CampbellWindow>,
-    /// Open dialog of the model space and unit system, for a new or the open model.
+    /// Open dialog of the model properties.
     model_dialog: Option<ModelPropertiesDialog>,
-    /// The new model asked for the geometry import; the app opens the file dialog.
-    import_requested: bool,
     viewport: Viewport,
     /// The FE model workspace: mesh and analysis set up from an input or project file.
     model: Option<Model>,
@@ -240,9 +250,11 @@ impl AnalysisWindow {
                 project_folder: String::new(),
                 solve_after_meshing: false,
                 requests: Vec::new(),
+                incoming: Default::default(),
+                upstream_missing: Vec::new(),
+                linked_prompt: None,
                 status: None,
                 model_dialog: None,
-                import_requested: false,
                 viewport: Viewport::new(render_state),
                 model: None,
                 geometry: None,
@@ -316,6 +328,77 @@ impl AnalysisWindow {
         self.import_when_loaded = paths;
     }
 
+    /// Tells the window what the analysis takes from other analyses, and which of those it
+    /// needs results of that are not there yet.
+    pub fn set_links(&mut self, incoming: crate::links::Incoming, upstream_missing: Vec<String>) {
+        self.workbench.incoming = incoming;
+        self.workbench.upstream_missing = upstream_missing;
+    }
+
+    /// Takes over what `path` names of the setup of another analysis, see
+    /// [`crate::links::apply_setup`].
+    pub fn apply_setup(&mut self, source: &plx_model::FeModel, path: &[String]) {
+        if let Some(model) = &mut self.workbench.model {
+            crate::links::apply_setup(&mut model.fe, source, path);
+            self.workbench.results_changed = true;
+            self.workbench.symbols_shown = None;
+        }
+    }
+
+    /// Makes the analysis a submodel of the global results at `results`, see
+    /// [`crate::links::apply_submodel`].
+    pub fn apply_submodel(&mut self, step: &str, global: u32, results: PathBuf) {
+        if let Some(model) = &mut self.workbench.model {
+            crate::links::apply_submodel(&mut model.fe, step, global, results);
+        }
+    }
+
+    pub fn clear_submodel(&mut self) {
+        if let Some(model) = &mut self.workbench.model {
+            crate::links::clear_submodel(&mut model.fe);
+        }
+    }
+
+    /// Takes over the geometry of another analysis, shown on the Geometry tab.
+    pub fn apply_geometry(&mut self, geometry: Option<plx_model::Geometry>) {
+        let workbench = &mut self.workbench;
+        let Some(model) = &mut workbench.model else {
+            return;
+        };
+        workbench.geometry = match &geometry {
+            Some(geometry) => match plx_mesher::tessellate(geometry) {
+                Ok(display) => Some(Model::geometry_view(&model.path, display)),
+                Err(error) => {
+                    (workbench.output).push(format!("Geometry cannot be displayed: {error}"));
+                    None
+                }
+            },
+            None => None,
+        };
+        model.geometry = geometry;
+        workbench.after_parts_changed();
+    }
+
+    /// Takes over the mesh of another analysis with the geometry it was meshed from.
+    pub fn apply_mesh(&mut self, mesh: crate::links::MeshCopy) {
+        let crate::links::MeshCopy {
+            geometry,
+            mesh,
+            mesh_inputs,
+            mesh_sets,
+            element_types,
+        } = mesh;
+        let Some(model) = &mut self.workbench.model else {
+            return;
+        };
+        model.fe.mesh_sets = mesh_sets;
+        model.fe.element_types = element_types;
+        model.set_mesh(mesh);
+        model.mesh_inputs = mesh_inputs;
+        self.apply_geometry(geometry);
+        self.workbench.view_command = Some(ViewCommand::Fit);
+    }
+
     /// Whether the window is still loading, or has an import or a solve to start once loaded.
     pub fn waiting(&self) -> bool {
         self.loading.is_some() || self.solve_when_loaded || !self.import_when_loaded.is_empty()
@@ -324,25 +407,6 @@ impl AnalysisWindow {
     /// Solves the analysis as soon as it is loaded.
     pub fn solve_when_loaded(&mut self) {
         self.solve_when_loaded = true;
-    }
-
-    /// Takes over the project's model space and unit system; `convert` converts the values
-    /// into the new units.
-    pub fn set_space_and_units(
-        &mut self,
-        space: plx_model::ModelSpace,
-        units: UnitSystem,
-        convert: bool,
-    ) {
-        let Some(model) = &self.workbench.model else {
-            return;
-        };
-        let properties = plx_model::ModelProperties {
-            space,
-            units,
-            ..model.fe.properties.clone()
-        };
-        self.workbench.set_model_properties(properties, convert);
     }
 
     /// Opens the analysis of the project at `path` in the window, built on a worker thread.
@@ -463,12 +527,9 @@ impl AnalysisWindow {
         self.workbench.cached_status()
     }
 
-    /// Geometry > Import. Without a model, PrePoMax first asks for the new model's
-    /// properties, so that a 2D geometry lands in a 2D model.
+    /// Geometry > Import, into the model space and units the analysis was made with.
     fn import(&mut self, ctx: &egui::Context) {
-        if self.workbench.model.is_none() {
-            self.workbench.new_model(true);
-        } else {
+        if self.workbench.model.is_some() {
             self.import_dialog(ctx);
         }
     }
@@ -569,11 +630,6 @@ impl AnalysisWindow {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
-                let new = egui::Button::new("New Model …").shortcut_text("Ctrl+N");
-                let tip = "Replaces the model of this analysis with an empty one.";
-                if ui.add(new).on_hover_text(tip).clicked() {
-                    self.workbench.new_model(false);
-                }
                 let import = egui::Button::new("Import …");
                 if ui.add_enabled(self.loading.is_none(), import).clicked() {
                     self.import(ui.ctx());
@@ -753,10 +809,6 @@ impl AnalysisWindow {
     fn tool_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
-            let new = "New Model (Ctrl+N)";
-            if icons::button(ui, Icon::New, new, true, false).clicked() {
-                self.workbench.new_model(false);
-            }
             let can_open = self.loading.is_none();
             let import = "Import Geometry (STEP, IGES, BREP) or mesh (INP)";
             if icons::button(ui, Icon::Import, import, can_open, false).clicked() {
@@ -1146,9 +1198,6 @@ impl AnalysisWindow {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
             self.workbench.requests.push(Request::Save(false));
         }
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
-            self.workbench.new_model(false);
-        }
         // A focused text field undoes its own typing.
         if !ctx.egui_wants_keyboard_input() {
             // Ctrl+Z matches with Shift held too, so Redo is checked first.
@@ -1320,9 +1369,7 @@ impl AnalysisWindow {
         self.workbench.findings_window(&ctx);
         self.workbench.settings_window(&ctx);
         self.workbench.model_dialog_window(&ctx);
-        if std::mem::take(&mut self.workbench.import_requested) {
-            self.import_dialog(&ctx);
-        }
+        self.workbench.linked_prompt_window(&ctx);
         self.workbench.update_explosion(&ctx);
         self.workbench.update_thick_shells();
         self.workbench.rebuild_if_results_changed();
@@ -1554,7 +1601,14 @@ impl Workbench {
                         rebuild = true;
                     }
                     if let Some(project) = &self.model {
-                        model.fe.add_missing_features(&project.fe);
+                        // Results are stored in the units they show; the FE model in SI ones.
+                        let mut features = project.fe.clone();
+                        let shown = model.units();
+                        features.convert_features(&plx_model::convert::Conversion::new(
+                            plx_model::STORED,
+                            shown,
+                        ));
+                        model.fe.add_missing_features(&features);
                     }
                     // Results read again, e.g. after the analysis ran once more, keep their
                     // colour scale.
@@ -1717,7 +1771,7 @@ impl Workbench {
             let hint = if view == TreeView::Geometry {
                 "Geometry > Import or drag a STEP, IGES or BREP file into the window."
             } else {
-                "File > Open (Ctrl+O) or drag a .plx or .inp file into the window."
+                "Geometry > Import or drag a STEP or .inp file into the window."
             };
             ui.weak(format!("{text}.\n{hint}"));
             ui.separator();
@@ -1726,6 +1780,7 @@ impl Workbench {
             .and_then(|m| m.geometry.as_ref())
             .map(|g| g.mesh_items.iter().map(|i| i.name.clone()).collect())
             .unwrap_or_default();
+        self.tree.linked = self.linked_tree_items(view);
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
@@ -1742,8 +1797,169 @@ impl Workbench {
         self.tree_response(ui.ctx(), view, response);
     }
 
+    /// The items of the tree in `view` that another analysis owns, with its name.
+    fn linked_tree_items(&self, view: TreeView) -> HashMap<TreeItem, String> {
+        let mut linked = HashMap::new();
+        let Some(model) = &self.model else {
+            return linked;
+        };
+        for (path, source) in &self.incoming.paths {
+            let items = match view {
+                TreeView::Results => Vec::new(),
+                TreeView::Geometry
+                    if path[0] == crate::links::GEOMETRY || path[0] == crate::links::MESH =>
+                {
+                    let mut items = vec![TreeItem::Group("Parts"), TreeItem::Group("Mesh Setup")];
+                    items.extend(
+                        (0..self.geometry.as_ref().map_or(0, |g| g.parts.len()))
+                            .map(TreeItem::Part),
+                    );
+                    let setup = model.geometry.as_ref().map_or(0, |g| g.mesh_items.len());
+                    items.extend((0..setup).map(TreeItem::MeshItem));
+                    items
+                }
+                TreeView::Geometry => Vec::new(),
+                TreeView::FeModel if path[0] == crate::links::MESH => {
+                    let mut items = vec![TreeItem::Mesh, TreeItem::Group("Parts")];
+                    items.extend((0..model.parts.len()).map(TreeItem::Part));
+                    items
+                }
+                TreeView::FeModel => crate::links::tree_items(&model.fe, path),
+            };
+            for item in items {
+                linked.insert(item, source.clone());
+            }
+        }
+        linked
+    }
+
+    /// The analysis a tree item comes from, if another analysis owns it.
+    fn linked_source(&self, view: TreeView, item: &TreeItem) -> Option<(Vec<String>, String)> {
+        let source = self.tree.linked.get(item)?;
+        let path = match view {
+            TreeView::Geometry => vec![crate::links::GEOMETRY.to_owned()],
+            _ => (self.model.as_ref()).and_then(|m| crate::links::path_of(&m.fe, item))?,
+        };
+        // The link that covers it: a whole category rather than the item in it.
+        let path = (self.incoming.paths.iter())
+            .find(|(prefix, s)| s == source && crate::links::covers(prefix, &path))
+            .map_or(path, |(prefix, _)| prefix.clone());
+        Some((path, source.clone()))
+    }
+
+    /// Keeps the user from changing in the tree what another analysis owns: a double-click
+    /// asks whether to open that analysis or unlink the item, other changes are refused.
+    fn guard_linked(&mut self, view: TreeView, response: &mut TreeResponse) {
+        if self.tree.linked.is_empty() {
+            return;
+        }
+        if let Some(item) = &response.open
+            && let Some(linked) = self.linked_source(view, item)
+        {
+            response.open = None;
+            self.linked_prompt = Some(linked);
+        }
+        let mut refused: Option<String> = None;
+        let mut check = |item: Option<&TreeItem>, this: &Self| {
+            let linked = item.and_then(|item| this.linked_source(view, item));
+            if let Some((path, source)) = linked {
+                refused = Some(format!(
+                    "{} comes from {source}: change it there, or unlink it first.",
+                    crate::links::label(&path)
+                ));
+                true
+            } else {
+                false
+            }
+        };
+        if check(response.delete.as_ref(), self) {
+            response.delete = None;
+        }
+        if check(response.toggle_active.as_ref(), self) {
+            response.toggle_active = None;
+        }
+        if check(response.swap_master_slave.as_ref(), self) {
+            response.swap_master_slave = None;
+        }
+        if let Some((step, _)) = response.move_step
+            && check(Some(&TreeItem::Step(step)), self)
+        {
+            response.move_step = None;
+        }
+        if let Some(kind) = &response.create
+            && check(new_item_container(kind).as_ref(), self)
+        {
+            response.create = None;
+        }
+        let mesh = TreeItem::Mesh;
+        let geometry = TreeItem::Group("Mesh Setup");
+        let meshing = response.generate_mesh
+            || response.mesh_part.is_some()
+            || response.transform_part.is_some()
+            || response.merge_parts;
+        if meshing
+            && (check(Some(&mesh), self)
+                || self.tree.linked.contains_key(&TreeItem::Group("Parts")))
+        {
+            if refused.is_none() {
+                refused = Some("The mesh comes from another analysis: mesh it there.".into());
+            }
+            response.generate_mesh = false;
+            response.mesh_part = None;
+            response.transform_part = None;
+            response.merge_parts = false;
+        }
+        if response.mesh_defaults && self.tree.linked.contains_key(&geometry) {
+            refused = Some("The geometry comes from another analysis: set it up there.".into());
+            response.mesh_defaults = false;
+        }
+        if let Some(line) = refused {
+            self.output.push(line);
+        }
+    }
+
+    /// Asks what to do about a linked item that was double-clicked.
+    fn linked_prompt_window(&mut self, ctx: &egui::Context) {
+        let Some((path, source)) = &self.linked_prompt else {
+            return;
+        };
+        let mut close = false;
+        let mut open = true;
+        egui::Window::new("Linked Item")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .show(ctx, |ui| {
+                ui.label(format!(
+                    "{} comes from the analysis {source}. Change it there, or unlink it: this \
+                     analysis then keeps its own copy.",
+                    crate::links::label(path)
+                ));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button(format!("Open {source}")).clicked() {
+                        self.requests.push(Request::OpenAnalysis(source.clone()));
+                        close = true;
+                    }
+                    if ui.button("Unlink").clicked() {
+                        self.requests.push(Request::Unlink(path.clone()));
+                        close = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if close || !open {
+            self.linked_prompt = None;
+        }
+    }
+
     /// Acts on what the user picked in the tree or in a part's context menu in the 3D view.
-    fn tree_response(&mut self, ctx: &egui::Context, view: TreeView, response: TreeResponse) {
+    fn tree_response(&mut self, ctx: &egui::Context, view: TreeView, mut response: TreeResponse) {
+        self.guard_linked(view, &mut response);
         for (index, visible) in response.visibility {
             if let Some(part) = self.shown_mut().and_then(|m| m.parts.get_mut(index)) {
                 part.visible = visible;
@@ -2000,9 +2216,18 @@ impl Workbench {
         }
     }
 
-    /// Where the moving loads of the FE model stand in the steps of its results.
+    /// Where the moving loads of the FE model stand in the steps of its results, in the
+    /// units the results show.
     fn moving_load_stations(&self) -> Vec<plx_model::LoadStations> {
-        (self.model.as_ref()).map_or_else(Vec::new, |project| plx_model::load_stations(&project.fe))
+        let Some(project) = &self.model else {
+            return Vec::new();
+        };
+        let units = project.fe.properties.units;
+        let mut stations = plx_model::load_stations(&project.fe);
+        for (_, position) in stations.iter_mut().flat_map(|s| s.steps.iter_mut()) {
+            *position = units.shown(*position, plx_model::Quantity::Length);
+        }
+        stations
     }
 
     fn edit_hot_spot(&mut self, index: usize) {
@@ -2752,10 +2977,15 @@ impl Workbench {
                     for warning in &part.warnings {
                         self.output.push(format!("Gmsh: {warning}"));
                     }
+                    let units = model.fe.properties.units;
+                    let size = |size: f64| {
+                        let size = units.shown(size, plx_model::Quantity::Length);
+                        crate::numeric::format_physical(size)
+                    };
                     for p in &part.mesh.parts {
                         let parameters = model.geometry.as_ref().map(|g| g.parameters(&p.name));
                         self.output.push(format!(
-                            "{}: {} elements (order {}, element size {} to {})",
+                            "{}: {} elements (order {}, element size {} to {} {})",
                             p.name,
                             p.elements.len(),
                             if parameters.is_some_and(|s| s.second_order) {
@@ -2763,8 +2993,9 @@ impl Workbench {
                             } else {
                                 1
                             },
-                            parameters.map_or(0.0, |s| s.min_size),
-                            parameters.map_or(0.0, |s| s.max_size),
+                            size(parameters.map_or(0.0, |s| s.min_size)),
+                            size(parameters.map_or(0.0, |s| s.max_size)),
+                            units.unit(plx_model::Quantity::Length),
                         ));
                     }
                     mesh = plx_mesher::merge_part(&mesh, part.mesh);
@@ -3276,6 +3507,15 @@ impl Workbench {
     /// date stays as it is.
     fn solve(&mut self, ctx: &egui::Context) {
         if self.meshing.is_some() || self.analysis.as_ref().is_some_and(Analysis::is_running) {
+            return;
+        }
+        // A submodel needs the results of its global model; the project solves that first.
+        if !self.upstream_missing.is_empty() {
+            self.output.push(format!(
+                "{} has no results yet: it is solved first.",
+                self.upstream_missing.join(", ")
+            ));
+            self.requests.push(Request::SolveChain);
             return;
         }
         let Some(status) = self.status() else {
@@ -4467,7 +4707,7 @@ impl Workbench {
                 || path.display().to_string(),
                 |n| n.to_string_lossy().into_owned(),
             );
-            let import = match result {
+            let mut import = match result {
                 Ok(import) => *import,
                 Err(error) => {
                     self.output.push(format!("Error importing {name}: {error}"));
@@ -4480,16 +4720,18 @@ impl Workbench {
                 ));
                 continue;
             }
+            // The numbers of the input file are in the analysis' units; the mesh is stored in
+            // SI units.
+            let length = (model.fe.properties.units)
+                .factor_to(plx_model::Quantity::Length, plx_model::STORED);
+            if length != 1.0 {
+                import.mesh.scale(length);
+            }
+            // The model space of an analysis is set when it is made: plane stress, plane
+            // strain and axisymmetric elements take the type of the analysis' 2D space.
             let space = plx_model::ModelSpace::of_mesh(&import.mesh);
-            if model.mesh.element_count() == 0 && model.geometry.is_none() {
-                // Into an empty model, the mesh decides what the model is, as opening it does;
-                // the model space is the project's, so all its analyses take it over.
-                if model.fe.properties.space != space {
-                    let units = model.fe.properties.units;
-                    self.requests
-                        .push(Request::SpaceAndUnits(space, units, false));
-                }
-                model.fe.properties.space = space;
+            if space.is_2d() && model.fe.properties.space.is_2d() {
+                model.fe.properties.space.convert_mesh(&mut import.mesh);
             } else if space.is_2d() != model.fe.properties.space.is_2d() {
                 self.output.push(format!(
                     "Error importing {name}: its elements are {}, the model is {}",
@@ -5032,7 +5274,8 @@ impl Workbench {
         let center = model.mesh.bounds().map_or(glam::DVec3::ZERO, |(a, b)| {
             (glam::DVec3::from(a) + glam::DVec3::from(b)) * 0.5
         });
-        let mut dialog = ExplodedDialog::new(model.explosion.applied.clone(), &last, center);
+        let units = (model.stored_units(), model.units());
+        let mut dialog = ExplodedDialog::new(model.explosion.applied.clone(), &last, center, units);
         preview_explosion(model, &mut dialog, true);
         self.exploded_dialog = Some((dialog, which));
     }
@@ -5676,27 +5919,10 @@ impl Workbench {
         }
     }
 
-    /// The unit system CAD geometry is read in: that of an empty model it goes into, such as
-    /// one just created with File > New, else that of new models.
+    /// The unit system of the analysis, in which files without units are read and results
+    /// shown.
     fn import_units(&self) -> UnitSystem {
-        match &self.model {
-            Some(model) if model.mesh.element_count() == 0 && model.geometry.is_none() => {
-                model.fe.properties.units
-            }
-            _ => self.settings.new_model.units,
-        }
-    }
-
-    /// PrePoMax's File > New: asks for the model space and unit system of the new model,
-    /// with the last choice proposed. `then_import` opens the geometry import afterwards.
-    fn new_model(&mut self, then_import: bool) {
-        // The model space and units are the project's, those of the model replaced.
-        let mut proposed = self.settings.new_model.clone();
-        if let Some(model) = &self.model {
-            proposed.space = model.fe.properties.space;
-            proposed.units = model.fe.properties.units;
-        }
-        self.model_dialog = Some(ModelPropertiesDialog::new_model(proposed, then_import));
+        (self.model.as_ref()).map_or(self.settings.new_model.units, |m| m.fe.properties.units)
     }
 
     fn edit_model_properties(&mut self) {
@@ -5709,176 +5935,24 @@ impl Workbench {
         let Some(dialog) = &mut self.model_dialog else {
             return;
         };
-        let mesh = (self.model.as_ref())
-            .filter(|_| dialog.editing)
-            .map(|m| &m.mesh);
-        let geometry = self.geometry.as_ref().filter(|_| dialog.editing);
-        let result = dialog.show(ctx, mesh, geometry);
-        let (editing, then_import, convert) = (dialog.editing, dialog.then_import, dialog.convert);
+        let mesh = self.model.as_ref().map(|m| &m.mesh);
+        let result = dialog.show(ctx, mesh, self.geometry.as_ref());
         match result {
             DialogResult::Open => return,
             DialogResult::Cancel => {}
-            DialogResult::Ok(properties) if editing => {
-                let space_and_units =
-                    (self.model.as_ref()).map(|m| (m.fe.properties.space, m.fe.properties.units));
-                let changed = space_and_units != Some((properties.space, properties.units));
-                // The project applies a new model space or unit system to all its analyses.
-                if changed {
-                    self.requests.push(Request::SpaceAndUnits(
-                        properties.space,
-                        properties.units,
-                        convert,
-                    ));
-                }
-                let properties = match &self.model {
-                    Some(model) => plx_model::ModelProperties {
+            DialogResult::Ok(properties) => {
+                // The model space and the unit system stay as the analysis was made.
+                if let Some(model) = &mut self.model {
+                    model.fe.properties = plx_model::ModelProperties {
                         space: model.fe.properties.space,
                         units: model.fe.properties.units,
                         ..properties
-                    },
-                    None => properties,
-                };
-                self.set_model_properties(properties, false)
-            }
-            DialogResult::Ok(properties) => {
-                // New models propose the space and units, never a submodel's global results.
-                self.settings.new_model = plx_model::ModelProperties {
-                    kind: plx_model::ModelKind::General,
-                    global_results: None,
-                    ..properties.clone()
-                };
-                let space_and_units =
-                    (self.model.as_ref()).map(|m| (m.fe.properties.space, m.fe.properties.units));
-                if space_and_units.is_some_and(|s| s != (properties.space, properties.units)) {
-                    self.requests.push(Request::SpaceAndUnits(
-                        properties.space,
-                        properties.units,
-                        false,
-                    ));
+                    };
+                    self.results_changed = true;
                 }
-                self.create_model(properties);
-                self.import_requested = then_import;
             }
         }
         self.model_dialog = None;
-    }
-
-    /// Starts an empty model, to import geometry into or to save as a project.
-    fn create_model(&mut self, properties: plx_model::ModelProperties) {
-        self.close_model();
-        let mut model = Model::new(
-            std::path::Path::new("Untitled"),
-            plx_mesh::FeMesh::default(),
-        );
-        self.output.push(format!(
-            "New model: {}, {}",
-            properties.space.label(),
-            properties.units.label()
-        ));
-        model.fe.properties = properties;
-        self.model = Some(model);
-        self.set_tree_view(TreeView::Geometry);
-        self.viewport.set_parts(&[]);
-        self.frame_cache.clear();
-        self.update_contour();
-    }
-
-    /// Takes over changed model properties; a new model space retypes the mesh's surface
-    /// elements, as PrePoMax does. A new unit system converts the model with `convert`.
-    fn set_model_properties(&mut self, properties: plx_model::ModelProperties, convert: bool) {
-        let Some(model) = &mut self.model else {
-            return;
-        };
-        let old = model.fe.properties.clone();
-        if convert && old.units != properties.units {
-            self.convert_units(properties.units);
-        }
-        let Some(model) = &mut self.model else {
-            return;
-        };
-        model.fe.properties = properties.clone();
-        if old.space != properties.space {
-            let mut mesh = model.mesh.clone();
-            if properties.space.convert_mesh(&mut mesh) {
-                model.set_mesh(mesh);
-                self.results_changed = true;
-                self.highlighted = None;
-            }
-            self.output
-                .push(format!("Model space: {}", properties.space.label()));
-        }
-        if old.units != properties.units {
-            self.output
-                .push(format!("Unit system: {}", properties.units.label()));
-        }
-        self.results_changed = true;
-    }
-
-    /// Converts the open model into another unit system: its values, its mesh and its
-    /// geometry, which are scaled for the new length unit.
-    fn convert_units(&mut self, units: UnitSystem) {
-        let Some(model) = &mut self.model else {
-            return;
-        };
-        let conversion = plx_model::convert::Conversion::new(model.fe.properties.units, units);
-        let notes = model.fe.convert_units(units);
-        let factor = conversion.length_factor();
-        if factor != 1.0 {
-            if model.mesh.node_count() > 0 {
-                let mut mesh = model.mesh.clone();
-                mesh.scale(factor);
-                model.set_mesh(mesh);
-                self.highlighted = None;
-            }
-            if let Some(geometry) = &mut model.geometry {
-                geometry.convert_sizes(&conversion);
-                match plx_mesher::scale_geometry(geometry, factor) {
-                    Ok(scaled) => {
-                        *geometry = scaled;
-                        match plx_mesher::tessellate(geometry) {
-                            Ok(display) => {
-                                self.geometry = Some(Model::geometry_view(&model.path, display))
-                            }
-                            Err(error) => self
-                                .output
-                                .push(format!("Geometry cannot be displayed: {error}")),
-                        }
-                    }
-                    Err(error) => self
-                        .output
-                        .push(format!("Geometry could not be converted: {error}")),
-                }
-            }
-            self.frame_cache.clear();
-            self.view_command = Some(ViewCommand::Fit);
-        }
-        self.output.extend(notes);
-        self.output.push(format!(
-            "Model converted to {} (lengths × {factor})",
-            units.label()
-        ));
-    }
-
-    /// Removes the model and all results, like PrePoMax's File > New.
-    fn close_model(&mut self) {
-        if let Some(model) = self.model.take() {
-            self.output.push(format!("{} closed", model.file_name()));
-        }
-        self.geometry = None;
-        self.campbell = None;
-        self.mesh_setup = None;
-        self.mesh_item_editor = None;
-        self.meshing = None;
-        self.close_results(true);
-        self.tree.selected = None;
-        self.dialog = None;
-        self.section = None;
-        self.section_dialog = None;
-        self.exploded_dialog = None;
-        self.editor = None;
-        self.highlighted = None;
-        self.parked_camera = None;
-        self.results_changed = true;
     }
 
     /// Plays the animation and shows its window; marks the scene for rebuilding.
@@ -6251,6 +6325,9 @@ impl Workbench {
             global_origin: graphics.global_axes.then(|| model.global_origin()),
             show_scale_bar: graphics.scale_bar,
             length_unit: units.unit(plx_model::Quantity::Length),
+            length_factor: Some(
+                (model.stored_units()).factor_to(plx_model::Quantity::Length, units) as f32,
+            ),
             show_view_triad: graphics.view_triad,
             nodes: (model.highlight.nodes.iter())
                 .filter_map(|&id| model.node_position(model.mesh.node_index(id)?))
@@ -6649,6 +6726,28 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
 /// Prefixes an output message with the local time, `HH:MM:SS`.
 fn timestamped(message: String) -> String {
     format!("{} {message}", chrono::Local::now().format("%H:%M:%S"))
+}
+
+/// The container a new item goes into, to find whether another analysis owns it.
+fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
+    Some(match kind {
+        NewItem::Material => TreeItem::Group("Materials"),
+        NewItem::Section => TreeItem::Group("Sections"),
+        NewItem::InitialCondition => TreeItem::Group("Initial Conditions"),
+        NewItem::Step => TreeItem::Group("Steps"),
+        NewItem::BoundaryCondition(s)
+        | NewItem::Load(s)
+        | NewItem::FieldOutput(s)
+        | NewItem::HistoryOutput(s)
+        | NewItem::DefinedField(s) => TreeItem::Step(*s),
+        NewItem::Constraint => TreeItem::Group("Constraints"),
+        NewItem::SurfaceInteraction | NewItem::ContactPair | NewItem::Tie | NewItem::NodeTie => {
+            TreeItem::Group("Contacts")
+        }
+        NewItem::Amplitude => TreeItem::Group("Amplitudes"),
+        NewItem::MeshSetupItem => TreeItem::Group("Mesh Setup"),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]

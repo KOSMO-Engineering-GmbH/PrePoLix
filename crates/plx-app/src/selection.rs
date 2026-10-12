@@ -1413,7 +1413,7 @@ mod tests {
     fn beam_hit(x: f32, y: f32) -> (Model, Hit) {
         let model = crate::model::load(
             &testdata("kragbalken_c3d8.inp"),
-            plx_model::UnitSystem::MmTonSC,
+            plx_model::UnitSystem::Unitless,
         )
         .unwrap()
         .model;
@@ -1811,7 +1811,7 @@ mod tests {
         // outline join two edges, the corners are where it bends.
         let model = crate::model::load(
             &testdata("platte_mit_stuetzen.inp"),
-            plx_model::UnitSystem::MmTonSC,
+            plx_model::UnitSystem::Unitless,
         )
         .unwrap()
         .model;

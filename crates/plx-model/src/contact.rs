@@ -98,17 +98,24 @@ pub enum SurfaceBehavior {
 impl SurfaceBehavior {
     /// Kinds of the relation with PrePoMax's default values, as offered in the dialog.
     pub fn kinds() -> [SurfaceBehavior; 5] {
-        // E = 200 GPa: K = 50 E, sigma_inf = E / 70000.
-        let k = 1e7;
+        // PrePoMax's values for mm, t, s, stored in SI units. E = 200 GPa: K = 50 E,
+        // sigma_inf = E / 70000.
+        use crate::{Quantity, UnitSystem::MmTonSC};
+        let k = MmTonSC.stored(1e7, Quantity::ForcePerVolume);
+        let pressure = |p| MmTonSC.stored(p, Quantity::Pressure);
+        let length = |l| MmTonSC.stored(l, Quantity::Length);
         [
             SurfaceBehavior::Hard,
             SurfaceBehavior::Linear {
                 k,
-                sigma_inf: 2.86,
+                sigma_inf: pressure(2.86),
                 c0: None,
             },
-            SurfaceBehavior::Exponential { c0: 1.0, p0: 0.1 },
-            SurfaceBehavior::Tabular(vec![[0.0, 0.0], [1e5, 1.0]]),
+            SurfaceBehavior::Exponential {
+                c0: length(1.0),
+                p0: pressure(0.1),
+            },
+            SurfaceBehavior::Tabular(vec![[0.0, 0.0], [pressure(1e5), length(1.0)]]),
             SurfaceBehavior::Tied { k },
         ]
     }

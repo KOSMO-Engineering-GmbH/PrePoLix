@@ -2,6 +2,7 @@
 //! features, or a point with a normal) and the dialog that edits it. Every way of defining the plane ends in the same
 //! point and normal, so the renderer, the cut and the manipulator only know those.
 
+use plx_model::{Quantity::Length, UnitSystem};
 use std::collections::BTreeSet;
 
 use egui::Ui;
@@ -369,7 +370,7 @@ impl SectionDialog {
             .pivot(egui::Align2::LEFT_TOP)
             .default_pos(ctx.content_rect().left_top() + egui::vec2(300.0, 90.0))
             .show(ctx, |ui| {
-                self.form(ui, &model.fe);
+                self.form(ui, model);
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     if ui.button("Cancel").clicked() {
@@ -400,8 +401,13 @@ impl SectionDialog {
         result
     }
 
-    fn form(&mut self, ui: &mut Ui, fe: &FeModel) {
-        let speed = self.half_diagonal.length() * 0.005;
+    fn form(&mut self, ui: &mut Ui, model: &Model) {
+        let fe = &model.fe;
+        // Positions are stored in the model's units and shown in those it shows.
+        let units = (model.stored_units(), model.units());
+        let speed = self.half_diagonal.length()
+            * 0.005
+            * (units.0).factor_to(plx_model::Quantity::Length, units.1);
         let kind = match self.draft.definition {
             PlaneDefinition::Principal { .. } => 0,
             PlaneDefinition::Feature { .. } => 1,
@@ -460,7 +466,7 @@ impl SectionDialog {
                     });
                     ui.end_row();
                     ui.label(format!("Position {}", plane.axis_label()));
-                    ui.add(numeric::drag_value(offset).speed(speed));
+                    ui.add(numeric::converted(offset, units.0, units.1, Length).speed(speed));
                     ui.end_row();
                 }
                 PlaneDefinition::Feature {
@@ -478,7 +484,7 @@ impl SectionDialog {
                         });
                     ui.end_row();
                     ui.label("Distance");
-                    ui.add(numeric::drag_value(offset).speed(speed));
+                    ui.add(numeric::converted(offset, units.0, units.1, Length).speed(speed));
                     ui.end_row();
                     if frame.is_none() {
                         ui.label("");
@@ -488,7 +494,7 @@ impl SectionDialog {
                 }
                 PlaneDefinition::PointNormal { point, normal } => {
                     ui.label("Point");
-                    vector_row(ui, point, speed);
+                    vector_row(ui, point, speed, units);
                     ui.end_row();
                     ui.label("From selection");
                     if crate::setup::pick_button(ui, self.picking == Some(Picking::Point)) {
@@ -500,7 +506,7 @@ impl SectionDialog {
                     }
                     ui.end_row();
                     ui.label("Normal");
-                    vector_row(ui, normal, 0.01);
+                    vector_row(ui, normal, 0.01, (plx_model::STORED, plx_model::STORED));
                     ui.end_row();
                     ui.label("");
                     let normal_picking = matches!(self.picking, Some(Picking::Normal(_)));
@@ -576,12 +582,13 @@ fn closest_principal(normal: DVec3) -> PrincipalPlane {
         .unwrap_or(PrincipalPlane::Xy)
 }
 
-fn vector_row(ui: &mut Ui, value: &mut DVec3, speed: f64) {
+/// Fields for the components of a vector stored in `units.0` and shown in `units.1`.
+fn vector_row(ui: &mut Ui, value: &mut DVec3, speed: f64, units: (UnitSystem, UnitSystem)) {
     ui.horizontal(|ui| {
         for (k, label) in ["X", "Y", "Z"].into_iter().enumerate() {
             ui.label(label);
             ui.add(
-                egui::DragValue::new(&mut value[k])
+                numeric::converted(&mut value[k], units.0, units.1, Length)
                     .speed(speed)
                     .max_decimals(6),
             );

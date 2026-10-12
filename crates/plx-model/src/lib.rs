@@ -58,7 +58,7 @@ pub use section::{
     unit_thickness,
 };
 pub use symmetry::{SymmetryError, SymmetryPlane, symmetry_dofs, symmetry_plane};
-pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, UnitSystem};
+pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, STORED, UnitSystem};
 pub use validity::{Invalid, ModelItem};
 
 use std::path::{Path, PathBuf};
@@ -68,7 +68,9 @@ use serde::{Deserialize, Serialize};
 
 /// Version of the project file format written by this build.
 /// Format 2 holds several analyses; projects of format 1 had one model and are not read.
-pub const PROJECT_FORMAT: u32 = 2;
+/// Format 3 stores all values in SI units ([`STORED`]) and gives each analysis its own model
+/// space and unit system.
+pub const PROJECT_FORMAT: u32 = 3;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -401,7 +403,7 @@ pub struct Material {
 }
 
 /// Norton's creep law (`*CREEP, LAW=NORTON`): the equivalent creep strain rate is
-/// `a * stress^n * time^m`, in the units of the model.
+/// `a * stress^n * time^m`, stored in SI units (stress in Pa, time in s).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Creep {
     pub a: f64,
@@ -410,10 +412,10 @@ pub struct Creep {
 }
 
 impl Default for Creep {
-    /// A steel creeping about 1 % in 1000 s at 100 MPa (mm, ton, s units).
+    /// A steel creeping about 1 % in 1000 s at 100 MPa: `a` = 1e-15 for MPa.
     fn default() -> Self {
         Self {
-            a: 1e-15,
+            a: 1e-45,
             n: 5.0,
             m: 0.0,
         }
