@@ -35,7 +35,7 @@ delete the selected tree item, #key("Space") activate or deactivate it. In dialo
 
 === Views
 
-The projection is orthographic. As in PrePoMax, Y points up in the front view.
+The projection is orthographic. Y points up in the front view.
 
 - #ui("Front"), #ui("Back"), #ui("Left"), #ui("Right"), #ui("Top"), #ui("Bottom") and
   #ui("Isometric") are on the toolbar and in the #ui("View") menu.

@@ -104,7 +104,7 @@ midside node 4/6 of the edge's share.
 #ui("Hide") in the context menu of a boundary condition or load removes its symbol from the 3D
 view, #ui("Show") brings it back; the tree marks a hidden item with an eye. #ui("Hide All") and
 #ui("Show All") in the context menu of #ui("BCs") or #ui("Loads") of a step do this for all of
-them. Constraints are hidden the same way (@constraints). As in PrePoMax, a hidden item is still
+them. Constraints are hidden the same way (@constraints). A hidden item is still
 drawn while it is selected, and the setting is saved with the project. Hiding changes only the
 view; #ui("Deactivate") leaves an item out of the input file.
 

@@ -14,7 +14,7 @@ nodes of a picked edge, element or surface, for example the centre of a hole.
 
 #screenshot("point-picks-corner.png", [Picking a point: the corner nearest to the mouse is shown])
 
-/ Reference Point: a named point. #ui("Create by") offers, as in PrePoMax:
+/ Reference Point: a named point. #ui("Create by") offers:
   - #ui("Coordinates"): typed in or picked, in the global system or in a coordinate system of
     the features chosen under #ui("Coordinate system"). In a cylindrical system the coordinates
     are R, Theta in degrees and Z. The point follows the coordinate system when it changes.

@@ -3,9 +3,7 @@
 = Introduction
 
 PrePoLix is a pre- and post-processor for the finite element solver
-#link("http://www.calculix.de/")[CalculiX]. It runs on Linux and Windows. Its look, workflow
-and feature set follow #link("https://prepomax.fs.um.si/")[PrePoMax], so users of PrePoMax will
-find most dialogs where they expect them.
+#link("http://www.calculix.de/")[CalculiX]. It runs on Linux and Windows.
 
 With PrePoLix you
 

@@ -3,8 +3,7 @@
 == Bolt pre-tension <pre-tension>
 
 A #ui("Pre-tension (bolt preload)") load tightens a bolt: it pulls the two sides of a cut through
-the shank together with a force, or shortens the bolt by a given length, as PrePoMax's
-pre-tension load does. Create it with #ui("Create ...") on #ui("Loads") of a step or
+the shank together with a force, or shortens the bolt by a given length. Create it with #ui("Create ...") on #ui("Loads") of a step or
 #menu("Model", "Create Load ...").
 
 #screenshot("pre-tension-load.png", [Pre-tension load on the cut through a bolt shank])
@@ -30,10 +29,10 @@ reuses the node, so a bolt tightened by a force in the first step can be held at
 the next step with a displacement of 0, like the usual "preload, then load" sequence of a bolted
 joint.
 
-#note[PrePoMax writes `*PRE-TENSION SECTION`, and CalculiX separates only the elements with a
+#note[CalculiX's `*PRE-TENSION SECTION` separates only the elements with a
 face on the cut. In a tetrahedral mesh, elements that touch the cut with just an edge or a
-corner then hold both sides together and take most of the preload, which is why PrePoMax users
-add a thin layer of wedge elements at the cut (#menu("Model", "Tools", "Boundary Layer")).
+corner then hold both sides together and take most of the preload, which is why a thin layer of wedge elements is often
+added at the cut (#menu("Model", "Tools", "Boundary Layer")).
 PrePoLix needs no such layer: its own cut separates all of them.]
 
 #note[A bolt split into two parts in the CAD geometry has two meshes that do not share nodes at
