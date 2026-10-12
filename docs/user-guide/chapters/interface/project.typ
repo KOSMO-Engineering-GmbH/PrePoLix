@@ -20,8 +20,7 @@ both.
 
 === Creating an analysis <new-analysis>
 
-#menu("Project", "New Analysis ..."), the first toolbar button or a right-click on the
-background of the schematic open #ui("Model Properties") for the new analysis
+#menu("Project", "New Analysis ...") or a right-click on the background of the schematic open #ui("Model Properties") for the new analysis
 (@model-properties). Choose its *model space* (3D, plane stress, plane strain or axisymmetric)
 and its *unit system* there.
 
@@ -132,7 +131,7 @@ the green square takes the state of another analysis (@data-links).
     for a new version.],
 )
 
-The toolbar holds #ui("New Analysis"), #ui("Open"), #ui("Save"), #ui("Update Project") and
+The toolbar holds #ui("New Project"), #ui("Open"), #ui("Save"), #ui("Update Project") and
 the button that stops the update. Stopping the update lets the running CalculiX jobs finish; use
 #ui("Stop") in the analysis window to kill one.
 
