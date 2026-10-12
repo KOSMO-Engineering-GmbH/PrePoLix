@@ -82,6 +82,9 @@ setup items), orange wires carry results and green wires carry the state after a
 
 - *Double-click* a block to open its analysis in its own window. If the window is open
   already, it comes to the front. The header of an open analysis says #ui("(open)").
+  Double-clicking a row opens the window in the matching workspace: #ui("Geometry") and
+  #ui("Mesh") in the Geometry workspace, #ui("Setup") and its categories in the FE Model
+  workspace, and #ui("Results") in the Results workspace.
 - *Drag* a block by its header to move it, drag the background to pan, and scroll to zoom.
   Double-click the background to see all blocks.
 - *Drag* from a pin on the right of a row to a pin on the left of a row of another block to
