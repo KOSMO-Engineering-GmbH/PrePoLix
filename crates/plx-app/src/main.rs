@@ -48,6 +48,7 @@ mod transformation_dialog;
 mod tree;
 mod tree_icons;
 mod undo;
+mod update;
 mod viewport;
 mod virtual_table;
 mod vtk_export_dialog;
@@ -140,6 +141,7 @@ mod tests {
             ("setup.rs", include_str!("setup.rs")),
             ("solver_check.rs", include_str!("solver_check.rs")),
             ("style.rs", include_str!("style.rs")),
+            ("update.rs", include_str!("update.rs")),
             ("tree.rs", include_str!("tree.rs")),
             ("tree_icons.rs", include_str!("tree_icons.rs")),
             ("viewport.rs", include_str!("viewport.rs")),

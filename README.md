@@ -10,7 +10,7 @@ Rust, limited to CalculiX, and runs on **Linux and Windows**. The goal is the sa
 PrePoMax: import a geometry, mesh it, set up materials, loads and steps, run CalculiX and look at
 the results, all in one window and without editing input files by hand.
 
-![PrePoLix main window with a result](docs/user-guide/images/results.png)
+![PrePoLix main window with a result](docs/images/readme-hero.png)
 
 > PrePoLix is a hobby project under active development. It is not affiliated with PrePoMax or
 > CalculiX. Expect rough edges and please report what you find in the
@@ -162,6 +162,6 @@ _1D beam elements and plotting along paths_
 
 _moving loads_
 
-<img width="1247" height="735" alt="grafik" src="https://github.com/user-attachments/assets/53403e28-1ae5-487a-8d2b-8bef4ecb7274" />
+<img width="1587" height="740" alt="grafik" src="https://github.com/user-attachments/assets/39663ab6-7505-453f-a2e4-736420f9ce04" />
 
 _hotspot analysis by means of extrapolation_
