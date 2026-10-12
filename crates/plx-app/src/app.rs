@@ -194,6 +194,8 @@ pub struct PrepolixApp {
     workbench: Workbench,
     load_events: (Sender<LoadEvent>, Receiver<LoadEvent>),
     loading: Option<PathBuf>,
+    /// Last title sent to the operating system window, to send it only on change.
+    window_title: String,
 }
 
 impl PrepolixApp {
@@ -289,6 +291,7 @@ impl PrepolixApp {
             },
             load_events: channel(),
             loading: None,
+            window_title: String::new(),
         };
         if app.workbench.settings.updates.check_at_startup
             && app.workbench.updater.installation().checks_at_startup()
@@ -954,6 +957,15 @@ impl eframe::App for PrepolixApp {
         let ctx = ui.ctx().clone();
         // Under the System theme, the operating system may switch between light and dark.
         crate::style::sync(&ctx);
+        let title = window_title(
+            (self.workbench.model.as_ref())
+                .map(|m| m.path.as_path())
+                .filter(|p| p.as_os_str() != "Untitled"),
+        );
+        if title != self.window_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.window_title = title;
+        }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
             self.open_dialog(&ctx);
         }
@@ -1174,6 +1186,15 @@ fn file_size(bytes: u64) -> String {
 }
 
 /// Asks for a project file to save `model` to, proposing its name with `suffix`.
+/// Title of the window: program, version and the full path of the open file, like PrePoMax.
+fn window_title(path: Option<&std::path::Path>) -> String {
+    let base = concat!("PrePoLix v", env!("CARGO_PKG_VERSION"));
+    match path {
+        Some(path) => format!("{base}  {}", path.display()),
+        None => base.to_string(),
+    }
+}
+
 fn pick_project_file(model: &Model, title: &str, suffix: &str) -> Option<PathBuf> {
     let stem = model
         .path
@@ -6441,6 +6462,17 @@ fn timestamped(message: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn window_title_shows_version_and_path() {
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(super::window_title(None), format!("PrePoLix v{version}"));
+        let path = std::path::Path::new("/tmp/hinge.plx");
+        assert_eq!(
+            super::window_title(Some(path)),
+            format!("PrePoLix v{version}  /tmp/hinge.plx")
+        );
+    }
+
     use super::*;
     use std::collections::HashMap;
 

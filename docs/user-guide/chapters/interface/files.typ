@@ -28,6 +28,12 @@
 #note[PrePoLix does not ask about unsaved changes. Save regularly. Changes of the model can be
   undone (@undo).]
 
+=== Window title
+
+The title bar of the window shows the program version and the full path of the open file, for
+example `PrePoLix v0.2.6  C:\Projects\hinge.plx`. It follows #ui("Open"), #ui("Save As") and
+#ui("New"). Without a model, only the version is shown.
+
 === What each file type does
 
 / `.plx` (PrePoLix project): geometry, mesh setup, mesh and FE model in one file, and the result
