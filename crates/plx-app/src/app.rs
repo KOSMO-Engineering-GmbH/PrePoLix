@@ -362,17 +362,21 @@ impl AnalysisWindow {
         inherited
     }
 
-    /// Makes the analysis a submodel of the global results at `results`, see
-    /// [`crate::links::apply_submodel`].
-    pub fn apply_submodel(&mut self, step: &str, global: u32, results: PathBuf) {
-        if let Some(model) = &mut self.workbench.model {
-            crate::links::apply_submodel(&mut model.fe, step, global, results);
+    /// Lets the analysis use the results of another one, see
+    /// [`crate::links::apply_results`].
+    pub fn apply_results(&mut self, link: &plx_io::project::Link, global: u32, file: PathBuf) {
+        if let Some(model) = &mut self.workbench.model
+            && crate::links::apply_results(&mut model.fe, link, global, file)
+        {
+            self.workbench.symbols_shown = None;
         }
     }
 
-    pub fn clear_submodel(&mut self) {
+    /// Takes back what a removed results link set, see [`crate::links::clear_results`].
+    pub fn clear_results(&mut self, link: &plx_io::project::Link, submodel: bool) {
         if let Some(model) = &mut self.workbench.model {
-            crate::links::clear_submodel(&mut model.fe);
+            crate::links::clear_results(&mut model.fe, link, submodel);
+            self.workbench.symbols_shown = None;
         }
     }
 
@@ -542,6 +546,12 @@ impl AnalysisWindow {
     /// The state of the analysis' cells, found again at most twice a second.
     pub fn status(&mut self) -> Option<crate::status::AnalysisStatus> {
         self.workbench.cached_status()
+    }
+
+    /// The state of the cells found now, not as last found: right after a run, the one
+    /// found while it ran may still be cached.
+    pub fn current_status(&self) -> Option<crate::status::AnalysisStatus> {
+        self.workbench.status()
     }
 
     /// Geometry > Import, into the model space and units the analysis was made with.
@@ -3678,6 +3688,10 @@ impl Workbench {
                 analysis.status(),
                 plx_job::JobStatus::Completed | plx_job::JobStatus::FailedWithResults
             );
+        // Results being restored or kept go first; those of this run are kept after them.
+        if done && self.bound_work.is_some() {
+            return;
+        }
         if done {
             analysis.open_when_done = false;
             if with_results {

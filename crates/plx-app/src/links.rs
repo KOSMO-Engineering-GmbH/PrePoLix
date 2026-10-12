@@ -17,7 +17,9 @@ use std::path::PathBuf;
 
 use plx_io::project::Link;
 use plx_mesh::{FeMesh, Fnv};
-use plx_model::{BoundaryKind, FeModel, Geometry, ModelKind, Step};
+use plx_model::{
+    BoundaryKind, DefinedField, DefinedFieldKind, FeModel, Geometry, ModelKind, Step, StepKind,
+};
 
 use crate::tree::TreeItem;
 
@@ -199,6 +201,152 @@ pub struct Continuation {
     /// The own steps of the analyses that continue it, after the index of the step of this
     /// one they follow: their sets go into its input file.
     pub dependent_steps: Vec<(usize, Vec<Step>)>,
+}
+
+/// What the results of a step of another analysis are used for, by the slot they go to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResultsUse {
+    /// The displacements on the cut boundary of a submodel: `["Results", step]`.
+    Submodel,
+    /// The temperatures as a defined field of a step: `["Results", step, "Temperature"]`.
+    Temperature,
+    /// The eigenmodes of a frequency step, for modal dynamics and steady state dynamics:
+    /// `["Results", step, "Modes"]`.
+    Modes,
+    /// The temperatures the model starts at: `["Setup", "Initial Conditions", "Temperature"]`.
+    InitialTemperatures,
+}
+
+pub const TEMPERATURE: &str = "Temperature";
+pub const MODES: &str = "Modes";
+const INITIAL_CONDITIONS: &str = "Initial Conditions";
+
+/// Name of the defined field a temperature link sets in its step.
+pub const LINKED_TEMPERATURES: &str = "Linked Temperatures";
+
+impl ResultsUse {
+    /// What the results go to in the target, by the slot of a results link.
+    pub fn of(link: &Link) -> Option<Self> {
+        if !is_results(link) {
+            return None;
+        }
+        Some(match slot(link) {
+            [cell, _, kind] if cell == RESULTS && kind == TEMPERATURE => Self::Temperature,
+            [cell, _, kind] if cell == RESULTS && kind == MODES => Self::Modes,
+            [cell, ..] if cell == SETUP => Self::InitialTemperatures,
+            _ => Self::Submodel,
+        })
+    }
+}
+
+/// Where results of `source_step` dropped on `slot` of `target` go: a step of the target
+/// takes temperatures of a thermal step as a defined field, the eigenmodes of a frequency
+/// step for modal and steady state dynamics, other results for a submodel; the initial
+/// conditions take temperatures. `Err` tells why they cannot go there.
+pub fn results_slot(
+    source_step: &Step,
+    target: &FeModel,
+    slot: &[String],
+) -> Result<Vec<String>, String> {
+    let path = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+    let thermal = source_step.kind.is_thermal();
+    match slot {
+        [cell, category] if cell == SETUP && category == INITIAL_CONDITIONS => {
+            if thermal {
+                Ok(path(&[SETUP, INITIAL_CONDITIONS, TEMPERATURE]))
+            } else {
+                Err(format!(
+                    "only the temperatures of a thermal step can be initial conditions, and {} \
+                     is none",
+                    source_step.name
+                ))
+            }
+        }
+        [cell, step] if cell == RESULTS => {
+            let target_step = target.steps.iter().find(|s| &s.name == step);
+            let kind = target_step.map(|s| &s.kind);
+            if let StepKind::Frequency(frequency) = &source_step.kind
+                && kind.is_some_and(StepKind::uses_stored_modes)
+            {
+                if !frequency.storage {
+                    return Err(format!(
+                        "{} does not store its eigenmodes; turn on Storage in it",
+                        source_step.name
+                    ));
+                }
+                return Ok(path(&[RESULTS, step, MODES]));
+            }
+            if thermal && kind.is_some_and(StepKind::supports_defined_fields) {
+                return Ok(path(&[RESULTS, step, TEMPERATURE]));
+            }
+            Ok(slot.to_vec())
+        }
+        _ => Err("they cannot go there".into()),
+    }
+}
+
+/// Lets `fe` use the results of another analysis: `file` is the results file (`.frd`) or,
+/// for eigenmodes, the `.eig` file, `global` the step of it. Returns whether anything
+/// changed.
+pub fn apply_results(fe: &mut FeModel, link: &Link, global: u32, file: PathBuf) -> bool {
+    let Some(kind) = ResultsUse::of(link) else {
+        return false;
+    };
+    let step = slot(link).get(1).cloned().unwrap_or_default();
+    match kind {
+        ResultsUse::Submodel => apply_submodel(fe, &step, global, file),
+        ResultsUse::Modes => {
+            let changed = fe.properties.stored_modes.as_ref() != Some(&file);
+            fe.properties.stored_modes = Some(file);
+            changed
+        }
+        ResultsUse::InitialTemperatures => {
+            let value = Some((file, global));
+            let changed = fe.properties.initial_temperatures != value;
+            fe.properties.initial_temperatures = value;
+            changed
+        }
+        ResultsUse::Temperature => {
+            let Some(step) = fe.steps.iter_mut().find(|s| s.name == step) else {
+                return false;
+            };
+            let field = DefinedField {
+                name: LINKED_TEMPERATURES.into(),
+                active: true,
+                region: plx_model::Region::Parts(Vec::new()),
+                kind: DefinedFieldKind::TemperatureFromFile { file, step: global },
+                amplitude: None,
+            };
+            match (step.defined_fields.iter_mut()).find(|f| f.name == LINKED_TEMPERATURES) {
+                Some(own) if own.kind == field.kind => false,
+                Some(own) => {
+                    own.kind = field.kind;
+                    true
+                }
+                None => {
+                    step.defined_fields.push(field);
+                    true
+                }
+            }
+        }
+    }
+}
+
+/// Takes back what a results link set in `fe`, once it is removed; `submodel` tells
+/// whether other links still make it a submodel.
+pub fn clear_results(fe: &mut FeModel, link: &Link, submodel: bool) {
+    match ResultsUse::of(link) {
+        Some(ResultsUse::Submodel) if !submodel => clear_submodel(fe),
+        Some(ResultsUse::Modes) => fe.properties.stored_modes = None,
+        Some(ResultsUse::InitialTemperatures) => fe.properties.initial_temperatures = None,
+        Some(ResultsUse::Temperature) => {
+            let step = slot(link).get(1);
+            for s in fe.steps.iter_mut().filter(|s| Some(&s.name) == step) {
+                s.defined_fields.retain(|f| f.name != LINKED_TEMPERATURES);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The names of the items of a category of the setup, as the tree lists them.
@@ -487,6 +635,8 @@ pub fn compatible(item: &[String], slot: &[String]) -> bool {
         ([a, _], [b, _]) if a == RESULTS && b == RESULTS => true,
         // The results of a step dropped on the state row: continue from it.
         ([a, _], [b]) if a == RESULTS && b == STATE => true,
+        // Temperatures dropped on the initial conditions.
+        ([a, _], [b, c]) if a == RESULTS && b == SETUP && c == INITIAL_CONDITIONS => true,
         ([a, ..], [b, ..]) if a == SETUP && b == SETUP => {
             // A category or an item goes to the target's category, or into its setup.
             match (item.get(1), slot.get(1)) {
@@ -892,6 +1042,79 @@ mod tests {
     }
 
     #[test]
+    fn results_go_where_the_steps_at_both_ends_take_them() {
+        let mut frequency = Step::new_frequency("Modes");
+        let heat = Step::new_heat_transfer("Heat");
+        let mut target = FeModel::default();
+        target.steps.push(Step::new_static("Load"));
+        target.steps.push(Step::new_modal_dynamics("Shake"));
+        let slot = |parts: &[&str]| results_slot(&heat, &target, &path(parts));
+        assert_eq!(
+            slot(&["Results", "Load"]).unwrap(),
+            path(&["Results", "Load", "Temperature"])
+        );
+        assert_eq!(
+            slot(&["Setup", "Initial Conditions"]).unwrap(),
+            path(&["Setup", "Initial Conditions", "Temperature"])
+        );
+        let static_step = Step::new_static("Preload");
+        assert!(
+            results_slot(
+                &static_step,
+                &target,
+                &path(&["Setup", "Initial Conditions"])
+            )
+            .is_err()
+        );
+        // Displacements of a static step drive a submodel.
+        assert_eq!(
+            results_slot(&static_step, &target, &path(&["Results", "Load"])).unwrap(),
+            path(&["Results", "Load"])
+        );
+        // Eigenmodes only when the frequency step stores them.
+        let shake = path(&["Results", "Shake"]);
+        assert!(results_slot(&frequency, &target, &shake).is_err());
+        if let StepKind::Frequency(f) = &mut frequency.kind {
+            f.storage = true;
+        }
+        let modes = results_slot(&frequency, &target, &shake).unwrap();
+        assert_eq!(modes, path(&["Results", "Shake", "Modes"]));
+
+        let link = |item: &[&str], slot: Vec<String>| Link {
+            source: 1,
+            target: 2,
+            item: path(item),
+            slot,
+            inherited: Vec::new(),
+        };
+        let temperature = link(
+            &["Results", "Heat"],
+            path(&["Results", "Load", "Temperature"]),
+        );
+        assert_eq!(ResultsUse::of(&temperature), Some(ResultsUse::Temperature));
+        assert!(apply_results(
+            &mut target,
+            &temperature,
+            1,
+            "heat.frd".into()
+        ));
+        assert!(!apply_results(
+            &mut target,
+            &temperature,
+            1,
+            "heat.frd".into()
+        ));
+        assert_eq!(target.result_files(), [std::path::Path::new("heat.frd")]);
+        let modes = link(&["Results", "Modes"], modes);
+        assert!(apply_results(&mut target, &modes, 1, "modes.eig".into()));
+        assert_eq!(target.properties.stored_modes, Some("modes.eig".into()));
+        clear_results(&mut target, &temperature, false);
+        clear_results(&mut target, &modes, false);
+        assert!(target.result_files().is_empty());
+        assert_eq!(target.properties.stored_modes, None);
+    }
+
+    #[test]
     fn like_goes_with_like() {
         assert!(compatible(&path(&["Mesh"]), &path(&["Mesh"])));
         assert!(!compatible(&path(&["Mesh"]), &path(&["Geometry"])));
@@ -906,5 +1129,10 @@ mod tests {
         assert!(!compatible(&results, &path(&["Setup", "Steps"])));
         assert!(compatible(&results, &path(&["State"])));
         assert!(!compatible(&path(&["Mesh"]), &path(&["State"])));
+        assert!(compatible(
+            &results,
+            &path(&["Setup", "Initial Conditions"])
+        ));
+        assert!(!compatible(&results, &path(&["Setup", "Materials"])));
     }
 }

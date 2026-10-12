@@ -119,6 +119,65 @@ pub fn stage_global_results(
     Ok(())
 }
 
+/// Prepares what the model takes from the results of other analyses: the stored eigenmodes
+/// are copied to `<name>.eig`, where CalculiX reads them; the initial temperatures are read
+/// from their results file and returned as the keyword that sets them.
+pub fn stage_linked_results(
+    fe: &plx_model::FeModel,
+    dir: &std::path::Path,
+    name: &str,
+) -> Result<Option<String>, String> {
+    if let Some(modes) = &fe.properties.stored_modes {
+        if !modes.is_file() {
+            return Err(format!(
+                "The eigenmodes {} are gone: solve the analysis they come from again.",
+                modes.display()
+            ));
+        }
+        let target = dir.join(format!("{name}.eig"));
+        if *modes != target {
+            std::fs::create_dir_all(dir)
+                .and_then(|()| std::fs::copy(modes, &target))
+                .map_err(|e| format!("Eigenmodes {} not copied: {e}", modes.display()))?;
+        }
+    }
+    let Some((file, step)) = &fe.properties.initial_temperatures else {
+        return Ok(None);
+    };
+    let results =
+        plx_io::frd::read_frd(file).map_err(|e| format!("Initial temperatures not read: {e}"))?;
+    let temperatures = (results.increments.iter().rev())
+        .filter(|i| i.step == *step)
+        .find_map(|i| i.field("NDTEMP")?.component("T"))
+        .ok_or_else(|| {
+            format!(
+                "Initial temperatures not read: {} has no temperatures of step {step}.",
+                file.display()
+            )
+        })?;
+    let mut keyword = format!(
+        "** Initial temperatures: step {step} of {}\n*Initial conditions, Type=Temperature\n",
+        file.display()
+    );
+    for (node, value) in results.mesh.node_ids().iter().zip(&temperatures.values) {
+        keyword.push_str(&format!("{node}, {value:e}\n"));
+    }
+    Ok(Some(keyword))
+}
+
+/// The input file with `keyword` inserted after the model definition, before the first step.
+fn before_first_step(input: &str, keyword: &str) -> String {
+    let at = (input.match_indices('\n'))
+        .map(|(i, _)| i + 1)
+        .find(|&i| {
+            input[i..]
+                .get(..5)
+                .is_some_and(|k| k.eq_ignore_ascii_case("*step"))
+        })
+        .unwrap_or(input.len());
+    format!("{}{keyword}{}", &input[..at], &input[at..])
+}
+
 impl Analysis {
     /// Writes the input file of the analysis `name` into `work_dir` and starts CalculiX on
     /// it; steps left at the default solver use `default_solver`, see
@@ -147,6 +206,7 @@ impl Analysis {
         fe.resolve_default_solver(default_solver);
         let job_name = job_name(name);
         stage_global_results(&mut fe, work_dir, &job_name)?;
+        let initial = stage_linked_results(&fe, work_dir, &job_name)?;
         // The sets of the analyses that continue from its states go into the input file too:
         // CalculiX takes no new sets after reading a state.
         let input = if check_model {
@@ -156,6 +216,10 @@ impl Analysis {
             plx_io::inp::write_inp_with_sets_of(&model.mesh, &fe, &heading, dependent)
         }
         .map_err(|e| format!("Input file not written: {e}"))?;
+        let input = match &initial {
+            Some(keyword) => before_first_step(&input, keyword),
+            None => input,
+        };
         // The model check leaves out the steps; their keywords are still tested.
         let keywords = if check_model {
             let full = plx_io::inp::write_inp(&model.mesh, &fe, &heading).unwrap_or_default();
@@ -429,6 +493,8 @@ fn plan_restart(
         .map(std::path::Path::to_path_buf)
         .collect();
     external.extend(fe.properties.global_results.clone());
+    external.extend(fe.properties.stored_modes.clone());
+    external.extend((fe.properties.initial_temperatures.iter()).map(|(file, _)| file.clone()));
     let keep = solver.keep_restart_files;
     let chain = Chain::new(input, keep, restart::files_fingerprint(&external));
     let solver_key = solver.executable_key();
@@ -783,6 +849,109 @@ mod tests {
             format!("{:?}", continued.increments),
             format!("{:?}", full.increments)
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn eigenmodes_and_temperatures_come_from_other_analyses() {
+        use plx_model::{BoundaryCondition, BoundaryKind, Load, LoadKind, Region, Step};
+        if std::process::Command::new("ccx")
+            .arg("-v")
+            .output()
+            .is_err()
+        {
+            eprintln!("ccx missing, test skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("prepolix-linked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bc = |name: &str, nodes: Vec<u32>, kind| BoundaryCondition {
+            name: name.into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(nodes),
+            kind,
+            amplitude: None,
+        };
+        let cubes = || {
+            let mut model = pulled_cubes(0.0);
+            let material = &mut model.fe.materials[0];
+            material.density = Some(7.85e-9);
+            material.conductivity = Some(50.0);
+            material.specific_heat = Some(4.6e8);
+            model
+        };
+        // Eigenmodes of one analysis, the response over time from them in another one.
+        let mut frequency = Step::new_frequency("Modes");
+        if let plx_model::StepKind::Frequency(f) = &mut frequency.kind {
+            f.storage = true;
+        }
+        frequency.boundary_conditions = vec![bc("Fix", vec![1, 2, 3, 4], BoundaryKind::Fixed)];
+        let mut modal = Step::new_modal_dynamics("Shake");
+        modal.boundary_conditions = frequency.boundary_conditions.clone();
+        modal.loads.push(Load {
+            name: "Push".into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(vec![13, 14, 15, 16]),
+            kind: LoadKind::ConcentratedForce([0.0, 1.0, 0.0]),
+            amplitude: None,
+            factor_amplitude: None,
+        });
+        let mut both = cubes();
+        both.fe.steps = vec![frequency.clone(), modal.clone()];
+        solve_as(&both, &dir.join("Both"), "Both", &Default::default());
+        let mut source = cubes();
+        source.fe.steps = vec![frequency];
+        solve_as(&source, &dir.join("Modes"), "Modes", &Default::default());
+        let mut target = cubes();
+        target.fe.steps = vec![modal];
+        target.fe.properties.stored_modes = Some(dir.join("Modes/Modes.eig"));
+        assert!(
+            !(target.findings().iter()).any(|f| f.problem == plx_model::Problem::NoStoredModes)
+        );
+        solve_as(&target, &dir.join("Shake"), "Shake", &Default::default());
+        let alone = plx_io::frd::read_frd(&dir.join("Shake/Shake.frd")).unwrap();
+        let joint = plx_io::frd::read_frd(&dir.join("Both/Both.frd")).unwrap();
+        let last = |frd: &plx_io::frd::FrdImport| {
+            format!("{:?}", frd.increments.last().unwrap().displacements())
+        };
+        assert_eq!(last(&alone), last(&joint));
+        // Temperatures of a heat transfer analysis as the start of another one.
+        let mut heat = Step::new_heat_transfer("Heat");
+        heat.boundary_conditions = vec![
+            bc("Hot", vec![1, 2, 3, 4], BoundaryKind::Temperature(100.0)),
+            bc(
+                "Cold",
+                vec![13, 14, 15, 16],
+                BoundaryKind::Temperature(20.0),
+            ),
+        ];
+        let mut thermal = cubes();
+        thermal.fe.steps = vec![heat];
+        solve_as(
+            &thermal,
+            &dir.join("Thermal"),
+            "Thermal",
+            &Default::default(),
+        );
+        let mut fe = cubes().fe;
+        fe.properties.initial_temperatures = Some((dir.join("Thermal/Thermal.frd"), 1));
+        let keyword = stage_linked_results(&fe, &dir, "Start").unwrap().unwrap();
+        let lines: Vec<&str> = keyword.lines().collect();
+        assert_eq!(lines[1], "*Initial conditions, Type=Temperature");
+        assert_eq!(lines.len(), 2 + 16);
+        let value = |node: &str| -> f64 {
+            let line = lines
+                .iter()
+                .find(|l| l.starts_with(&format!("{node}, ")))
+                .unwrap();
+            line.split(", ").nth(1).unwrap().parse().unwrap()
+        };
+        assert!((value("1") - 100.0).abs() < 1e-3 && (value("16") - 20.0).abs() < 1e-3);
+        assert!((value("8") - 100.0 + 80.0 / 3.0).abs() < 1e-2, "{keyword}");
+        let input = before_first_step("*Node\n1, 0, 0, 0\n*Step\n*Static\n", &keyword);
+        assert!(input.find("*Initial").unwrap() < input.find("*Step").unwrap());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

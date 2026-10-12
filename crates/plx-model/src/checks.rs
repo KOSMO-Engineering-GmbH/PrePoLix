@@ -800,8 +800,8 @@ impl FeModel {
                 ));
             }
         }
-        let initial_temperature =
-            (self.initial_conditions.iter()).any(|c| c.active && !c.kind.is_velocity());
+        let initial_temperature = self.properties.initial_temperatures.is_some()
+            || (self.initial_conditions.iter()).any(|c| c.active && !c.kind.is_velocity());
         let dynamic =
             (self.steps.iter()).any(|s| s.active && matches!(s.kind, StepKind::Dynamic(_)));
         for (i, condition) in self.initial_conditions.iter().enumerate() {
@@ -818,8 +818,9 @@ impl FeModel {
         let trusses = Trusses::new(self, mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             self.check_step(s, mesh, mesh_check, &trusses, &mut findings);
-            let stored = (self.steps[..s].iter().filter(|p| p.active))
-                .any(|p| matches!(&p.kind, StepKind::Frequency(f) if f.storage));
+            let stored = self.properties.stored_modes.is_some()
+                || (self.steps[..s].iter().filter(|p| p.active))
+                    .any(|p| matches!(&p.kind, StepKind::Frequency(f) if f.storage));
             if step.kind.uses_stored_modes() && !stored {
                 findings.push(Finding::new(
                     ModelItem::Step(s),

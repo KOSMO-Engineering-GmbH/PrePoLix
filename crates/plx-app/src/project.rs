@@ -114,8 +114,8 @@ enum Payload {
     Setup(Box<plx_model::FeModel>),
     Geometry(Option<plx_model::Geometry>),
     Mesh(Box<links::MeshCopy>),
-    /// The target's step, the global step and the global results file of a submodel.
-    Results(String, u32, PathBuf),
+    /// The step of the source's results and their file, see [`links::apply_results`].
+    Results(u32, PathBuf),
     /// What a state link takes: the mesh with its geometry when it changed, the source's
     /// model when the setup or the steps up to `step` changed.
     Chain {
@@ -201,6 +201,8 @@ pub struct ProjectApp {
     /// Global results being written for submodels, by the folder they are written to;
     /// `None` once writing failed.
     restoring: HashMap<PathBuf, Option<Receiver<Result<PathBuf, String>>>>,
+    /// Problems of links already reported in the output, each once.
+    warned: BTreeSet<String>,
 }
 
 impl ProjectApp {
@@ -248,6 +250,7 @@ impl ProjectApp {
             last_sync: None,
             sync_due: true,
             restoring: HashMap::new(),
+            warned: BTreeSet::new(),
         };
         if app.settings.updates.check_at_startup && app.updater.installation().checks_at_startup() {
             app.updater.check(&cc.egui_ctx, false);
@@ -668,7 +671,7 @@ impl ProjectApp {
                 continue;
             }
             // Done: solved, or stopped by an error the window shows.
-            let failed = window.status().is_some_and(|s| s.needs_solve());
+            let failed = window.current_status().is_some_and(|s| s.needs_solve());
             let name = node.name.clone();
             if failed {
                 // What depends on it is not solved; independent analyses go on.
@@ -998,14 +1001,62 @@ impl ProjectApp {
         let results = item.first().is_some_and(|c| c == links::RESULTS);
         // A category or item links into the same place of the target; a step's results go
         // to the step they are dropped on.
-        let slot = if results { slot } else { item.clone() };
+        let slot = if results {
+            // What the results are used for follows from the steps at both ends.
+            let fe = |id: u64| {
+                (self.nodes.iter().find(|n| n.id == id))
+                    .and_then(Node::link_data)
+                    .map(|d| d.fe.clone())
+            };
+            let (Some(source_fe), Some(target_fe)) = (fe(source), fe(target)) else {
+                return;
+            };
+            let step = item
+                .get(1)
+                .and_then(|n| source_fe.steps.iter().find(|s| &s.name == n));
+            let Some(step) = step else {
+                return;
+            };
+            match links::results_slot(step, &target_fe, &slot) {
+                Ok(slot) => slot,
+                Err(why) => {
+                    self.output.push(format!(
+                        "Not linked: {} of {from} cannot go to {} of {to}: {why}.",
+                        links::label(&item),
+                        links::label(&slot)
+                    ));
+                    return;
+                }
+            }
+        } else {
+            item.clone()
+        };
+        let usage = |link: &Link| links::ResultsUse::of(link);
+        let new_usage = usage(&Link {
+            source,
+            target,
+            item: item.clone(),
+            slot: slot.clone(),
+            inherited: Vec::new(),
+        });
         let overlaps = |link: &Link| {
             if link.target != target || links::is_results(link) != results {
                 return false;
             }
             if results {
-                // A submodel reads one global results file.
-                return link.source != source || links::slot(link) == slot.as_slice();
+                return usage(link) == new_usage
+                    && match new_usage {
+                        // A submodel reads one global results file.
+                        Some(links::ResultsUse::Submodel) => {
+                            link.source != source || links::slot(link) == slot.as_slice()
+                        }
+                        // A step takes one temperature field.
+                        Some(links::ResultsUse::Temperature) => {
+                            links::slot(link) == slot.as_slice()
+                        }
+                        // The model takes one set of eigenmodes and of initial temperatures.
+                        _ => true,
+                    };
             }
             let other = links::slot(link);
             let mesh_and_geometry = |a: &[String], b: &[String]| {
@@ -1026,14 +1077,22 @@ impl ProjectApp {
                 self.name_of(link.source)
             ));
         }
-        let text = if results {
-            format!(
-                "{to} takes the displacements of {} of {from} in {} (submodel).",
-                links::label(&item),
-                slot.get(1).map_or("", String::as_str)
-            )
-        } else {
-            format!("{to} takes {} from {from}.", links::label(&item))
+        let (what, step) = (links::label(&item), slot.get(1).map_or("", String::as_str));
+        let text = match new_usage {
+            Some(links::ResultsUse::Submodel) => {
+                format!("{to} takes the displacements of {what} of {from} in {step} (submodel).")
+            }
+            Some(links::ResultsUse::Temperature) => {
+                format!("{to} takes the temperatures of {what} of {from} in {step}.")
+            }
+            Some(links::ResultsUse::Modes) => format!(
+                "{to} takes the eigenmodes of {what} of {from} for its modal and steady state \
+                 dynamics steps."
+            ),
+            Some(links::ResultsUse::InitialTemperatures) => {
+                format!("{to} starts at the temperatures of {what} of {from}.")
+            }
+            None => format!("{to} takes {} from {from}.", links::label(&item)),
         };
         self.output.push(text);
         self.applied.retain(|(id, _), _| *id != target);
@@ -1228,16 +1287,17 @@ impl ProjectApp {
             ));
             self.applied
                 .retain(|(id, path), _| *id != target || path != &link.item);
-            let submodel = (self.links.iter()).any(|l| l.target == target && links::is_results(l));
+            let submodel = (self.links.iter()).any(|l| {
+                l.target == target && links::ResultsUse::of(l) == Some(links::ResultsUse::Submodel)
+            });
             if links::is_results(&link)
-                && !submodel
                 && let Some(node) = self.node(target)
             {
                 match &mut node.window {
-                    Some(window) => window.clear_submodel(),
+                    Some(window) => window.clear_results(&link, submodel),
                     None => {
                         if let Some(data) = &mut node.data {
-                            links::clear_submodel(&mut data.model);
+                            links::clear_results(&mut data.model, &link, submodel);
                         }
                         node.refresh_closed();
                     }
@@ -1358,7 +1418,34 @@ impl ProjectApp {
                     missing.push(source.name.clone());
                     return None;
                 };
-                let global = links::global_step_number(data?.fe, step)?;
+                let data = data?;
+                let global = links::global_step_number(data.fe, step)?;
+                let usage = links::ResultsUse::of(link)?;
+                if usage != links::ResultsUse::Submodel
+                    && target.link_data()?.mesh.input_fingerprint() != data.mesh.input_fingerprint()
+                {
+                    // Temperatures and eigenmodes are taken node by node.
+                    let line = format!(
+                        "{} cannot take the {} of {}: their meshes differ. Link the mesh, or \
+                         continue from a state, so that both have the same nodes.",
+                        target.name,
+                        links::label(&link.item),
+                        source.name
+                    );
+                    if self.warned.insert(line.clone()) {
+                        self.output.push(line);
+                    }
+                    return None;
+                }
+                if usage == links::ResultsUse::Modes {
+                    // CalculiX reads them from the run's own folder.
+                    let job = crate::analysis::job_name(&source.name);
+                    let file = (self.settings.solver.work_dir())
+                        .join(crate::analysis::job_name(&self.project_name()))
+                        .join(&job)
+                        .join(format!("{job}.eig"));
+                    return Some(Payload::Results(global, file));
+                }
                 let frd = bound.files.iter().find(|f| {
                     Path::new(&f.name)
                         .extension()
@@ -1390,8 +1477,7 @@ impl ProjectApp {
                         }
                     }
                 }
-                let step = links::slot(link).get(1)?.clone();
-                Some(Payload::Results(step, global, file))
+                Some(Payload::Results(global, file))
             }
             Some(links::STATE) => {
                 if source.bound_results().is_none() {
@@ -1507,7 +1593,7 @@ impl ProjectApp {
                     window.apply_mesh(*mesh);
                     window.message(format!("Mesh taken from {source}"));
                 }
-                Payload::Results(step, global, file) => window.apply_submodel(&step, global, file),
+                Payload::Results(global, file) => window.apply_results(link, global, file),
                 Payload::Chain { .. } => {}
             }
             return None;
@@ -1530,8 +1616,8 @@ impl ProjectApp {
                 data.model.mesh_sets = mesh_sets;
                 data.model.element_types = element_types;
             }
-            Payload::Results(step, global, file) => {
-                links::apply_submodel(&mut data.model, &step, global, file);
+            Payload::Results(global, file) => {
+                links::apply_results(&mut data.model, link, global, file);
             }
             Payload::Chain { .. } => {}
         }
@@ -2068,7 +2154,13 @@ fn block_rows(
                 input: true,
                 output: true,
                 linked_from: from(&path),
-                tip: format!("{category}: drag to another analysis to link them all"),
+                tip: if category == "Initial Conditions" {
+                    "Initial Conditions: drag to another analysis to link them all, or drop the \
+                     results of a thermal step here to start at its temperatures"
+                        .into()
+                } else {
+                    format!("{category}: drag to another analysis to link them all")
+                },
                 path: path.clone(),
             });
             if open {
@@ -2102,9 +2194,11 @@ fn block_rows(
         let path = vec![links::RESULTS.to_owned(), step.name.clone()];
         let tip = if step.active {
             format!(
-                "Results of {}: drag to a step of a submodel, which takes its displacements \
-                 from them, to the State row of another analysis, which continues from them, \
-                 or to empty space to continue in a new analysis",
+                "Results of {}: drag them to a step of another analysis, which takes the \
+                 temperatures of a thermal step, the eigenmodes of a frequency step for modal \
+                 or steady state dynamics, or else the displacements as a submodel; to the \
+                 State row of another analysis, which continues from them; or to empty space \
+                 to continue in a new analysis",
                 step.name
             )
         } else {
