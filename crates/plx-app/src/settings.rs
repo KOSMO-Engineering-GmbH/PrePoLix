@@ -28,6 +28,10 @@ pub struct Settings {
 pub const SHELL_THICKNESS_LABEL: &str = "Shell thickness";
 pub const SHELL_THICKNESS_TIP: &str = "Draws shell and membrane elements of the FE model as solids of their section's thickness, placed by its offset.";
 
+/// Label and tooltip of [`Graphics::show_linked`], in the settings, the View menu and the tree.
+pub const SHOW_LINKED_LABEL: &str = "Show linked items";
+pub const SHOW_LINKED_TIP: &str = "Lists the items of the FE Model tree that this analysis takes from another one. They stay in the model; hidden, the tree shows only what is set up here.";
+
 /// [`Settings::format`] of this version.
 const FORMAT: u32 = 1;
 
@@ -68,6 +72,9 @@ pub struct Graphics {
     /// Shell and membrane elements of the FE model drawn as the solid of their section's
     /// thickness and offset rather than as surfaces.
     pub shell_thickness: bool,
+    /// The FE Model tree lists the items an analysis takes from another one; off, it shows
+    /// only its own items.
+    pub show_linked: bool,
 }
 
 impl Default for Graphics {
@@ -78,6 +85,7 @@ impl Default for Graphics {
             view_triad: true,
             scale_bar: true,
             shell_thickness: true,
+            show_linked: false,
         }
     }
 }
@@ -591,6 +599,8 @@ impl SettingsWindow {
                 ui.checkbox(&mut g.scale_bar, "Scale bar");
                 ui.checkbox(&mut g.shell_thickness, SHELL_THICKNESS_LABEL)
                     .on_hover_text(SHELL_THICKNESS_TIP);
+                ui.checkbox(&mut g.show_linked, SHOW_LINKED_LABEL)
+                    .on_hover_text(SHOW_LINKED_TIP);
             }
             Page::PostProcessing => {
                 let p = &mut self.draft.post;

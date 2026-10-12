@@ -782,6 +782,11 @@ impl AnalysisWindow {
                     "Shell Thickness",
                 )
                 .on_hover_text(settings::SHELL_THICKNESS_TIP);
+                ui.checkbox(
+                    &mut self.workbench.settings.graphics.show_linked,
+                    settings::SHOW_LINKED_LABEL,
+                )
+                .on_hover_text(settings::SHOW_LINKED_TIP);
                 ui.separator();
                 let has_model = self.workbench.shown().is_some();
                 if ui
@@ -1837,6 +1842,15 @@ impl Workbench {
             .map(|g| g.mesh_items.iter().map(|i| i.name.clone()).collect())
             .unwrap_or_default();
         self.tree.linked = self.linked_tree_items(view);
+        self.tree.hide_linked = !self.settings.graphics.show_linked;
+        if view == TreeView::FeModel && !self.tree.linked.is_empty() {
+            ui.checkbox(
+                &mut self.settings.graphics.show_linked,
+                settings::SHOW_LINKED_LABEL,
+            )
+            .on_hover_text(settings::SHOW_LINKED_TIP);
+            ui.separator();
+        }
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),

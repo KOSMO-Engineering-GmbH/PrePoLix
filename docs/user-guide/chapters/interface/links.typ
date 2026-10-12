@@ -41,7 +41,21 @@ the setup (open #ui("Setup") with the arrow in front of it: #ui("Materials"), #u
 #ui("Constraints") and so on) or a single item of a category (open the category: one material,
 one contact pair, one step). A linked category also passes on items added to it later.
 
-In the window of the target, linked items are read-only. A link sign marks them in the tree,
+The FE Model tree of the target shows only what is set up in that analysis: linked items are
+hidden by default, so that the tree lists the inputs that matter for it. Categories stay in the
+tree, also when everything in them is linked, so that items of the analysis itself can be added;
+a linked mesh or step leaves just its category row with the link sign. Tick #ui("Show linked
+items") above the tree, in the #ui("View") menu or in the settings (#ui("Graphics")) to list
+them; the choice is stored in the settings. Hidden items are still part of the model: dialogs
+offer the linked sets, materials and so on as before, and the solver gets them.
+
+#screenshot("linked-hidden.png", [The FE Model tree of the target with linked items hidden: only
+  the own material and the own step are listed])
+
+#screenshot("linked-shown.png", [With #ui("Show linked items") ticked, the linked ones appear with
+  their link sign])
+
+In the window of the target, linked items are read-only. When shown, a link sign marks them in the tree,
 and their tooltip names the analysis they come from and says that they change there. The
 commands that would change them are refused with the same hint; a double-click opens a small
 dialog instead of the item's own:
