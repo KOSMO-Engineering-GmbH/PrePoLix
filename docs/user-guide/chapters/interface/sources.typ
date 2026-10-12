@@ -55,14 +55,23 @@ A mesh block makes a structured mesh from a few numbers, without geometry and wi
 2D analyses. Link its #ui("Mesh") row to the #ui("Mesh") row of analyses of the same model
 space; several analyses can share one mesh block.
 
-#screenshot("mesh-block.png", [A box linked to an analysis; its mesh is out of date after its
-  division changed])
+#screenshot("mesh-block.png", [A box linked to an analysis, its parameters in the block])
+
+Its parameters are rows of the block under #ui("Mesh"), like the inputs of a Blender node:
+#ui("X"), #ui("Y"), #ui("Z") of the corner it starts at and the edge lengths #ui("Lx"),
+#ui("Ly"), #ui("Lz") in the block's units, the numbers of elements #ui("nx"), #ui("ny"),
+#ui("nz") as whole numbers, and the #ui("Element") type. Click a field to type a value, or
+drag it; a rectangle has no Z rows. Once a parameter changes, the #ui("Mesh") row shows the
+mesh out of date.
 
 Its sides are node sets and surfaces at once, named after the axis and the side they lie on:
 #ui("X-") at the smallest X, #ui("X+") at the largest, then #ui("Y-"), #ui("Y+") and, for a
 box, #ui("Z-") and #ui("Z+"). Boundary conditions and loads pick them under #ui("Node set") or
 #ui("Surface") without selecting anything. The elements form the part #ui("BOX") or
 #ui("RECTANGLE"), which a section takes.
+
+A double-click on the block's name opens all its parameters in a dialog, with what the rows
+leave out: the model space of a rectangle and the units the lengths are shown in.
 
 #screenshot("mesh-block-editor.png", [The parameters of a box])
 
@@ -77,7 +86,8 @@ box, #ui("Z-") and #ui("Z+"). Boundary conditions and loads pick them under #ui(
   [Elements along], [The number of elements along each axis.],
   [Element type], [Box: C3D8, C3D8R, C3D8I, C3D20 or C3D20R. Rectangle: #ui("Quadratic")
     gives 8-node instead of 4-node elements, #ui("Reduced integration") the R types; the family
-    (CPS, CPE or CAX) follows from the model space.],
+    (CPS, CPE or CAX) follows from the model space. The #ui("Element") row of a rectangle
+    lists its four types.],
 )
 
 The line below the fields counts the elements and names the sides. #ui("OK") keeps the
