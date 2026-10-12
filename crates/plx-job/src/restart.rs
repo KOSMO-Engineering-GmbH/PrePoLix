@@ -140,11 +140,34 @@ pub enum Plan {
     Restart {
         /// The last step whose state is read, counted from 1.
         after: usize,
-        /// The state file, in the work directory.
-        file: String,
+        /// The state file.
+        file: PathBuf,
+        /// The results file of the run that wrote it, with the results of the steps up to
+        /// `after`; its history output is next to it.
+        results: PathBuf,
         /// Total time at the end of that step.
         time: f64,
     },
+}
+
+/// Whether the job can start from a state, and from which: of its own earlier runs, the
+/// first of `jobs` (work directory and job name), or of the jobs of analyses it continues,
+/// the others. The state after the latest step wins; on a tie the job's own.
+pub fn plan(chain: &Chain, solver: &str, jobs: &[(PathBuf, String)]) -> Plan {
+    let mut best: Option<Plan> = None;
+    let mut reason = None;
+    for (dir, job) in jobs {
+        let plan = StateIndex::read(dir, job).plan(chain, solver, dir, job);
+        match (&plan, &best) {
+            (Plan::Restart { after, .. }, Some(Plan::Restart { after: best, .. }))
+                if after <= best => {}
+            (Plan::Restart { .. }, _) => best = Some(plan),
+            (Plan::Full(_), _) if reason.is_none() => reason = Some(plan),
+            _ => {}
+        }
+    }
+    best.or(reason)
+        .unwrap_or_else(|| Plan::Full("no state of an earlier run".into()))
 }
 
 /// The states a job's earlier runs left in its work directory, saved next to them.
@@ -194,7 +217,7 @@ impl StateIndex {
         std::fs::write(index_file(work_dir, job), text)
     }
 
-    /// Whether the job can start from a state of an earlier run, and from which.
+    /// Whether the job can start from a state this index lists, and from which.
     pub fn plan(&self, chain: &Chain, solver: &str, work_dir: &Path, job: &str) -> Plan {
         let full = |reason: &str| Plan::Full(reason.to_owned());
         let steps = chain.steps.len();
@@ -241,7 +264,8 @@ impl StateIndex {
                 }
                 return Plan::Restart {
                     after,
-                    file: file.name.clone(),
+                    file: work_dir.join(&file.name),
+                    results: results.clone(),
                     time: state.time,
                 };
             }
@@ -376,20 +400,29 @@ fn finished_steps(sta: &str, after: usize, completed: bool) -> Vec<(usize, f64)>
 }
 
 /// Prepares the work directory for a run from the state after a step: the state file is
-/// copied to `<job>.rin`, where CalculiX reads it, and the results of the earlier run are
-/// moved aside, as the run starts new ones.
-pub fn prepare(work_dir: &Path, job: &str, state_file: &str) -> std::io::Result<()> {
-    std::fs::copy(
-        work_dir.join(state_file),
-        work_dir.join(format!("{job}.rin")),
-    )?;
+/// copied to `<job>.rin`, where CalculiX reads it, and the earlier results the new ones are
+/// joined with are put aside: the job's own are moved, as the run starts new ones, those of
+/// another job copied.
+pub fn prepare(
+    work_dir: &Path,
+    job: &str,
+    state_file: &Path,
+    results: &Path,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(work_dir)?;
+    std::fs::copy(state_file, work_dir.join(format!("{job}.rin")))?;
+    let own = work_dir.join(format!("{job}.frd"));
     for extension in ["frd", "dat"] {
-        let file = work_dir.join(format!("{job}.{extension}"));
+        let file = results.with_extension(extension);
         let kept = earlier(work_dir, job, extension);
-        if file.is_file() {
+        if !file.is_file() {
+            if kept.is_file() {
+                std::fs::remove_file(kept)?;
+            }
+        } else if results == own {
             std::fs::rename(file, kept)?;
-        } else if kept.is_file() {
-            std::fs::remove_file(kept)?;
+        } else {
+            std::fs::copy(file, kept)?;
         }
     }
     Ok(())

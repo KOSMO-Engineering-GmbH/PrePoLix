@@ -141,6 +141,47 @@ pub fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String
     Ok(write_keywords(&tree))
 }
 
+/// Writes the input file of `model` with the sets of `extra` steps too, which are not
+/// written themselves: the steps of analyses that continue from the state after a step of
+/// this one. CalculiX takes no new sets after reading a state, so the run that writes it has
+/// to define them. Each entry holds the index of the step of `model` the steps follow; they
+/// take the place in the order of the sets they have in the input file of the analysis that
+/// continues, so that the sets are named as there. When the extra steps cannot be written,
+/// the file is written without their sets.
+pub fn write_inp_with_sets_of(
+    mesh: &FeMesh,
+    model: &FeModel,
+    heading: &str,
+    extra: &[(usize, Vec<Step>)],
+) -> Result<String, WriteError> {
+    if extra.iter().all(|(_, steps)| steps.is_empty()) {
+        return write_inp(mesh, model, heading);
+    }
+    let mut combined = model.clone();
+    combined.steps.clear();
+    let mut written = Vec::new();
+    for (index, step) in model.steps.iter().enumerate() {
+        combined.steps.push(step.clone());
+        written.push(true);
+        for (_, steps) in extra.iter().filter(|(after, _)| *after == index) {
+            combined.steps.extend(steps.iter().cloned());
+            written.extend(steps.iter().map(|_| false));
+        }
+    }
+    let Ok(mut tree) = model_keywords(mesh, &combined, heading) else {
+        return write_inp(mesh, model, heading);
+    };
+    if let Some(steps) = tree
+        .iter_mut()
+        .find(|k| matches!(&k.kind, KeywordKind::Title(name) if name == "Steps"))
+    {
+        let mut written = written.into_iter();
+        steps.children.retain(|_| written.next().unwrap_or(true));
+    }
+    insert_user_keywords(&mut tree, &model.user_keywords);
+    Ok(write_keywords(&tree))
+}
+
 /// An input file with only the mesh, its nodes moved by `scale` times `displacements` (one per
 /// node, in the order of [`FeMesh::coords`]), as PrePoMax's "Export deformed mesh": the
 /// deformed shape, e.g. a buckling mode as imperfection, can be imported into another model.

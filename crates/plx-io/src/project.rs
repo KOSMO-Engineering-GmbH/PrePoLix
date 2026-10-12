@@ -85,6 +85,10 @@ pub struct Link {
     /// that takes the results of a global step, `["Results", step]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slot: Vec<String>,
+    /// A state link (`["State", step]`): the steps of the source up to that step the target
+    /// took last time, which come before its own steps.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited: Vec<String>,
 }
 
 /// The files of a finished analysis kept in the project file: the input file CalculiX ran,
@@ -463,12 +467,21 @@ mod tests {
             target: 2,
             item: vec!["Setup".into(), "Materials".into(), "Steel".into()],
             slot: Vec::new(),
+            inherited: Vec::new(),
         });
         saved.links.push(Link {
             source: 1,
             target: 2,
             item: vec!["Results".into(), "Step-1".into()],
             slot: vec!["Results".into(), "Step-2".into()],
+            inherited: Vec::new(),
+        });
+        saved.links.push(Link {
+            source: 1,
+            target: 2,
+            item: vec!["State".into(), "Step-1".into()],
+            slot: vec!["State".into()],
+            inherited: vec!["Step-1".into()],
         });
         save_project(&path, &saved).unwrap();
         let mut project = read_project(&path).unwrap();

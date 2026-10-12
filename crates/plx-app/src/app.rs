@@ -345,6 +345,23 @@ impl AnalysisWindow {
         }
     }
 
+    /// Makes the analysis continue `source` after its step `step`, see
+    /// [`crate::links::apply_chain`]; returns the names of the steps taken.
+    pub fn apply_chain(
+        &mut self,
+        source: &plx_model::FeModel,
+        step: usize,
+        link: &plx_io::project::Link,
+    ) -> Vec<String> {
+        let Some(model) = &mut self.workbench.model else {
+            return link.inherited.clone();
+        };
+        let inherited = crate::links::apply_chain(&mut model.fe, source, step, link);
+        self.workbench.results_changed = true;
+        self.workbench.symbols_shown = None;
+        inherited
+    }
+
     /// Makes the analysis a submodel of the global results at `results`, see
     /// [`crate::links::apply_submodel`].
     pub fn apply_submodel(&mut self, step: &str, global: u32, results: PathBuf) {
@@ -3569,6 +3586,7 @@ impl Workbench {
             check_model,
             name,
             &work_dir,
+            &self.incoming.continuation,
         ) {
             Ok(mut analysis) => {
                 analysis.open_when_done = keep_results && !check_model;
