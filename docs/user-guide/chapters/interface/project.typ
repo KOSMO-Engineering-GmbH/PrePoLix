@@ -91,7 +91,8 @@ the green square takes the state of another analysis (@data-links).
   Double-click the background to see all blocks.
 - *Drag* from a pin on the right of a row to a pin on the left of a row of another block to
   link them (@links). Right-click a pin to remove its links.
-- *Right-click* a block for its context menu, or the background for #ui("New Analysis").
+- *Right-click* a block for its context menu, or the background for #ui("New Analysis") and
+  #ui("Add Materials") (@source-blocks).
 
 #screenshot("project-node-menu.png", [Context menu of an analysis])
 
@@ -121,6 +122,8 @@ the green square takes the state of another analysis (@data-links).
   [File > Save Without Results ...], [Saves a copy without the results the analyses keep.],
   [Project > New Analysis ...], [Adds an analysis after asking for its model space and unit
     system (@new-analysis).],
+  [Project > Add Materials], [Adds a block of materials that analyses link to
+    (@materials-block).],
   [Project > Update Project], [Solves every analysis that is not up to date (@update-project).],
   [Tools > Settings ...], [The settings (@settings); they apply to all windows.],
   [Help], [#ui("User Guide") opens this guide, #ui("Check for Updates ...") looks

@@ -166,6 +166,14 @@ pub fn node_header() -> Color32 {
         Color32::from_rgb(214, 223, 234)
     }
 }
+/// Header band of a materials block in the project schematic: a muted orange-grey.
+pub fn materials_header() -> Color32 {
+    if dark() {
+        Color32::from_rgb(84, 66, 48)
+    } else {
+        Color32::from_rgb(236, 222, 204)
+    }
+}
 /// Outline of the pins of the project schematic.
 pub fn pin_edge() -> Color32 {
     if dark() {

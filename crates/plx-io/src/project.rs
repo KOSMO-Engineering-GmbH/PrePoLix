@@ -16,8 +16,8 @@ use plx_results::ResultsSettings;
 use serde::{Deserialize, Serialize};
 
 /// A prepolix project as saved in a `.plx` file: its analyses, like the systems of an Ansys
-/// Workbench project. Like PrePoMax's `.pmx` it stores what the user defined, not the
-/// CalculiX input files.
+/// Workbench project, and the blocks that give them data. Like PrePoMax's `.pmx` it stores
+/// what the user defined, not the CalculiX input files.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     pub format: u32,
@@ -28,8 +28,14 @@ pub struct Project {
     pub space: plx_model::ModelSpace,
     #[serde(default, skip_serializing)]
     pub units: plx_model::UnitSystem,
+    /// The analyses of a project of format 4 or older, which [`read_project`] turns into
+    /// [`Project::nodes`].
+    #[serde(default, skip_serializing)]
     pub analyses: Vec<ProjectAnalysis>,
-    /// Data one analysis takes from another.
+    /// The blocks of the project schematic: analyses and the sources of data they take.
+    #[serde(default)]
+    pub nodes: Vec<ProjectNode>,
+    /// Data one block takes from another.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
 }
@@ -41,9 +47,76 @@ impl Default for Project {
             space: Default::default(),
             units: Default::default(),
             analyses: Vec::new(),
+            nodes: Vec::new(),
             links: Vec::new(),
         }
     }
+}
+
+impl Project {
+    /// The analyses among the blocks.
+    pub fn analyses(&self) -> impl Iterator<Item = &ProjectAnalysis> {
+        self.nodes.iter().filter_map(|node| match node {
+            ProjectNode::Analysis(analysis) => Some(&**analysis),
+            _ => None,
+        })
+    }
+
+    pub fn analyses_mut(&mut self) -> impl Iterator<Item = &mut ProjectAnalysis> {
+        self.nodes.iter_mut().filter_map(|node| match node {
+            ProjectNode::Analysis(analysis) => Some(&mut **analysis),
+            _ => None,
+        })
+    }
+}
+
+/// A block of the project schematic: an analysis, or a source of data that analyses link
+/// to, which has no steps and is not solved.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum ProjectNode {
+    Analysis(Box<ProjectAnalysis>),
+    /// A collection of materials kept in the project, unlike the user's material library.
+    Materials(MaterialSet),
+}
+
+impl ProjectNode {
+    /// Stays the same when the block is renamed, for links to it.
+    pub fn id(&self) -> u64 {
+        match self {
+            Self::Analysis(a) => a.id,
+            Self::Materials(m) => m.id,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Analysis(a) => &a.name,
+            Self::Materials(m) => &m.name,
+        }
+    }
+
+    /// Position of the block in the project schematic.
+    pub fn position(&self) -> [f32; 2] {
+        match self {
+            Self::Analysis(a) => a.position,
+            Self::Materials(m) => m.position,
+        }
+    }
+}
+
+/// A block that holds materials for analyses to link, item by item or all of them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MaterialSet {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The unit system its values are shown in; they are stored in SI units like those of an
+    /// analysis.
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    #[serde(default)]
+    pub materials: Vec<plx_model::Material>,
 }
 
 /// An analysis of a project: what a whole project was before projects held several, with
@@ -206,7 +279,15 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
         });
     }
     let mut project: Project = ron::from_str(&text).map_err(format_error)?;
-    for analysis in &mut project.analyses {
+    // Format 4 and older held analyses only.
+    let analyses = std::mem::take(&mut project.analyses);
+    (project.nodes).splice(
+        0..0,
+        analyses
+            .into_iter()
+            .map(|a| ProjectNode::Analysis(Box::new(a))),
+    );
+    for analysis in project.analyses_mut() {
         analysis.model.migrate();
     }
     Ok(project)
@@ -316,7 +397,7 @@ mod tests {
         results: Option<&BoundResults>,
     ) -> Project {
         Project {
-            analyses: vec![ProjectAnalysis {
+            nodes: vec![ProjectNode::Analysis(Box::new(ProjectAnalysis {
                 id: 1,
                 name: "Analysis-1".into(),
                 geometry: geometry.cloned(),
@@ -324,7 +405,7 @@ mod tests {
                 model: model.clone(),
                 results: results.cloned(),
                 ..Default::default()
-            }],
+            }))],
             ..Default::default()
         }
     }
@@ -460,14 +541,18 @@ mod tests {
             part_names: vec!["SOLID-1".into()],
         };
         let mut saved = single(Some(&geometry), &mesh, &model, None);
-        saved.analyses[0].mesh_inputs.insert("SOLID-1".into(), 42);
+        (saved.analyses_mut().next().unwrap())
+            .mesh_inputs
+            .insert("SOLID-1".into(), 42);
         // A second, empty analysis next to it.
-        saved.analyses.push(ProjectAnalysis {
-            id: 2,
-            name: "Modal".into(),
-            position: [300.0, 20.0],
-            ..Default::default()
-        });
+        saved
+            .nodes
+            .push(ProjectNode::Analysis(Box::new(ProjectAnalysis {
+                id: 2,
+                name: "Modal".into(),
+                position: [300.0, 20.0],
+                ..Default::default()
+            })));
         saved.links.push(Link {
             source: 1,
             target: 2,
@@ -498,13 +583,14 @@ mod tests {
             ..Default::default()
         });
         save_project(&path, &saved).unwrap();
-        let mut project = read_project(&path).unwrap();
+        let project = read_project(&path).unwrap();
         assert_eq!(project.links, saved.links);
-        let second = project.analyses.pop().unwrap();
+        let mut analyses: Vec<ProjectAnalysis> = project.analyses().cloned().collect();
+        let second = analyses.pop().unwrap();
         assert_eq!((second.id, second.name.as_str()), (2, "Modal"));
         assert_eq!(second.position, [300.0, 20.0]);
         assert_eq!(second.mesh.element_count(), 0);
-        let project = project.analyses.pop().unwrap();
+        let project = analyses.pop().unwrap();
         assert_eq!(project.model, model);
         assert_eq!(project.geometry, Some(geometry));
         assert_eq!(project.mesh.elements(), mesh.elements());
@@ -529,6 +615,69 @@ mod tests {
             read_project(&path),
             Err(ProjectError::Older { format: 1, .. })
         ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn material_sets_read_back_and_older_projects_become_nodes() {
+        let dir = std::env::temp_dir().join(format!("plx-nodes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("nodes.plx");
+        let set = MaterialSet {
+            id: 3,
+            name: "Materials".into(),
+            position: [10.0, 400.0],
+            units: plx_model::UnitSystem::MKgSC,
+            materials: vec![Material {
+                name: "Steel".into(),
+                density: Some(7850.0),
+                ..Default::default()
+            }],
+        };
+        let mut saved = single(None, &FeMesh::default(), &FeModel::default(), None);
+        saved.nodes.push(ProjectNode::Materials(set.clone()));
+        saved.links.push(Link {
+            source: 3,
+            target: 1,
+            item: vec!["Setup".into(), "Materials".into()],
+            slot: Vec::new(),
+            inherited: Vec::new(),
+            excluded: Vec::new(),
+        });
+        save_project(&path, &saved).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(&format!("format:{PROJECT_FORMAT}")));
+        assert!(!text.contains("analyses:"), "{text}");
+        let project = read_project(&path).unwrap();
+        assert_eq!(project.nodes.len(), 2);
+        assert_eq!(
+            (project.nodes[0].id(), project.nodes[0].name()),
+            (1, "Analysis-1")
+        );
+        match &project.nodes[1] {
+            ProjectNode::Materials(read) => assert_eq!(read, &set),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(project.links, saved.links);
+
+        // A project of format 4 lists its analyses; they become the blocks, losslessly.
+        let analysis = ProjectAnalysis {
+            id: 7,
+            name: "Old".into(),
+            position: [1.0, 2.0],
+            ..Default::default()
+        };
+        let older = format!(
+            "(format:4,analyses:[{}],links:[])",
+            ron::to_string(&analysis).unwrap()
+        );
+        std::fs::write(&path, older).unwrap();
+        let project = read_project(&path).unwrap();
+        assert!(project.analyses.is_empty());
+        let read: Vec<&ProjectAnalysis> = project.analyses().collect();
+        assert_eq!(read.len(), 1);
+        assert_eq!((read[0].id, read[0].name.as_str()), (7, "Old"));
+        assert_eq!(read[0].position, [1.0, 2.0]);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -661,7 +810,8 @@ mod tests {
         bound.input = Some(7);
         save_project(&path, &single(None, &mesh, &model, Some(&bound))).unwrap();
         let project = read_project(&path).unwrap();
-        assert_eq!(project.analyses[0].results.as_ref(), Some(&bound));
+        let analysis = project.analyses().next().unwrap();
+        assert_eq!(analysis.results.as_ref(), Some(&bound));
 
         let restored = restore_results(&bound, &dir.join("restored")).unwrap();
         assert_eq!(restored, dir.join("restored/Analysis-1.frd"));
@@ -670,7 +820,8 @@ mod tests {
         // Without bound results the project file has no trace of them.
         save_project(&path, &single(None, &mesh, &model, None)).unwrap();
         assert!(!std::fs::read_to_string(&path).unwrap().contains("files:"));
-        assert_eq!(read_project(&path).unwrap().analyses[0].results, None);
+        let project = read_project(&path).unwrap();
+        assert_eq!(project.analyses().next().unwrap().results, None);
 
         let mut evil = bound.clone();
         evil.files[0].name = "../evil.frd".into();
