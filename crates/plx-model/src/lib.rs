@@ -70,8 +70,9 @@ use serde::{Deserialize, Serialize};
 /// Format 2 holds several analyses; projects of format 1 had one model and are not read.
 /// Format 3 stores all values in SI units ([`STORED`]) and gives each analysis its own model
 /// space and unit system. Format 4 adds state links: an analysis that continues the steps of
-/// another one.
-pub const PROJECT_FORMAT: u32 = 4;
+/// another one. Format 5 holds blocks of several kinds, the analyses among them, in place of
+/// the analyses alone.
+pub const PROJECT_FORMAT: u32 = 5;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -1682,19 +1682,21 @@ mod tests {
     /// Saves the model as the only analysis of a project and opens that analysis again.
     fn save_and_reopen(path: &Path, model: &Model) -> LoadedModel {
         let project = plx_io::project::Project {
-            analyses: vec![plx_io::project::ProjectAnalysis {
-                id: 1,
-                name: "Analysis-1".into(),
-                geometry: model.geometry.clone(),
-                mesh: model.mesh.clone(),
-                model: model.fe.clone(),
-                ..Default::default()
-            }],
+            nodes: vec![plx_io::project::ProjectNode::Analysis(Box::new(
+                plx_io::project::ProjectAnalysis {
+                    id: 1,
+                    name: "Analysis-1".into(),
+                    geometry: model.geometry.clone(),
+                    mesh: model.mesh.clone(),
+                    model: model.fe.clone(),
+                    ..Default::default()
+                },
+            ))],
             ..Default::default()
         };
         plx_io::project::save_project(path, &project).unwrap();
-        let mut project = plx_io::project::read_project(path).unwrap();
-        load_analysis(path, project.analyses.remove(0))
+        let project = plx_io::project::read_project(path).unwrap();
+        load_analysis(path, project.analyses().next().unwrap().clone())
     }
 
     #[test]

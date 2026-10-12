@@ -24,6 +24,7 @@ mod icons;
 mod keywords;
 mod links;
 mod material_library;
+mod material_set;
 mod mesh_tools;
 mod meshing;
 mod model;

@@ -21,7 +21,7 @@ check box. A new material starts with #ui("Elasticity") switched on.
 Values can be typed in any unit of the right kind, for example `210 GPa` or `7.85 g/cm³`
 (@numeric-input).
 
-=== Material library
+=== Material library <material-library>
 
 #ui("Material Library ...") in the context menu of #ui("Materials") opens the material library.
 On the left are the library materials in categories, on the right the materials of the model.

@@ -9,12 +9,13 @@ use std::time::{Duration, Instant};
 
 use egui_snarl::ui::{AnyPins, PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
-use plx_io::project::{Link, Project, ProjectAnalysis};
+use plx_io::project::{Link, MaterialSet, Project, ProjectAnalysis, ProjectNode};
 use plx_model::{ModelProperties, ModelSpace};
 
 use crate::app::{AnalysisWindow, Request};
 use crate::icons::{self, Icon};
 use crate::links;
+use crate::material_set::{MaterialSetEditor, MaterialSetResult};
 use crate::model::PROJECT_EXTENSION;
 use crate::model_properties::{DialogResult, ModelPropertiesDialog};
 use crate::node_icons::{self, NodeIcon};
@@ -24,11 +25,38 @@ use crate::status::{self, AnalysisStatus, CellState};
 /// Storage key of the project file open at exit, reopened at the next start.
 const LAST_PROJECT_KEY: &str = "last_project";
 
-/// An analysis of the project with its block in the schematic.
+/// What a block of the schematic is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Analysis,
+    /// A collection of materials, held in the setup of its data: a source of data for
+    /// analyses, which has no steps and is not solved.
+    Materials,
+}
+
+impl Kind {
+    /// Whether the block is a source of data rather than an analysis.
+    fn is_source(self) -> bool {
+        self != Self::Analysis
+    }
+
+    /// What the block is called in the output and in dialogs.
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Analysis => "analysis",
+            Self::Materials => "materials block",
+        }
+    }
+}
+
+/// A block of the schematic: an analysis of the project, or a source of data analyses link
+/// to, which holds what it gives in the same form as an analysis.
 struct Node {
     id: u64,
     name: String,
-    /// The analysis' data while its window is closed; an open window holds it.
+    kind: Kind,
+    /// The analysis' data while its window is closed; an open window holds it. A source
+    /// always holds its data.
     data: Option<ProjectAnalysis>,
     window: Option<Box<AnalysisWindow>>,
     /// Where the window opens the first time: over the project window.
@@ -43,10 +71,15 @@ struct Node {
 
 impl Node {
     fn new(id: u64, name: String, data: ProjectAnalysis) -> Self {
+        Self::of_kind(Kind::Analysis, id, name, data)
+    }
+
+    fn of_kind(kind: Kind, id: u64, name: String, data: ProjectAnalysis) -> Self {
         let space = data.model.properties.space;
         let mut node = Self {
             id,
             name,
+            kind,
             data: Some(data),
             window: None,
             window_position: None,
@@ -58,8 +91,50 @@ impl Node {
         node
     }
 
+    /// A block read from the project file.
+    fn read(node: ProjectNode) -> Self {
+        match node {
+            ProjectNode::Analysis(analysis) => {
+                Self::new(analysis.id, analysis.name.clone(), *analysis)
+            }
+            ProjectNode::Materials(set) => {
+                let mut data = ProjectAnalysis {
+                    id: set.id,
+                    name: set.name.clone(),
+                    position: set.position,
+                    ..Default::default()
+                };
+                data.model.materials = set.materials;
+                data.model.properties.units = set.units;
+                Self::of_kind(Kind::Materials, set.id, set.name, data)
+            }
+        }
+    }
+
+    /// The block as the project file keeps it, from the window of an analysis if it is
+    /// open; `position` is that of its block.
+    fn written(&mut self, position: [f32; 2]) -> Option<ProjectNode> {
+        let mut data = self.data()?;
+        data.id = self.id;
+        data.name = self.name.clone();
+        data.position = position;
+        Some(match self.kind {
+            Kind::Analysis => ProjectNode::Analysis(Box::new(data)),
+            Kind::Materials => ProjectNode::Materials(MaterialSet {
+                id: data.id,
+                name: data.name,
+                position,
+                units: data.model.properties.units,
+                materials: data.model.materials,
+            }),
+        })
+    }
+
     /// Finds the state of a closed analysis from its data, once after it changed.
     fn refresh_closed(&mut self) {
+        if self.kind.is_source() {
+            return;
+        }
         if let Some(data) = &self.data {
             self.status = Some(status::analysis_status(
                 data.geometry.as_ref(),
@@ -128,6 +203,8 @@ enum Payload {
 /// What the user did in the schematic, done after it is drawn.
 enum Action {
     New(egui::Pos2),
+    /// A new materials block at the position.
+    AddMaterials(egui::Pos2),
     /// Open the analysis' window, on the tab of a cell if given.
     Open(u64),
     Solve(u64),
@@ -182,6 +259,8 @@ pub struct ProjectApp {
     rename: Option<(u64, String)>,
     /// Analysis to delete once the user agrees.
     confirm_delete: Option<u64>,
+    /// The editor of a materials block.
+    material_set: Option<MaterialSetEditor>,
     /// The properties of a new analysis being asked for, with where its block goes.
     new_analysis: Option<(egui::Pos2, ModelPropertiesDialog)>,
     /// A project file being read on a worker thread, with notes on its conversion.
@@ -241,6 +320,7 @@ impl ProjectApp {
             graph_generation: 0,
             rename: None,
             confirm_delete: None,
+            material_set: None,
             new_analysis: None,
             opening: None,
             update_queue: VecDeque::new(),
@@ -323,6 +403,66 @@ impl ProjectApp {
         id
     }
 
+    /// Adds an empty materials block; returns its id.
+    fn add_materials(&mut self, position: egui::Pos2) -> u64 {
+        let id = self.next_id();
+        let name = self.unique_name("Materials");
+        let mut data = ProjectAnalysis {
+            id,
+            name: name.clone(),
+            ..Default::default()
+        };
+        data.model.properties.units = self.settings.new_model.units;
+        self.nodes
+            .push(Node::of_kind(Kind::Materials, id, name.clone(), data));
+        self.graph.insert_node(position, id);
+        self.output.push(format!(
+            "{name} created: double-click it to add materials, then drag them to analyses."
+        ));
+        id
+    }
+
+    /// Opens the editor of a materials block, with the materials of the analyses to import.
+    fn edit_materials(&mut self, id: u64) {
+        let analyses = (self.nodes.iter())
+            .filter(|n| n.kind == Kind::Analysis)
+            .filter_map(|n| Some((n.name.clone(), n.link_data()?.fe.materials.clone())))
+            .collect();
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            return;
+        };
+        let Some(data) = &node.data else {
+            return;
+        };
+        self.material_set = Some(MaterialSetEditor::new(
+            id,
+            &node.name,
+            &data.model.materials,
+            data.model.properties.units,
+            analyses,
+        ));
+    }
+
+    fn material_set_window(&mut self, ctx: &egui::Context) {
+        let Some(editor) = &mut self.material_set else {
+            return;
+        };
+        let id = editor.id;
+        match editor.show(ctx) {
+            MaterialSetResult::Open => {}
+            MaterialSetResult::Cancel => self.material_set = None,
+            MaterialSetResult::Ok(materials, units) => {
+                self.material_set = None;
+                if let Some(data) = self.node(id).and_then(|n| n.data.as_mut()) {
+                    data.model.materials = materials;
+                    data.model.properties.units = units;
+                }
+                // The analyses that link them take them now.
+                self.sync_due = true;
+            }
+        }
+    }
+
     /// The analysis' block in the schematic.
     fn graph_node(&self, id: u64) -> Option<NodeId> {
         (self.graph.nodes_ids_data())
@@ -331,6 +471,15 @@ impl ProjectApp {
     }
 
     fn open_window(&mut self, ctx: &egui::Context, id: u64) {
+        match self.nodes.iter().find(|n| n.id == id).map(|n| n.kind) {
+            Some(Kind::Analysis) => {}
+            Some(Kind::Materials) => {
+                // Asked for from an analysis window: the editor is in the project window.
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                return self.edit_materials(id);
+            }
+            None => return,
+        }
         let path = self.model_path();
         let folder = crate::analysis::job_name(&self.project_name());
         let (render_state, settings) = (self.render_state.clone(), self.settings.clone());
@@ -434,9 +583,10 @@ impl ProjectApp {
                 // Format 2 kept the values in the project's unit system.
                 let mut notes = Vec::new();
                 if project.format < 3 {
-                    for analysis in &mut project.analyses {
-                        analysis.model.properties.space = project.space;
-                        analysis.model.properties.units = project.units;
+                    let (space, units) = (project.space, project.units);
+                    for analysis in project.analyses_mut() {
+                        analysis.model.properties.space = space;
+                        analysis.model.properties.units = units;
                         notes.extend(crate::model::migrate_to_si(analysis));
                     }
                     notes.push(
@@ -445,7 +595,8 @@ impl ProjectApp {
                             .into(),
                     );
                 }
-                // Format 3 differs only by what it lacks: state links.
+                // Format 3 differs only by what it lacks: state links; format 4 by what it
+                // lacks too: blocks besides analyses.
                 project.format = plx_model::PROJECT_FORMAT;
                 (project, notes)
             });
@@ -477,17 +628,24 @@ impl ProjectApp {
                 self.applied.clear();
                 self.restoring.clear();
                 self.sync_due = true;
-                for analysis in project.analyses {
-                    let [x, y] = analysis.position;
-                    self.graph.insert_node(egui::pos2(x, y), analysis.id);
-                    self.nodes
-                        .push(Node::new(analysis.id, analysis.name.clone(), analysis));
+                for node in project.nodes {
+                    let [x, y] = node.position();
+                    self.graph.insert_node(egui::pos2(x, y), node.id());
+                    self.nodes.push(Node::read(node));
                 }
-                self.output.push(format!(
-                    "{} opened: {} analyses",
-                    path.display(),
-                    self.nodes.len()
-                ));
+                let analyses = (self.nodes.iter())
+                    .filter(|n| n.kind == Kind::Analysis)
+                    .count();
+                let sources = self.nodes.len() - analyses;
+                self.output.push(if sources == 0 {
+                    format!("{} opened: {analyses} analyses", path.display())
+                } else {
+                    let other = if sources == 1 { "block" } else { "blocks" };
+                    format!(
+                        "{} opened: {analyses} analyses, {sources} other {other}",
+                        path.display()
+                    )
+                });
                 self.path = Some(path);
                 self.update_queue.clear();
                 self.updating.clear();
@@ -502,23 +660,23 @@ impl ProjectApp {
         let positions: Vec<(u64, egui::Pos2)> = (self.graph.nodes_pos_ids())
             .map(|(_, pos, id)| (*id, pos))
             .collect();
-        let mut analyses = Vec::with_capacity(self.nodes.len());
+        let mut nodes = Vec::with_capacity(self.nodes.len());
         for node in &mut self.nodes {
-            let Some(mut data) = node.data() else {
+            let position = (positions.iter())
+                .find(|(id, _)| *id == node.id)
+                .map_or([0.0; 2], |(_, pos)| [pos.x, pos.y]);
+            let Some(mut written) = node.written(position) else {
                 continue;
             };
-            data.id = node.id;
-            data.name = node.name.clone();
-            if let Some((_, pos)) = positions.iter().find(|(id, _)| *id == node.id) {
-                data.position = [pos.x, pos.y];
-            }
-            if !results {
+            if let ProjectNode::Analysis(data) = &mut written
+                && !results
+            {
                 data.results = None;
             }
-            analyses.push(data);
+            nodes.push(written);
         }
         Project {
-            analyses,
+            nodes,
             links: self.links.clone(),
             ..Default::default()
         }
@@ -599,11 +757,13 @@ impl ProjectApp {
             return;
         };
         let name = format!("Copy of {}", node.name);
+        let kind = node.kind;
         let new_id = self.next_id();
         let name = self.unique_name(&name);
         data.id = new_id;
         data.name = name.clone();
-        self.nodes.push(Node::new(new_id, name.clone(), data));
+        self.nodes
+            .push(Node::of_kind(kind, new_id, name.clone(), data));
         self.graph.insert_node(position, new_id);
         self.output.push(format!("{name} created"));
     }
@@ -621,6 +781,9 @@ impl ProjectApp {
         }
         self.links.retain(|l| l.source != id && l.target != id);
         self.applied.retain(|(target, _), _| *target != id);
+        if self.material_set.as_ref().is_some_and(|e| e.id == id) {
+            self.material_set = None;
+        }
         self.update_queue.retain(|&queued| queued != id);
     }
 
@@ -781,6 +944,14 @@ impl ProjectApp {
                 if ui.button("New Analysis …").clicked() {
                     self.ask_new_analysis(self.free_position());
                 }
+                if ui
+                    .button("Add Materials")
+                    .on_hover_text(MATERIALS_TIP)
+                    .clicked()
+                {
+                    self.add_materials(self.free_position());
+                }
+                ui.separator();
                 let update = egui::Button::new("Update Project");
                 if ui.add(update).on_hover_text(UPDATE_TIP).clicked() {
                     self.update_project();
@@ -867,14 +1038,15 @@ impl ProjectApp {
         let blocks: Vec<BlockView> = (self.nodes.iter())
             .map(|n| {
                 let fe = n.link_data().map(|d| d.fe);
-                let rows = match &n.status {
-                    Some(status) => block_rows(
+                let rows = match (n.kind, &n.status) {
+                    (Kind::Materials, _) => fe.map(material_rows).unwrap_or_default(),
+                    (Kind::Analysis, Some(status)) => block_rows(
                         status,
                         fe,
                         &n.expanded,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                     ),
-                    None => Vec::new(),
+                    (Kind::Analysis, None) => Vec::new(),
                 };
                 let continues = (self.links.iter())
                     .find(|l| l.target == n.id && links::is_state(l))
@@ -882,6 +1054,7 @@ impl ProjectApp {
                 BlockView {
                     id: n.id,
                     name: n.name.clone(),
+                    kind: n.kind,
                     space: n.space,
                     steps: (fe.into_iter().flat_map(|fe| &fe.steps))
                         .map(|s| s.name.clone())
@@ -908,7 +1081,8 @@ impl ProjectApp {
                 egui::Label::new(
                     egui::RichText::new(
                         "Project > New Analysis, or right-click here, adds an analysis.\n\
-                         Double-click an analysis to open it in its own window.",
+                         Double-click an analysis to open it in its own window.\n\
+                         Project > Add Materials adds materials for analyses to link.",
                     )
                     .weak(),
                 ),
@@ -966,7 +1140,12 @@ impl ProjectApp {
             ));
             return;
         }
-        let space = |id: u64| self.nodes.iter().find(|n| n.id == id).map(|n| n.space);
+        // Materials have no model space.
+        let space = |id: u64| {
+            (self.nodes.iter())
+                .find(|n| n.id == id && n.kind != Kind::Materials)
+                .map(|n| n.space)
+        };
         if let (Some(a), Some(b)) = (space(source), space(target))
             && a != b
         {
@@ -1676,6 +1855,9 @@ impl ProjectApp {
     fn act(&mut self, ctx: &egui::Context, action: Action) {
         match action {
             Action::New(pos) => self.ask_new_analysis(pos),
+            Action::AddMaterials(pos) => {
+                self.add_materials(pos);
+            }
             Action::Open(id) => self.open_window(ctx, id),
             Action::Solve(id) => self.solve_chain(id),
             Action::Rename(id) => {
@@ -1729,7 +1911,8 @@ impl ProjectApp {
         let taken =
             (self.nodes.iter()).any(|n| n.id != id && n.name.eq_ignore_ascii_case(name.trim()));
         let valid = !name.trim().is_empty() && !taken;
-        egui::Window::new("Rename Analysis")
+        let noun = (self.nodes.iter().find(|n| n.id == id)).map_or("analysis", |n| n.kind.noun());
+        egui::Window::new(format!("Rename {}", title_case(noun)))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -1747,7 +1930,7 @@ impl ProjectApp {
                 if taken {
                     ui.colored_label(
                         ui.visuals().error_fg_color,
-                        "Another analysis has this name.",
+                        "Another block of the project has this name.",
                     );
                 }
                 ui.horizontal(|ui| {
@@ -1770,6 +1953,9 @@ impl ProjectApp {
                     window.rename(&name);
                 }
             }
+            if let Some(editor) = self.material_set.as_mut().filter(|e| e.id == id) {
+                editor.rename(&name);
+            }
         } else if open {
             self.rename = Some((id, name));
         }
@@ -1779,18 +1965,33 @@ impl ProjectApp {
         let Some(id) = self.confirm_delete else {
             return;
         };
-        let name =
-            (self.nodes.iter().find(|n| n.id == id)).map_or_else(String::new, |n| n.name.clone());
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            self.confirm_delete = None;
+            return;
+        };
+        let (name, kind) = (node.name.clone(), node.kind);
+        let what = match kind {
+            Kind::Analysis => "with its model and results",
+            Kind::Materials => "with its materials",
+        };
+        let users = (self.links.iter())
+            .filter(|l| l.source == id)
+            .map(|l| l.target)
+            .collect::<BTreeSet<_>>()
+            .len();
         let mut answer = None;
-        egui::Window::new("Delete Analysis")
+        egui::Window::new(format!("Delete {}", title_case(kind.noun())))
             .collapsible(false)
             .resizable(false)
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
-                ui.label(format!(
-                    "Delete {name} with its model and results from the project?"
-                ));
+                ui.label(format!("Delete {name} {what} from the project?"));
+                if kind.is_source() && users > 0 {
+                    ui.label(format!(
+                        "{users} analyses link to it; they keep their copies."
+                    ));
+                }
                 ui.horizontal(|ui| {
                     if ui.button("Delete").clicked() {
                         answer = Some(true);
@@ -2031,6 +2232,7 @@ impl eframe::App for ProjectApp {
         }
         self.rename_window(&ctx);
         self.confirm_delete_window(&ctx);
+        self.material_set_window(&ctx);
         self.new_analysis_window(&ctx);
         self.settings_window(&ctx);
         self.updater.show(&ctx, &mut self.output);
@@ -2063,6 +2265,7 @@ struct Row {
 struct BlockView {
     id: u64,
     name: String,
+    kind: Kind,
     space: ModelSpace,
     /// Its steps, to split it after one, and the analysis it continues, to merge into.
     steps: Vec<String>,
@@ -2215,6 +2418,58 @@ fn block_rows(
     rows
 }
 
+/// The rows of a materials block: all materials, then each of them, to link to analyses.
+fn material_rows(fe: &plx_model::FeModel) -> Vec<Row> {
+    let path = vec![links::SETUP.to_owned(), "Materials".to_owned()];
+    let mut rows = vec![Row {
+        text: format!("Materials ({})", fe.materials.len()),
+        depth: 0,
+        icon: NodeIcon::Materials,
+        state: None,
+        expander: None,
+        input: false,
+        output: !fe.materials.is_empty(),
+        linked_from: None,
+        tip: "All materials: drag them to the Materials row of an analysis, which then takes \
+              each of them, also those added here later"
+            .into(),
+        path: path.clone(),
+    }];
+    for material in &fe.materials {
+        let mut path = path.clone();
+        path.push(material.name.clone());
+        rows.push(Row {
+            tip: format!(
+                "{}: drag it to the Materials row of an analysis to link it",
+                material.name
+            ),
+            text: material.name.clone(),
+            depth: 1,
+            icon: NodeIcon::Materials,
+            state: None,
+            expander: None,
+            input: false,
+            output: true,
+            linked_from: None,
+            path,
+        });
+    }
+    rows
+}
+
+/// "materials block" as "Materials Block", for window titles.
+fn title_case(text: &str) -> String {
+    (text.split(' '))
+        .map(|word| {
+            let mut chars = word.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().chain(chars).collect()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The row a path is shown in: the row itself, or the closed row it lies in.
 fn shown_row(rows: &[Row], path: &[String]) -> Option<usize> {
     (rows.iter().enumerate())
@@ -2299,8 +2554,17 @@ impl SnarlViewer<u64> for Viewer {
             return;
         };
         let (rect, icon) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
-        paint_space(ui.painter(), rect, block.space, ui.visuals().text_color());
-        icon.on_hover_text(format!("Model space: {}", block.space.label()));
+        match block.kind {
+            Kind::Analysis => {
+                paint_space(ui.painter(), rect, block.space, ui.visuals().text_color());
+                icon.on_hover_text(format!("Model space: {}", block.space.label()));
+            }
+            Kind::Materials => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Materials, ink);
+                icon.on_hover_text("Materials for analyses to link");
+            }
+        }
         let text = egui::RichText::new(&block.name).strong();
         let label = ui.add(
             egui::Label::new(text)
@@ -2313,14 +2577,25 @@ impl SnarlViewer<u64> for Viewer {
         if block.loading {
             ui.spinner();
         }
-        let (steps, continues) = (block.steps.clone(), block.continues.clone());
+        let (steps, continues, kind) = (block.steps.clone(), block.continues.clone(), block.kind);
         if label.double_clicked() {
             self.actions.push(Action::Open(id));
         }
+        let tip = match kind {
+            Kind::Analysis => "Double-click opens the analysis in its own window.",
+            Kind::Materials => "Double-click edits the materials.",
+        };
         // The name takes the clicks of the header, so it opens the block's menu too.
-        label
-            .on_hover_text("Double-click opens the analysis in its own window.")
-            .context_menu(|ui| node_menu(ui, id, &steps, continues.as_deref(), &mut self.actions));
+        label.on_hover_text(tip).context_menu(|ui| {
+            node_menu(
+                ui,
+                id,
+                kind,
+                &steps,
+                continues.as_deref(),
+                &mut self.actions,
+            )
+        });
     }
 
     fn inputs(&mut self, node: &u64) -> usize {
@@ -2533,6 +2808,33 @@ impl SnarlViewer<u64> for Viewer {
             self.actions.push(Action::New(pos));
             ui.close();
         }
+        if ui
+            .button("Add Materials")
+            .on_hover_text(MATERIALS_TIP)
+            .clicked()
+        {
+            self.actions.push(Action::AddMaterials(pos));
+            ui.close();
+        }
+    }
+
+    /// Header bands tinted by the kind of block, like the node groups of Blender.
+    fn header_frame(
+        &mut self,
+        default: egui::Frame,
+        node: NodeId,
+        _inputs: &[InPin],
+        _outputs: &[OutPin],
+        snarl: &Snarl<u64>,
+    ) -> egui::Frame {
+        match snarl
+            .get_node(node)
+            .and_then(|id| self.block(*id))
+            .map(|b| b.kind)
+        {
+            Some(Kind::Materials) => default.fill(crate::style::materials_header()),
+            _ => default,
+        }
     }
 
     fn has_node_menu(&mut self, _node: &u64) -> bool {
@@ -2551,7 +2853,15 @@ impl SnarlViewer<u64> for Viewer {
         let block = self.block(id);
         let steps = block.map(|b| b.steps.clone()).unwrap_or_default();
         let continues = block.and_then(|b| b.continues.clone());
-        node_menu(ui, id, &steps, continues.as_deref(), &mut self.actions);
+        let kind = block.map_or(Kind::Analysis, |b| b.kind);
+        node_menu(
+            ui,
+            id,
+            kind,
+            &steps,
+            continues.as_deref(),
+            &mut self.actions,
+        );
     }
 
     fn has_dropped_wire_menu(&mut self, src_pins: AnyPins, snarl: &mut Snarl<u64>) -> bool {
@@ -2662,6 +2972,7 @@ fn hidden_pin() -> PinInfo {
 fn node_menu(
     ui: &mut egui::Ui,
     id: u64,
+    kind: Kind,
     steps: &[String],
     continues: Option<&str>,
     actions: &mut Vec<Action>,
@@ -2672,6 +2983,15 @@ fn node_menu(
             ui.close();
         }
     };
+    if kind.is_source() {
+        // Sources have no steps and are not solved.
+        entry(ui, "Edit …", Action::Open(id));
+        ui.separator();
+        entry(ui, "Rename …", Action::Rename(id));
+        entry(ui, "Duplicate", Action::Duplicate(id));
+        entry(ui, "Delete …", Action::Delete(id));
+        return;
+    }
     entry(ui, "Open", Action::Open(id));
     entry(ui, "Solve", Action::Solve(id));
     ui.separator();
@@ -2741,6 +3061,10 @@ fn schematic_style() -> SnarlStyle {
     }
 }
 
+/// Tooltip of Add Materials.
+const MATERIALS_TIP: &str = "Adds a block of materials kept in the project: analyses link \
+     them one by one or all at once, so that they are defined in one place.";
+
 /// Tooltip of Update Project.
 const UPDATE_TIP: &str = "Update Project: solves every analysis that is not up to date, one \
      after the other, and keeps the new results.";
@@ -2798,6 +3122,43 @@ mod tests {
         }
 
         fn flush(&mut self) {}
+    }
+
+    #[test]
+    fn a_materials_block_keeps_its_materials_and_gives_them_as_setup() {
+        let set = MaterialSet {
+            id: 4,
+            name: "Materials".into(),
+            position: [5.0, 6.0],
+            units: plx_model::UnitSystem::MKgSC,
+            materials: vec![plx_model::Material {
+                name: "Steel".into(),
+                density: Some(7850.0),
+                ..Default::default()
+            }],
+        };
+        let mut node = Node::read(ProjectNode::Materials(set.clone()));
+        assert_eq!(node.kind, Kind::Materials);
+        assert!(node.status.is_none(), "a source is not solved");
+        // Analyses link its materials like those of another analysis.
+        let data = node.link_data().unwrap();
+        let path = vec![links::SETUP.to_owned(), "Materials".to_owned()];
+        assert!(links::exists(data, &path));
+        let mut steel = path.clone();
+        steel.push("Steel".into());
+        assert!(links::exists(data, &steel));
+        assert!(links::compatible(&steel, &steel) && links::compatible(&path, &path));
+        let mut target = plx_model::FeModel::default();
+        links::apply_setup(&mut target, data.fe, &steel);
+        assert_eq!(target.materials, set.materials);
+        let rows = material_rows(data.fe);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.output && !r.input));
+        assert_eq!(rows[1].path, steel);
+        match node.written([5.0, 6.0]) {
+            Some(ProjectNode::Materials(written)) => assert_eq!(written, set),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
