@@ -547,6 +547,11 @@ impl PrepolixApp {
                     &mut self.workbench.viewport.options.mesh_edges,
                     "Mesh Edges",
                 );
+                ui.checkbox(
+                    &mut self.workbench.settings.graphics.shell_thickness,
+                    "Shell Thickness",
+                )
+                .on_hover_text(settings::SHELL_THICKNESS_TIP);
                 ui.separator();
                 let has_model = self.workbench.shown().is_some();
                 if ui
@@ -1124,6 +1129,7 @@ impl eframe::App for PrepolixApp {
             self.import_dialog(&ctx);
         }
         self.workbench.update_explosion(&ctx);
+        self.workbench.update_thick_shells();
         self.workbench.rebuild_if_results_changed();
         self.workbench.update_section();
         self.workbench.update_feature_overlay();
@@ -5887,6 +5893,28 @@ impl Workbench {
             view.sound = None;
             self.audio = None;
         }
+    }
+
+    /// Draws the shells of the shown FE model thick or thin as the setting asks, again after
+    /// their sections changed.
+    fn update_thick_shells(&mut self) {
+        if self.tree_view != TreeView::FeModel {
+            return;
+        }
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        let wanted = self.settings.graphics.shell_thickness;
+        let current = &model.thick_shells;
+        if wanted && model.shell_sections().eq(current) || !wanted && current.is_empty() {
+            return;
+        }
+        model.thick_shells = if wanted {
+            model.shell_sections().cloned().collect()
+        } else {
+            Vec::new()
+        };
+        self.results_changed = true;
     }
 
     /// Rebuilds the scene after the result selection or deformation changed.

@@ -5,14 +5,14 @@ use crate::contour::NO_VALUE;
 
 use crate::mesh::{RenderMesh, Vertex};
 
-const EDGE_COLOR: [f32; 3] = [0.0, 0.0, 0.0];
+pub(crate) const EDGE_COLOR: [f32; 3] = [0.0, 0.0, 0.0];
 /// Opacities of PrePoMax's edge actors; line vertices carry them in [`Vertex::scalar`], the
 /// shader draws mesh edges with [`MESH_EDGE_OPACITY`] (`viewport.wgsl` repeats it).
 pub const FEATURE_EDGE_OPACITY: f32 = 0.7;
 pub const MESH_EDGE_OPACITY: f32 = 0.4;
 pub const WIREFRAME_OPACITY: f32 = 0.5;
 /// How far the mid node of a straight edge may lie off its centre, relative to its length.
-const STRAIGHT_TOLERANCE: f64 = 1e-3;
+pub(crate) const STRAIGHT_TOLERANCE: f64 = 1e-3;
 
 /// PrePoMax's default part colours (System.Drawing names), cycled by part index.
 const PART_COLORS_SRGB: [[u8; 3]; 10] = [
@@ -185,7 +185,7 @@ pub fn wireframe_edges(coords: &[[f64; 3]], skin: &PartSkin, origin: DVec3) -> V
 /// For each face in turn, one normal for each of its corner and mid nodes: the area-weighted
 /// average of the normals of all faces of the same patch at that node that deviate from this
 /// face by less than the angle.
-fn smooth_vertex_normals(
+pub(crate) fn smooth_vertex_normals(
     coords: &[[f64; 3]],
     skin: &PartSkin,
     smooth_angle_deg: f64,
@@ -253,7 +253,7 @@ fn polygon_area(coords: &[[f64; 3]], corners: &[usize]) -> f64 {
 }
 
 /// Triangles of a face as indices into its corner-then-mid vertex list.
-fn face_triangles(face: &SkinFace) -> &'static [u32] {
+pub(crate) fn face_triangles(face: &SkinFace) -> &'static [u32] {
     match (face.corners.len(), face.mids.is_empty()) {
         (3, true) => &[0, 1, 2],
         (4, true) => &[0, 1, 2, 0, 2, 3],

@@ -24,3 +24,18 @@ internally, and the result file keeps the node numbers of the model.
 
 Shell nodes have rotations: #ui("Displacement/Rotation") boundary conditions can hold `UR1`,
 `UR2`, `UR3`, and #ui("Moment") loads can act on them.
+
+==== Shell thickness in the FE model
+
+The FE model shows the elements of shell and membrane sections as the solid their section
+gives them: the surface thickened by the #ui("Thickness"), with the mesh lying where the
+#ui("Offset") puts it. The top face is the side the element normal points to, so an offset of
+0.5 draws the solid below the mesh and −0.5 above it. Neighbouring elements whose normals point
+to opposite sides show a step, which reveals a flipped normal before the analysis is run.
+
+#screenshot("shell-thickness.png", [Shell sections drawn with their thickness: the plate with
+offset 0.5 hangs below its mesh, the half tube with offset 0.5 lies inside it.])
+
+Turn the display off and on with #menu("View", "Shell Thickness") or in the
+#link(<settings>)[settings] under #ui("Graphics"). Picking still selects the elements on the
+mesh, and the Results workspace is not affected.
