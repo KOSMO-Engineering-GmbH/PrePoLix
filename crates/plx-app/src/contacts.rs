@@ -331,6 +331,7 @@ pub fn interaction_dialog(
     });
     ui.add_space(4.0);
     ui.strong("Properties");
+    let was_tied = interaction.is_tied();
     frame().show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.set_min_height(150.0);
@@ -360,6 +361,11 @@ pub fn interaction_dialog(
             }
         }
     });
+    // CalculiX aborts on a tied contact without friction, so choosing Tied brings it along.
+    if !was_tied && interaction.add_friction_if_tied() {
+        view.focus = Some(TIED_FRICTION);
+        view.available = None;
+    }
     ui.add_space(4.0);
     egui::Frame::group(ui.style()).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -371,6 +377,14 @@ pub fn interaction_dialog(
         }
     });
 }
+
+/// Why a tied surface behavior comes with friction, shown when the friction is added.
+const TIED_FRICTION: Description = (
+    "Friction added for Tied",
+    "CalculiX needs Friction with a Tied surface behavior: its stick slope is the stiffness of \
+     the tie along the surfaces, the friction coefficient is irrelevant. Tied works only with \
+     the method Surface to surface.",
+);
 
 /// The Available list, the add and remove buttons and the Selected list.
 fn model_lists(ui: &mut Ui, interaction: &mut SurfaceInteraction, view: &mut InteractionView) {
@@ -564,7 +578,7 @@ impl Rows<'_> {
              the overclosure, a soft penalty contact. Exponential: pressure rises \
              exponentially as the gap closes, which helps convergence from open contact. \
              Tabular: your own curve. Tied: the surfaces stay connected with the stiffness K \
-             (see also Ties).",
+             (see also Ties); needs Friction and the method Surface to surface.",
         );
         self.row(ui, description, |ui| {
             egui::ComboBox::from_id_salt("pressure overclosure")
@@ -628,6 +642,9 @@ impl Rows<'_> {
                     k,
                     Quantity::ForcePerVolume,
                 );
+                ui.label("");
+                ui.weak("Needs Friction (stick slope)\nand Surface to surface pairs.");
+                ui.end_row();
             }
         }
     }
@@ -641,7 +658,7 @@ impl Rows<'_> {
             ui.add_sized(field_size(ui), value)
         });
         let text = "Slope lambda of the shear stress over the slip in the stick range; \
-                    if empty, CalculiX chooses it.";
+                    if empty, half the Young's modulus of the first material (CalculiX's default).";
         self.optional(
             ui,
             ("Stick slope", text),
@@ -762,6 +779,13 @@ pub fn validate_interaction(interaction: &SurfaceInteraction) -> Result<(), Stri
         {
             return Err("The friction coefficient must be greater than 0.".into());
         }
+    }
+    if interaction.is_tied() && !interaction.has_friction() {
+        return Err(
+            "A Tied surface behavior needs Friction: CalculiX takes the stiffness of \
+                    the tie along the surfaces from its stick slope."
+                .into(),
+        );
     }
     Ok(())
 }

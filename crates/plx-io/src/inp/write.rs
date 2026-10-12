@@ -323,7 +323,14 @@ pub fn model_keywords(
     sections.extend(generated.sections);
     let mut materials = materials;
     materials.extend(generated.material);
-    let interactions = model.surface_interactions.iter().map(interaction).collect();
+    // CalculiX 2.23 no longer fills in its default stick slope, half the first elastic
+    // constant of the first material, and a friction without one sticks with no stiffness.
+    let stick_slope = (model.materials.first())
+        .and_then(|m| m.elastic)
+        .map(|e| e.young / 2.0);
+    let interactions = (model.surface_interactions.iter())
+        .map(|i| interaction(i, stick_slope))
+        .collect();
     let (mut contact_pairs, pair_surfaces) = contact_pairs(&mut sets, model)?;
     contact_pairs.extend(node_ties(&mut sets, model, &lines)?);
     let initial_conditions = initial_conditions(&mut sets, model)?;
@@ -1484,7 +1491,8 @@ fn node_tie(sets: &mut Sets, tie: &NodeTie, lines: &LineElements) -> Result<Keyw
 
 /// A surface interaction with its models as children, like PrePoMax's
 /// `CalSurfaceInteraction`.
-fn interaction(interaction: &SurfaceInteraction) -> Keyword {
+/// `stick_slope` is written for a friction without one.
+fn interaction(interaction: &SurfaceInteraction, stick_slope: Option<f64>) -> Keyword {
     let properties = (interaction.properties.iter())
         .map(|property| {
             let mut out = String::new();
@@ -1521,7 +1529,7 @@ fn interaction(interaction: &SurfaceInteraction) -> Keyword {
                 }
                 InteractionProperty::Friction(friction) => {
                     let _ = write!(out, "*Friction\n{}", number(friction.coefficient));
-                    if let Some(slope) = friction.stick_slope {
+                    if let Some(slope) = friction.stick_slope.or(stick_slope) {
                         let _ = write!(out, ", {}", number(slope));
                     }
                     out.push('\n');
