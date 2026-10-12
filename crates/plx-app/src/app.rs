@@ -242,7 +242,7 @@ pub struct AnalysisWindow {
     /// Whether to solve once the analysis is loaded, for Update Project.
     solve_when_loaded: bool,
     /// The workspace to switch to once the analysis is loaded.
-    show_when_loaded: Option<TreeView>,
+    show_when_loaded: Option<Show>,
 }
 
 impl AnalysisWindow {
@@ -331,8 +331,8 @@ impl AnalysisWindow {
     }
 
     /// Shows this workspace, as soon as the analysis is loaded.
-    pub fn show_workspace(&mut self, view: TreeView) {
-        self.show_when_loaded = Some(view);
+    pub fn show_workspace(&mut self, show: Show) {
+        self.show_when_loaded = Some(show);
     }
 
     /// Imports these files into the analysis as soon as it is loaded.
@@ -1334,8 +1334,13 @@ impl AnalysisWindow {
             if !import.is_empty() {
                 self.import_paths(import, &ctx);
             }
-            if let Some(view) = self.show_when_loaded.take() {
+            if let Some(Show { view, step }) = self.show_when_loaded.take() {
                 self.workbench.set_tree_view(view);
+                if let (Some(name), Some(model)) = (step, &self.workbench.model)
+                    && let Some(i) = model.fe.steps.iter().position(|s| s.name == name)
+                {
+                    self.workbench.tree.selected = Some((TreeView::FeModel, TreeItem::Step(i)));
+                }
                 // The results bound to the analysis open after the model, without taking
                 // the view away again.
                 let bound =
@@ -6797,6 +6802,14 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
         NewItem::MeshSetupItem => TreeItem::Group("Mesh Setup"),
         _ => return None,
     })
+}
+
+/// What the project window asks of a window it opens: the workspace, and a step to select
+/// in the FE Model tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Show {
+    pub view: TreeView,
+    pub step: Option<String>,
 }
 
 /// The workspace after a results file opened: the Results tab, unless the project window

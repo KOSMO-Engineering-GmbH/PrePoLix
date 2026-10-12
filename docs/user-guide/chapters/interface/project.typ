@@ -86,7 +86,7 @@ the green square takes the state of another analysis (@data-links).
   once the solve is done. The header of an open analysis says #ui("(open)").
   Double-clicking a row opens the window in the matching workspace: #ui("Geometry") and
   #ui("Mesh") in the Geometry workspace, #ui("Setup") and its categories in the FE Model
-  workspace, the rows of the steps likewise, and #ui("Results") in the Results workspace.
+  workspace, the rows of the steps likewise with the step selected in the tree, and #ui("Results") in the Results workspace.
 - *Drag* a block by its header to move it, drag the background to pan, and scroll to zoom.
   #menu("Project", "Show All Blocks") (#key("Home")) fits all blocks into the view.
 - *Drag* from a pin on the right of a row to a pin on the left of a row of another block to

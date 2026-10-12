@@ -15,7 +15,7 @@ use plx_model::{
     MeshPrimitive, ModelProperties, ModelSpace, Param, ParamSlot, Quantity, UnitSystem,
 };
 
-use crate::app::{AnalysisWindow, Request};
+use crate::app::{AnalysisWindow, Request, Show};
 use crate::icons::{self, Icon};
 use crate::links;
 use crate::material_set::{MaterialSetEditor, MaterialSetResult};
@@ -311,7 +311,7 @@ enum Action {
     /// Make the mesh of a mesh block anew.
     Generate(u64),
     /// Open the analysis' window, in the workspace of a cell if given.
-    Open(u64, Option<TreeView>),
+    Open(u64, Option<Show>),
     Solve(u64),
     Rename(u64),
     Duplicate(u64),
@@ -709,7 +709,7 @@ impl ProjectApp {
             .map(|(graph_id, _)| graph_id)
     }
 
-    fn open_window(&mut self, ctx: &egui::Context, id: u64, view: Option<TreeView>) {
+    fn open_window(&mut self, ctx: &egui::Context, id: u64, view: Option<Show>) {
         match self.nodes.iter().find(|n| n.id == id).map(|n| n.kind) {
             Some(Kind::Analysis) => {}
             Some(Kind::Materials) => {
@@ -751,7 +751,7 @@ impl ProjectApp {
             let viewport = analysis_viewport(id);
             ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
             if let (Some(view), Some(window)) = (view, &mut node.window) {
-                window.show_workspace(view);
+                window.show_workspace(view.clone());
             }
             return;
         }
@@ -762,7 +762,7 @@ impl ProjectApp {
         window.set_project_folder(folder);
         window.set_links(incoming, Vec::new());
         if let Some(view) = view {
-            window.show_workspace(view);
+            window.show_workspace(view.clone());
         }
         window.load(ctx, path, data);
         if !import.is_empty() {
@@ -1484,7 +1484,14 @@ impl ProjectApp {
             self.window_runs.retain(|id| updating.contains(id));
         }
         if let Some(id) = open_analysis {
-            self.open_window(ctx, id, Some(TreeView::Results));
+            self.open_window(
+                ctx,
+                id,
+                Some(Show {
+                    view: TreeView::Results,
+                    step: None,
+                }),
+            );
         }
         if !open {
             self.monitor = None;
@@ -3091,13 +3098,17 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> String {
 /// The workspace a double-click on the row at `path` opens the analysis in: Geometry and
 /// Mesh in the Geometry workspace, the setup and the steps in the FE Model workspace,
 /// Results in the Results workspace.
-fn workspace_of(path: &[String]) -> Option<TreeView> {
+fn workspace_of(path: &[String]) -> Option<Show> {
+    let show = |view| Some(Show { view, step: None });
     match path.first().map(String::as_str) {
-        Some(links::GEOMETRY | links::MESH) => Some(TreeView::Geometry),
-        Some(links::SETUP) => Some(TreeView::FeModel),
+        Some(links::GEOMETRY | links::MESH) => show(TreeView::Geometry),
+        Some(links::SETUP) => show(TreeView::FeModel),
         // The rows of the steps stand for the steps of the setup.
-        Some(links::RESULTS) if path.len() > 1 => Some(TreeView::FeModel),
-        Some(links::RESULTS) => Some(TreeView::Results),
+        Some(links::RESULTS) if path.len() > 1 => Some(Show {
+            view: TreeView::FeModel,
+            step: Some(path[1].clone()),
+        }),
+        Some(links::RESULTS) => show(TreeView::Results),
         _ => None,
     }
 }
@@ -4636,18 +4647,22 @@ fn timestamped(message: String) -> String {
 mod tests {
     #[test]
     fn rows_open_the_analysis_in_their_workspace() {
-        use super::{TreeView, workspace_of};
+        use super::{Show, TreeView, workspace_of};
+        let view = |view| Some(Show { view, step: None });
         let path = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(workspace_of(&path(&["Geometry"])), Some(TreeView::Geometry));
-        assert_eq!(workspace_of(&path(&["Mesh"])), Some(TreeView::Geometry));
+        assert_eq!(workspace_of(&path(&["Geometry"])), view(TreeView::Geometry));
+        assert_eq!(workspace_of(&path(&["Mesh"])), view(TreeView::Geometry));
         assert_eq!(
             workspace_of(&path(&["Setup", "Steps"])),
-            Some(TreeView::FeModel)
+            view(TreeView::FeModel)
         );
-        assert_eq!(workspace_of(&path(&["Results"])), Some(TreeView::Results));
+        assert_eq!(workspace_of(&path(&["Results"])), view(TreeView::Results));
         assert_eq!(
             workspace_of(&path(&["Results", "Step-1"])),
-            Some(TreeView::FeModel)
+            Some(Show {
+                view: TreeView::FeModel,
+                step: Some("Step-1".into())
+            })
         );
         assert_eq!(workspace_of(&path(&["State"])), None);
     }
