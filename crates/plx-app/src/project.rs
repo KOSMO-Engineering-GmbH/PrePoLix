@@ -168,10 +168,10 @@ pub struct ProjectApp {
     new_analysis: Option<(egui::Pos2, ModelPropertiesDialog)>,
     /// A project file being read on a worker thread, with notes on its conversion.
     opening: Option<(PathBuf, Receiver<Opened>)>,
-    /// Analyses Update Project still has to solve, in order, and the one it solves, with
-    /// whether the update opened its window.
+    /// Analyses Update Project still has to solve, in order, and those it solves, with
+    /// whether the update opened their window.
     update_queue: VecDeque<u64>,
-    updating: Option<(u64, bool)>,
+    updating: Vec<(u64, bool)>,
     /// Files given on the command line, imported into the first analysis once it is open.
     startup_import: Vec<PathBuf>,
     /// Fingerprint of the geometry or mesh a link last copied into its target, by target and
@@ -224,7 +224,7 @@ impl ProjectApp {
             new_analysis: None,
             opening: None,
             update_queue: VecDeque::new(),
-            updating: None,
+            updating: Vec::new(),
             startup_import: Vec::new(),
             applied: HashMap::new(),
             last_sync: None,
@@ -383,7 +383,7 @@ impl ProjectApp {
         self.graph_generation += 1;
         self.path = None;
         self.update_queue.clear();
-        self.updating = None;
+        self.updating.clear();
         self.output.push("New project".into());
     }
 
@@ -464,7 +464,7 @@ impl ProjectApp {
                 ));
                 self.path = Some(path);
                 self.update_queue.clear();
-                self.updating = None;
+                self.updating.clear();
             }
             Err(error) => self.output.push(format!("Not opened: {error}")),
         }
@@ -630,53 +630,93 @@ impl ProjectApp {
         }
     }
 
-    /// Works through Update Project: opens the next analysis and solves it, then the next
-    /// once the one before is done.
+    /// Works through Update Project: opens the next analyses and solves them, as many at a
+    /// time as the settings allow; an analysis waits for those it takes data from.
     fn run_update(&mut self, ctx: &egui::Context) {
-        if let Some((id, opened)) = self.updating {
+        for (id, opened) in std::mem::take(&mut self.updating) {
             let Some(node) = self.node(id) else {
-                self.updating = None;
-                return;
+                continue;
             };
             let Some(window) = &mut node.window else {
-                self.updating = None;
-                return;
+                continue;
             };
             if window.waiting() || window.solving() || window.is_running() {
-                return;
+                self.updating.push((id, opened));
+                continue;
             }
             // Done: solved, or stopped by an error the window shows.
             let failed = window.status().is_some_and(|s| s.needs_solve());
             let name = node.name.clone();
-            self.updating = None;
             if failed {
-                self.update_queue.clear();
-                self.output
-                    .push(format!("Update stopped: {name} could not be solved."));
+                // What depends on it is not solved; independent analyses go on.
+                let dependent = self.dependents(id);
+                let skipped: Vec<String> = (self.nodes.iter())
+                    .filter(|n| dependent.contains(&n.id) && self.update_queue.contains(&n.id))
+                    .map(|n| n.name.clone())
+                    .collect();
+                self.update_queue
+                    .retain(|queued| !dependent.contains(queued));
+                self.output.push(if skipped.is_empty() {
+                    format!("{name} could not be solved.")
+                } else {
+                    format!(
+                        "{name} could not be solved; {} not updated.",
+                        skipped.join(", ")
+                    )
+                });
             } else if opened {
                 // Windows the update opened close again, as Workbench solves in the
                 // background; the window stays open to show what went wrong.
                 self.close_window(id);
             }
-            if !failed && self.update_queue.is_empty() {
-                self.output.push("Project updated".into());
+            if self.updating.is_empty() && self.update_queue.is_empty() {
+                self.output.push(if failed {
+                    "Update finished with errors".into()
+                } else {
+                    "Project updated".into()
+                });
             }
             // The analyses after it take its new results before they are solved.
             self.sync_due = true;
-            return;
         }
         if self.sync_due || self.restoring.values().any(Option::is_some) {
             return;
         }
-        let Some(id) = self.update_queue.pop_front() else {
-            return;
-        };
-        let opened = self.node(id).is_some_and(|n| n.window.is_none());
-        self.open_window(ctx, id);
-        self.updating = Some((id, opened));
-        if let Some(window) = self.node(id).and_then(|n| n.window.as_mut()) {
-            window.solve_when_loaded();
+        let parallel = self.settings.solver.parallel_runs.max(1) as usize;
+        while self.updating.len() < parallel {
+            // The first queued analysis whose sources are neither queued nor solving.
+            let busy = |source: u64| {
+                self.update_queue.contains(&source)
+                    || self.updating.iter().any(|(id, _)| *id == source)
+            };
+            let ready = self.update_queue.iter().position(|&id| {
+                !(self.links.iter()).any(|l| l.target == id && l.source != id && busy(l.source))
+            });
+            let Some(id) = ready.and_then(|index| self.update_queue.remove(index)) else {
+                return;
+            };
+            let opened = self.node(id).is_some_and(|n| n.window.is_none());
+            self.open_window(ctx, id);
+            self.updating.push((id, opened));
+            if let Some(window) = self.node(id).and_then(|n| n.window.as_mut()) {
+                window.solve_when_loaded();
+            }
         }
+    }
+
+    /// The analyses that take data from `id`, directly or through others.
+    fn dependents(&self, id: u64) -> Vec<u64> {
+        let mut found = Vec::new();
+        let mut queue = vec![id];
+        while let Some(source) = queue.pop() {
+            for link in self.links.iter().filter(|l| l.source == source) {
+                if !found.contains(&link.target) && link.target != id {
+                    found.push(link.target);
+                    queue.push(link.target);
+                }
+            }
+        }
+        found
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
@@ -766,7 +806,7 @@ impl ProjectApp {
                 self.save(false);
             }
             ui.separator();
-            let updating = self.updating.is_some() || !self.update_queue.is_empty();
+            let updating = !self.updating.is_empty() || !self.update_queue.is_empty();
             let update = icons::button(ui, Icon::Solve, UPDATE_TIP, !updating, false).clicked();
             let text = egui::Button::new("Update Project").frame(false);
             let text = ui.add_enabled(!updating, text).on_hover_text(UPDATE_TIP);
@@ -776,7 +816,7 @@ impl ProjectApp {
             ui.add_space(4.0);
             if icons::button(ui, Icon::Stop, "Stop Update Project", updating, false).clicked() {
                 self.update_queue.clear();
-                self.updating = None;
+                self.updating.clear();
                 self.output.push("Update stopped".into());
             }
         });

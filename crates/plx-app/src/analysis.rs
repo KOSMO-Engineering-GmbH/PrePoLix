@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
+use plx_job::restart::{self, Chain, Plan, StateIndex};
 use plx_job::{Job, JobStatus};
 use plx_model::EquationSolver;
 
@@ -33,6 +34,22 @@ pub struct Analysis {
     pub bound: bool,
     /// The keywords of the input file, see [`plx_io::inp::keywords::input_keywords`].
     keywords: Vec<String>,
+    /// How the run reuses the state of an earlier one; `None` for a model check.
+    restart: Option<RestartRun>,
+}
+
+/// What a run needs to start from the state of an earlier run and to keep its own states,
+/// see [`plx_job::restart`].
+struct RestartRun {
+    chain: Chain,
+    plan: Plan,
+    /// The CalculiX the states belong to, see [`crate::settings::Solver::executable_key`].
+    solver_key: String,
+    job_solver: plx_job::Solver,
+    work_dir: PathBuf,
+    job_name: String,
+    /// Most the restart files of the project may take, in bytes; `None` keeps none.
+    limit: Option<u64>,
 }
 
 pub enum MonitorEvent {
@@ -148,7 +165,18 @@ impl Analysis {
         if let Some(message) = crate::settings::missing_executable(&job_solver.executable) {
             return Err(format!("CalculiX not started: {message}. {hint}"));
         }
-        let job = Job::start(&job_solver, work_dir, &job_name, &input).map_err(|e| {
+        let restart = (!check_model)
+            .then(|| plan_restart(solver, &fe, &input, work_dir, &job_name, job_solver.clone()));
+        let run_input = match &restart {
+            Some(RestartRun {
+                chain,
+                plan: Plan::Restart { after, .. },
+                ..
+            }) => chain.restart_input(*after),
+            Some(run) => run.chain.input.clone(),
+            None => input,
+        };
+        let job = Job::start(&job_solver, work_dir, &job_name, &run_input).map_err(|e| {
             format!(
                 "CalculiX ({}) not started: {e}. {hint}",
                 job_solver.executable.display()
@@ -164,6 +192,9 @@ impl Analysis {
             work_dir.display()
         )];
         output.extend(copied);
+        if let Some(run) = &restart {
+            output.push(run.describe());
+        }
         Ok(Self {
             output,
             filter: String::new(),
@@ -177,6 +208,7 @@ impl Analysis {
             monitor: true,
             bound: false,
             keywords,
+            restart,
         })
     }
 
@@ -213,6 +245,13 @@ impl Analysis {
             return None;
         }
         self.output.extend(self.job.new_output());
+        if self.solve_in_full_after_failed_restart(status) {
+            return None;
+        }
+        if let Some(run) = &self.restart {
+            let notes = run.finish(&self.job, status);
+            self.output.extend(notes);
+        }
         self.finished = Some(self.started.elapsed().as_secs_f32());
         self.status = status;
         Some(status)
@@ -241,7 +280,8 @@ impl Analysis {
     pub fn window(&mut self, ctx: &egui::Context) -> MonitorEvent {
         let mut event = MonitorEvent::None;
         let mut open = self.monitor;
-        let status = self.job.poll();
+        // Running until `poll` has joined the results of a restart with the earlier ones.
+        let status = self.status;
         egui::Window::new(format!("Monitor: {}", self.name))
             .open(&mut open)
             .collapsible(false)
@@ -332,6 +372,140 @@ impl Analysis {
     pub fn results(&self) -> Option<PathBuf> {
         self.job.results()
     }
+
+    /// A run from the state of an earlier one that CalculiX could not finish is solved once
+    /// more from the beginning: a restart is only a shortcut, and CalculiX does not take it
+    /// after every kind of step. Returns whether the full run started.
+    fn solve_in_full_after_failed_restart(&mut self, status: JobStatus) -> bool {
+        let Some(run) = &mut self.restart else {
+            return false;
+        };
+        if !matches!(status, JobStatus::Failed | JobStatus::FailedWithResults)
+            || !matches!(run.plan, Plan::Restart { .. })
+        {
+            return false;
+        }
+        restart::discard(&run.work_dir, &run.job_name);
+        run.plan = Plan::Full("the restart failed".into());
+        self.output
+            .push("The restart failed: CalculiX solves all steps again.".into());
+        match Job::start(
+            &run.job_solver,
+            &run.work_dir,
+            &run.job_name,
+            &run.chain.input,
+        ) {
+            Ok(job) => {
+                self.job = job;
+                self.status = JobStatus::Running;
+                true
+            }
+            Err(error) => {
+                self.output.push(format!("CalculiX not started: {error}"));
+                false
+            }
+        }
+    }
+}
+
+/// Decides whether the job starts from the state of an earlier run, see
+/// [`plx_job::restart`], and prepares its work directory for that.
+fn plan_restart(
+    solver: &Solver,
+    fe: &plx_model::FeModel,
+    input: &str,
+    work_dir: &std::path::Path,
+    job_name: &str,
+    job_solver: plx_job::Solver,
+) -> RestartRun {
+    // Files the job reads besides its input file count as part of the model.
+    let mut external: Vec<PathBuf> = (fe.result_files().into_iter())
+        .map(std::path::Path::to_path_buf)
+        .collect();
+    external.extend(fe.properties.global_results.clone());
+    let keep = solver.keep_restart_files;
+    let chain = Chain::new(input, keep, restart::files_fingerprint(&external));
+    let solver_key = solver.executable_key();
+    let mut plan = if keep {
+        StateIndex::read(work_dir, job_name).plan(&chain, &solver_key, work_dir, job_name)
+    } else {
+        StateIndex::clear(work_dir, job_name);
+        Plan::Full("restart files are turned off in the settings".into())
+    };
+    if let Plan::Restart { file, .. } = &plan
+        && let Err(error) = restart::prepare(work_dir, job_name, file)
+    {
+        restart::discard(work_dir, job_name);
+        plan = Plan::Full(format!("the state could not be read: {error}"));
+    }
+    RestartRun {
+        chain,
+        plan,
+        solver_key,
+        job_solver,
+        work_dir: work_dir.to_owned(),
+        job_name: job_name.to_owned(),
+        limit: keep.then(|| solver.restart_limit_mb.saturating_mul(1 << 20)),
+    }
+}
+
+impl RestartRun {
+    /// A line for the monitor on how the run starts.
+    fn describe(&self) -> String {
+        let steps = self.chain.steps.len();
+        match &self.plan {
+            Plan::Restart { after, .. } => format!(
+                "Restart after step {after} of {steps}: the steps up to it are unchanged; \
+                 CalculiX reads their state from the earlier run and solves the rest."
+            ),
+            Plan::Full(reason) => format!("Full run: {reason}."),
+        }
+    }
+
+    /// Joins the results of a restart with the earlier ones, keeps the full input file next
+    /// to them and records the states the run wrote. Returns lines for the monitor.
+    fn finish(&self, job: &Job, status: JobStatus) -> Vec<String> {
+        let mut notes = Vec::new();
+        let (dir, name) = (&self.work_dir, self.job_name.as_str());
+        if let Plan::Restart { after, time, .. } = &self.plan {
+            if job.results().is_some() {
+                match restart::join_results(dir, name, *after, *time) {
+                    Ok(()) => notes.push(format!(
+                        "Results of steps 1 to {after} taken from the earlier run."
+                    )),
+                    Err(error) => notes.push(format!("Earlier results not joined: {error}")),
+                }
+            } else {
+                restart::discard(dir, name);
+            }
+            // The input file kept with the results is the full one, which runs on its own.
+            let restart_input = dir.join(format!("{name}.restart.inp"));
+            let _ = std::fs::rename(job.file("inp"), restart_input);
+            if let Err(error) = std::fs::write(job.file("inp"), &self.chain.input) {
+                notes.push(format!("Full input file not written: {error}"));
+            }
+        }
+        let Some(limit) = self.limit else {
+            return notes;
+        };
+        let run = restart::Run {
+            after: match self.plan {
+                Plan::Restart { after, .. } => after,
+                Plan::Full(_) => 0,
+            },
+            completed: status == JobStatus::Completed,
+            results: job.results().is_some(),
+            sta: std::fs::read_to_string(job.file("sta")).unwrap_or_default(),
+        };
+        let mut index = StateIndex::read(dir, name);
+        if let Err(error) = index.record(&self.chain, &self.solver_key, dir, name, &run) {
+            notes.push(format!("Restart files not kept: {error}"));
+        }
+        if let Some(project) = dir.parent() {
+            notes.extend(restart::limit_states(project, limit));
+        }
+        notes
+    }
 }
 
 /// Step, increment and iteration from the latest `STEP n`, `INCREMENT n` and `iteration n`
@@ -391,7 +565,129 @@ pub fn copy_result_files(fe: &plx_model::FeModel, dir: &std::path::Path) -> Vec<
 
 #[cfg(test)]
 mod tests {
-    use super::live_progress;
+    use super::*;
+
+    /// A row of three cubes, fixed at one end and pulled at the other in three steps, the
+    /// last one by `last`.
+    fn pulled_cubes(last: f64) -> Model {
+        use plx_model::{BoundaryCondition, BoundaryKind, Elastic, Material, Region, Section};
+        let mut mesh = plx_mesh::FeMesh::default();
+        let mut id = 0;
+        for x in 0..=3 {
+            for (y, z) in [(0, 0), (1, 0), (1, 1), (0, 1)] {
+                id += 1;
+                mesh.set_node(id, [x as f64, y as f64, z as f64]);
+            }
+        }
+        for index in 0..3 {
+            let first = 4 * index;
+            (mesh.add_element(plx_mesh::Element {
+                id: index + 1,
+                type_name: "C3D8".into(),
+                shape: plx_mesh::ElementShape::Hex8,
+                nodes: (1..=8).map(|n| first + n).collect(),
+            }))
+            .unwrap();
+        }
+        mesh.parts.push(plx_mesh::Part {
+            name: "Solid-1".into(),
+            elements: vec![1, 2, 3],
+        });
+        let bc = |name: &str, nodes: Vec<u32>, kind| BoundaryCondition {
+            name: name.into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(nodes),
+            kind,
+            amplitude: None,
+        };
+        let pull = |u: f64| BoundaryKind::Displacement([Some(u), None, None, None, None, None]);
+        let steps = [0.01, 0.02, last].into_iter().enumerate().map(|(i, u)| {
+            let mut step = plx_model::Step::new_static(format!("Step-{}", i + 1));
+            step.boundary_conditions = vec![
+                bc("Fix", vec![1, 2, 3, 4], BoundaryKind::Fixed),
+                bc("Pull", vec![13, 14, 15, 16], pull(u)),
+            ];
+            step
+        });
+        let mut model = Model::new(std::path::Path::new("cubes.plx"), mesh);
+        model.fe = plx_model::FeModel {
+            materials: vec![Material {
+                name: "S235".into(),
+                elastic: Some(Elastic {
+                    young: 210000.0,
+                    poisson: 0.3,
+                }),
+                ..Default::default()
+            }],
+            sections: vec![Section {
+                name: "Section-1".into(),
+                material: "S235".into(),
+                region: Region::Parts(vec!["Solid-1".into()]),
+                thickness: 1.0,
+                kind: plx_model::SectionKind::Solid,
+            }],
+            steps: steps.collect(),
+            ..Default::default()
+        };
+        model
+    }
+
+    /// Solves the model in `dir`; returns the monitor output.
+    fn solve(model: &Model, dir: &std::path::Path) -> Vec<String> {
+        let solver = Solver {
+            executable: "ccx".into(),
+            ..Default::default()
+        };
+        let mut analysis =
+            Analysis::start(&solver, model, EquationSolver::Default, false, "Cubes", dir).unwrap();
+        let status = loop {
+            if let Some(status) = analysis.poll() {
+                break status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        assert_eq!(status, JobStatus::Completed, "{:?}", analysis.output());
+        analysis.output().to_vec()
+    }
+
+    #[test]
+    fn a_changed_last_step_is_solved_alone() {
+        if std::process::Command::new("ccx")
+            .arg("-v")
+            .output()
+            .is_err()
+        {
+            eprintln!("ccx missing, test skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("prepolix-restart-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let output = solve(&pulled_cubes(0.03), &dir.join("Cubes"));
+        assert!(
+            output.iter().any(|l| l.starts_with("Full run")),
+            "{output:?}"
+        );
+        let output = solve(&pulled_cubes(0.04), &dir.join("Cubes"));
+        assert!(
+            output
+                .iter()
+                .any(|l| l.starts_with("Restart after step 2 of 3")),
+            "{output:?}"
+        );
+        // The same results as solving all steps, and the full input file next to them.
+        solve(&pulled_cubes(0.04), &dir.join("Full"));
+        let restarted = plx_io::frd::read_frd(&dir.join("Cubes/Cubes.frd")).unwrap();
+        let full = plx_io::frd::read_frd(&dir.join("Full/Cubes.frd")).unwrap();
+        assert_eq!(restarted.increments.len(), 3);
+        assert_eq!(
+            format!("{:?}", restarted.increments),
+            format!("{:?}", full.increments)
+        );
+        let inp = std::fs::read_to_string(dir.join("Cubes/Cubes.inp")).unwrap();
+        assert!(inp.contains("*Node") && !inp.contains("Read"), "{inp}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn progress_follows_the_solver_output() {

@@ -10,6 +10,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+pub mod restart;
+
 /// Files of a previous run that would otherwise be mistaken for results of this one.
 const OLD_FILES: [&str; 7] = ["inp", "dat", "sta", "cvg", "12d", "cel", "frd"];
 

@@ -127,6 +127,13 @@ pub struct Solver {
     pub detected: Option<DetectedSolvers>,
     /// Keywords tested on the executable; tested again when it changes.
     pub keywords: Option<DetectedKeywords>,
+    /// CalculiX writes the state after each step, so that a run after a change solves only
+    /// the steps from the first changed one; see [`plx_job::restart`].
+    pub keep_restart_files: bool,
+    /// Most the restart files of a project may take, in MB; the oldest are removed beyond.
+    pub restart_limit_mb: u64,
+    /// Most analyses Update Project solves at the same time.
+    pub parallel_runs: u32,
 }
 
 /// Result of [`crate::solver_check::available_solvers`] for one executable.
@@ -154,6 +161,9 @@ impl Default for Solver {
             work_dir: String::new(),
             detected: None,
             keywords: None,
+            keep_restart_files: true,
+            restart_limit_mb: 4096,
+            parallel_runs: 2,
         }
     }
 }
@@ -633,6 +643,23 @@ impl SettingsWindow {
                             egui::TextEdit::singleline(&mut solver.work_dir)
                                 .hint_text(self.default_work_dir.as_str()),
                         );
+                        ui.end_row();
+                        ui.label("Restart files");
+                        ui.checkbox(&mut solver.keep_restart_files, "Keep the state after each step")
+                            .on_hover_text("CalculiX writes the state after each static, dynamic, heat transfer or visco step. Solving again after a change then starts after the last unchanged step instead of from the beginning. Needs disk space next to the results.");
+                        ui.end_row();
+                        ui.label("Restart files per project");
+                        ui.add_enabled(
+                            solver.keep_restart_files,
+                            numeric::drag_value(&mut solver.restart_limit_mb)
+                                .range(10..=1_000_000)
+                                .suffix(" MB"),
+                        )
+                        .on_hover_text("Beyond this size the oldest restart files of the project are removed; an analysis without them is solved from the beginning.");
+                        ui.end_row();
+                        ui.label("Parallel analyses");
+                        ui.add(numeric::drag_value(&mut solver.parallel_runs).range(1..=64))
+                            .on_hover_text("Update Project solves up to this many independent analyses at the same time, each with the threads above.");
                         ui.end_row();
                         ui.label("Equation solvers");
                         ui.label(solvers_text(solver.solvers()))
