@@ -1,9 +1,10 @@
 name: Release
 
-# Baut den Windows-Installer auf Linux (MinGW + NSIS), das Linux-AppImage (beide mit CalculiX) und das
-# Benutzerhandbuch (Typst, PDF; Installer und AppImage enthalten es als HTML für Help > User
-# Guide), getrennt von der schnellen PR-CI. Läuft bei einem Versions-Tag (v0.1.0 usw.) und hängt
-# alles an das GitHub-Release, oder per Hand über "Run workflow", dann nur als Artefakte.
+# Baut den Windows-Installer auf Linux (MinGW + NSIS) samt portabler ZIP, das Linux-AppImage
+# (beide mit CalculiX) und das Benutzerhandbuch (Typst, PDF; Installer und AppImage enthalten
+# es als HTML für Help > User Guide), getrennt von der schnellen PR-CI. Läuft bei einem
+# Versions-Tag (v0.1.0 usw.) und hängt alles an das GitHub-Release, oder per Hand über
+# "Run workflow", dann nur als Artefakte.
 on:
   push:
     tags: ["v*"]
@@ -48,7 +49,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: prepolix-windows-installer
-          path: target/windows-installer/prepolix-*-setup.exe
+          path: |
+            target/windows-installer/prepolix-*-setup.exe
+            target/windows-installer/prepolix-*-windows-portable.zip
           if-no-files-found: error
       - name: An das Release hängen
         if: startsWith(github.ref, 'refs/tags/')
@@ -59,7 +62,8 @@ jobs:
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 \
             || gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes \
             || gh release view "$GITHUB_REF_NAME" >/dev/null
-          gh release upload "$GITHUB_REF_NAME" target/windows-installer/prepolix-*-setup.exe --clobber
+          gh release upload "$GITHUB_REF_NAME" target/windows-installer/prepolix-*-setup.exe \
+            target/windows-installer/prepolix-*-windows-portable.zip --clobber
 
   linux-appimage:
     # Das älteste unterstützte Ubuntu: das AppImage läuft nur mit einer glibc, die mindestens so

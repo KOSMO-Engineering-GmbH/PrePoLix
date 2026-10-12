@@ -14,10 +14,10 @@ use crate::keywords::{frame, tree_row};
 /// Name of the library file in prepolix's data directory.
 const FILE_NAME: &str = "materials.ron";
 
-/// The library file: in the directory where eframe keeps the settings (Linux
-/// `~/.local/share/prepolix`, Windows `%APPDATA%\prepolix\data`).
+/// The library file: in the directory where the settings are kept (see
+/// [`crate::portable::data_dir`]).
 pub fn library_file() -> Option<PathBuf> {
-    eframe::storage_dir("prepolix").map(|dir| dir.join(FILE_NAME))
+    crate::portable::data_dir().map(|dir| dir.join(FILE_NAME))
 }
 
 /// Which list was used last; the move buttons and the preview follow it, as in PrePoMax.

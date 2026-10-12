@@ -492,6 +492,15 @@ impl SettingsWindow {
                         self.page_ui(ui);
                     });
                 });
+                if crate::portable::is_portable()
+                    && let Some(dir) = crate::portable::data_dir()
+                {
+                    ui.add_space(4.0);
+                    ui.weak(format!(
+                        "Portable mode: settings are kept in {}",
+                        dir.display()
+                    ));
+                }
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("Defaults").clicked() {
