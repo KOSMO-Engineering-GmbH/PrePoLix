@@ -610,7 +610,7 @@ fn release_ui(
     if !release.notes.trim().is_empty() {
         ui.add_space(4.0);
         egui::Frame::new()
-            .stroke(egui::Stroke::new(1.0, crate::style::BORDER))
+            .stroke(egui::Stroke::new(1.0, crate::style::border()))
             .inner_margin(6)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
