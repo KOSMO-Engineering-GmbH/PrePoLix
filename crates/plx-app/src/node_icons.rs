@@ -2,6 +2,7 @@
 //! strokes in the style of a node editor like Blender's: simple outlines in the text colour
 //! that read at a glance without competing with the coloured pins and wires.
 
+use crate::tree_icons::{self, StepGlyph, TreeIcon};
 use egui::{Color32, Painter, Pos2, Shape, Stroke, pos2, vec2};
 
 /// What a row of a block stands for.
@@ -37,10 +38,18 @@ pub enum NodeIcon {
     Solution,
     /// The results: bars.
     Results,
+    /// Taken over from another analysis: two chain links.
+    Link,
+    /// A step of this type, drawn like in the tree of the FE model.
+    StepType(StepGlyph),
 }
 
 /// Paints `icon` into the 14 x 14 square at `min` in `color`.
 pub fn paint(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32) {
+    if let NodeIcon::StepType(glyph) = icon {
+        tree_icons::paint(painter, min, TreeIcon::StepType(glyph));
+        return;
+    }
     let stroke = Stroke::new(1.2, color);
     let p = |x: f32, y: f32| pos2(min.x + x, min.y + y);
     let line = |points: &[Pos2]| {
@@ -56,6 +65,27 @@ pub fn paint(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32) {
         painter.circle_filled(center, radius, color);
     };
     match icon {
+        NodeIcon::StepType(_) => {}
+        NodeIcon::Link => {
+            let link = |x0: f32, y0: f32| {
+                let points: Vec<Pos2> = [
+                    (0.0, 0.0),
+                    (4.5, 0.0),
+                    (6.0, 1.5),
+                    (6.0, 3.0),
+                    (4.5, 4.5),
+                    (0.0, 4.5),
+                    (-1.5, 3.0),
+                    (-1.5, 1.5),
+                ]
+                .iter()
+                .map(|(x, y)| p(x0 + x, y0 + y))
+                .collect();
+                closed(&points);
+            };
+            link(1.5, 8.0);
+            link(6.0, 1.5);
+        }
         NodeIcon::State => {
             line(&[p(0.5, 7.0), p(5.0, 7.0)]);
             line(&[p(3.0, 4.8), p(5.2, 7.0), p(3.0, 9.2)]);
