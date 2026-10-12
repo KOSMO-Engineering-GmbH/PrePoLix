@@ -70,6 +70,34 @@ the AppImage when a new release is published. The CalculiX
 work directory defaults to `/tmp/prepolix`. Alternatively build PrePoLix from source with a
 current stable Rust toolchain (`cargo run --release`), see the README of the repository.
 
+== Updates <updates>
+
+PrePoLix asks GitHub for the latest release when it starts. If a newer version exists, a green
+symbol with a download arrow appears at the right of the menu bar, next to the version number.
+Nothing else happens: ignore it if you do not want to update. A click on the symbol, or
+#menu("Help", "Check for Updates ..."), opens the update window with the release notes
+(_What's Changed_, one line per change with a link to it on GitHub):
+
+#screenshot("update-available.png", [Update symbol next to the version and the update window of a
+  PrePoLix built from source; with the Windows installer it also offers #ui("Update Now")])
+
+- #ui("Update Now") (Windows installer only) downloads the installer of the new version, checks
+  its size and checksum and starts it. Windows asks for administrator rights, PrePoLix closes,
+  the installer only shows its progress and then starts PrePoLix again; the shortcuts and the
+  `.plx` association stay as you installed them. Save your project before: the project that was
+  open is reopened when it was saved as a `.plx` file.
+- #ui("Open Release Page") opens the release on GitHub. A PrePoLix built from source or unpacked
+  from a ZIP file offers only this.
+- #ui("Close") closes the window; the symbol stays until PrePoLix is closed.
+
+The Linux AppImage does not check at startup, since an AppImage manager such as Gear Lever or
+AppImageLauncher updates it; #menu("Help", "Check for Updates ...") still shows what is new. The
+check at startup runs in the background and stays silent when there is nothing new or no
+internet connection. It can be turned off under #menu("Tools", "Settings ...", "Updates")
+(@settings). A proxy is taken from the `HTTPS_PROXY` variable or, on Windows, from a proxy server
+entered in the Internet Options (automatic configuration scripts are not read). The connection is
+checked with the certificates of the system, so a company proxy that inspects HTTPS works too.
+
 == Starting PrePoLix
 
 Start PrePoLix from the start menu, by double-clicking a `.plx` file (Windows, if associated), or

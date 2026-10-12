@@ -57,6 +57,8 @@ struct Workbench {
     settings: Settings,
     /// Open settings window with its unsaved draft.
     settings_window: Option<SettingsWindow>,
+    /// The check for a new release and its window.
+    updater: crate::update::Updater,
     /// Campbell diagram window with its speed sweep; kept with its results while hidden.
     campbell: Option<crate::campbell::CampbellWindow>,
     /// Open dialog of the model space and unit system, for a new or the open model.
@@ -217,10 +219,11 @@ impl PrepolixApp {
         settings.upgrade();
         crate::style::set_theme(&cc.egui_ctx, settings.graphics.theme);
         plx_mesher::set_library_path(settings.gmsh.library());
-        let app = Self {
+        let mut app = Self {
             workbench: Workbench {
                 settings,
                 settings_window: None,
+                updater: Default::default(),
                 model_dialog: None,
                 import_requested: false,
                 viewport: Viewport::new(render_state),
@@ -287,6 +290,11 @@ impl PrepolixApp {
             load_events: channel(),
             loading: None,
         };
+        if app.workbench.settings.updates.check_at_startup
+            && app.workbench.updater.installation().checks_at_startup()
+        {
+            app.workbench.updater.check(&cc.egui_ctx, false);
+        }
         // Every file on the command line is opened in turn, e.g. a model and its results.
         let mut paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
         // Without files on the command line, the project open at the last exit is reopened.
@@ -604,13 +612,23 @@ impl PrepolixApp {
                     let line = crate::help::open_user_guide();
                     self.workbench.output.push(line);
                 }
+                let updater = &mut self.workbench.updater;
+                if ui
+                    .add_enabled(!updater.busy(), egui::Button::new("Check for Updates …"))
+                    .on_hover_text("Asks GitHub whether a newer version of PrePoLix is available")
+                    .clicked()
+                {
+                    updater.check(ui.ctx(), true);
+                }
             });
-            // Version number, greyed out at the far right of the menu bar.
+            // Version number, greyed out at the far right of the menu bar, with the symbol of
+            // a newer release left of it.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                         .color(ui.visuals().weak_text_color()),
                 );
+                self.workbench.updater.indicator(ui);
             });
         });
     }
@@ -1100,6 +1118,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.update_hot_spot_preview();
         self.workbench.findings_window(&ctx);
         self.workbench.settings_window(&ctx);
+        (self.workbench.updater).show(&ctx, &mut self.workbench.output);
         self.workbench.model_dialog_window(&ctx);
         if std::mem::take(&mut self.workbench.import_requested) {
             self.import_dialog(&ctx);
