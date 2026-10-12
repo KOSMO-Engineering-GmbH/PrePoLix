@@ -113,10 +113,106 @@ pub fn output_path(link: &Link) -> Vec<String> {
     }
 }
 
+/// Whether the link takes a whole category of the setup. It goes to a collection, whose pin
+/// takes any number of wires, and is a bundle of links of the category's items: the target
+/// keeps its own items of other names, and items can be left out, see [`Link::excluded`].
+pub fn is_bundle(link: &Link) -> bool {
+    link.slot.is_empty() && matches!(link.item.as_slice(), [cell, _] if cell == SETUP)
+}
+
+/// Whether the row of `path` is a collection that takes any number of wires: a category of
+/// the setup. Every other row takes one, and a new wire replaces the old.
+pub fn is_collection(path: &[String]) -> bool {
+    matches!(path, [cell, category] if cell == SETUP && CATEGORIES.contains(&category.as_str()))
+}
+
+/// The category of the setup a link of a category or of one of its items fills.
+pub fn setup_category(link: &Link) -> Option<&str> {
+    if !link.slot.is_empty() {
+        return None;
+    }
+    match link.item.as_slice() {
+        [cell, category, ..] if cell == SETUP => Some(category),
+        _ => None,
+    }
+}
+
+/// The items a link of a category or of an item offers its target: those of the source's
+/// category but the excluded ones, or the item.
+pub fn offered(source: &FeModel, link: &Link) -> Vec<String> {
+    match link.item.as_slice() {
+        [_, category] => (entries(source, category).into_iter())
+            .filter(|name| !link.excluded.contains(name))
+            .collect(),
+        [_, _, name] => vec![name.clone()],
+        _ => Vec::new(),
+    }
+}
+
+/// Whether the target of a category link has the items `names` of the source as they are
+/// there, and took no others last time.
+pub fn bundle_up_to_date(
+    source: &FeModel,
+    target: &FeModel,
+    link: &Link,
+    names: &[String],
+) -> bool {
+    let Some(category) = setup_category(link) else {
+        return true;
+    };
+    let print = |fe: &FeModel| {
+        let mut hash = Fnv::new();
+        for name in names {
+            category_fingerprint(&mut hash, fe, category, Some(name));
+        }
+        hash.finish()
+    };
+    link.inherited == names && print(source) == print(target)
+}
+
+/// Copies the items `names` of a category of `source` into `target`, see [`is_bundle`]: an
+/// item replaces the target's item of the same name or comes after the linked items before
+/// it, those named in `ahead` and those of this link; own items of other names stay. Items
+/// the link took last time that the source no longer has are removed. Returns the names
+/// taken, for [`Link::inherited`].
+pub fn apply_bundle(
+    target: &mut FeModel,
+    source: &FeModel,
+    link: &Link,
+    names: &[String],
+    ahead: &[String],
+) -> Vec<String> {
+    let Some(category) = setup_category(link) else {
+        return Vec::new();
+    };
+    let present = entries(source, category);
+    let stale: Vec<String> = (link.inherited.iter())
+        .filter(|name| !present.contains(name))
+        .cloned()
+        .collect();
+    let mode = Mode::Bundle {
+        names,
+        stale: &stale,
+        ahead,
+    };
+    copy_category(target, source, category, mode);
+    names.to_vec()
+}
+
 /// What a link fills in its target, with the name of the source: for a state link the
-/// geometry, the mesh, the setup but the steps, and the steps it took.
+/// geometry, the mesh, the setup but the steps, and the steps it took; for a category
+/// the items it took, so that the target's own items stay its own.
 pub fn filled_paths(link: &Link, source: &str) -> Vec<(Vec<String>, String)> {
     let path = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+    if is_bundle(link) {
+        return (link.inherited.iter())
+            .map(|name| {
+                let mut path = link.item.clone();
+                path.push(name.clone());
+                (path, source.to_owned())
+            })
+            .collect();
+    }
     if !is_state(link) {
         return vec![(slot(link).to_vec(), source.to_owned())];
     }
@@ -180,7 +276,7 @@ pub fn apply_chain(
 ) -> Vec<String> {
     let own = own_steps(target, link);
     for category in CATEGORIES.iter().filter(|c| **c != "Steps") {
-        copy_category(target, source, category, None);
+        copy_category(target, source, category, Mode::All);
     }
     target.user_keywords = source.user_keywords.clone();
     target.properties.kind = source.properties.kind;
@@ -474,36 +570,73 @@ fn category_fingerprint(hash: &mut Fnv, fe: &FeModel, category: &str, name: Opti
     }
 }
 
-/// Copies what the path names from `source` into `target`: a category replaces the
-/// target's, an item replaces the target's item of the same name or is added.
+/// Copies what the path names from `source` into `target`: the setup or a category
+/// replaces the target's, an item replaces the target's item of the same name or is added.
+/// Links of a category take its items with [`apply_bundle`] instead.
 pub fn apply_setup(target: &mut FeModel, source: &FeModel, path: &[String]) {
     match path {
         [cell] if cell == SETUP => {
             for category in CATEGORIES {
-                copy_category(target, source, category, None);
+                copy_category(target, source, category, Mode::All);
             }
             target.user_keywords = source.user_keywords.clone();
         }
-        [cell, category] if cell == SETUP => copy_category(target, source, category, None),
+        [cell, category] if cell == SETUP => copy_category(target, source, category, Mode::All),
         [cell, category, name] if cell == SETUP => {
-            copy_category(target, source, category, Some(name))
+            copy_category(target, source, category, Mode::One(name))
         }
         _ => {}
     }
 }
 
-fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: Option<&str>) {
-    fn copy<T: Clone>(target: &mut Vec<T>, source: &[T], key: fn(&T) -> &str, name: Option<&str>) {
-        let Some(name) = name else {
-            *target = source.to_vec();
-            return;
-        };
-        let Some(item) = source.iter().find(|i| key(i) == name) else {
-            return;
-        };
-        match target.iter_mut().find(|i| key(i) == name) {
-            Some(own) => *own = item.clone(),
-            None => target.push(item.clone()),
+/// What [`copy_category`] copies.
+#[derive(Clone, Copy)]
+enum Mode<'a> {
+    /// All items, in place of the target's.
+    All,
+    /// The item of this name.
+    One(&'a str),
+    /// The items of these names, see [`apply_bundle`].
+    Bundle {
+        names: &'a [String],
+        stale: &'a [String],
+        ahead: &'a [String],
+    },
+}
+
+fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: Mode) {
+    fn copy<T: Clone>(target: &mut Vec<T>, source: &[T], key: fn(&T) -> &str, mode: Mode) {
+        let named = |names: &[String], item: &T| names.iter().any(|n| n == key(item));
+        match mode {
+            Mode::All => *target = source.to_vec(),
+            Mode::One(name) => {
+                let Some(item) = source.iter().find(|i| key(i) == name) else {
+                    return;
+                };
+                match target.iter_mut().find(|i| key(i) == name) {
+                    Some(own) => *own = item.clone(),
+                    None => target.push(item.clone()),
+                }
+            }
+            Mode::Bundle {
+                names,
+                stale,
+                ahead,
+            } => {
+                target.retain(|item| !named(stale, item));
+                for item in source.iter().filter(|item| named(names, item)) {
+                    match target.iter().position(|own| key(own) == key(item)) {
+                        Some(at) => target[at] = item.clone(),
+                        None => {
+                            // Linked items come first, in the order of the links.
+                            let at = (target.iter())
+                                .rposition(|own| named(ahead, own) || named(names, own))
+                                .map_or(0, |at| at + 1);
+                            target.insert(at, item.clone());
+                        }
+                    }
+                }
+            }
         }
     }
     // The global steps of the target's submodel boundary conditions stay as a results link
@@ -926,6 +1059,96 @@ mod tests {
     }
 
     #[test]
+    fn a_category_link_is_a_bundle_of_item_links() {
+        let mut source = FeModel {
+            materials: vec![
+                material("Steel", 210_000.0),
+                material("Aluminium", 70_000.0),
+            ],
+            ..Default::default()
+        };
+        let mut target = FeModel {
+            materials: vec![material("Steel", 1.0), material("Rubber", 5.0)],
+            ..Default::default()
+        };
+        let mut link = Link {
+            source: 1,
+            target: 2,
+            item: path(&["Setup", "Materials"]),
+            ..Default::default()
+        };
+        assert!(is_bundle(&link));
+        assert_eq!(setup_category(&link), Some("Materials"));
+        let names =
+            |fe: &FeModel| -> Vec<String> { fe.materials.iter().map(|m| m.name.clone()).collect() };
+        let sync = |source: &FeModel, target: &mut FeModel, link: &mut Link| {
+            let offered = offered(source, link);
+            if bundle_up_to_date(source, target, link, &offered) {
+                return false;
+            }
+            link.inherited = apply_bundle(target, source, link, &offered, &[]);
+            true
+        };
+        // The linked items come first, the own one stays.
+        assert!(sync(&source, &mut target, &mut link));
+        assert_eq!(names(&target), ["Steel", "Aluminium", "Rubber"]);
+        assert_eq!(target.materials[0], source.materials[0]);
+        assert!(!sync(&source, &mut target, &mut link));
+        // The tree marks the taken items, not the category, so own items stay editable.
+        let filled: Vec<Vec<String>> = (filled_paths(&link, "Source").into_iter())
+            .map(|(p, _)| p)
+            .collect();
+        assert_eq!(
+            filled,
+            [
+                path(&["Setup", "Materials", "Steel"]),
+                path(&["Setup", "Materials", "Aluminium"])
+            ]
+        );
+        // New items of the source follow, removed ones go.
+        source.materials.push(material("Copper", 110_000.0));
+        source.materials.remove(1);
+        assert!(sync(&source, &mut target, &mut link));
+        assert_eq!(names(&target), ["Steel", "Copper", "Rubber"]);
+        // A left out item stays as a copy and is no longer taken.
+        link.excluded.push("Steel".into());
+        link.inherited.retain(|n| n != "Steel");
+        source.materials[0].elastic = None;
+        assert!(!sync(&source, &mut target, &mut link));
+        assert_eq!(link.inherited, ["Copper"]);
+        assert!(target.materials[0].elastic.is_some());
+        assert_eq!(names(&target), ["Steel", "Copper", "Rubber"]);
+    }
+
+    #[test]
+    fn linked_steps_come_before_the_own_ones_in_the_order_of_the_links() {
+        let model = |names: &[&str]| {
+            let mut fe = FeModel::default();
+            fe.steps.extend(names.iter().map(|n| Step::new_static(*n)));
+            fe
+        };
+        let (first, second) = (model(&["Preload"]), model(&["Service"]));
+        let mut target = model(&["Overload"]);
+        let link = |source| Link {
+            source,
+            target: 3,
+            item: path(&["Setup", "Steps"]),
+            ..Default::default()
+        };
+        let preload = path(&["Preload"]);
+        apply_bundle(&mut target, &first, &link(1), &preload, &[]);
+        apply_bundle(
+            &mut target,
+            &second,
+            &link(2),
+            &path(&["Service"]),
+            &preload,
+        );
+        let names: Vec<&str> = target.steps.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Preload", "Service", "Overload"]);
+    }
+
+    #[test]
     fn steps_keep_the_global_step_a_results_link_set() {
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
@@ -981,7 +1204,7 @@ mod tests {
             target,
             item: path(&["Mesh"]),
             slot: Vec::new(),
-            inherited: Vec::new(),
+            ..Default::default()
         };
         let links = vec![link(1, 2), link(2, 3)];
         assert!(makes_cycle(&links, 3, 1));
@@ -1007,7 +1230,7 @@ mod tests {
             target: 2,
             item: path(&["State", "Service"]),
             slot: path(&["State"]),
-            inherited: Vec::new(),
+            ..Default::default()
         };
         let step = state_step(&source, &link).unwrap();
         assert!(!chain_up_to_date(&source, step, &target, &link));
@@ -1085,7 +1308,7 @@ mod tests {
             target: 2,
             item: path(item),
             slot,
-            inherited: Vec::new(),
+            ..Default::default()
         };
         let temperature = link(
             &["Results", "Heat"],
@@ -1134,5 +1357,8 @@ mod tests {
             &path(&["Setup", "Initial Conditions"])
         ));
         assert!(!compatible(&results, &path(&["Setup", "Materials"])));
+        assert!(is_collection(&path(&["Setup", "Materials"])));
+        assert!(!is_collection(&path(&["Setup", "Materials", "Steel"])));
+        assert!(!is_collection(&path(&["Mesh"])));
     }
 }

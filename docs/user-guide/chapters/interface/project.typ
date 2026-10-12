@@ -76,7 +76,9 @@ date. Within the solution, PrePoLix also remembers which steps are unchanged, so
 can start after them (@restart).
 
 The pins on both sides of a row take and give links. Blue wires carry data (geometry, mesh,
-setup items), orange wires carry results and green wires carry the state after a step.
+setup items), orange wires carry results and green wires carry the state after a step. A round
+pin on the left takes one wire, a tall one (the categories of the setup) takes any number, and
+the green square takes the state of another analysis (@data-links).
 
 === Working with the schematic
 
