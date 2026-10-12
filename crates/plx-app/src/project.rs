@@ -3032,6 +3032,7 @@ fn block_rows(
             linked_from: Some(c.source.clone()),
             collection: false,
             partial: false,
+            widget: None,
             tip: format!(
                 "These steps are taken over from {} and solved there, not in this analysis. \
                  Their results are in {}.",
@@ -3053,6 +3054,7 @@ fn block_rows(
                 linked_from: None,
                 collection: false,
                 partial: false,
+                widget: None,
                 tip: format!("{name} is solved in {}", c.source),
                 path,
             });
