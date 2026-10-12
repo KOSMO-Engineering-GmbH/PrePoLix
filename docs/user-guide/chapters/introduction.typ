@@ -85,8 +85,8 @@ switches this on; without it the settings go to `%APPDATA%\prepolix\data` as wit
 installer. To update, unpack the new version and copy the `Settings` folder over; to remove
 PrePoLix, delete the folder.
 
-#screenshot("portable.png", [Settings window of the portable version, with the note at the
-bottom])
+#screenshot("portable.png", [The portable version under Windows: CalculiX and its work directory
+in the unpacked folder, the note at the bottom])
 
 == Starting PrePoLix
 
