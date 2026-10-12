@@ -7,13 +7,17 @@
 //! A path names what is linked, as the block of the analysis lists it: `["Geometry"]`,
 //! `["Mesh"]`, `["Setup"]`, `["Setup", "Materials"]`, `["Setup", "Materials", "Steel"]` or
 //! `["Results", "Step-1"]`.
+//!
+//! A state link, `["State", "Step-1"]`, makes the target continue the source: it takes the
+//! source's model and its steps up to that step, then solves its own steps from the state
+//! CalculiX wrote after it.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use plx_io::project::Link;
 use plx_mesh::{FeMesh, Fnv};
-use plx_model::{BoundaryKind, FeModel, Geometry, ModelKind};
+use plx_model::{BoundaryKind, FeModel, Geometry, ModelKind, Step};
 
 use crate::tree::TreeItem;
 
@@ -21,6 +25,7 @@ pub const GEOMETRY: &str = "Geometry";
 pub const MESH: &str = "Mesh";
 pub const SETUP: &str = "Setup";
 pub const RESULTS: &str = "Results";
+pub const STATE: &str = "State";
 
 /// The categories of the setup in the order of the FE Model tree; each can be linked as a
 /// whole or item by item.
@@ -88,6 +93,112 @@ pub fn slot(link: &Link) -> &[String] {
 /// Whether the link carries the results of a step, for a submodel.
 pub fn is_results(link: &Link) -> bool {
     link.item.first().is_some_and(|c| c == RESULTS)
+}
+
+/// Whether the link makes its target continue from the state after a step of the source.
+pub fn is_state(link: &Link) -> bool {
+    link.item.first().is_some_and(|c| c == STATE)
+}
+
+/// The row of the source a link starts at: the results of the step for a state link.
+pub fn output_path(link: &Link) -> Vec<String> {
+    if is_state(link) {
+        let mut path = link.item.clone();
+        path[0] = RESULTS.to_owned();
+        path
+    } else {
+        link.item.clone()
+    }
+}
+
+/// What a link fills in its target, with the name of the source: for a state link the
+/// geometry, the mesh, the setup but the steps, and the steps it took.
+pub fn filled_paths(link: &Link, source: &str) -> Vec<(Vec<String>, String)> {
+    let path = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+    if !is_state(link) {
+        return vec![(slot(link).to_vec(), source.to_owned())];
+    }
+    let mut paths = vec![path(&[STATE]), path(&[GEOMETRY]), path(&[MESH])];
+    for category in CATEGORIES.iter().filter(|c| **c != "Steps") {
+        paths.push(path(&[SETUP, category]));
+    }
+    for step in &link.inherited {
+        paths.push(path(&[SETUP, "Steps", step]));
+    }
+    paths.into_iter().map(|p| (p, source.to_owned())).collect()
+}
+
+/// The index of the step of `source` a state link continues from.
+pub fn state_step(source: &FeModel, link: &Link) -> Option<usize> {
+    let name = link.item.get(1)?;
+    source.steps.iter().position(|s| &s.name == name)
+}
+
+/// The steps of the target of a state link that are its own, not taken from the source.
+pub fn own_steps(target: &FeModel, link: &Link) -> Vec<Step> {
+    (target.steps.iter())
+        .filter(|s| !link.inherited.contains(&s.name))
+        .cloned()
+        .collect()
+}
+
+/// Fingerprint of what a state link takes of a model besides the geometry and mesh: the
+/// setup but the steps, the model kind and these steps.
+fn chain_fingerprint(fe: &FeModel, steps: &[Step]) -> u64 {
+    let mut hash = Fnv::new();
+    for category in CATEGORIES.iter().filter(|c| **c != "Steps") {
+        category_fingerprint(&mut hash, fe, category, None);
+    }
+    hash.add_debug(&fe.user_keywords);
+    hash.add_debug(&fe.properties.kind);
+    hash.add_debug(&fe.properties.global_results);
+    hash.add_debug(&steps);
+    hash.finish()
+}
+
+/// Whether the target of a state link has what it takes from `source`, whose step `step` it
+/// continues from.
+pub fn chain_up_to_date(source: &FeModel, step: usize, target: &FeModel, link: &Link) -> bool {
+    let chain = &source.steps[..=step];
+    let names: Vec<&String> = chain.iter().map(|s| &s.name).collect();
+    let n = chain.len();
+    names == link.inherited.iter().collect::<Vec<_>>()
+        && target.steps.len() >= n
+        && chain_fingerprint(source, chain) == chain_fingerprint(target, &target.steps[..n])
+}
+
+/// Makes `target` continue `source` after its step `step`: the setup but the steps is the
+/// source's, the steps are the source's up to `step` followed by the target's own. Returns
+/// the names of the steps taken, for [`Link::inherited`].
+pub fn apply_chain(
+    target: &mut FeModel,
+    source: &FeModel,
+    step: usize,
+    link: &Link,
+) -> Vec<String> {
+    let own = own_steps(target, link);
+    for category in CATEGORIES.iter().filter(|c| **c != "Steps") {
+        copy_category(target, source, category, None);
+    }
+    target.user_keywords = source.user_keywords.clone();
+    target.properties.kind = source.properties.kind;
+    target.properties.global_results = source.properties.global_results.clone();
+    target.steps = source.steps[..=step].to_vec();
+    let inherited = target.steps.iter().map(|s| s.name.clone()).collect();
+    target.steps.extend(own);
+    inherited
+}
+
+/// What an analysis needs to continue from the states of others, and to let others
+/// continue from its own.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Continuation {
+    /// Work directory and job name of each analysis it continues, nearest first: their
+    /// states and results are where a restart starts from.
+    pub upstream: Vec<(PathBuf, String)>,
+    /// The own steps of the analyses that continue it, after the index of the step of this
+    /// one they follow: their sets go into its input file.
+    pub dependent_steps: Vec<(usize, Vec<Step>)>,
 }
 
 /// The names of the items of a category of the setup, as the tree lists them.
@@ -369,11 +480,13 @@ pub fn clear_submodel(fe: &mut FeModel) {
 }
 
 /// Whether a link from `item` of one analysis may go to `slot` of another: like with like,
-/// and the results of a step only to a step.
+/// and the results of a step only to a step or the state row.
 pub fn compatible(item: &[String], slot: &[String]) -> bool {
     match (item, slot) {
         ([a], [b]) => a == b && a != RESULTS,
         ([a, _], [b, _]) if a == RESULTS && b == RESULTS => true,
+        // The results of a step dropped on the state row: continue from it.
+        ([a, _], [b]) if a == RESULTS && b == STATE => true,
         ([a, ..], [b, ..]) if a == SETUP && b == SETUP => {
             // A category or an item goes to the target's category, or into its setup.
             match (item.get(1), slot.get(1)) {
@@ -605,6 +718,7 @@ pub fn path_of(fe: &FeModel, item: &TreeItem) -> Option<Vec<String>> {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Incoming {
     pub paths: Vec<(Vec<String>, String)>,
+    pub continuation: Continuation,
 }
 
 #[cfg(test)]
@@ -717,6 +831,7 @@ mod tests {
             target,
             item: path(&["Mesh"]),
             slot: Vec::new(),
+            inherited: Vec::new(),
         };
         let links = vec![link(1, 2), link(2, 3)];
         assert!(makes_cycle(&links, 3, 1));
@@ -724,6 +839,56 @@ mod tests {
         assert!(!makes_cycle(&links, 1, 3));
         assert_eq!(order(&[3, 2, 1], &links), [1, 2, 3]);
         assert_eq!(upstream(&links, 3), [2, 1]);
+    }
+
+    #[test]
+    fn a_state_link_takes_the_model_and_the_steps_up_to_its_step() {
+        let mut source = FeModel {
+            materials: vec![material("Steel", 210_000.0)],
+            ..Default::default()
+        };
+        for name in ["Preload", "Service", "Overload"] {
+            source.steps.push(Step::new_static(name));
+        }
+        let mut target = FeModel::default();
+        target.steps.push(Step::new_static("Unload"));
+        let mut link = Link {
+            source: 1,
+            target: 2,
+            item: path(&["State", "Service"]),
+            slot: path(&["State"]),
+            inherited: Vec::new(),
+        };
+        let step = state_step(&source, &link).unwrap();
+        assert!(!chain_up_to_date(&source, step, &target, &link));
+        link.inherited = apply_chain(&mut target, &source, step, &link);
+        assert_eq!(link.inherited, ["Preload", "Service"]);
+        let names: Vec<&str> = target.steps.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Preload", "Service", "Unload"]);
+        assert_eq!(target.materials, source.materials);
+        assert!(chain_up_to_date(&source, step, &target, &link));
+        // A changed material or step of the source is taken again; the own step stays.
+        source.materials[0].name = "S355".into();
+        source.steps[0].name = "Bolts".into();
+        assert!(!chain_up_to_date(&source, step, &target, &link));
+        link.inherited = apply_chain(&mut target, &source, step, &link);
+        let names: Vec<&str> = target.steps.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["Bolts", "Service", "Unload"]);
+        assert_eq!(own_steps(&target, &link).len(), 1);
+        // The tree shows the taken steps as linked, the own one not.
+        let filled = filled_paths(&link, "Source");
+        assert!(
+            filled
+                .iter()
+                .any(|(p, _)| *p == path(&["Setup", "Steps", "Bolts"]))
+        );
+        assert!(filled.iter().any(|(p, _)| *p == path(&["Mesh"])));
+        assert!(
+            !filled
+                .iter()
+                .any(|(p, _)| covers(p, &path(&["Setup", "Steps", "Unload"])))
+        );
+        assert_eq!(output_path(&link), path(&["Results", "Service"]));
     }
 
     #[test]
@@ -739,5 +904,7 @@ mod tests {
         let results = path(&["Results", "Step-1"]);
         assert!(compatible(&results, &path(&["Results", "Step-2"])));
         assert!(!compatible(&results, &path(&["Setup", "Steps"])));
+        assert!(compatible(&results, &path(&["State"])));
+        assert!(!compatible(&path(&["Mesh"]), &path(&["State"])));
     }
 }

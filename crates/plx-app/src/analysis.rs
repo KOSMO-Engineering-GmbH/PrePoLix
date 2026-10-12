@@ -123,7 +123,8 @@ impl Analysis {
     /// Writes the input file of the analysis `name` into `work_dir` and starts CalculiX on
     /// it; steps left at the default solver use `default_solver`, see
     /// [`Solver::default_solver`]. With `check_model` CalculiX only reads and checks the model
-    /// (PrePoMax's "Check Model").
+    /// (PrePoMax's "Check Model"). `continuation` tells which analyses it continues from the
+    /// state of and which continue from its own.
     pub fn start(
         solver: &Solver,
         model: &Model,
@@ -131,6 +132,7 @@ impl Analysis {
         check_model: bool,
         name: &str,
         work_dir: &std::path::Path,
+        continuation: &crate::links::Continuation,
     ) -> Result<Self, String> {
         if model.fe.steps.is_empty() && !check_model {
             return Err(
@@ -145,13 +147,15 @@ impl Analysis {
         fe.resolve_default_solver(default_solver);
         let job_name = job_name(name);
         stage_global_results(&mut fe, work_dir, &job_name)?;
-        let write = if check_model {
-            plx_io::inp::write_check_inp
+        // The sets of the analyses that continue from its states go into the input file too:
+        // CalculiX takes no new sets after reading a state.
+        let input = if check_model {
+            plx_io::inp::write_check_inp(&model.mesh, &fe, &heading)
         } else {
-            plx_io::inp::write_inp
-        };
-        let input = write(&model.mesh, &fe, &heading)
-            .map_err(|e| format!("Input file not written: {e}"))?;
+            let dependent = &continuation.dependent_steps;
+            plx_io::inp::write_inp_with_sets_of(&model.mesh, &fe, &heading, dependent)
+        }
+        .map_err(|e| format!("Input file not written: {e}"))?;
         // The model check leaves out the steps; their keywords are still tested.
         let keywords = if check_model {
             let full = plx_io::inp::write_inp(&model.mesh, &fe, &heading).unwrap_or_default();
@@ -165,8 +169,10 @@ impl Analysis {
         if let Some(message) = crate::settings::missing_executable(&job_solver.executable) {
             return Err(format!("CalculiX not started: {message}. {hint}"));
         }
-        let restart = (!check_model)
-            .then(|| plan_restart(solver, &fe, &input, work_dir, &job_name, job_solver.clone()));
+        let restart = (!check_model).then(|| {
+            let job = (work_dir, job_name.as_str());
+            plan_restart(solver, &fe, &input, job, continuation, job_solver.clone())
+        });
         let run_input = match &restart {
             Some(RestartRun {
                 chain,
@@ -414,8 +420,8 @@ fn plan_restart(
     solver: &Solver,
     fe: &plx_model::FeModel,
     input: &str,
-    work_dir: &std::path::Path,
-    job_name: &str,
+    (work_dir, job_name): (&std::path::Path, &str),
+    continuation: &crate::links::Continuation,
     job_solver: plx_job::Solver,
 ) -> RestartRun {
     // Files the job reads besides its input file count as part of the model.
@@ -427,13 +433,16 @@ fn plan_restart(
     let chain = Chain::new(input, keep, restart::files_fingerprint(&external));
     let solver_key = solver.executable_key();
     let mut plan = if keep {
-        StateIndex::read(work_dir, job_name).plan(&chain, &solver_key, work_dir, job_name)
+        // Its own earlier runs first, then those of the analyses it continues.
+        let mut jobs = vec![(work_dir.to_owned(), job_name.to_owned())];
+        jobs.extend(continuation.upstream.iter().cloned());
+        restart::plan(&chain, &solver_key, &jobs)
     } else {
         StateIndex::clear(work_dir, job_name);
         Plan::Full("restart files are turned off in the settings".into())
     };
-    if let Plan::Restart { file, .. } = &plan
-        && let Err(error) = restart::prepare(work_dir, job_name, file)
+    if let Plan::Restart { file, results, .. } = &plan
+        && let Err(error) = restart::prepare(work_dir, job_name, file, results)
     {
         restart::discard(work_dir, job_name);
         plan = Plan::Full(format!("the state could not be read: {error}"));
@@ -454,10 +463,20 @@ impl RestartRun {
     fn describe(&self) -> String {
         let steps = self.chain.steps.len();
         match &self.plan {
-            Plan::Restart { after, .. } => format!(
-                "Restart after step {after} of {steps}: the steps up to it are unchanged; \
-                 CalculiX reads their state from the earlier run and solves the rest."
-            ),
+            Plan::Restart { after, results, .. } => {
+                // The state of another analysis, which this one continues.
+                let source = (results.parent() != Some(self.work_dir.as_path()))
+                    .then(|| results.file_stem())
+                    .flatten()
+                    .map_or_else(
+                        || "the earlier run".to_owned(),
+                        |job| format!("{}", job.to_string_lossy()),
+                    );
+                format!(
+                    "Restart after step {after} of {steps}: the steps up to it are unchanged; \
+                     CalculiX reads their state from {source} and solves the rest."
+                )
+            }
             Plan::Full(reason) => format!("Full run: {reason}."),
         }
     }
@@ -635,12 +654,29 @@ mod tests {
 
     /// Solves the model in `dir`; returns the monitor output.
     fn solve(model: &Model, dir: &std::path::Path) -> Vec<String> {
+        solve_as(model, dir, "Cubes", &Default::default())
+    }
+
+    fn solve_as(
+        model: &Model,
+        dir: &std::path::Path,
+        name: &str,
+        continuation: &crate::links::Continuation,
+    ) -> Vec<String> {
         let solver = Solver {
             executable: "ccx".into(),
             ..Default::default()
         };
-        let mut analysis =
-            Analysis::start(&solver, model, EquationSolver::Default, false, "Cubes", dir).unwrap();
+        let mut analysis = Analysis::start(
+            &solver,
+            model,
+            EquationSolver::Default,
+            false,
+            name,
+            dir,
+            continuation,
+        )
+        .unwrap();
         let status = loop {
             if let Some(status) = analysis.poll() {
                 break status;
@@ -686,6 +722,67 @@ mod tests {
         );
         let inp = std::fs::read_to_string(dir.join("Cubes/Cubes.inp")).unwrap();
         assert!(inp.contains("*Node") && !inp.contains("Read"), "{inp}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_analysis_continues_from_the_state_of_another() {
+        if std::process::Command::new("ccx")
+            .arg("-v")
+            .output()
+            .is_err()
+        {
+            eprintln!("ccx missing, test skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("prepolix-continue-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // The continuing analysis holds the end with a boundary condition of its own, on a
+        // set the first analysis does not use itself.
+        let mut target = pulled_cubes(0.04);
+        let own = &mut target.fe.steps[2];
+        own.boundary_conditions[1].name = "Hold".into();
+        let own = own.clone();
+        let mut source = pulled_cubes(0.04);
+        source.fe.steps.truncate(2);
+        let continuation = crate::links::Continuation {
+            dependent_steps: vec![(1, vec![own])],
+            ..Default::default()
+        };
+        solve_as(&source, &dir.join("Source"), "Source", &continuation);
+        let source_inp = std::fs::read_to_string(dir.join("Source/Source.inp")).unwrap();
+        assert!(source_inp.contains("Hold"), "{source_inp}");
+        assert_eq!(source_inp.matches("*Step").count(), 2);
+        let continuation = crate::links::Continuation {
+            upstream: vec![(dir.join("Source"), "Source".into())],
+            ..Default::default()
+        };
+        let output = solve_as(&target, &dir.join("Target"), "Target", &continuation);
+        assert!(
+            output
+                .iter()
+                .any(|l| l.starts_with("Restart after step 2 of 3") && l.contains("from Source")),
+            "{output:?}"
+        );
+        // Without the set of the continuing analysis in its input, the state cannot be read.
+        solve_as(&source, &dir.join("Plain"), "Plain", &Default::default());
+        let continuation = crate::links::Continuation {
+            upstream: vec![(dir.join("Plain"), "Plain".into())],
+            ..Default::default()
+        };
+        let output = solve_as(&target, &dir.join("Other"), "Target", &continuation);
+        assert!(
+            output.iter().any(|l| l.starts_with("Full run")),
+            "{output:?}"
+        );
+        solve_as(&target, &dir.join("Full"), "Target", &Default::default());
+        let continued = plx_io::frd::read_frd(&dir.join("Target/Target.frd")).unwrap();
+        let full = plx_io::frd::read_frd(&dir.join("Full/Target.frd")).unwrap();
+        assert_eq!(continued.increments.len(), 3);
+        assert_eq!(
+            format!("{:?}", continued.increments),
+            format!("{:?}", full.increments)
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

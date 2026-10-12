@@ -163,13 +163,25 @@ SUMMARY OF JOB INFORMATION
 
 /// Runs the job as PrePoLix does: from a state if the index has one, recording the run.
 fn run(dir: &Path, input: &str) -> (Plan, String) {
+    run_after(dir, input, &[])
+}
+
+/// Runs the job, from a state of its own or of the jobs in `upstream`.
+fn run_after(dir: &Path, input: &str, upstream: &[(PathBuf, String)]) -> (Plan, String) {
     let solver = Solver::default();
     let chain = Chain::new(input, true, 0);
+    let mut jobs = vec![(dir.to_path_buf(), "Job".to_string())];
+    jobs.extend(upstream.iter().cloned());
+    let plan = plan(&chain, "ccx", &jobs);
     let mut index = StateIndex::read(dir, "Job");
-    let plan = index.plan(&chain, "ccx", dir, "Job");
     let text = match &plan {
-        Plan::Restart { after, file, .. } => {
-            prepare(dir, "Job", file).unwrap();
+        Plan::Restart {
+            after,
+            file,
+            results,
+            ..
+        } => {
+            prepare(dir, "Job", file, results).unwrap();
             chain.restart_input(*after)
         }
         Plan::Full(_) => chain.input.clone(),
@@ -228,6 +240,17 @@ fn a_changed_step_is_solved_from_the_state_before() {
     let _ = std::fs::remove_dir_all(&full);
     let (_, solved) = run(&full, &steps(400.0));
     assert_eq!(results(&restarted), results(&solved));
+    // Another job that continues after the second step starts from this job's state.
+    let other = work_dir("continued");
+    let _ = std::fs::remove_dir_all(&other);
+    let (plan, continued) = run_after(&other, &steps(450.0), &[(dir.clone(), "Job".into())]);
+    assert!(matches!(plan, Plan::Restart { after: 2, .. }), "{plan:?}");
+    let full_other = work_dir("full-other");
+    let _ = std::fs::remove_dir_all(&full_other);
+    let (_, solved_other) = run(&full_other, &steps(450.0));
+    assert_eq!(results(&continued), results(&solved_other));
+    std::fs::remove_dir_all(other).unwrap();
+    std::fs::remove_dir_all(full_other).unwrap();
     // The input file of the run is the full one, and the states of the steps that changed
     // are gone.
     let index = StateIndex::read(&dir, "Job");

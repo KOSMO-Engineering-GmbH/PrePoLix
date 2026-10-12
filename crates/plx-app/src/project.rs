@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use egui_snarl::ui::{PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
+use egui_snarl::ui::{AnyPins, PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
 use plx_io::project::{Link, Project, ProjectAnalysis};
 use plx_model::{ModelProperties, ModelSpace};
@@ -116,6 +116,13 @@ enum Payload {
     Mesh(Box<links::MeshCopy>),
     /// The target's step, the global step and the global results file of a submodel.
     Results(String, u32, PathBuf),
+    /// What a state link takes: the mesh with its geometry when it changed, the source's
+    /// model when the setup or the steps up to `step` changed.
+    Chain {
+        mesh: Option<Box<links::MeshCopy>>,
+        fe: Option<Box<plx_model::FeModel>>,
+        step: usize,
+    },
 }
 
 /// What the user did in the schematic, done after it is drawn.
@@ -136,6 +143,17 @@ enum Action {
         target: u64,
         slot: Vec<String>,
     },
+    /// A new analysis that continues `source` after `step`, its block at the position.
+    Continue {
+        source: u64,
+        step: String,
+        position: egui::Pos2,
+    },
+    /// Split the analysis after the step: the steps after it go to a new analysis that
+    /// continues it.
+    Split(u64, String),
+    /// Give the own steps of the analysis to the one it continues, and remove it.
+    Merge(u64),
     /// Remove the links of a pin, or the one between two pins.
     Unlink {
         source: Option<(u64, Vec<String>)>,
@@ -315,6 +333,9 @@ impl ProjectApp {
         let (render_state, settings) = (self.render_state.clone(), self.settings.clone());
         let at = ctx.input(|i| i.viewport().outer_rect).map(|r| r.min);
         let import = std::mem::take(&mut self.startup_import);
+        // What it takes from others is known before it is solved.
+        let incoming = self.incoming(id);
+        self.sync_due = true;
         let Some(node) = self.node(id) else {
             return;
         };
@@ -329,6 +350,7 @@ impl ProjectApp {
         };
         let mut window = AnalysisWindow::new(render_state, settings, &node.name);
         window.set_project_folder(folder);
+        window.set_links(incoming, Vec::new());
         window.load(ctx, path, data);
         if !import.is_empty() {
             window.import_after_load(import);
@@ -408,7 +430,7 @@ impl ProjectApp {
             let project = plx_io::project::read_project(&file).map(|mut project| {
                 // Format 2 kept the values in the project's unit system.
                 let mut notes = Vec::new();
-                if project.format < plx_model::PROJECT_FORMAT {
+                if project.format < 3 {
                     for analysis in &mut project.analyses {
                         analysis.model.properties.space = project.space;
                         analysis.model.properties.units = project.units;
@@ -419,8 +441,9 @@ impl ProjectApp {
                          longer opens in older versions."
                             .into(),
                     );
-                    project.format = plx_model::PROJECT_FORMAT;
                 }
+                // Format 3 differs only by what it lacks: state links.
+                project.format = plx_model::PROJECT_FORMAT;
                 (project, notes)
             });
             let _ = sender.send(project.map_err(|e| e.to_string()));
@@ -835,7 +858,7 @@ impl ProjectApp {
         for link in &self.links {
             if let Some(source) = self.nodes.iter().find(|n| n.id == link.source) {
                 (incoming.entry(link.target).or_default())
-                    .push((links::slot(link).to_vec(), source.name.clone()));
+                    .extend(links::filled_paths(link, &source.name));
             }
         }
         let blocks: Vec<BlockView> = (self.nodes.iter())
@@ -850,10 +873,17 @@ impl ProjectApp {
                     ),
                     None => Vec::new(),
                 };
+                let continues = (self.links.iter())
+                    .find(|l| l.target == n.id && links::is_state(l))
+                    .map(|l| self.name_of(l.source));
                 BlockView {
                     id: n.id,
                     name: n.name.clone(),
                     space: n.space,
+                    steps: (fe.into_iter().flat_map(|fe| &fe.steps))
+                        .map(|s| s.name.clone())
+                        .collect(),
+                    continues,
                     rows,
                     loading: n.window.as_ref().is_some_and(|w| w.model().is_none()),
                     open: n.window.is_some(),
@@ -893,7 +923,7 @@ impl ProjectApp {
             let (Some(source), Some(target)) = (block(link.source), block(link.target)) else {
                 continue;
             };
-            let output = shown_row(&source.rows, &link.item);
+            let output = shown_row(&source.rows, &links::output_path(link));
             let input = shown_row(&target.rows, links::slot(link));
             let nodes = (self.graph_node(link.source), self.graph_node(link.target));
             if let (Some(output), Some(input), (Some(from), Some(to))) = (output, input, nodes) {
@@ -951,6 +981,20 @@ impl ProjectApp {
             ));
             return;
         }
+        let state = slot.first().is_some_and(|c| c == links::STATE);
+        if let Some(chain) = (self.links.iter()).find(|l| l.target == target && links::is_state(l))
+            && !state
+        {
+            self.output.push(format!(
+                "Not linked: {to} continues {} and takes its model from there; unlink it first.",
+                self.name_of(chain.source)
+            ));
+            return;
+        }
+        if state {
+            self.link_state(source, item, target);
+            return;
+        }
         let results = item.first().is_some_and(|c| c == links::RESULTS);
         // A category or item links into the same place of the target; a step's results go
         // to the step they are dropped on.
@@ -998,7 +1042,174 @@ impl ProjectApp {
             target,
             slot: if results { slot } else { Vec::new() },
             item,
+            inherited: Vec::new(),
         });
+        self.sync_due = true;
+    }
+
+    /// Makes `target` continue `source` after the step whose results `item` names: it takes
+    /// the source's model and its steps up to that one, in place of all it took before.
+    fn link_state(&mut self, source: u64, item: Vec<String>, target: u64) {
+        let (from, to) = (self.name_of(source), self.name_of(target));
+        let Some(step) = item.get(1).cloned() else {
+            return;
+        };
+        let replaced: Vec<Link> = (self.links.iter())
+            .filter(|l| l.target == target)
+            .cloned()
+            .collect();
+        self.links.retain(|l| l.target != target);
+        for link in replaced {
+            self.output.push(format!(
+                "{to} no longer takes {} from {}.",
+                links::label(&link.item),
+                self.name_of(link.source)
+            ));
+        }
+        self.output.push(format!(
+            "{to} continues {from} from the state after {step}: it takes the model of {from} \
+             and its steps up to {step}; its own steps follow."
+        ));
+        self.applied.retain(|(id, _), _| *id != target);
+        self.links.push(Link {
+            source,
+            target,
+            item: vec![links::STATE.to_owned(), step],
+            slot: vec![links::STATE.to_owned()],
+            inherited: Vec::new(),
+        });
+        self.sync_due = true;
+    }
+
+    /// A new analysis that continues `source` after `step`, with its model space and units.
+    fn continue_from(&mut self, source: u64, step: String, position: egui::Pos2) -> Option<u64> {
+        let properties = self.node(source)?.link_data()?.fe.properties.clone();
+        let name = format!("{} continued", self.name_of(source));
+        let id = self.add_analysis(&name, position, properties);
+        self.output.push(format!("{} created", self.name_of(id)));
+        let item = vec![links::RESULTS.to_owned(), step];
+        self.link(source, item, id, vec![links::STATE.to_owned()]);
+        Some(id)
+    }
+
+    /// Splits the analysis after `step`: the steps after it go to a new analysis that
+    /// continues it, and what took their results takes them from there.
+    fn split(&mut self, id: u64, step: String) {
+        let Some(fe) = self
+            .node(id)
+            .and_then(|n| n.link_data())
+            .map(|d| d.fe.clone())
+        else {
+            return;
+        };
+        let Some(index) = fe.steps.iter().position(|s| s.name == step) else {
+            return;
+        };
+        if index + 1 >= fe.steps.len() {
+            return;
+        }
+        if let Some(window) = self.node(id).and_then(|n| n.window.as_ref())
+            && let Some(reason) = window.busy()
+        {
+            self.output.push(format!("Not split while {reason}."));
+            return;
+        }
+        let tail: Vec<plx_model::Step> = fe.steps[index + 1..].to_vec();
+        let moved: Vec<String> = tail.iter().map(|s| s.name.clone()).collect();
+        let position = (self.graph_node(id))
+            .and_then(|g| self.graph.get_node_info(g))
+            .map_or(self.free_position(), |info| {
+                info.pos + egui::vec2(420.0, 0.0)
+            });
+        let Some(new) = self.continue_from(id, step.clone(), position) else {
+            return;
+        };
+        if let Some(data) = self.node(new).and_then(|n| n.data.as_mut()) {
+            data.model.steps = tail;
+        }
+        // What took the results or state of a moved step takes them from the new analysis.
+        for link in &mut self.links {
+            let moved_step = link.item.get(1).is_some_and(|s| moved.contains(s));
+            if link.source == id && link.target != new && moved_step {
+                link.source = new;
+            }
+        }
+        let mut kept = fe.clone();
+        kept.steps.truncate(index + 1);
+        let path = [links::SETUP.to_owned(), "Steps".to_owned()];
+        self.set_steps(id, &kept, &path);
+        self.output.push(format!(
+            "{} split after {step}: {} continues it with {}.",
+            self.name_of(id),
+            self.name_of(new),
+            moved.join(", ")
+        ));
+    }
+
+    /// Gives the own steps of the analysis to the one it continues and removes it; only when
+    /// it continues from the last step of that one.
+    fn merge(&mut self, id: u64) {
+        let Some(link) = (self.links.iter())
+            .find(|l| l.target == id && links::is_state(l))
+            .cloned()
+        else {
+            return;
+        };
+        let (name, into) = (self.name_of(id), self.name_of(link.source));
+        let source = self
+            .node(link.source)
+            .and_then(|n| n.link_data())
+            .map(|d| d.fe.clone());
+        let target = self
+            .node(id)
+            .and_then(|n| n.link_data())
+            .map(|d| d.fe.clone());
+        let (Some(mut source), Some(target)) = (source, target) else {
+            return;
+        };
+        if source.steps.last().map(|s| &s.name) != link.item.get(1) {
+            self.output.push(format!(
+                "Not merged: {name} continues {into} from a step before its last; only an \
+                 analysis that continues from the last step can be merged into it."
+            ));
+            return;
+        }
+        if !self.close_window(id) {
+            return;
+        }
+        let own = links::own_steps(&target, &link);
+        let moved: Vec<String> = own.iter().map(|s| s.name.clone()).collect();
+        source.steps.extend(own);
+        let path = [links::SETUP.to_owned(), "Steps".to_owned()];
+        self.set_steps(link.source, &source, &path);
+        // What took results or states of the merged analysis takes them from the other one.
+        for other in &mut self.links {
+            if other.source == id {
+                other.source = link.source;
+            }
+        }
+        self.delete(id);
+        self.output.push(format!(
+            "{name} merged into {into}: {into} solves {} too.",
+            moved.join(", ")
+        ));
+        self.sync_due = true;
+    }
+
+    /// Replaces the steps of an analysis with those of `fe`.
+    fn set_steps(&mut self, id: u64, fe: &plx_model::FeModel, path: &[String]) {
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        match &mut node.window {
+            Some(window) => window.apply_setup(fe, path),
+            None => {
+                if let Some(data) = &mut node.data {
+                    links::apply_setup(&mut data.model, fe, path);
+                }
+                node.refresh_closed();
+            }
+        }
         self.sync_due = true;
     }
 
@@ -1053,17 +1264,17 @@ impl ProjectApp {
                 .filter(|l| l.target == target)
                 .cloned()
                 .collect();
-            let mut incoming = links::Incoming::default();
             let mut missing = Vec::new();
             for link in &to_target {
                 let source = self.name_of(link.source);
-                incoming
-                    .paths
-                    .push((links::slot(link).to_vec(), source.clone()));
-                if let Some(payload) = self.payload(link, &mut missing) {
-                    self.apply(target, &source, link, payload);
+                if let Some(payload) = self.payload(link, &mut missing)
+                    && let Some(inherited) = self.apply(target, &source, link, payload)
+                    && let Some(own) = self.links.iter_mut().find(|l| *l == link)
+                {
+                    own.inherited = inherited;
                 }
             }
+            let incoming = self.incoming(target);
             if let Some(node) = self.node(target) {
                 match &mut node.window {
                     Some(window) => window.set_links(incoming, missing),
@@ -1072,6 +1283,59 @@ impl ProjectApp {
             }
         }
         ctx.request_repaint_after(Duration::from_millis(300));
+    }
+
+    /// What links fill in `target`, and from where it continues and where others continue
+    /// it.
+    fn incoming(&self, target: u64) -> links::Incoming {
+        let mut incoming = links::Incoming::default();
+        for link in self.links.iter().filter(|l| l.target == target) {
+            let source = self.name_of(link.source);
+            incoming.paths.extend(links::filled_paths(link, &source));
+        }
+        let fe = |id: u64| {
+            (self.nodes.iter().find(|n| n.id == id))
+                .and_then(Node::link_data)
+                .map(|d| d.fe)
+        };
+        let dir =
+            (self.settings.solver.work_dir()).join(crate::analysis::job_name(&self.project_name()));
+        // The analyses it continues, nearest first.
+        let mut at = target;
+        while let Some(link) = (self.links.iter()).find(|l| l.target == at && links::is_state(l)) {
+            at = link.source;
+            if at == target {
+                break;
+            }
+            let job = crate::analysis::job_name(&self.name_of(at));
+            incoming.continuation.upstream.push((dir.join(&job), job));
+        }
+        // The own steps of those that continue it, and of those that continue them.
+        if let Some(own) = fe(target) {
+            for link in self
+                .links
+                .iter()
+                .filter(|l| l.source == target && links::is_state(l))
+            {
+                let Some(index) = links::state_step(own, link) else {
+                    continue;
+                };
+                let mut steps = Vec::new();
+                let mut queue = vec![link.clone()];
+                while let Some(link) = queue.pop() {
+                    if let Some(fe) = fe(link.target) {
+                        steps.extend(links::own_steps(fe, &link));
+                    }
+                    queue.extend(
+                        (self.links.iter())
+                            .filter(|l| l.source == link.target && links::is_state(l))
+                            .cloned(),
+                    );
+                }
+                incoming.continuation.dependent_steps.push((index, steps));
+            }
+        }
+        incoming
     }
 
     /// What `link` has to copy into its target to bring it up to date with the source;
@@ -1129,6 +1393,30 @@ impl ProjectApp {
                 let step = links::slot(link).get(1)?.clone();
                 Some(Payload::Results(step, global, file))
             }
+            Some(links::STATE) => {
+                if source.bound_results().is_none() {
+                    // Solved first, so that this one continues from its states.
+                    missing.push(source.name.clone());
+                }
+                let (data, own) = (data?, target.link_data()?);
+                let step = links::state_step(data.fe, link)?;
+                let mut print = plx_mesh::Fnv::new();
+                for cell in [links::GEOMETRY, links::MESH] {
+                    let path = [cell.to_owned()];
+                    print.add(&links::fingerprint(data, &path).to_le_bytes());
+                }
+                let print = print.finish();
+                let key = (link.target, vec![links::STATE.to_owned()]);
+                let mesh = (self.applied.get(&key) != Some(&print))
+                    .then(|| Box::new(links::MeshCopy::of(data)));
+                let fe = (!links::chain_up_to_date(data.fe, step, own.fe, link))
+                    .then(|| Box::new(data.fe.clone()));
+                if mesh.is_none() && fe.is_none() {
+                    return None;
+                }
+                self.applied.insert(key, print);
+                Some(Payload::Chain { mesh, fe, step })
+            }
             Some(links::GEOMETRY | links::MESH) => {
                 let data = data?;
                 if !links::exists(data, path) {
@@ -1159,12 +1447,52 @@ impl ProjectApp {
         }
     }
 
-    /// Copies what a link takes into its target, see [`ProjectApp::payload`].
-    fn apply(&mut self, target: u64, source: &str, link: &Link, payload: Payload) {
-        let Some(node) = self.node(target) else {
-            return;
-        };
+    /// Copies what a link takes into its target, see [`ProjectApp::payload`]; returns the
+    /// steps a state link took.
+    fn apply(
+        &mut self,
+        target: u64,
+        source: &str,
+        link: &Link,
+        payload: Payload,
+    ) -> Option<Vec<String>> {
+        let node = self.node(target)?;
         let path = &link.item;
+        if let Payload::Chain { mesh, fe, step } = payload {
+            let mut inherited = None;
+            match &mut node.window {
+                Some(window) => {
+                    if let Some(mesh) = mesh {
+                        window.apply_mesh(*mesh);
+                    }
+                    if let Some(fe) = fe {
+                        inherited = Some(window.apply_chain(&fe, step, link));
+                    }
+                    window.message(format!("Model and steps taken from {source}"));
+                }
+                None => {
+                    let data = node.data.as_mut()?;
+                    if let Some(mesh) = mesh {
+                        let links::MeshCopy {
+                            geometry,
+                            mesh,
+                            mesh_inputs,
+                            mesh_sets,
+                            element_types,
+                        } = *mesh;
+                        data.geometry = geometry;
+                        data.mesh = mesh;
+                        data.mesh_inputs = mesh_inputs;
+                        data.model.mesh_sets = mesh_sets;
+                        data.model.element_types = element_types;
+                    }
+                    if let Some(fe) = fe {
+                        inherited = Some(links::apply_chain(&mut data.model, &fe, step, link));
+                    }
+                }
+            }
+            return inherited;
+        }
         if let Some(window) = &mut node.window {
             match payload {
                 Payload::Setup(fe) => {
@@ -1180,12 +1508,11 @@ impl ProjectApp {
                     window.message(format!("Mesh taken from {source}"));
                 }
                 Payload::Results(step, global, file) => window.apply_submodel(&step, global, file),
+                Payload::Chain { .. } => {}
             }
-            return;
+            return None;
         }
-        let Some(data) = &mut node.data else {
-            return;
-        };
+        let data = node.data.as_mut()?;
         match payload {
             Payload::Setup(fe) => links::apply_setup(&mut data.model, &fe, path),
             Payload::Geometry(geometry) => data.geometry = geometry,
@@ -1206,7 +1533,9 @@ impl ProjectApp {
             Payload::Results(step, global, file) => {
                 links::apply_submodel(&mut data.model, &step, global, file);
             }
+            Payload::Chain { .. } => {}
         }
+        None
     }
 
     /// Picks up global results written for submodels.
@@ -1242,7 +1571,8 @@ impl ProjectApp {
         let mut queue = vec![id];
         while let Some(target) = queue.pop() {
             for link in self.links.iter().filter(|l| l.target == target) {
-                if links::is_results(link) && !sources.contains(&link.source) {
+                let solved_first = links::is_results(link) || links::is_state(link);
+                if solved_first && !sources.contains(&link.source) {
                     sources.push(link.source);
                     queue.push(link.source);
                 }
@@ -1285,13 +1615,21 @@ impl ProjectApp {
                 target,
                 slot,
             } => self.link(source, item, target, slot),
+            Action::Continue {
+                source,
+                step,
+                position,
+            } => {
+                self.continue_from(source, step, position);
+            }
+            Action::Split(id, step) => self.split(id, step),
+            Action::Merge(id) => self.merge(id),
             Action::Unlink { source, target } => self.unlink(|link| {
-                source
-                    .as_ref()
-                    .is_none_or(|(id, path)| link.source == *id && links::covers(path, &link.item))
-                    && target.as_ref().is_none_or(|(id, path)| {
-                        link.target == *id && links::covers(path, links::slot(link))
-                    })
+                source.as_ref().is_none_or(|(id, path)| {
+                    link.source == *id && links::covers(path, &links::output_path(link))
+                }) && target.as_ref().is_none_or(|(id, path)| {
+                    link.target == *id && links::covers(path, links::slot(link))
+                })
             }),
         }
     }
@@ -1521,9 +1859,10 @@ impl ProjectApp {
                         self.open_window(ctx, source);
                     }
                 }
-                Request::Unlink(path) => {
-                    self.unlink(|l| l.target == id && links::covers(&path, links::slot(l)))
-                }
+                // Unlinking what a state link took makes the analysis independent.
+                Request::Unlink(path) => self.unlink(|l| {
+                    l.target == id && (links::covers(&path, links::slot(l)) || links::is_state(l))
+                }),
             }
         }
     }
@@ -1639,6 +1978,9 @@ struct BlockView {
     id: u64,
     name: String,
     space: ModelSpace,
+    /// Its steps, to split it after one, and the analysis it continues, to merge into.
+    steps: Vec<String>,
+    continues: Option<String>,
     rows: Vec<Row>,
     loading: bool,
     open: bool,
@@ -1672,7 +2014,27 @@ fn block_rows(
             path,
         }
     };
+    let state = vec![links::STATE.to_owned()];
+    let continues = from(&state);
     let mut rows = vec![
+        Row {
+            text: match &continues {
+                Some(source) => format!("State of {source}"),
+                None => "State".to_owned(),
+            },
+            depth: 0,
+            icon: TreeIcon::Step,
+            state: None,
+            expander: None,
+            input: true,
+            output: false,
+            tip: "Drop the results of a step of another analysis here: this analysis then \
+                  continues from the state after that step. It takes the model and the steps \
+                  up to it, and CalculiX solves only its own steps."
+                .into(),
+            linked_from: continues,
+            path: state,
+        },
         cell(links::GEOMETRY, TreeIcon::Geometry, status.geometry, true),
         cell(links::MESH, TreeIcon::Mesh, status.mesh, true),
     ];
@@ -1741,7 +2103,8 @@ fn block_rows(
         let tip = if step.active {
             format!(
                 "Results of {}: drag to a step of a submodel, which takes its displacements \
-                 from them",
+                 from them, to the State row of another analysis, which continues from them, \
+                 or to empty space to continue in a new analysis",
                 step.name
             )
         } else {
@@ -1785,9 +2148,11 @@ fn category_icon(category: &str) -> TreeIcon {
     }
 }
 
-/// Colour of the wires of a link: data in blue, results in orange.
+/// Colour of the wires of a link: data in blue, results in orange, states in green.
 fn wire_color(path: &[String]) -> egui::Color32 {
-    if path.first().is_some_and(|c| c == links::RESULTS) {
+    if path.first().is_some_and(|c| c == links::STATE) {
+        crate::style::adapt(egui::Color32::from_rgb(40, 150, 60))
+    } else if path.first().is_some_and(|c| c == links::RESULTS) {
         crate::style::adapt(egui::Color32::from_rgb(230, 130, 20))
     } else {
         crate::style::adapt(egui::Color32::from_rgb(40, 110, 200))
@@ -1802,6 +2167,18 @@ struct Viewer {
 impl Viewer {
     fn block(&self, id: u64) -> Option<&BlockView> {
         self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// The analysis and step whose results a wire dropped on empty space comes from.
+    fn dropped_results(&self, pins: AnyPins, snarl: &Snarl<u64>) -> Option<(u64, String)> {
+        let AnyPins::Out([pin]) = pins else {
+            return None;
+        };
+        let (id, row) = self.row(snarl, pin.node, pin.output)?;
+        match row.path.as_slice() {
+            [cell, step] if cell == links::RESULTS && row.output => Some((id, step.clone())),
+            _ => None,
+        }
     }
 
     fn row(&self, snarl: &Snarl<u64>, node: NodeId, index: usize) -> Option<(u64, &Row)> {
@@ -1847,13 +2224,14 @@ impl SnarlViewer<u64> for Viewer {
         if block.loading {
             ui.spinner();
         }
+        let (steps, continues) = (block.steps.clone(), block.continues.clone());
         if label.double_clicked() {
             self.actions.push(Action::Open(id));
         }
         // The name takes the clicks of the header, so it opens the block's menu too.
         label
             .on_hover_text("Double-click opens the analysis in its own window.")
-            .context_menu(|ui| node_menu(ui, id, &mut self.actions));
+            .context_menu(|ui| node_menu(ui, id, &steps, continues.as_deref(), &mut self.actions));
     }
 
     fn inputs(&mut self, node: &u64) -> usize {
@@ -1936,7 +2314,10 @@ impl SnarlViewer<u64> for Viewer {
         } else if response.double_clicked() {
             self.actions.push(Action::Open(id));
         }
-        if row.input {
+        if row.path.first().is_some_and(|c| c == links::STATE) {
+            let color = wire_color(&row.path);
+            PinInfo::square().with_fill(color).with_wire_color(color)
+        } else if row.input {
             PinInfo::circle().with_fill(wire_color(&row.path))
         } else {
             hidden_pin()
@@ -2036,7 +2417,37 @@ impl SnarlViewer<u64> for Viewer {
         snarl: &mut Snarl<u64>,
     ) {
         let id = snarl[node];
-        node_menu(ui, id, &mut self.actions);
+        let block = self.block(id);
+        let steps = block.map(|b| b.steps.clone()).unwrap_or_default();
+        let continues = block.and_then(|b| b.continues.clone());
+        node_menu(ui, id, &steps, continues.as_deref(), &mut self.actions);
+    }
+
+    fn has_dropped_wire_menu(&mut self, src_pins: AnyPins, snarl: &mut Snarl<u64>) -> bool {
+        self.dropped_results(src_pins, snarl).is_some()
+    }
+
+    fn show_dropped_wire_menu(
+        &mut self,
+        pos: egui::Pos2,
+        ui: &mut egui::Ui,
+        src_pins: AnyPins,
+        snarl: &mut Snarl<u64>,
+    ) {
+        let Some((source, step)) = self.dropped_results(src_pins, snarl) else {
+            ui.close();
+            return;
+        };
+        let tip = "A new analysis that continues from the state after this step: it takes the \
+                   model and the steps up to it, and its own steps are solved from there.";
+        if ui.button("Continue from here").on_hover_text(tip).clicked() {
+            self.actions.push(Action::Continue {
+                source,
+                step,
+                position: pos,
+            });
+            ui.close();
+        }
     }
 }
 
@@ -2117,7 +2528,13 @@ fn hidden_pin() -> PinInfo {
 }
 
 /// The context menu of an analysis' block.
-fn node_menu(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
+fn node_menu(
+    ui: &mut egui::Ui,
+    id: u64,
+    steps: &[String],
+    continues: Option<&str>,
+    actions: &mut Vec<Action>,
+) {
     let mut entry = |ui: &mut egui::Ui, text: &str, action: Action| {
         if ui.button(text).clicked() {
             actions.push(action);
@@ -2126,6 +2543,23 @@ fn node_menu(ui: &mut egui::Ui, id: u64, actions: &mut Vec<Action>) {
     };
     entry(ui, "Open", Action::Open(id));
     entry(ui, "Solve", Action::Solve(id));
+    ui.separator();
+    let split = steps.len() > 1;
+    ui.add_enabled_ui(split, |ui| {
+        ui.menu_button("Split After", |ui| {
+            for step in &steps[..steps.len().saturating_sub(1)] {
+                entry(ui, step, Action::Split(id, step.clone()));
+            }
+        })
+        .response
+        .on_hover_text(
+            "The steps after the one picked go to a new analysis that continues this one \
+             from the state after it.",
+        );
+    });
+    if let Some(source) = continues {
+        entry(ui, &format!("Merge into {source}"), Action::Merge(id));
+    }
     ui.separator();
     entry(ui, "Rename …", Action::Rename(id));
     entry(ui, "Duplicate", Action::Duplicate(id));
