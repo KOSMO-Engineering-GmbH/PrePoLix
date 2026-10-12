@@ -597,13 +597,13 @@ mod tests {
             name: name.into(),
             active: true,
             visible: true,
-            region: Region::Nodes(nodes.into_iter().map(Into::into).collect()),
+            region: Region::Nodes(nodes),
             kind,
             amplitude: None,
         };
         let pull = |u: f64| BoundaryKind::Displacement([Some(u), None, None, None, None, None]);
         let steps = [0.01, 0.02, last].into_iter().enumerate().map(|(i, u)| {
-            let mut step = plx_model::Step::new_static(&format!("Step-{}", i + 1));
+            let mut step = plx_model::Step::new_static(format!("Step-{}", i + 1));
             step.boundary_conditions = vec![
                 bc("Fix", vec![1, 2, 3, 4], BoundaryKind::Fixed),
                 bc("Pull", vec![13, 14, 15, 16], pull(u)),
@@ -640,8 +640,7 @@ mod tests {
             ..Default::default()
         };
         let mut analysis =
-            Analysis::start(&solver, model, EquationSolver::Default, false, "Cubes", dir)
-                .unwrap();
+            Analysis::start(&solver, model, EquationSolver::Default, false, "Cubes", dir).unwrap();
         let status = loop {
             if let Some(status) = analysis.poll() {
                 break status;
@@ -654,17 +653,26 @@ mod tests {
 
     #[test]
     fn a_changed_last_step_is_solved_alone() {
-        if std::process::Command::new("ccx").arg("-v").output().is_err() {
+        if std::process::Command::new("ccx")
+            .arg("-v")
+            .output()
+            .is_err()
+        {
             eprintln!("ccx missing, test skipped");
             return;
         }
         let dir = std::env::temp_dir().join(format!("prepolix-restart-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let output = solve(&pulled_cubes(0.03), &dir.join("Cubes"));
-        assert!(output.iter().any(|l| l.starts_with("Full run")), "{output:?}");
+        assert!(
+            output.iter().any(|l| l.starts_with("Full run")),
+            "{output:?}"
+        );
         let output = solve(&pulled_cubes(0.04), &dir.join("Cubes"));
         assert!(
-            output.iter().any(|l| l.starts_with("Restart after step 2 of 3")),
+            output
+                .iter()
+                .any(|l| l.starts_with("Restart after step 2 of 3")),
             "{output:?}"
         );
         // The same results as solving all steps, and the full input file next to them.
