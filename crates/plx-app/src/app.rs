@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use plx_io::project::ProjectAnalysis;
 use plx_model::UnitSystem;
 use plx_render::StandardView;
 use plx_results::hot_spot::{HotSpot, HotSpotPath};
@@ -40,7 +41,7 @@ use crate::setup::{Editor, EditorResult, NewItem};
 use crate::sound::{self, ModeSound};
 use crate::symbols;
 use crate::transformation_dialog::{TransformationAction, TransformationDialog};
-use crate::tree::{self, AnalysisAction, TreeItem, TreeResponse, TreeState, TreeView};
+use crate::tree::{self, TreeItem, TreeResponse, TreeState, TreeView};
 use crate::viewport::{Axis, BoxSelect, Click, ViewCommand, Viewport};
 use plx_render::RenderMesh;
 
@@ -51,14 +52,41 @@ enum LoadEvent {
     Added(Vec<PathBuf>, Result<Box<plx_mesher::CadAddition>, String>),
     /// Meshes of input files, each read from its file, to add as parts of the open model.
     MeshesRead(Vec<(PathBuf, Result<Box<plx_io::inp::InpImport>, String>)>),
+    /// A project file was picked or dropped; the project window opens it.
+    Project(PathBuf),
+}
+
+/// What an analysis window asks of the project window, which holds the project.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Request {
+    /// Save the project, to a file the user picks with `true`.
+    Save(bool),
+    /// Save a copy of the project without the results of its analyses.
+    SaveWithoutResults,
+    /// Open this project file instead of the open project.
+    OpenProject(PathBuf),
+    /// Give the project, all its analyses, this model space and unit system; `true` converts
+    /// the values into the new units.
+    SpaceAndUnits(plx_model::ModelSpace, UnitSystem, bool),
 }
 
 struct Workbench {
     settings: Settings,
     /// Open settings window with its unsaved draft.
     settings_window: Option<SettingsWindow>,
-    /// The check for a new release and its window.
-    updater: crate::update::Updater,
+    /// Name of the analysis the window shows, also of its input and results files.
+    analysis_name: String,
+    /// Folder of the project in the work directory; each analysis of the project runs in a
+    /// folder of its own in it.
+    project_folder: String,
+    /// Solve meshes the parts whose mesh is out of date first; the analysis starts once
+    /// they are meshed.
+    solve_after_meshing: bool,
+    /// What the window asks of the project window.
+    requests: Vec<Request>,
+    /// The state of the analysis' cells and when it was found; finding it takes the
+    /// fingerprints of mesh and model, so it is not done in every frame.
+    status: Option<(std::time::Instant, crate::status::AnalysisStatus)>,
     /// Campbell diagram window with its speed sweep; kept with its results while hidden.
     campbell: Option<crate::campbell::CampbellWindow>,
     /// Open dialog of the model space and unit system, for a new or the open model.
@@ -190,40 +218,29 @@ struct Workbench {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ShownModel(TreeView, usize);
 
-pub struct PrepolixApp {
+/// The window of one analysis of the project: PrePoMax's main window with the geometry, the
+/// FE model and the results of the analysis.
+pub struct AnalysisWindow {
     workbench: Workbench,
     load_events: (Sender<LoadEvent>, Receiver<LoadEvent>),
     loading: Option<PathBuf>,
+    /// Files to import once the analysis is loaded.
+    import_when_loaded: Vec<PathBuf>,
+    /// Whether to solve once the analysis is loaded, for Update Project.
+    solve_when_loaded: bool,
 }
 
-impl PrepolixApp {
-    pub fn new(
-        cc: &eframe::CreationContext<'_>,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let render_state = cc
-            .wgpu_render_state
-            .clone()
-            .ok_or("PrePoLix requires the wgpu backend of eframe")?;
-        crate::style::apply(&cc.egui_ctx);
-        let adapter = render_state.adapter.get_info();
-        let output = vec![format!(
-            "PrePoLix {} started, graphics: {} ({:?})",
-            env!("CARGO_PKG_VERSION"),
-            adapter.name,
-            adapter.backend
-        )];
-        let mut settings: Settings = cc
-            .storage
-            .and_then(|s| eframe::get_value(s, settings::STORAGE_KEY))
-            .unwrap_or_default();
-        settings.upgrade();
-        crate::style::set_theme(&cc.egui_ctx, settings.graphics.theme);
-        plx_mesher::set_library_path(settings.gmsh.library());
-        let mut app = Self {
+impl AnalysisWindow {
+    pub fn new(render_state: egui_wgpu::RenderState, settings: Settings, name: &str) -> Self {
+        Self {
             workbench: Workbench {
                 settings,
                 settings_window: None,
-                updater: Default::default(),
+                analysis_name: name.to_owned(),
+                project_folder: String::new(),
+                solve_after_meshing: false,
+                requests: Vec::new(),
+                status: None,
                 model_dialog: None,
                 import_requested: false,
                 viewport: Viewport::new(render_state),
@@ -242,7 +259,7 @@ impl PrepolixApp {
                 part_types: Vec::new(),
                 menu_part: None,
                 tree_view: TreeView::FeModel,
-                output,
+                output: Vec::new(),
                 view_command: None,
                 results_changed: false,
                 frame_changed: false,
@@ -289,60 +306,161 @@ impl PrepolixApp {
             },
             load_events: channel(),
             loading: None,
-        };
-        if app.workbench.settings.updates.check_at_startup
-            && app.workbench.updater.installation().checks_at_startup()
-        {
-            app.workbench.updater.check(&cc.egui_ctx, false);
+            import_when_loaded: Vec::new(),
+            solve_when_loaded: false,
         }
-        // Every file on the command line is opened in turn, e.g. a model and its results.
-        let mut paths: Vec<PathBuf> = std::env::args_os().skip(1).map(PathBuf::from).collect();
-        // Without files on the command line, the project open at the last exit is reopened.
-        if paths.is_empty() {
-            paths.extend(cc.storage.and_then(stored_last_project));
-        }
-        if !paths.is_empty() {
-            let (sender, ctx) = (app.load_events.0.clone(), cc.egui_ctx.clone());
-            let units = app.workbench.import_units();
-            std::thread::spawn(move || {
-                // Several CAD files make one geometry, as with Geometry > Import.
-                if paths.len() > 1 && paths.iter().all(|p| plx_mesher::is_cad_file(p)) {
-                    return load_geometry_in_background(paths, units, sender, ctx);
-                }
-                for path in paths {
-                    load_in_background(path, units, sender.clone(), ctx.clone());
-                }
-            });
-        }
-        Ok(app)
     }
 
-    fn open_dialog(&mut self, ctx: &egui::Context) {
-        if self.loading.is_some() {
+    /// Imports these files into the analysis as soon as it is loaded.
+    pub fn import_after_load(&mut self, paths: Vec<PathBuf>) {
+        self.import_when_loaded = paths;
+    }
+
+    /// Whether the window is still loading, or has an import or a solve to start once loaded.
+    pub fn waiting(&self) -> bool {
+        self.loading.is_some() || self.solve_when_loaded || !self.import_when_loaded.is_empty()
+    }
+
+    /// Solves the analysis as soon as it is loaded.
+    pub fn solve_when_loaded(&mut self) {
+        self.solve_when_loaded = true;
+    }
+
+    /// Takes over the project's model space and unit system; `convert` converts the values
+    /// into the new units.
+    pub fn set_space_and_units(
+        &mut self,
+        space: plx_model::ModelSpace,
+        units: UnitSystem,
+        convert: bool,
+    ) {
+        let Some(model) = &self.workbench.model else {
             return;
-        }
-        let sender = self.load_events.0.clone();
-        let ctx = ctx.clone();
-        let units = self.workbench.import_units();
+        };
+        let properties = plx_model::ModelProperties {
+            space,
+            units,
+            ..model.fe.properties.clone()
+        };
+        self.workbench.set_model_properties(properties, convert);
+    }
+
+    /// Opens the analysis of the project at `path` in the window, built on a worker thread.
+    pub fn load(&mut self, ctx: &egui::Context, path: PathBuf, analysis: ProjectAnalysis) {
+        let (sender, ctx) = (self.load_events.0.clone(), ctx.clone());
+        self.loading = Some(path.clone());
         std::thread::spawn(move || {
-            let picked = rfd::FileDialog::new()
-                .set_title("Open Model")
-                .add_filter(
-                    "Project, CalculiX model, results or geometry",
-                    &[
-                        "plx", "PLX", "inp", "INP", "frd", "FRD", "step", "STEP", "stp", "STP",
-                        "iges", "IGES", "igs", "IGS", "brep", "BREP",
-                    ],
-                )
-                .add_filter("PrePoLix project (*.plx)", &["plx", "PLX"])
-                .add_filter("Input file (*.inp)", &["inp", "INP"])
-                .add_filter("Results file (*.frd)", &["frd", "FRD"])
-                .add_filter(GEOMETRY_FILTER.0, GEOMETRY_FILTER.1)
-                .pick_file();
-            if let Some(path) = picked {
-                load_in_background(path, units, sender, ctx);
-            }
+            let loaded = model::load_analysis(&path, analysis);
+            let _ = sender.send(LoadEvent::Finished(path, Ok(Box::new(loaded))));
+            ctx.request_repaint();
         });
+    }
+
+    pub fn rename(&mut self, name: &str) {
+        self.workbench.analysis_name = name.to_owned();
+    }
+
+    /// The folder of the project in the work directory, from the project file's name.
+    pub fn set_project_folder(&mut self, folder: String) {
+        self.workbench.project_folder = folder;
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.workbench.settings
+    }
+
+    pub fn set_settings(&mut self, settings: &Settings) {
+        self.workbench.settings = settings.clone();
+    }
+
+    /// What the window asked of the project window since the last call.
+    pub fn take_requests(&mut self) -> Vec<Request> {
+        std::mem::take(&mut self.workbench.requests)
+    }
+
+    /// The open model of the analysis; `None` while it is being built.
+    pub fn model(&self) -> Option<&Model> {
+        self.workbench.model.as_ref()
+    }
+
+    pub fn is_running(&self) -> bool {
+        (self.workbench.analysis.as_ref()).is_some_and(Analysis::is_running)
+    }
+
+    /// What keeps the window from closing or its data from being taken: work on a worker
+    /// thread that would be lost.
+    pub fn busy(&self) -> Option<&'static str> {
+        let workbench = &self.workbench;
+        if self.loading.is_some() {
+            Some("it is loading")
+        } else if workbench.meshing.is_some() {
+            Some("it is meshing")
+        } else if self.is_running() {
+            Some("its analysis is running")
+        } else if workbench.bound_work.is_some() {
+            Some("it is keeping its result")
+        } else {
+            None
+        }
+    }
+
+    /// Whether a Solve is under way: meshing, running or keeping the result.
+    pub fn solving(&self) -> bool {
+        let workbench = &self.workbench;
+        workbench.solve_after_meshing
+            || (workbench.analysis.as_ref()).is_some_and(|a| a.open_when_done && !a.bound)
+            || workbench.bound_work.is_some()
+            || workbench.meshing.is_some()
+            || self.loading.is_some()
+    }
+
+    /// The data of the analysis as the project saves it; the results keep what was defined
+    /// on them, if they are open. `None` while the model is being built.
+    pub fn data(&mut self) -> Option<ProjectAnalysis> {
+        let workbench = &mut self.workbench;
+        let bound_file = workbench.model.as_ref()?.bound_results_file.clone();
+        let settings = (workbench.results.iter())
+            .find(|r| bound_file.as_ref() == Some(&r.path))
+            .map(|open| workbench.view_settings(open));
+        let model = workbench.model.as_mut()?;
+        if let Some(bound) = &mut model.bound_results
+            && let Some(settings) = settings
+        {
+            bound.settings = settings;
+        }
+        Some(ProjectAnalysis {
+            name: workbench.analysis_name.clone(),
+            geometry: model.geometry.clone(),
+            mesh: model.mesh.clone(),
+            model: model.fe.clone(),
+            mesh_inputs: model.mesh_inputs.clone(),
+            results: model.bound_results.clone(),
+            ..Default::default()
+        })
+    }
+
+    /// The project was saved to `path`: the analysis belongs to that file now.
+    pub fn saved(&mut self, path: &std::path::Path) {
+        let workbench = &mut self.workbench;
+        if let Some(model) = &mut workbench.model {
+            // Results being kept for the model follow it to the new file.
+            if let Some((kept_for, _)) = &mut workbench.bound_work
+                && *kept_for == model.path
+            {
+                *kept_for = path.to_path_buf();
+            }
+            model.path = path.to_path_buf();
+        }
+    }
+
+    /// Adds a line to the output of the window.
+    pub fn message(&mut self, line: String) {
+        self.workbench.output.push(line);
+    }
+
+    /// The state of the analysis' cells, found again at most twice a second.
+    pub fn status(&mut self) -> Option<crate::status::AnalysisStatus> {
+        self.workbench.cached_status()
     }
 
     /// Geometry > Import. Without a model, PrePoMax first asks for the new model's
@@ -363,6 +481,23 @@ impl PrepolixApp {
         if self.loading.is_some() {
             return;
         }
+        let picked = rfd::FileDialog::new()
+            .set_title("Import Geometry")
+            .add_filter(IMPORT_FILTER.0, IMPORT_FILTER.1)
+            .add_filter(GEOMETRY_FILTER.0, GEOMETRY_FILTER.1)
+            .add_filter("Input file (*.inp)", &["inp", "INP"])
+            .pick_files();
+        if let Some(paths) = picked.filter(|p| !p.is_empty()) {
+            self.import_paths(paths, ctx);
+        }
+    }
+
+    /// Imports CAD files into the geometry and the meshes of input files as mesh parts, as
+    /// Geometry > Import does; files dropped into the window come here too.
+    pub fn import_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
+        if self.loading.is_some() {
+            return;
+        }
         let sender = self.load_events.0.clone();
         let ctx = ctx.clone();
         let units = self.workbench.import_units();
@@ -375,15 +510,6 @@ impl PrepolixApp {
                 (m.geometry.clone(), taken, m.fe.properties.units)
             });
         std::thread::spawn(move || {
-            let picked = rfd::FileDialog::new()
-                .set_title("Import Geometry")
-                .add_filter(IMPORT_FILTER.0, IMPORT_FILTER.1)
-                .add_filter(GEOMETRY_FILTER.0, GEOMETRY_FILTER.1)
-                .add_filter("Input file (*.inp)", &["inp", "INP"])
-                .pick_files();
-            let Some(paths) = picked.filter(|p| !p.is_empty()) else {
-                return;
-            };
             let (meshes, paths): (Vec<PathBuf>, Vec<PathBuf>) =
                 paths.into_iter().partition(|p| !plx_mesher::is_cad_file(p));
             if paths.is_empty() {
@@ -409,20 +535,11 @@ impl PrepolixApp {
         });
     }
 
-    fn open_path(&mut self, path: PathBuf, ctx: &egui::Context) {
-        if self.loading.is_none() {
-            let (sender, ctx) = (self.load_events.0.clone(), ctx.clone());
-            let units = self.workbench.import_units();
-            std::thread::spawn(move || load_in_background(path, units, sender, ctx));
-        }
-    }
-
-    fn open_geometry(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
-        if self.loading.is_none() {
-            let (sender, ctx) = (self.load_events.0.clone(), ctx.clone());
-            let units = self.workbench.import_units();
-            std::thread::spawn(move || load_geometry_in_background(paths, units, sender, ctx));
-        }
+    /// Opens the results of the analysis, written by CalculiX or restored from the project.
+    fn open_results(&mut self, path: PathBuf, ctx: &egui::Context) {
+        let (sender, ctx) = (self.load_events.0.clone(), ctx.clone());
+        let units = self.workbench.import_units();
+        std::thread::spawn(move || load_in_background(path, units, sender, ctx));
     }
 
     fn handle_load_events(&mut self) {
@@ -441,6 +558,10 @@ impl PrepolixApp {
                     self.loading = None;
                     self.workbench.meshes_added(files);
                 }
+                LoadEvent::Project(path) => {
+                    self.loading = None;
+                    self.workbench.requests.push(Request::OpenProject(path));
+                }
             }
         }
     }
@@ -448,36 +569,35 @@ impl PrepolixApp {
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
-                let new = egui::Button::new("New …").shortcut_text("Ctrl+N");
-                if ui.add(new).clicked() {
+                let new = egui::Button::new("New Model …").shortcut_text("Ctrl+N");
+                let tip = "Replaces the model of this analysis with an empty one.";
+                if ui.add(new).on_hover_text(tip).clicked() {
                     self.workbench.new_model(false);
                 }
-                let open = egui::Button::new("Open …").shortcut_text("Ctrl+O");
-                if ui.add_enabled(self.loading.is_none(), open).clicked() {
-                    self.open_dialog(ui.ctx());
+                let import = egui::Button::new("Import …");
+                if ui.add_enabled(self.loading.is_none(), import).clicked() {
+                    self.import(ui.ctx());
                 }
                 let setup = self.workbench.setup_model().is_some();
-                let save = egui::Button::new("Save").shortcut_text("Ctrl+S");
-                if ui.add_enabled(setup, save).clicked() {
-                    self.workbench.save_project(false);
+                let save = egui::Button::new("Save Project").shortcut_text("Ctrl+S");
+                if ui.add(save).clicked() {
+                    self.workbench.requests.push(Request::Save(false));
                 }
-                let save_as = egui::Button::new("Save As …").shortcut_text("Ctrl+Shift+S");
-                if ui.add_enabled(setup, save_as).clicked() {
-                    self.workbench.save_project(true);
+                let save_as = egui::Button::new("Save Project As …").shortcut_text("Ctrl+Shift+S");
+                if ui.add(save_as).clicked() {
+                    self.workbench.requests.push(Request::Save(true));
                 }
-                let bound =
-                    (self.workbench.setup_model()).is_some_and(|m| m.bound_results.is_some());
-                let without = egui::Button::new("Save Without Results …");
+                let without = egui::Button::new("Save Project Without Results …");
                 if ui
-                    .add_enabled(bound, without)
+                    .add(without)
                     .on_hover_text(
-                        "Saves a copy with only the mesh and the model definition, without \
-                         the result bound to the analysis. The open project keeps its result.",
+                        "Saves a copy of the project with only the meshes and the model \
+                         definitions, without the results its analyses keep. The open \
+                         project keeps them.",
                     )
-                    .on_disabled_hover_text("No result is bound to the analysis.")
                     .clicked()
                 {
-                    self.workbench.save_without_results();
+                    self.workbench.requests.push(Request::SaveWithoutResults);
                 }
                 ui.separator();
                 let export = egui::Button::new("Export CalculiX Input File …");
@@ -511,7 +631,8 @@ impl PrepolixApp {
                     }
                 }
                 ui.separator();
-                if ui.button("Exit").clicked() {
+                let tip = "Closes the window; the analysis stays in the project.";
+                if ui.button("Close Analysis").on_hover_text(tip).clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
@@ -617,23 +738,13 @@ impl PrepolixApp {
                     let line = crate::help::open_user_guide();
                     self.workbench.output.push(line);
                 }
-                let updater = &mut self.workbench.updater;
-                if ui
-                    .add_enabled(!updater.busy(), egui::Button::new("Check for Updates …"))
-                    .on_hover_text("Asks GitHub whether a newer version of PrePoLix is available")
-                    .clicked()
-                {
-                    updater.check(ui.ctx(), true);
-                }
             });
-            // Version number, greyed out at the far right of the menu bar, with the symbol of
-            // a newer release left of it.
+            // Version number, greyed out at the far right of the menu bar.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.label(
                     egui::RichText::new(concat!("v", env!("CARGO_PKG_VERSION")))
                         .color(ui.visuals().weak_text_color()),
                 );
-                self.workbench.updater.indicator(ui);
             });
         });
     }
@@ -642,20 +753,17 @@ impl PrepolixApp {
     fn tool_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 1.0;
-            if icons::button(ui, Icon::New, "New (Ctrl+N)", true, false).clicked() {
+            let new = "New Model (Ctrl+N)";
+            if icons::button(ui, Icon::New, new, true, false).clicked() {
                 self.workbench.new_model(false);
             }
             let can_open = self.loading.is_none();
-            if icons::button(ui, Icon::Open, "Open (Ctrl+O)", can_open, false).clicked() {
-                self.open_dialog(ui.ctx());
-            }
             let import = "Import Geometry (STEP, IGES, BREP) or mesh (INP)";
             if icons::button(ui, Icon::Import, import, can_open, false).clicked() {
                 self.import(ui.ctx());
             }
-            let can_save = self.workbench.setup_model().is_some();
-            if icons::button(ui, Icon::Save, "Save (Ctrl+S)", can_save, false).clicked() {
-                self.workbench.save_project(false);
+            if icons::button(ui, Icon::Save, "Save Project (Ctrl+S)", true, false).clicked() {
+                self.workbench.requests.push(Request::Save(false));
             }
             ui.separator();
             if icons::button(ui, Icon::Fit, "Zoom to Fit", true, false).clicked() {
@@ -723,7 +831,75 @@ impl PrepolixApp {
             if icons::button(ui, Icon::RemoveAnnotations, tooltip, annotated, false).clicked() {
                 self.workbench.annotations(AnnotationCommand::DeleteAll);
             }
+            ui.separator();
+            self.solve_tools(ui);
         });
+    }
+
+    /// Solve, Stop and Monitor with the state of the solution, which replace PrePoMax's
+    /// analysis in the tree.
+    fn solve_tools(&mut self, ui: &mut egui::Ui) {
+        let workbench = &mut self.workbench;
+        let running = workbench
+            .analysis
+            .as_ref()
+            .is_some_and(Analysis::is_running);
+        let meshing = workbench.meshing.is_some();
+        let can_solve = workbench.model.is_some() && !running && !meshing && self.loading.is_none();
+        if icons::button(ui, Icon::Solve, SOLVE_TIP, can_solve, false).clicked() {
+            workbench.solve(ui.ctx());
+        }
+        let stoppable = running || workbench.solve_after_meshing;
+        if icons::button(ui, Icon::Stop, "Stop the analysis", stoppable, false).clicked() {
+            workbench.solve_after_meshing = false;
+            if let Some(analysis) = &mut workbench.analysis {
+                analysis.kill();
+            }
+        }
+        let monitor = workbench.analysis.as_ref().is_some_and(|a| a.monitor);
+        let tip = "Monitor: the output of CalculiX";
+        let has_run = workbench.analysis.is_some();
+        if icons::button(ui, Icon::Monitor, tip, has_run, monitor).clicked()
+            && let Some(analysis) = &mut workbench.analysis
+        {
+            analysis.monitor = !analysis.monitor;
+        }
+        ui.add_space(4.0);
+        let Some(status) = workbench.cached_status() else {
+            return;
+        };
+        let (state, text) = if meshing {
+            (crate::status::CellState::Running, "Meshing …".to_string())
+        } else {
+            let state = status.solution;
+            let text = match state {
+                crate::status::CellState::Missing => "Not solved".into(),
+                crate::status::CellState::UpToDate => "Solution up to date".into(),
+                crate::status::CellState::OutOfDate => "Solution out of date".into(),
+                crate::status::CellState::Running => "Solving …".into(),
+                crate::status::CellState::Failed => "Solved with errors".into(),
+                crate::status::CellState::NotUsed => String::new(),
+            };
+            (state, text)
+        };
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(18.0, 22.0), egui::Sense::hover());
+        crate::status::paint(ui.painter(), crate::status::symbol_rect(rect).min, state);
+        let label = ui.label(text);
+        if !status.stale_parts.is_empty() {
+            label.on_hover_text(format!(
+                "The mesh of {} is out of date.",
+                status.stale_parts.join(", ")
+            ));
+        }
+        // Problems CalculiX reported, explained in a window.
+        if !workbench.solver_findings.is_empty() {
+            let warning = ui
+                .add(egui::Button::new("Problems").small())
+                .on_hover_text("What CalculiX reported in the last run");
+            if warning.clicked() {
+                workbench.findings_window = Some(workbench.solver_findings.clone());
+            }
+        }
     }
 
     fn status_bar(&self, ui: &mut egui::Ui) {
@@ -801,6 +977,16 @@ impl PrepolixApp {
     }
 }
 
+/// Whether a file is a CalculiX results file (`.frd`).
+pub fn is_results_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("frd"))
+}
+
+/// Tooltip of Solve, in the tool bar and the Analysis menu.
+const SOLVE_TIP: &str = "Solve (F5): meshes the parts whose mesh is out of date, runs CalculiX \
+     if the results are missing or out of date, and keeps the new results.";
+
 /// Moves the parts of a model between two scales of an exploded view: through the levels of a
 /// sequential disassembly one after the other, else in one animation.
 fn animate_explosion(
@@ -848,6 +1034,11 @@ fn load_in_background(
     sender: Sender<LoadEvent>,
     ctx: egui::Context,
 ) {
+    if model::is_project_file(&path) {
+        let _ = sender.send(LoadEvent::Project(path));
+        ctx.request_repaint();
+        return;
+    }
     let _ = sender.send(LoadEvent::Started(path.clone()));
     ctx.request_repaint();
     let result = model::load(&path, units).map(Box::new);
@@ -932,37 +1123,28 @@ const STANDARD_VIEWS: [(StandardView, &str); 7] = [
     (StandardView::Isometric, "Isometric View"),
 ];
 
-/// Storage key of the project file open at exit, reopened at the next start.
-const LAST_PROJECT_KEY: &str = "last_project";
-
-/// The project file stored at the last exit, if it still exists. It is stored as an
-/// `Option`, so it has to be read back as one.
-fn stored_last_project(storage: &dyn eframe::Storage) -> Option<PathBuf> {
-    eframe::get_value::<Option<PathBuf>>(storage, LAST_PROJECT_KEY)
-        .flatten()
-        .filter(|path| path.is_file())
-}
-
-impl eframe::App for PrepolixApp {
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        eframe::set_value(storage, settings::STORAGE_KEY, &self.workbench.settings);
-        eframe::set_value(storage, LAST_PROJECT_KEY, &self.workbench.last_project());
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+impl AnalysisWindow {
+    /// Shows the window's content in `ui`, the whole of its viewport.
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
         self.handle_load_events();
         let ctx = ui.ctx().clone();
+        if self.loading.is_none() && self.workbench.model.is_some() {
+            let import = std::mem::take(&mut self.import_when_loaded);
+            if !import.is_empty() {
+                self.import_paths(import, &ctx);
+            }
+            if std::mem::take(&mut self.solve_when_loaded) {
+                self.workbench.solve(&ctx);
+            }
+        }
         // Under the System theme, the operating system may switch between light and dark.
         crate::style::sync(&ctx);
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::O)) {
-            self.open_dialog(&ctx);
-        }
         let shift_command = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
         if ctx.input_mut(|i| i.consume_key(shift_command, egui::Key::S)) {
-            self.workbench.save_project(true);
+            self.workbench.requests.push(Request::Save(true));
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
-            self.workbench.save_project(false);
+            self.workbench.requests.push(Request::Save(false));
         }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::N)) {
             self.workbench.new_model(false);
@@ -985,10 +1167,24 @@ impl eframe::App for PrepolixApp {
         });
         // Several CAD files dropped together are imported into one geometry, as with
         // Geometry > Import; otherwise the first file opens.
-        if dropped.len() > 1 && dropped.iter().all(|p| plx_mesher::is_cad_file(p)) {
-            self.open_geometry(dropped, &ctx);
-        } else if let Some(path) = dropped.into_iter().next() {
-            self.open_path(path, &ctx);
+        // A project opens in the project window; geometry and meshes are imported into the
+        // analysis. Results only come from the analysis itself.
+        let (projects, dropped): (Vec<PathBuf>, Vec<PathBuf>) =
+            dropped.into_iter().partition(|p| model::is_project_file(p));
+        if let Some(path) = projects.into_iter().next() {
+            self.workbench.requests.push(Request::OpenProject(path));
+        }
+        let (results, dropped): (Vec<PathBuf>, Vec<PathBuf>) =
+            dropped.into_iter().partition(|p| is_results_file(p));
+        if !results.is_empty() {
+            self.workbench.output.push(
+                "Results files are not opened on their own: the Results tab shows the \
+                 results of the analysis (Solve)."
+                    .into(),
+            );
+        }
+        if !dropped.is_empty() {
+            self.import_paths(dropped, &ctx);
         }
 
         egui::Panel::top("menu").show(ui, |ui| self.menu_bar(ui));
@@ -1101,7 +1297,7 @@ impl eframe::App for PrepolixApp {
         self.workbench.material_library_window(&ctx);
         self.workbench.mesh_setup_window(&ctx);
         self.workbench.mesh_item_window(&ctx);
-        self.workbench.poll_meshing();
+        self.workbench.poll_meshing(&ctx);
         self.workbench.field_output_window(&ctx);
         self.workbench.history_output_window(&ctx);
         self.workbench.hot_spot_dialog_window(&ctx);
@@ -1116,14 +1312,13 @@ impl eframe::App for PrepolixApp {
         self.workbench.poll_bound_results(&ctx);
         self.workbench.campbell_window(&ctx);
         if let Some(path) = self.workbench.open_results.take() {
-            self.open_path(path, &ctx);
+            self.open_results(path, &ctx);
         }
         self.workbench.update_highlight();
         self.workbench.update_symbols(&ctx);
         self.workbench.update_hot_spot_preview();
         self.workbench.findings_window(&ctx);
         self.workbench.settings_window(&ctx);
-        (self.workbench.updater).show(&ctx, &mut self.workbench.output);
         self.workbench.model_dialog_window(&ctx);
         if std::mem::take(&mut self.workbench.import_requested) {
             self.import_dialog(&ctx);
@@ -1171,26 +1366,6 @@ fn file_size(bytes: u64) -> String {
     } else {
         format!("{:.1} MB", kb / 1024.0)
     }
-}
-
-/// Asks for a project file to save `model` to, proposing its name with `suffix`.
-fn pick_project_file(model: &Model, title: &str, suffix: &str) -> Option<PathBuf> {
-    let stem = model
-        .path
-        .file_stem()
-        .map_or_else(|| "Project".into(), |s| s.to_string_lossy().into_owned());
-    let mut dialog = rfd::FileDialog::new()
-        .set_title(title)
-        .add_filter("PrePoLix project (*.plx)", &[model::PROJECT_EXTENSION])
-        .set_file_name(format!("{stem}{suffix}.{}", model::PROJECT_EXTENSION));
-    if let Some(dir) = model.path.parent() {
-        dialog = dialog.set_directory(dir);
-    }
-    let mut path = dialog.save_file()?;
-    if path.extension().is_none() {
-        path.set_extension(model::PROJECT_EXTENSION);
-    }
-    Some(path)
 }
 
 /// Geometry imported into a model that has nothing yet keeps its FE model and its file: a
@@ -1333,7 +1508,9 @@ impl Workbench {
                     let mut model = model;
                     // Results get the features of the FE model; reloaded ones keep their own
                     // and their paths.
-                    let previous = self.results.iter().position(|r| r.path == model.path);
+                    // The Results tab shows the results of the analysis: new results, e.g.
+                    // of another run, replace those shown.
+                    let previous = (!self.results.is_empty()).then_some(0);
                     if let Some(old) = previous.map(|i| &self.results[i].fe) {
                         model.fe.add_missing_features(old);
                         model.fe.result_paths = old.result_paths.clone();
@@ -1540,7 +1717,7 @@ impl Workbench {
             let hint = if view == TreeView::Geometry {
                 "Geometry > Import or drag a STEP, IGES or BREP file into the window."
             } else {
-                "File > Open (Ctrl+O) or drag a .plx, .inp or .frd file into the window."
+                "File > Open (Ctrl+O) or drag a .plx or .inp file into the window."
             };
             ui.weak(format!("{text}.\n{hint}"));
             ui.separator();
@@ -1549,26 +1726,6 @@ impl Workbench {
             .and_then(|m| m.geometry.as_ref())
             .map(|g| g.mesh_items.iter().map(|i| i.name.clone()).collect())
             .unwrap_or_default();
-        let bound = (self.model.as_ref()).and_then(|m| m.bound_results.as_ref());
-        let job = match (&self.analysis, bound) {
-            (Some(a), _) => Some(tree::JobState {
-                status: a.status(),
-                results: a.results().is_some(),
-                bound: bound.is_some(),
-                ran: true,
-            }),
-            (None, Some(bound)) => Some(tree::JobState {
-                status: if bound.with_errors {
-                    plx_job::JobStatus::FailedWithResults
-                } else {
-                    plx_job::JobStatus::Completed
-                },
-                results: true,
-                bound: true,
-                ran: false,
-            }),
-            (None, None) => None,
-        };
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
             TreeView::Geometry => self.geometry.as_mut(),
@@ -1579,7 +1736,6 @@ impl Workbench {
             view,
             shown,
             &mesh_items,
-            job,
             &self.solver_findings,
             &mut self.tree,
         );
@@ -1685,9 +1841,6 @@ impl Workbench {
         {
             // The selection stays, but master and slave colours change places.
             self.highlighted = None;
-        }
-        if let Some(action) = response.analysis {
-            self.analysis_action(action);
         }
         if response.material_library {
             self.open_material_library();
@@ -2568,14 +2721,18 @@ impl Workbench {
         self.mesh_failure.clear();
     }
 
-    fn poll_meshing(&mut self) {
+    fn poll_meshing(&mut self, ctx: &egui::Context) {
         let Some(result) = self.meshing.as_ref().and_then(MeshingJob::poll) else {
             return;
         };
-        let started = self.meshing.take().map(|job| job.started);
+        let Some(job) = self.meshing.take() else {
+            return;
+        };
+        let started = Some(job.started);
         let Some(model) = self.model.as_mut() else {
             return;
         };
+        let solve = std::mem::take(&mut self.solve_after_meshing);
         match result {
             Ok(generated) => {
                 let had_mesh = model.mesh.element_count() > 0;
@@ -2585,6 +2742,12 @@ impl Workbench {
                     if let Err(error) = space.prepare_generated_mesh(&mut part.mesh) {
                         self.output.push(format!("Meshing failed: {error}"));
                         return;
+                    }
+                    // What each part is meshed from, to tell when its mesh is out of date.
+                    for p in &part.mesh.parts {
+                        let input =
+                            plx_model::fingerprint::mesh_input(&job.geometry, space, &p.name);
+                        model.mesh_inputs.insert(p.name.clone(), input);
                     }
                     for warning in &part.warnings {
                         self.output.push(format!("Gmsh: {warning}"));
@@ -2627,6 +2790,9 @@ impl Workbench {
                 self.results_changed = true;
                 if !had_mesh {
                     self.view_command = Some(ViewCommand::Fit);
+                }
+                if solve {
+                    self.solve(ctx);
                 }
             }
             Err(error) => {
@@ -2806,28 +2972,33 @@ impl Workbench {
 
     fn analysis_menu(&mut self, ui: &mut egui::Ui) {
         let running = self.analysis.as_ref().is_some_and(Analysis::is_running);
-        let can_start = self.setup_model().is_some() && !running;
+        let can_start = self.setup_model().is_some() && !running && self.meshing.is_none();
+        let solve = egui::Button::new("Solve").shortcut_text("F5");
         if ui
-            .add_enabled(
-                can_start,
-                egui::Button::new("Run Analysis").shortcut_text("F5"),
-            )
+            .add_enabled(can_start, solve)
+            .on_hover_text(SOLVE_TIP)
             .clicked()
         {
-            self.start_analysis(false);
+            self.solve(ui.ctx());
+        }
+        if ui
+            .add_enabled(can_start, egui::Button::new("Solve Again"))
+            .on_hover_text("Runs CalculiX even if the results are up to date.")
+            .clicked()
+        {
+            self.start_analysis(false, true);
         }
         if ui
             .add_enabled(can_start, egui::Button::new("Check Model"))
             .clicked()
         {
-            self.start_analysis(true);
+            self.start_analysis(true, false);
         }
-        if ui
-            .add_enabled(running, egui::Button::new("Kill Analysis"))
-            .clicked()
+        if ui.add_enabled(running, egui::Button::new("Stop")).clicked()
             && let Some(analysis) = &mut self.analysis
         {
             analysis.kill();
+            self.solve_after_meshing = false;
         }
         if ui
             .add_enabled(self.analysis.is_some(), egui::Button::new("Monitor"))
@@ -2836,15 +3007,30 @@ impl Workbench {
         {
             analysis.monitor = true;
         }
-        let results = self.analysis.as_ref().and_then(Analysis::results);
+        let kept = (self.model.as_ref()).is_some_and(|m| m.bound_results.is_some());
         if ui
-            .add_enabled(
-                !running && results.is_some(),
-                egui::Button::new("Open Results"),
-            )
+            .add_enabled(!running && kept, egui::Button::new("Open Results"))
             .clicked()
         {
-            self.open_analysis_results();
+            self.open_bound_results();
+        }
+        if ui
+            .add_enabled(!running && kept, egui::Button::new("Remove Results"))
+            .on_hover_text(
+                "Drops the results the analysis keeps; saving the project leaves them out.",
+            )
+            .clicked()
+            && let Some(model) = &mut self.model
+            && model.bound_results.take().is_some()
+        {
+            model.bound_results_file = None;
+            self.output
+                .push("Results removed; saving the project leaves them out.".into());
+        }
+        ui.separator();
+        if ui.button("Solver Settings …").clicked() {
+            let window = SettingsWindow::with_page(&self.settings, settings::Page::Solver);
+            self.settings_window = Some(window);
         }
         ui.separator();
         let rotor = self
@@ -2891,44 +3077,6 @@ impl Workbench {
         });
         window.visible = open || window.is_running();
         self.campbell = Some(window);
-    }
-
-    /// An entry of the analysis' context menu in the tree.
-    fn analysis_action(&mut self, action: AnalysisAction) {
-        match action {
-            AnalysisAction::Edit => {
-                let window = SettingsWindow::with_page(&self.settings, settings::Page::Solver);
-                self.settings_window = Some(window);
-            }
-            AnalysisAction::Run => self.start_analysis(false),
-            AnalysisAction::CheckModel => self.start_analysis(true),
-            AnalysisAction::Monitor => match &mut self.analysis {
-                Some(analysis) => analysis.monitor = true,
-                None => self.output.push(
-                    "The analysis has not been started yet (Analysis > Run Analysis).".into(),
-                ),
-            },
-            AnalysisAction::Results => match self.analysis.as_ref().and_then(Analysis::results) {
-                Some(_) => self.open_analysis_results(),
-                None => self.open_bound_results(),
-            },
-            AnalysisAction::RemoveBoundResult => {
-                if let Some(model) = &mut self.model
-                    && model.bound_results.take().is_some()
-                {
-                    model.bound_results_file = None;
-                    self.output.push(
-                        "Bound result removed; saving the project leaves it out of the file."
-                            .into(),
-                    );
-                }
-            }
-            AnalysisAction::Kill => {
-                if let Some(analysis) = &mut self.analysis {
-                    analysis.kill();
-                }
-            }
-        }
     }
 
     /// Opens the results of the last run and binds them to the project, once per run.
@@ -2989,20 +3137,26 @@ impl Workbench {
         // A result removed from the project is not bound again until the next run.
         analysis.bound = true;
         let with_errors = analysis.status() == plx_job::JobStatus::FailedWithResults;
+        let input = analysis.input;
         let Some(model) = &self.model else {
             return;
         };
         // Compressing large results takes seconds: done beside the GUI.
         let (sender, receiver) = std::sync::mpsc::channel();
         let files = ["inp", "frd", "dat"].map(|e| frd.with_extension(e));
+        let name = self.analysis_name.clone();
         std::thread::spawn(move || {
-            let bound = plx_io::project::bind_results(tree::ANALYSIS_NAME, &files, with_errors)
-                .map(Box::new)
+            let bound = plx_io::project::bind_results(&name, &files, with_errors)
+                .map(|mut bound| {
+                    // What was solved, to tell when the results are out of date.
+                    bound.input = Some(input);
+                    Box::new(bound)
+                })
                 .map_err(|e| e.to_string());
             let _ = sender.send(BoundWork::Bound(frd, bound));
         });
         self.output
-            .push(format!("Binding the result of {} …", tree::ANALYSIS_NAME));
+            .push(format!("Keeping the results of {} …", self.analysis_name));
         self.bound_work = Some((model.path.clone(), receiver));
     }
 
@@ -3011,7 +3165,7 @@ impl Workbench {
         if self.bound_work.is_some() {
             return;
         }
-        let work_dir = self.settings.solver.work_dir();
+        let dir = self.work_dir().join("Kept_Results");
         let Some(model) = &self.model else {
             return;
         };
@@ -3022,11 +3176,6 @@ impl Workbench {
             self.open_results = Some(path.clone());
             return;
         }
-        let stem = model
-            .path
-            .file_stem()
-            .map_or_else(|| "Project".into(), |s| s.to_string_lossy().into_owned());
-        let dir = work_dir.join("Bound_Results").join(stem);
         let (sender, receiver) = std::sync::mpsc::channel();
         let bound = bound.clone();
         std::thread::spawn(move || {
@@ -3059,7 +3208,7 @@ impl Workbench {
         match (work, model) {
             (BoundWork::Bound(frd, Ok(bound)), Some(model)) => {
                 self.output.push(format!(
-                    "Result bound to {}: {} of files, {} in the project file once it is saved",
+                    "Results of {} kept: {} of files, {} in the project file once it is saved",
                     bound.analysis,
                     file_size(bound.size()),
                     file_size(bound.stored_size())
@@ -3070,24 +3219,91 @@ impl Workbench {
             }
             (BoundWork::Restored(analysis, dir, Ok(file)), Some(model)) => {
                 self.output.push(format!(
-                    "Result bound to {analysis} restored to {}",
+                    "Results of {analysis} restored to {}",
                     dir.display()
                 ));
                 model.bound_results_file = Some(file.clone());
                 self.open_results = Some(file);
             }
             (BoundWork::Bound(_, Err(error)), _) => {
-                self.output.push(format!("Result not bound: {error}"));
+                self.output.push(format!("Results not kept: {error}"));
             }
             (BoundWork::Restored(_, _, Err(error)), _) => {
                 self.output
-                    .push(format!("Bound result not restored: {error}"));
+                    .push(format!("Kept results not restored: {error}"));
             }
             (_, None) => {}
         }
     }
 
-    fn start_analysis(&mut self, check_model: bool) {
+    /// The folder the analysis runs in: its own in the project's folder of the work
+    /// directory, so that the analyses of a project do not overwrite each other's files.
+    fn work_dir(&self) -> PathBuf {
+        let mut dir = self.settings.solver.work_dir();
+        if !self.project_folder.is_empty() {
+            dir.push(&self.project_folder);
+        }
+        dir.join(crate::analysis::job_name(&self.analysis_name))
+    }
+
+    /// The state of the cells of the analysis, see [`crate::status`].
+    pub fn status(&self) -> Option<crate::status::AnalysisStatus> {
+        let model = self.model.as_ref()?;
+        Some(crate::status::analysis_status(
+            model.geometry.as_ref(),
+            &model.mesh,
+            &model.fe,
+            &model.mesh_inputs,
+            model.bound_results.as_ref(),
+            self.analysis.as_ref().is_some_and(Analysis::is_running),
+        ))
+    }
+
+    /// The state of the cells as last found, found again when older than half a second.
+    fn cached_status(&mut self) -> Option<crate::status::AnalysisStatus> {
+        let fresh = (self.status.as_ref())
+            .filter(|(at, _)| at.elapsed() < std::time::Duration::from_millis(500));
+        if let Some((_, status)) = fresh {
+            return Some(status.clone());
+        }
+        let status = self.status()?;
+        self.status = Some((std::time::Instant::now(), status.clone()));
+        Some(status)
+    }
+
+    /// Ansys Workbench's Update: meshes the parts whose mesh is out of date, then solves if
+    /// the results are missing or out of date, and keeps the new results. What is up to
+    /// date stays as it is.
+    fn solve(&mut self, ctx: &egui::Context) {
+        if self.meshing.is_some() || self.analysis.as_ref().is_some_and(Analysis::is_running) {
+            return;
+        }
+        let Some(status) = self.status() else {
+            return;
+        };
+        let has_geometry = (self.model.as_ref()).is_some_and(|m| m.geometry.is_some());
+        let remesh = match status.mesh {
+            crate::status::CellState::Missing if has_geometry => Some(None),
+            crate::status::CellState::OutOfDate => Some(Some(status.stale_parts.clone())),
+            _ => None,
+        };
+        if let Some(parts) = remesh {
+            self.solve_after_meshing = true;
+            self.generate_mesh(ctx, parts);
+            return;
+        }
+        self.solve_after_meshing = false;
+        if status.needs_solve() {
+            self.start_analysis(false, true);
+        } else {
+            self.output.push(format!(
+                "{} is up to date; nothing to solve.",
+                self.analysis_name
+            ));
+        }
+    }
+
+    fn start_analysis(&mut self, check_model: bool, keep_results: bool) {
         if self.analysis.as_ref().is_some_and(Analysis::is_running) {
             return;
         }
@@ -3104,8 +3320,18 @@ impl Workbench {
             return;
         }
         let findings = model.findings();
-        match Analysis::start(&self.settings.solver, model, default_solver, check_model) {
+        let work_dir = self.work_dir();
+        let name = &self.analysis_name;
+        match Analysis::start(
+            &self.settings.solver,
+            model,
+            default_solver,
+            check_model,
+            name,
+            &work_dir,
+        ) {
             Ok(mut analysis) => {
+                analysis.open_when_done = keep_results && !check_model;
                 // Problems the checks found go into the monitor first, so that an abort is
                 // explained even before CalculiX says anything.
                 for finding in
@@ -3124,7 +3350,7 @@ impl Workbench {
                     } else {
                         "Analysis"
                     },
-                    self.settings.solver.work_dir().display()
+                    work_dir.display()
                 ));
                 self.solver_findings.clear();
                 // CalculiX skips keywords it does not know with only a warning; tested on
@@ -3156,7 +3382,7 @@ impl Workbench {
     /// Polls the running analysis and shows its monitor.
     fn run_analysis(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
-            self.start_analysis(false);
+            self.solve(ctx);
         }
         let Some(analysis) = &mut self.analysis else {
             return;
@@ -3187,78 +3413,24 @@ impl Workbench {
                 }
             }
         }
+        // Solve keeps and opens the results of its run once it ends.
+        let done = !analysis.is_running() && analysis.open_when_done && !analysis.bound;
+        let with_results = analysis.results().is_some()
+            && matches!(
+                analysis.status(),
+                plx_job::JobStatus::Completed | plx_job::JobStatus::FailedWithResults
+            );
+        if done {
+            analysis.open_when_done = false;
+            if with_results {
+                self.open_analysis_results();
+            }
+            return;
+        }
         if analysis.monitor
             && let MonitorEvent::OpenResults = analysis.window(ctx)
         {
             self.open_analysis_results();
-        }
-    }
-
-    /// The project file of the open model, if it was opened from or saved to one that exists.
-    /// Unsaved models and models from input or result files are not reopened at the next start.
-    fn last_project(&self) -> Option<PathBuf> {
-        self.model
-            .as_ref()
-            .filter(|model| model.is_project() && model.path.is_file())
-            .map(|model| model.path.clone())
-    }
-
-    /// Saves mesh and FE model as a project, to the project file it came from, or to a file
-    /// the user picks for a model opened from an input file or with `save_as`.
-    fn save_project(&mut self, save_as: bool) {
-        let Some(model) = self.model.as_mut() else {
-            return;
-        };
-        let path = if model.is_project() && !save_as {
-            model.path.clone()
-        } else {
-            let Some(path) = pick_project_file(model, "Save Project", "") else {
-                return;
-            };
-            path
-        };
-        // The bound results keep what the user defined on them, if they are open.
-        let bound_file = model.bound_results_file.clone();
-        let settings = (self.results.iter())
-            .find(|r| bound_file.as_ref() == Some(&r.path))
-            .map(|open| self.view_settings(open));
-        let Some(model) = self.model.as_mut() else {
-            return;
-        };
-        if let Some(bound) = &mut model.bound_results
-            && let Some(settings) = settings
-        {
-            bound.settings = settings;
-        }
-        let geometry = model.geometry.as_ref();
-        let results = model.bound_results.as_ref();
-        match plx_io::project::save_project(&path, geometry, &model.mesh, &model.fe, results) {
-            Ok(()) => {
-                self.output
-                    .push(timestamped(format!("{} saved", path.display())));
-                model.path = path;
-            }
-            Err(error) => self.output.push(format!("Not saved: {error}")),
-        }
-    }
-
-    /// Saves a copy of the project without the bound results, only mesh and definition, for
-    /// example to send it; the open project stays on its own file and keeps its results.
-    fn save_without_results(&mut self) {
-        let Some(model) = self.model.as_ref() else {
-            return;
-        };
-        let Some(path) = pick_project_file(model, "Save Without Results", "-without-results")
-        else {
-            return;
-        };
-        let geometry = model.geometry.as_ref();
-        match plx_io::project::save_project(&path, geometry, &model.mesh, &model.fe, None) {
-            Ok(()) => self.output.push(timestamped(format!(
-                "{} saved without results",
-                path.display()
-            ))),
-            Err(error) => self.output.push(format!("Not saved: {error}")),
         }
     }
 
@@ -3282,7 +3454,10 @@ impl Workbench {
         let picked = rfd::FileDialog::new()
             .set_title("Export CalculiX Input File")
             .add_filter("Input file (*.inp)", &["inp"])
-            .set_file_name(format!("{}.inp", crate::tree::ANALYSIS_NAME))
+            .set_file_name(format!(
+                "{}.inp",
+                crate::analysis::job_name(&self.analysis_name)
+            ))
             .save_file();
         if let Some(path) = picked {
             // A submodel's global results go next to the input file, which names them.
@@ -5509,10 +5684,13 @@ impl Workbench {
     /// PrePoMax's File > New: asks for the model space and unit system of the new model,
     /// with the last choice proposed. `then_import` opens the geometry import afterwards.
     fn new_model(&mut self, then_import: bool) {
-        self.model_dialog = Some(ModelPropertiesDialog::new_model(
-            self.settings.new_model.clone(),
-            then_import,
-        ));
+        // The model space and units are the project's, those of the model replaced.
+        let mut proposed = self.settings.new_model.clone();
+        if let Some(model) = &self.model {
+            proposed.space = model.fe.properties.space;
+            proposed.units = model.fe.properties.units;
+        }
+        self.model_dialog = Some(ModelPropertiesDialog::new_model(proposed, then_import));
     }
 
     fn edit_model_properties(&mut self) {
@@ -5535,7 +5713,26 @@ impl Workbench {
             DialogResult::Open => return,
             DialogResult::Cancel => {}
             DialogResult::Ok(properties) if editing => {
-                self.set_model_properties(properties, convert)
+                let space_and_units =
+                    (self.model.as_ref()).map(|m| (m.fe.properties.space, m.fe.properties.units));
+                let changed = space_and_units != Some((properties.space, properties.units));
+                // The project applies a new model space or unit system to all its analyses.
+                if changed {
+                    self.requests.push(Request::SpaceAndUnits(
+                        properties.space,
+                        properties.units,
+                        convert,
+                    ));
+                }
+                let properties = match &self.model {
+                    Some(model) => plx_model::ModelProperties {
+                        space: model.fe.properties.space,
+                        units: model.fe.properties.units,
+                        ..properties
+                    },
+                    None => properties,
+                };
+                self.set_model_properties(properties, false)
             }
             DialogResult::Ok(properties) => {
                 // New models propose the space and units, never a submodel's global results.
@@ -5544,6 +5741,15 @@ impl Workbench {
                     global_results: None,
                     ..properties.clone()
                 };
+                let space_and_units =
+                    (self.model.as_ref()).map(|m| (m.fe.properties.space, m.fe.properties.units));
+                if space_and_units.is_some_and(|s| s != (properties.space, properties.units)) {
+                    self.requests.push(Request::SpaceAndUnits(
+                        properties.space,
+                        properties.units,
+                        false,
+                    ));
+                }
                 self.create_model(properties);
                 self.import_requested = then_import;
             }
@@ -6442,7 +6648,6 @@ fn timestamped(message: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     #[test]
     fn import_into_saved_new_model_keeps_the_project_file() {
@@ -6455,40 +6660,7 @@ mod tests {
             plx_mesh::FeMesh::default(),
         );
         take_over_empty_model(&mut imported, &saved);
-        assert!(imported.is_project());
+        assert_eq!(imported.path, std::path::Path::new("/tmp/neu.plx"));
         assert_eq!(imported.path, saved.path);
-    }
-
-    #[derive(Default)]
-    struct MemoryStorage(HashMap<String, String>);
-
-    impl eframe::Storage for MemoryStorage {
-        fn get_string(&self, key: &str) -> Option<String> {
-            self.0.get(key).cloned()
-        }
-
-        fn set_string(&mut self, key: &str, value: String) {
-            self.0.insert(key.to_owned(), value);
-        }
-
-        fn remove_string(&mut self, key: &str) {
-            self.0.remove(key);
-        }
-
-        fn flush(&mut self) {}
-    }
-
-    #[test]
-    fn the_project_stored_at_exit_is_read_back() {
-        let path = std::env::temp_dir().join("prepolix_test_last_project.plx");
-        std::fs::write(&path, "").unwrap();
-        let mut storage = MemoryStorage::default();
-        eframe::set_value(&mut storage, LAST_PROJECT_KEY, &Some(path.clone()));
-        assert_eq!(stored_last_project(&storage), Some(path.clone()));
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(stored_last_project(&storage), None);
-        eframe::set_value(&mut storage, LAST_PROJECT_KEY, &None::<PathBuf>);
-        assert_eq!(stored_last_project(&storage), None);
-        assert_eq!(stored_last_project(&MemoryStorage::default()), None);
     }
 }

@@ -28,6 +28,12 @@ const SMOOTH_ANGLE_DEG: f64 = 60.0;
 /// Extension of prepolix project files.
 pub const PROJECT_EXTENSION: &str = "plx";
 
+/// Whether a file is a prepolix project, by its extension.
+pub fn is_project_file(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case(PROJECT_EXTENSION))
+}
+
 /// Colour of selected faces and nodes, PrePoMax's highlight red.
 pub const HIGHLIGHT_COLOR: [f32; 3] = [1.0, 0.0, 0.0];
 
@@ -71,6 +77,9 @@ pub struct Model {
     pub geometry: Option<Geometry>,
     /// Results of the analysis bound to the project, saved with it.
     pub bound_results: Option<plx_io::project::BoundResults>,
+    /// Fingerprint of the meshing inputs of each part of the geometry when it was last
+    /// meshed; a part whose inputs differ now has an out-of-date mesh.
+    pub mesh_inputs: BTreeMap<String, u64>,
     /// Where the bound results were written to be opened, once they were.
     pub bound_results_file: Option<PathBuf>,
     /// The display of CAD geometry rather than a mesh: element edges are not drawn.
@@ -254,78 +263,63 @@ fn adopt_input_parts(mesh: &mut FeMesh, input: &Path) -> bool {
     }
 }
 
-/// Loads a project, input, results or CAD file. CAD geometry is read in the length unit of
-/// `units`, the unit system of the model it goes into.
+/// Loads an input, results or CAD file. CAD geometry is read in the length unit of `units`,
+/// the unit system of the model it goes into. Project files hold several analyses and are
+/// opened by the project window.
 pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     let start = Instant::now();
     let extension = |e: &str| path.extension().is_some_and(|x| x.eq_ignore_ascii_case(e));
     if plx_mesher::is_cad_file(path) {
         return load_geometry(&[path.to_path_buf()], units);
     }
+    if extension(PROJECT_EXTENSION) {
+        return Err(format!(
+            "{} is a project; it opens in the project window",
+            path.display()
+        ));
+    }
     let mut fe = FeModel::default();
-    let mut geometry = None;
-    let mut bound_results = None;
     let mut contact = None;
-    let (mesh, mut warnings, skipped_keywords, included_files, increments) =
-        if extension(PROJECT_EXTENSION) {
-            let project = plx_io::project::read_project(path).map_err(|e| e.to_string())?;
-            fe = project.model;
-            geometry = project.geometry;
-            bound_results = project.results;
-            (project.mesh, Vec::new(), BTreeMap::new(), 0, None)
-        } else if extension("frd") {
-            let FrdImport {
-                mut mesh,
-                increments,
-                warnings,
-                date,
-                time,
-                ..
-            } = read_frd(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            // The results group the elements by material; the input it ran, named like the
-            // results, knows the parts.
-            contact = companion_input(path).map(|input| adopt_input_parts(&mut mesh, &input));
-            (
-                mesh,
-                warnings,
-                BTreeMap::new(),
-                0,
-                Some((increments, date, time)),
-            )
-        } else {
-            let InpImport {
-                mesh,
-                warnings,
-                skipped_keywords,
-                files,
-                ..
-            } = read_inp(path).map_err(|e| e.to_string())?;
-            // Plane stress, plane strain or axisymmetric elements make a 2D model.
-            fe.properties.space = plx_model::ModelSpace::of_mesh(&mesh);
-            let included = files.len().saturating_sub(1);
-            (mesh, warnings, skipped_keywords, included, None)
-        };
-    if mesh.element_count() == 0 && geometry.is_none() {
+    let (mesh, warnings, skipped_keywords, included_files, increments) = if extension("frd") {
+        let FrdImport {
+            mut mesh,
+            increments,
+            warnings,
+            date,
+            time,
+            ..
+        } = read_frd(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        // The results group the elements by material; the input it ran, named like the
+        // results, knows the parts.
+        contact = companion_input(path).map(|input| adopt_input_parts(&mut mesh, &input));
+        (
+            mesh,
+            warnings,
+            BTreeMap::new(),
+            0,
+            Some((increments, date, time)),
+        )
+    } else {
+        let InpImport {
+            mesh,
+            warnings,
+            skipped_keywords,
+            files,
+            ..
+        } = read_inp(path).map_err(|e| e.to_string())?;
+        // Plane stress, plane strain or axisymmetric elements make a 2D model.
+        fe.properties.space = plx_model::ModelSpace::of_mesh(&mesh);
+        let included = files.len().saturating_sub(1);
+        (mesh, warnings, skipped_keywords, included, None)
+    };
+    if mesh.element_count() == 0 {
         return Err(format!(
             "{} contains no elements that can be displayed",
             path.display()
         ));
     }
-    // A project's geometry is shown on the Geometry tab; without Gmsh only its mesh is.
-    let geometry_view = match &geometry {
-        Some(geometry) => match plx_mesher::tessellate(geometry) {
-            Ok(display) => Some(Model::geometry_view(path, display)),
-            Err(error) => {
-                warnings.push(format!("Geometry cannot be displayed: {error}"));
-                None
-            }
-        },
-        None => None,
-    };
     let mut model = Model::new(path, mesh);
     model.fe = fe;
-    model.geometry = geometry;
-    model.bound_results = bound_results;
     model.warnings = warnings;
     model.skipped_keywords = skipped_keywords;
     model.included_files = included_files;
@@ -357,7 +351,85 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
             }
         }
     }
-    // A project without a mesh yet opens on its geometry.
+    let render_meshes = model.render_meshes();
+    for (part, render) in model.parts.iter_mut().zip(&render_meshes) {
+        part.bounds = render.bounds();
+    }
+    model.load_time = start.elapsed();
+    Ok(LoadedModel {
+        model,
+        render_meshes,
+        geometry_view: None,
+    })
+}
+
+/// Gives a closed analysis of a project the project's model space and unit system, as an
+/// open one takes them over in its window; `convert` converts its values, mesh and geometry
+/// into the new units. Returns notes on what could not be converted.
+pub fn convert_analysis(
+    data: &mut plx_io::project::ProjectAnalysis,
+    space: plx_model::ModelSpace,
+    units: UnitSystem,
+    convert: bool,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    let old = data.model.properties.clone();
+    if convert && old.units != units {
+        let conversion = plx_model::convert::Conversion::new(old.units, units);
+        notes.extend(data.model.convert_units(units));
+        let factor = conversion.length_factor();
+        if factor != 1.0 {
+            data.mesh.scale(factor);
+            if let Some(geometry) = &mut data.geometry {
+                geometry.convert_sizes(&conversion);
+                match plx_mesher::scale_geometry(geometry, factor) {
+                    Ok(scaled) => *geometry = scaled,
+                    Err(error) => notes.push(format!(
+                        "{}: geometry could not be converted: {error}",
+                        data.name
+                    )),
+                }
+            }
+        }
+    }
+    if old.space != space {
+        space.convert_mesh(&mut data.mesh);
+    }
+    data.model.properties.space = space;
+    data.model.properties.units = units;
+    notes
+}
+
+/// Builds the model of an analysis of a project; `path` is the project file. An analysis
+/// without a mesh opens on its geometry, if it has one.
+pub fn load_analysis(path: &Path, analysis: plx_io::project::ProjectAnalysis) -> LoadedModel {
+    let start = Instant::now();
+    let plx_io::project::ProjectAnalysis {
+        geometry,
+        mesh,
+        model: fe,
+        mesh_inputs,
+        results,
+        ..
+    } = analysis;
+    let mut warnings = Vec::new();
+    // The geometry is shown on the Geometry tab; without Gmsh only the mesh is.
+    let geometry_view = match &geometry {
+        Some(geometry) => match plx_mesher::tessellate(geometry) {
+            Ok(display) => Some(Model::geometry_view(path, display)),
+            Err(error) => {
+                warnings.push(format!("Geometry cannot be displayed: {error}"));
+                None
+            }
+        },
+        None => None,
+    };
+    let mut model = Model::new(path, mesh);
+    model.fe = fe;
+    model.geometry = geometry;
+    model.bound_results = results;
+    model.mesh_inputs = mesh_inputs;
+    model.warnings = warnings;
     let render_meshes = match &geometry_view {
         Some(view) if model.mesh.element_count() == 0 => view.render_meshes(),
         _ => model.render_meshes(),
@@ -366,11 +438,11 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
         part.bounds = render.bounds();
     }
     model.load_time = start.elapsed();
-    Ok(LoadedModel {
+    LoadedModel {
         model,
         render_meshes,
         geometry_view,
-    })
+    }
 }
 
 impl Model {
@@ -482,6 +554,7 @@ impl Model {
             fe: FeModel::default(),
             geometry: None,
             bound_results: None,
+            mesh_inputs: BTreeMap::new(),
             bound_results_file: None,
             is_geometry: false,
             cad_entities: Vec::new(),
@@ -1421,14 +1494,6 @@ impl Model {
         (-self.origin).as_vec3()
     }
 
-    /// Whether the model was opened from or saved to a project file, so saving needs no
-    /// file dialog.
-    pub fn is_project(&self) -> bool {
-        self.path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case(PROJECT_EXTENSION))
-    }
-
     pub fn file_name(&self) -> String {
         self.path.file_name().map_or_else(
             || self.path.display().to_string(),
@@ -1553,20 +1618,36 @@ mod tests {
         assert_eq!(model.parts[0].element_types, [("C3D8I".to_string(), 40)]);
     }
 
+    /// Saves the model as the only analysis of a project and opens that analysis again.
+    fn save_and_reopen(path: &Path, model: &Model) -> LoadedModel {
+        let project = plx_io::project::Project {
+            analyses: vec![plx_io::project::ProjectAnalysis {
+                id: 1,
+                name: "Analysis-1".into(),
+                geometry: model.geometry.clone(),
+                mesh: model.mesh.clone(),
+                model: model.fe.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        plx_io::project::save_project(path, &project).unwrap();
+        let mut project = plx_io::project::read_project(path).unwrap();
+        load_analysis(path, project.analyses.remove(0))
+    }
+
     #[test]
     fn projects_open_with_their_fe_model() {
         let mut model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::MmTonSC)
             .unwrap()
             .model;
-        assert!(!model.is_project());
         model.fe.steps.push(plx_model::Step::new_static("Step-1"));
         let dir = std::env::temp_dir().join(format!("prepolix-model-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("platte.plx");
-        plx_io::project::save_project(&path, None, &model.mesh, &model.fe, None).unwrap();
-        let loaded = load(&path, UnitSystem::MmTonSC).unwrap();
+        let loaded = save_and_reopen(&path, &model);
         std::fs::remove_dir_all(&dir).unwrap();
-        assert!(loaded.model.is_project());
+        assert_eq!(loaded.model.path, path);
         assert!(!loaded.model.is_results());
         assert_eq!(loaded.model.fe, model.fe);
         assert_eq!(loaded.model.parts.len(), 2);
@@ -1743,9 +1824,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("prepolix-geometry-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bloecke.plx");
-        let saved = model.geometry.as_ref();
-        plx_io::project::save_project(&path, saved, &model.mesh, &model.fe, None).unwrap();
-        let reopened = load(&path, UnitSystem::MmTonSC).unwrap();
+        let reopened = save_and_reopen(&path, &model);
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(reopened.model.geometry, Some(geometry));
         assert!(!model.mesh.cad.is_empty());

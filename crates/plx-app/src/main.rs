@@ -32,6 +32,7 @@ mod numeric;
 mod overlay;
 mod path_plot;
 mod portable;
+mod project;
 mod properties;
 mod query;
 mod results;
@@ -42,6 +43,7 @@ mod settings;
 mod setup;
 mod solver_check;
 mod sound;
+mod status;
 mod style;
 mod symbols;
 mod transformation_dialog;
@@ -71,7 +73,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "prepolix",
         options,
-        Box::new(|cc| Ok(Box::new(app::PrepolixApp::new(cc)?))),
+        Box::new(|cc| Ok(Box::new(project::ProjectApp::new(cc)?))),
     )
 }
 
@@ -134,12 +136,14 @@ mod tests {
             ("model.rs", include_str!("model.rs")),
             ("model_properties.rs", include_str!("model_properties.rs")),
             ("overlay.rs", include_str!("overlay.rs")),
+            ("project.rs", include_str!("project.rs")),
             ("properties.rs", include_str!("properties.rs")),
             ("results.rs", include_str!("results.rs")),
             ("selection.rs", include_str!("selection.rs")),
             ("settings.rs", include_str!("settings.rs")),
             ("setup.rs", include_str!("setup.rs")),
             ("solver_check.rs", include_str!("solver_check.rs")),
+            ("status.rs", include_str!("status.rs")),
             ("style.rs", include_str!("style.rs")),
             ("update.rs", include_str!("update.rs")),
             ("tree.rs", include_str!("tree.rs")),

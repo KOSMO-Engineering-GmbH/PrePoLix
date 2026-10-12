@@ -175,26 +175,37 @@ impl FeMesh {
     /// A hash of the nodes and elements, the same for the same mesh in every program run,
     /// to tell whether results of two runs share their mesh.
     pub fn fingerprint(&self) -> u64 {
-        // FNV-1a, stable unlike the standard hasher.
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut add = |bytes: &[u8]| {
-            for &b in bytes {
-                hash = (hash ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        };
+        let mut hash = Fnv::new();
         for (id, coords) in self.node_ids.iter().zip(&self.coords) {
-            add(&id.to_le_bytes());
+            hash.add(&id.to_le_bytes());
             for c in coords {
-                add(&c.to_le_bytes());
+                hash.add(&c.to_le_bytes());
             }
         }
         for element in &self.elements {
-            add(&element.id.to_le_bytes());
+            hash.add(&element.id.to_le_bytes());
             for node in &element.nodes {
-                add(&node.to_le_bytes());
+                hash.add(&node.to_le_bytes());
             }
         }
-        hash
+        hash.finish()
+    }
+
+    /// A hash of everything of the mesh that goes into the input file: nodes, elements with
+    /// their types, parts, sets and surfaces. Unlike [`FeMesh::fingerprint`] it changes when
+    /// only an element type or a set changes, so that results computed on another state of
+    /// the mesh are told apart.
+    pub fn input_fingerprint(&self) -> u64 {
+        let mut hash = Fnv::new();
+        hash.add(&self.fingerprint().to_le_bytes());
+        for element in &self.elements {
+            hash.add_str(&element.type_name);
+        }
+        hash.add_debug(&self.parts);
+        hash.add_debug(&self.node_sets);
+        hash.add_debug(&self.element_sets);
+        hash.add_debug(&self.surfaces);
+        hash.finish()
     }
 
     pub fn node_ids(&self) -> &[NodeId] {
@@ -878,5 +889,44 @@ mod tests {
         }
         assert_eq!(mesh.missing_nodes(), vec![(1, 4)]);
         assert_eq!(mesh.element(1).map(|e| e.shape), Some(ElementShape::Tet4));
+    }
+}
+
+/// FNV-1a: a hash that is the same in every program run, unlike the standard hasher, so that
+/// it can be saved and compared later.
+#[derive(Clone, Copy, Debug)]
+pub struct Fnv(u64);
+
+impl Default for Fnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Fnv {
+    pub fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+
+    pub fn add(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    /// Adds a text followed by a separator, so that "ab" + "c" differs from "a" + "bc".
+    pub fn add_str(&mut self, text: &str) {
+        self.add(text.as_bytes());
+        self.add(&[0xff]);
+    }
+
+    /// Adds a value by its debug text, which holds all its data and is the same in every
+    /// run as long as the value has no hash maps.
+    pub fn add_debug(&mut self, value: &impl std::fmt::Debug) {
+        self.add_str(&format!("{value:?}"));
+    }
+
+    pub fn finish(self) -> u64 {
+        self.0
     }
 }

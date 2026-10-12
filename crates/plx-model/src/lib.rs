@@ -14,6 +14,7 @@ pub mod convert;
 mod element_type;
 mod features;
 mod field;
+pub mod fingerprint;
 mod geometry;
 mod history;
 pub mod library;
@@ -66,7 +67,8 @@ use plx_mesh::{CadEntity, NodeId};
 use serde::{Deserialize, Serialize};
 
 /// Version of the project file format written by this build.
-pub const PROJECT_FORMAT: u32 = 1;
+/// Format 2 holds several analyses; projects of format 1 had one model and are not read.
+pub const PROJECT_FORMAT: u32 = 2;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

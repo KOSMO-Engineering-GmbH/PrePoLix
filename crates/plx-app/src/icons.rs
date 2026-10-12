@@ -54,6 +54,10 @@ pub enum Icon {
     Query,
     /// A label of the query crossed out: remove all annotations.
     RemoveAnnotations,
+    /// Lightning bolt of Ansys Workbench's Update: make the analysis up to date.
+    Solve,
+    /// A window with lines of text: the solver monitor.
+    Monitor,
 }
 
 /// Flat toolbar button in the Windows style: frame only while hovered or checked.
@@ -421,6 +425,52 @@ fn paint(shapes: &mut Vec<Shape>, icon: Icon, r: Rect) {
             line(shapes, &[p(12.5, 3.5), p(3.5, 12.5)], 2.2, color);
         }
         Icon::Query => pipette(shapes, r),
+        Icon::Solve => {
+            let amber = Color32::from_rgb(250, 190, 40);
+            let edge = Color32::from_rgb(150, 100, 0);
+            // A bolt is not convex: two triangles, then its outline.
+            polygon(
+                shapes,
+                vec![p(11.0, 1.0), p(3.5, 9.5), p(9.5, 8.0)],
+                amber,
+                amber,
+            );
+            polygon(
+                shapes,
+                vec![p(6.5, 8.0), p(12.5, 6.5), p(5.0, 15.0)],
+                amber,
+                amber,
+            );
+            shapes.push(Shape::closed_line(
+                vec![
+                    p(11.0, 1.0),
+                    p(3.5, 9.5),
+                    p(7.8, 8.4),
+                    p(5.0, 15.0),
+                    p(12.5, 6.5),
+                    p(8.2, 7.6),
+                ],
+                Stroke::new(1.0, edge),
+            ));
+        }
+        Icon::Monitor => {
+            let window = Rect::from_min_max(p(1.5, 2.5), p(14.5, 13.5));
+            shapes.push(Shape::rect_filled(window, 0.0, Color32::WHITE));
+            shapes.push(Shape::rect_filled(
+                Rect::from_min_max(p(1.5, 2.5), p(14.5, 5.0)),
+                0.0,
+                ACCENT,
+            ));
+            for (y, end) in [(7.0, 12.0), (9.0, 10.0), (11.0, 12.5)] {
+                line(shapes, &[p(3.5, y), p(end, y)], 1.0, OUTLINE);
+            }
+            shapes.push(Shape::rect_stroke(
+                window,
+                0.0,
+                Stroke::new(1.0, OUTLINE),
+                egui::StrokeKind::Middle,
+            ));
+        }
         Icon::RemoveAnnotations => {
             // A query label: framed text with the arrow to its point.
             line(shapes, &[p(3.0, 9.5), p(1.0, 14.5)], 1.0, OUTLINE);

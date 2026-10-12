@@ -177,8 +177,7 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
         | TreeItem::MeshItem(_)
         | TreeItem::HistorySet(_)
         | TreeItem::HistoryField(..)
-        | TreeItem::HistoryComponent(..)
-        | TreeItem::Analysis => {}
+        | TreeItem::HistoryComponent(..) => {}
         TreeItem::Model => {
             rows.push(("File", model.path.display().to_string()));
             rows.push(("Load time", format!("{} ms", model.load_time.as_millis())));
