@@ -11,8 +11,8 @@ use crate::node_picker::{self, NodePicker};
 use egui_snarl::ui::{AnyPins, PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
 use plx_io::project::{
-    Link, MaterialSet, MeasureBlock, MeshBlock, MeshExport, OptimizerBlock, ParameterSet, Project,
-    ProjectAnalysis, ProjectNode,
+    CampbellBlock, Link, MaterialSet, MeasureBlock, MeshBlock, MeshExport, OptimizerBlock,
+    ParameterSet, Project, ProjectAnalysis, ProjectNode,
 };
 use plx_model::{
     Iteration, MeasureKind, MeshPrimitive, ModelProperties, ModelSpace, Next, OptimizerKind,
@@ -20,6 +20,7 @@ use plx_model::{
 };
 
 use crate::app::{AnalysisWindow, Request, Show};
+use crate::campbell::CampbellWindow;
 use crate::icons::{self, Icon};
 use crate::links;
 use crate::material_set::{MaterialSetEditor, MaterialSetResult};
@@ -56,6 +57,9 @@ enum Kind {
     Optimizer,
     /// A sink that writes the mesh linked to it to a file, held in the mesh of its data.
     MeshExport,
+    /// A sweep of the analysis linked to it over the rotational speed, with its Campbell
+    /// diagram.
+    Campbell,
 }
 
 impl Kind {
@@ -74,6 +78,7 @@ impl Kind {
             Self::Measure => "measure block",
             Self::Optimizer => "optimizer",
             Self::MeshExport => "mesh export block",
+            Self::Campbell => "Campbell block",
         }
     }
 }
@@ -117,6 +122,11 @@ struct Node {
     /// What it takes from other blocks that is not ready yet; found by
     /// [`ProjectApp::sync_links`].
     upstream: crate::status::Upstream,
+    /// The sweep and diagram of a Campbell block, and the fingerprint of the analysis linked
+    /// to it as last found by [`ProjectApp::sync_links`], see
+    /// [`crate::campbell::sweep_fingerprint`].
+    campbell: Option<Box<CampbellWindow>>,
+    campbell_input: Option<u64>,
 }
 
 impl Node {
@@ -152,6 +162,8 @@ impl Node {
             export_error: None,
             solving: false,
             upstream: crate::status::Upstream::default(),
+            campbell: None,
+            campbell_input: None,
         };
         node.refresh_closed();
         node
@@ -181,6 +193,18 @@ impl Node {
         let mut node = Self::of_kind(Kind::MeshExport, id, name, data);
         node.export_path = path;
         node.written = written;
+        node
+    }
+
+    /// A Campbell block with its sweep and diagram.
+    fn campbell_block(id: u64, name: String, window: CampbellWindow) -> Self {
+        let data = ProjectAnalysis {
+            id,
+            name: name.clone(),
+            ..Default::default()
+        };
+        let mut node = Self::of_kind(Kind::Campbell, id, name, data);
+        node.campbell = Some(Box::new(window));
         node
     }
 
@@ -347,6 +371,16 @@ impl Node {
                 node
             }
             ProjectNode::MeshExport(e) => Self::mesh_export(e.id, e.name, e.path, e.written),
+            ProjectNode::Campbell(block) => {
+                let block = *block;
+                let window = CampbellWindow::saved(
+                    block.setup,
+                    block.points,
+                    block.focus,
+                    block.fingerprint,
+                );
+                Self::campbell_block(block.id, block.name, window)
+            }
         }
     }
 
@@ -363,13 +397,26 @@ impl Node {
                 written: self.written,
             }));
         }
+        if self.kind == Kind::Campbell {
+            // It keeps no model: the link brings it again.
+            let window = self.campbell.as_ref()?;
+            return Some(ProjectNode::Campbell(Box::new(CampbellBlock {
+                id: self.id,
+                name: self.name.clone(),
+                position,
+                setup: window.setup().clone(),
+                points: window.points().to_vec(),
+                focus: window.focus(),
+                fingerprint: window.fingerprint(),
+            })));
+        }
         let mut data = self.data()?;
         data.id = self.id;
         data.name = self.name.clone();
         data.position = position;
         Some(match self.kind {
             Kind::Analysis => ProjectNode::Analysis(Box::new(data)),
-            Kind::MeshExport => return None,
+            Kind::MeshExport | Kind::Campbell => return None,
             Kind::Materials => ProjectNode::Materials(MaterialSet {
                 id: data.id,
                 name: data.name,
@@ -584,6 +631,8 @@ enum Action {
     AddMesh(egui::Pos2, MeshPrimitive),
     /// A new mesh export block at the position.
     AddMeshExport(egui::Pos2),
+    /// A new Campbell block at the position.
+    AddCampbell(egui::Pos2),
     /// The file a mesh export block writes to was edited in its block.
     SetExportPath(u64, String),
     /// Write the file of a mesh export block now.
@@ -1838,6 +1887,179 @@ impl ProjectApp {
         id
     }
 
+    /// Adds a Campbell block; returns its id.
+    fn add_campbell(&mut self, position: egui::Pos2) -> u64 {
+        let window = CampbellWindow::new(&plx_model::FeModel::default());
+        let id = self.insert_campbell(position, window);
+        let name = self.name_of(id);
+        self.output.push(format!(
+            "{name} created: drag the Setup of an analysis with a Centrifugal load and a \
+             Complex Frequency step to its Analysis row; Update Project or its diagram then \
+             sweeps it."
+        ));
+        id
+    }
+
+    /// Inserts a Campbell block with `window`; returns its id.
+    fn insert_campbell(&mut self, position: egui::Pos2, window: CampbellWindow) -> u64 {
+        let id = self.next_id();
+        let name = self.unique_name("Campbell");
+        self.nodes.push(Node::campbell_block(id, name, window));
+        self.graph.insert_node(position, id);
+        id
+    }
+
+    /// Opens the Campbell block that sweeps the analysis `analysis`; one is made and linked
+    /// first if there is none.
+    fn open_campbell_of(&mut self, ctx: &egui::Context, analysis: u64) {
+        let existing = (self.links.iter())
+            .find(|l| l.source == analysis && links::slot(l) == [links::ANALYSIS])
+            .map(|l| l.target);
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let position = (self.graph_node(analysis))
+                    .and_then(|g| self.graph.get_node_info(g))
+                    .map_or_else(|| self.free_position(), |i| i.pos + egui::vec2(300.0, 0.0));
+                // The sweep goes up to the speed of the analysis at first.
+                let fe = (self.nodes.iter().find(|n| n.id == analysis))
+                    .and_then(Node::link_data)
+                    .map(|d| d.fe.clone())
+                    .unwrap_or_default();
+                let id = self.insert_campbell(position, CampbellWindow::new(&fe));
+                self.link(
+                    analysis,
+                    vec![links::SETUP.to_owned()],
+                    id,
+                    vec![links::ANALYSIS.to_owned()],
+                );
+                id
+            }
+        };
+        self.open_window(ctx, id, None);
+    }
+
+    /// The analysis a Campbell block sweeps.
+    fn campbell_source(&self, id: u64) -> Option<&Node> {
+        let link =
+            (self.links.iter()).find(|l| l.target == id && links::slot(l) == [links::ANALYSIS])?;
+        self.nodes.iter().find(|n| n.id == link.source)
+    }
+
+    /// The state of the diagram of a Campbell block: up to date while the analysis is as it
+    /// was swept, its speed left out.
+    fn campbell_state(&self, id: u64) -> CellState {
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            return CellState::Missing;
+        };
+        let Some(window) = &node.campbell else {
+            return CellState::Missing;
+        };
+        if window.is_running() {
+            CellState::Running
+        } else if window.points().is_empty() || self.campbell_source(id).is_none() {
+            CellState::Missing
+        } else if node.campbell_input.is_some() && window.fingerprint() == node.campbell_input {
+            CellState::UpToDate
+        } else {
+            CellState::OutOfDate
+        }
+    }
+
+    /// Starts the sweep of a Campbell block, or continues it with `keep`.
+    fn start_campbell(&mut self, id: u64, keep: bool) -> Result<(), String> {
+        let mut window = (self.node(id).and_then(|n| n.campbell.take()))
+            .ok_or_else(|| "not a Campbell block".to_string())?;
+        let default_solver = self.settings.solver.default_solver();
+        let result = self.start_sweep(id, &mut window, default_solver, keep);
+        if let Some(node) = self.node(id) {
+            node.campbell = Some(window);
+        }
+        result
+    }
+
+    /// Starts the sweep of the Campbell block `id`, whose window is `window`, on the model of
+    /// the analysis linked to it, in a folder of its own in that of the project.
+    fn start_sweep(
+        &self,
+        id: u64,
+        window: &mut CampbellWindow,
+        default_solver: plx_model::EquationSolver,
+        keep: bool,
+    ) -> Result<(), String> {
+        let source = self.campbell_source(id).ok_or_else(|| {
+            "No analysis is linked: drag the Setup of an analysis to the Analysis row of the \
+             block."
+                .to_string()
+        })?;
+        let data = (source.link_data()).ok_or_else(|| format!("{} is loading.", source.name))?;
+        let dir = (self.settings.solver.work_dir())
+            .join(crate::analysis::job_name(&self.project_name()))
+            .join(crate::analysis::job_name(&self.name_of(id)));
+        let solver = &self.settings.solver;
+        window.start(solver, (data.mesh, data.fe), default_solver, dir, keep)
+    }
+
+    /// Takes the finished speeds of the Campbell blocks and shows their open diagrams.
+    fn campbell_windows(&mut self, ctx: &egui::Context) {
+        let ids: Vec<u64> = (self.nodes.iter())
+            .filter(|n| n.kind == Kind::Campbell)
+            .map(|n| n.id)
+            .collect();
+        for id in ids {
+            let Some(mut window) = self.node(id).and_then(|n| n.campbell.take()) else {
+                continue;
+            };
+            window.poll();
+            if window.visible {
+                let can_start = (self.campbell_source(id))
+                    .and_then(Node::link_data)
+                    .is_some_and(|d| crate::campbell::applies(d.fe) && d.mesh.element_count() > 0);
+                let name = self.name_of(id);
+                let open = window.show(ctx, (&name, id), can_start, |window, keep| {
+                    // Probes the executable the first time; the settings keep what they know.
+                    let default_solver = self.settings.solver.clone().default_solver();
+                    self.start_sweep(id, window, default_solver, keep)
+                });
+                window.visible = open;
+            }
+            if window.is_running() {
+                ctx.request_repaint_after(Duration::from_millis(250));
+            }
+            if let Some(node) = self.node(id) {
+                node.campbell = Some(window);
+            }
+        }
+    }
+
+    /// Starts the sweeps of the Campbell blocks whose diagram is not up to date; returns
+    /// whether any started.
+    fn update_campbells(&mut self) -> bool {
+        let due: Vec<u64> = (self.nodes.iter())
+            .filter(|n| n.kind == Kind::Campbell)
+            .map(|n| n.id)
+            .filter(|&id| {
+                self.campbell_source(id).is_some()
+                    && matches!(
+                        self.campbell_state(id),
+                        CellState::Missing | CellState::OutOfDate
+                    )
+            })
+            .collect();
+        let mut started = false;
+        for id in due {
+            let name = self.name_of(id);
+            match self.start_campbell(id, false) {
+                Ok(()) => {
+                    self.output.push(format!("{name}: sweep started"));
+                    started = true;
+                }
+                Err(why) => self.output.push(format!("{name} not swept: {why}")),
+            }
+        }
+        started
+    }
+
     /// The folder relative export paths are taken from: that of the project file.
     fn export_base(&self) -> Option<PathBuf> {
         self.path.as_deref()?.parent().map(Path::to_path_buf)
@@ -2095,6 +2317,13 @@ impl ProjectApp {
             Some(Kind::MeshExport) => {
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 return self.choose_export_file(id);
+            }
+            Some(Kind::Campbell) => {
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                if let Some(window) = self.node(id).and_then(|n| n.campbell.as_mut()) {
+                    window.visible = true;
+                }
+                return;
             }
             None => return,
         }
@@ -2393,6 +2622,14 @@ impl ProjectApp {
             evaluated: None,
             error: None,
         });
+        let campbell = (node.campbell.as_ref()).map(|w| {
+            Box::new(CampbellWindow::saved(
+                w.setup().clone(),
+                Vec::new(),
+                None,
+                None,
+            ))
+        });
         let new_id = self.next_id();
         let name = self.unique_name(&name);
         data.id = new_id;
@@ -2409,6 +2646,7 @@ impl ProjectApp {
         copy.parameters = parameters;
         copy.measure = measure;
         copy.optimizer = optimizer;
+        copy.campbell = campbell;
         self.nodes.push(copy);
         self.graph.insert_node(position, new_id);
         self.output.push(format!("{name} created"));
@@ -2490,10 +2728,13 @@ impl ProjectApp {
         }
         // The files of the mesh export blocks come after everything they may depend on, and
         // after the loop of an optimizer: a loop updates the project at every iteration.
+        let mut swept = false;
         if self.looping.is_none() && self.loops_due.is_empty() {
             self.queue_exports(self.update_queue.is_empty());
+            // A sweep runs the model of its analysis by itself, beside the solves.
+            swept = self.update_campbells();
         }
-        if self.update_queue.is_empty() && self.export_queue.is_empty() {
+        if self.update_queue.is_empty() && self.export_queue.is_empty() && !swept {
             self.output.push("Nothing to update.".into());
         }
     }
@@ -3179,6 +3420,11 @@ impl ProjectApp {
                     ),
                     (Kind::Parameters, _) => parameter_rows(n),
                     (Kind::Optimizer, _) => self.optimizer_rows(n, &incoming),
+                    (Kind::Campbell, _) => campbell_rows(
+                        n,
+                        incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                        self.campbell_state(n.id),
+                    ),
                     (Kind::Measure, _) => measure_rows(
                         n,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
@@ -3355,6 +3601,7 @@ impl ProjectApp {
                                 | Kind::Measure
                                 | Kind::Optimizer
                                 | Kind::MeshExport
+                                | Kind::Campbell
                         )
                 })
                 .map(|n| n.space)
@@ -3379,6 +3626,10 @@ impl ProjectApp {
         }
         if slot.first().is_some_and(|c| c == links::MEASURE) {
             self.link_measure(source, item, target);
+            return;
+        }
+        if slot.first().is_some_and(|c| c == links::ANALYSIS) {
+            self.link_campbell(source, item, target);
             return;
         }
         let state = slot.first().is_some_and(|c| c == links::STATE);
@@ -3630,6 +3881,41 @@ impl ProjectApp {
             target,
             item,
             slot: vec![links::MEASURE.to_owned()],
+            ..Default::default()
+        });
+        self.sync_due = true;
+    }
+
+    /// Makes the Campbell block `target` sweep the analysis `source`, whose setup `item` is,
+    /// in place of the one it swept.
+    fn link_campbell(&mut self, source: u64, item: Vec<String>, target: u64) {
+        let (from, to) = (self.name_of(source), self.name_of(target));
+        let kind = |id: u64| self.nodes.iter().find(|n| n.id == id).map(|n| n.kind);
+        if kind(source) != Some(Kind::Analysis) || kind(target) != Some(Kind::Campbell) {
+            self.output.push(format!(
+                "Not linked: {to} sweeps an analysis, and {from} is none."
+            ));
+            return;
+        }
+        let replaced: Vec<Link> = (self.links.iter())
+            .filter(|l| l.target == target)
+            .cloned()
+            .collect();
+        self.links.retain(|l| l.target != target);
+        for link in replaced {
+            self.output.push(format!(
+                "{to} no longer sweeps {}.",
+                self.name_of(link.source)
+            ));
+        }
+        self.output.push(format!(
+            "{to} sweeps {from} over the speed of its centrifugal loads."
+        ));
+        self.links.push(Link {
+            source,
+            target,
+            item,
+            slot: vec![links::ANALYSIS.to_owned()],
             ..Default::default()
         });
         self.sync_due = true;
@@ -3908,6 +4194,19 @@ impl ProjectApp {
                     own.inherited = inherited;
                 }
             }
+            if self
+                .nodes
+                .iter()
+                .any(|n| n.id == target && n.kind == Kind::Campbell)
+            {
+                let input = (self.campbell_source(target))
+                    .and_then(Node::link_data)
+                    .map(|d| crate::campbell::sweep_fingerprint(d.mesh, d.fe));
+                if let Some(node) = self.node(target) {
+                    node.campbell_input = input;
+                }
+                continue;
+            }
             let incoming = self.incoming(target);
             upstream.stale_meshes = self.stale_meshes(target);
             if let Some(node) = self.node(target) {
@@ -3982,6 +4281,10 @@ impl ProjectApp {
     fn payload(&mut self, link: &Link, upstream: &mut crate::status::Upstream) -> Option<Payload> {
         let source = self.nodes.iter().find(|n| n.id == link.source)?;
         let target = self.nodes.iter().find(|n| n.id == link.target)?;
+        // A Campbell block reads the analysis when its sweep starts.
+        if target.kind == Kind::Campbell {
+            return None;
+        }
         if let Some(window) = &target.window
             && (window.busy().is_some() || window.model().is_none())
         {
@@ -4377,6 +4680,9 @@ impl ProjectApp {
             Action::AddMeshExport(pos) => {
                 self.add_mesh_export(pos);
             }
+            Action::AddCampbell(pos) => {
+                self.add_campbell(pos);
+            }
             Action::SetExportPath(id, path) => {
                 if let Some(node) = self.node(id) {
                     node.export_path = path;
@@ -4530,6 +4836,7 @@ impl ProjectApp {
             Kind::Measure => "with its value",
             Kind::Optimizer => "with its iterations",
             Kind::MeshExport => "(the file it wrote stays)",
+            Kind::Campbell => "with its diagram",
         };
         let users = (self.links.iter())
             .filter(|l| l.source == id)
@@ -4703,6 +5010,7 @@ impl ProjectApp {
                         self.open_window(ctx, source, None);
                     }
                 }
+                Request::Campbell => self.open_campbell_of(ctx, id),
                 // Unlinking what a state link took makes the analysis independent.
                 Request::Unlink(path) => {
                     self.exclude(None, Some(&(id, path.clone())));
@@ -4868,6 +5176,7 @@ impl eframe::App for ProjectApp {
         self.parameter_set_window(&ctx);
         self.measure_window(&ctx);
         self.optimizer_window(&ctx);
+        self.campbell_windows(&ctx);
         self.new_analysis_window(&ctx);
         self.settings_window(&ctx);
         self.updater.show(&ctx, &mut self.output);
@@ -5641,6 +5950,96 @@ fn measure_rows(
     vec![results, what, value]
 }
 
+/// The rows of a Campbell block: the analysis it sweeps, how far its sweep is and the
+/// critical speeds of its diagram.
+fn campbell_rows(node: &Node, incoming: &[(Vec<String>, String)], state: CellState) -> Vec<Row> {
+    let Some(window) = &node.campbell else {
+        return Vec::new();
+    };
+    let row = |path: &[&str], text: String, icon, tip: String| Row {
+        path: path.iter().map(|p| p.to_string()).collect(),
+        text,
+        depth: 0,
+        icon,
+        state: None,
+        expander: None,
+        input: false,
+        output: false,
+        linked_from: None,
+        collection: false,
+        partial: false,
+        widget: None,
+        tip,
+    };
+    let path = [links::ANALYSIS.to_owned()];
+    let linked_from = (incoming.iter())
+        .find(|(slot, _)| slot.as_slice() == path)
+        .map(|(_, source)| source.clone());
+    let tip = match state {
+        CellState::Missing if linked_from.is_none() => {
+            "The analysis to sweep: drag the Setup of an analysis with a Centrifugal load and a \
+             Complex Frequency step here."
+        }
+        CellState::Missing => "Not swept yet: Update Project or Start sweep in its diagram.",
+        CellState::UpToDate => "The diagram is up to date with the analysis.",
+        CellState::Running => "The sweep is running.",
+        _ => {
+            "The analysis changed since the sweep: Update Project or Start sweep in its diagram \
+             sweeps it again."
+        }
+    };
+    let analysis = Row {
+        input: true,
+        state: Some(state),
+        linked_from,
+        ..row(
+            &[links::ANALYSIS],
+            "Analysis".into(),
+            NodeIcon::Setup,
+            tip.into(),
+        )
+    };
+    let mut rows = vec![
+        analysis,
+        row(
+            &["Campbell", "Speeds"],
+            window.progress(),
+            NodeIcon::Solution,
+            "The speeds swept so far; double-click the block for the diagram.".into(),
+        ),
+    ];
+    const SHOWN: usize = 5;
+    let critical = window.critical_speeds();
+    for (index, speed) in critical.iter().enumerate().take(SHOWN) {
+        let order = crate::numeric::format_physical(speed.order);
+        rows.push(row(
+            &["Campbell", "Critical", &index.to_string()],
+            format!(
+                "{order}x: {} rpm",
+                crate::numeric::format_physical(crate::campbell::rpm(speed.speed).round())
+            ),
+            NodeIcon::Results,
+            format!(
+                "Critical speed: mode {}{} crosses the {order}x engine order line here.",
+                speed.mode,
+                match speed.whirl.letter() {
+                    "" => String::new(),
+                    letter => format!(" ({letter})"),
+                }
+            ),
+        ));
+    }
+    if critical.len() > SHOWN {
+        rows.push(row(
+            &["Campbell", "More"],
+            format!("{} more critical speeds", critical.len() - SHOWN),
+            NodeIcon::Results,
+            "The diagram lists them all.".into(),
+        ));
+    }
+    rows
+}
+
 /// Tooltip of an Add Mesh entry.
 /// A kind of block the schematic adds: the menus and the picker list these, in this order.
 enum BlockKind {
@@ -5650,6 +6049,7 @@ enum BlockKind {
     Parameters,
     Measure,
     Optimizer,
+    Campbell,
     MeshExport,
 }
 
@@ -5662,6 +6062,7 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::Parameters,
         BlockKind::Measure,
         BlockKind::Optimizer,
+        BlockKind::Campbell,
         BlockKind::MeshExport,
     ]
 }
@@ -5706,6 +6107,15 @@ impl BlockKind {
                 "loop iterate mesh convergence refine parameter study sweep",
                 OPTIMIZER_TIP,
             ),
+            Self::Campbell => (
+                "Campbell",
+                "Campbell",
+                "rotor speed rpm whirl critical speed complex frequency coriolis sweep diagram",
+                "Adds a block that sweeps the analysis linked to it over the speed of its \
+                 centrifugal loads and keeps the Campbell diagram with the critical speeds. Link \
+                 the Setup of an analysis with a Centrifugal load and a Complex Frequency step \
+                 to its Analysis row.",
+            ),
             Self::MeshExport => (
                 "Export",
                 "Mesh Export",
@@ -5732,6 +6142,7 @@ impl BlockKind {
             Self::Measure => "Add Measure",
             Self::Optimizer => "Add Optimizer",
             Self::MeshExport => "Add Mesh Export",
+            Self::Campbell => "Add Campbell",
         }
     }
 
@@ -5745,6 +6156,7 @@ impl BlockKind {
             Self::Measure => Action::AddMeasure(pos),
             Self::Optimizer => Action::AddOptimizer(pos),
             Self::MeshExport => Action::AddMeshExport(pos),
+            Self::Campbell => Action::AddCampbell(pos),
         }
     }
 }
@@ -6148,6 +6560,11 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Export, ink);
                 icon.on_hover_text("Writes the mesh linked to it to a file");
             }
+            Kind::Campbell => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Results, ink);
+                icon.on_hover_text("Sweeps an analysis over the rotational speed");
+            }
         }
         let text = egui::RichText::new(&block.name).strong();
         let label = ui.add(
@@ -6173,6 +6590,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Parameters => "Double-click adds, renames or removes parameters.",
             Kind::Measure => "Double-click chooses what it measures.",
             Kind::Optimizer => "Double-click sets what it varies and shows its iterations.",
+            Kind::Campbell => "Double-click opens its Campbell diagram and the sweep.",
         };
         // The name takes the clicks of the header, so it opens the block's menu too.
         label.on_hover_text(tip).context_menu(|ui| {
@@ -6497,6 +6915,7 @@ impl SnarlViewer<u64> for Viewer {
             Some(Kind::Measure) => default.fill(crate::style::measure_header()),
             Some(Kind::Optimizer) => default.fill(crate::style::optimizer_header()),
             Some(Kind::MeshExport) => default.fill(crate::style::export_header()),
+            Some(Kind::Campbell) => default.fill(crate::style::optimizer_header()),
             _ => default,
         }
     }
@@ -6818,6 +7237,8 @@ fn node_menu(
         if kind == Kind::MeshExport {
             entry(ui, "Export Now", Action::ExportNow(id));
             entry(ui, "Choose File …", Action::Open(id, None));
+        } else if kind == Kind::Campbell {
+            entry(ui, "Open Diagram …", Action::Open(id, None));
         } else {
             entry(ui, "Edit …", Action::Open(id, None));
         }
@@ -7496,6 +7917,46 @@ mod tests {
         assert!(empty.write_export(None).unwrap_err().contains("no mesh"));
         let rows = export_rows(&empty, None, &[]);
         assert!(rows[0].input && !rows[0].output && rows[1].widget.is_some());
+    }
+
+    #[test]
+    fn a_campbell_block_keeps_its_sweep_and_lists_the_critical_speeds() {
+        use plx_model::campbell::{Mode, Setup, SpeedPoint, Whirl};
+        // A mode that falls through the 1x line between 600 and 1000 rad/s.
+        let points: Vec<SpeedPoint> = (1..=5)
+            .map(|i| SpeedPoint {
+                speed: 200.0 * i as f64,
+                modes: vec![Mode {
+                    frequency: 200.0 - 10.0 * i as f64,
+                    whirl: Whirl::Backward,
+                    unstable: false,
+                }],
+            })
+            .collect();
+        let setup = Setup {
+            max_speed: 1000.0,
+            ..Setup::default()
+        };
+        let window = CampbellWindow::saved(setup.clone(), points.clone(), None, Some(9));
+        let mut node = Node::campbell_block(4, "Campbell".into(), window);
+        let saved = match node.written([1.0, 2.0]) {
+            Some(ProjectNode::Campbell(saved)) => *saved,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            (&saved.setup, &saved.points, saved.fingerprint),
+            (&setup, &points, Some(9))
+        );
+        let read = Node::read(ProjectNode::Campbell(Box::new(saved)));
+        assert_eq!(read.kind, Kind::Campbell);
+        let incoming = [(vec![links::ANALYSIS.to_owned()], "Rotor".to_owned())];
+        let rows = campbell_rows(&read, &incoming, CellState::UpToDate);
+        assert!(rows[0].input && rows[0].linked_from.as_deref() == Some("Rotor"));
+        assert_eq!(rows[1].text, "5 speeds, 1910 to 9549 rpm");
+        // The 1x line f = speed / 2 pi meets the mode at 200 / (1 / 2 pi + 0.05) = 956 rad/s.
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(texts[2..], ["1x: 9131 rpm"]);
+        assert!(rows[2].tip.contains("mode 1 (B)"), "{}", rows[2].tip);
     }
 
     #[test]

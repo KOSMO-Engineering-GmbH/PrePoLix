@@ -73,6 +73,8 @@ pub enum Request {
     /// Stop taking the item at this path from another analysis; the analysis keeps its
     /// copy.
     Unlink(Vec<String>),
+    /// Open the Campbell block of this analysis, made and linked first if it has none.
+    Campbell,
 }
 
 struct Workbench {
@@ -99,8 +101,6 @@ struct Workbench {
     /// The state of the analysis' cells and when it was found; finding it takes the
     /// fingerprints of mesh and model, so it is not done in every frame.
     status: Option<(std::time::Instant, crate::status::AnalysisStatus)>,
-    /// Campbell diagram window with its speed sweep; kept with its results while hidden.
-    campbell: Option<crate::campbell::CampbellWindow>,
     /// Open dialog of the model properties.
     model_dialog: Option<ModelPropertiesDialog>,
     viewport: Viewport,
@@ -303,7 +303,6 @@ impl AnalysisWindow {
                 analysis: None,
                 bound_work: None,
                 carried_settings: None,
-                campbell: None,
                 solver_findings: Vec::new(),
                 findings_window: None,
                 open_results: None,
@@ -1537,7 +1536,6 @@ impl AnalysisWindow {
         self.workbench.sync_result_features();
         self.workbench.run_analysis(&ctx);
         self.workbench.poll_bound_results(&ctx);
-        self.workbench.campbell_window(&ctx);
         if let Some(path) = self.workbench.open_results.take() {
             self.workbench.results_asked = Some(path.clone());
             self.open_results(path, &ctx);
@@ -3331,46 +3329,18 @@ impl Workbench {
             .setup_model()
             .is_some_and(|m| crate::campbell::applies(&m.fe));
         if ui
-            .add_enabled(
-                rotor || self.campbell.is_some(),
-                egui::Button::new("Campbell diagram ..."),
+            .add_enabled(rotor, egui::Button::new("Campbell diagram ..."))
+            .on_hover_text(
+                "Opens the Campbell block of the analysis in the project, which sweeps it over \
+                 the speed and keeps the diagram; makes the block first if there is none.",
             )
             .on_disabled_hover_text(
                 "Needs an active Centrifugal load and a Complex Frequency step.",
             )
             .clicked()
         {
-            // A closed window comes back with the diagram of its last sweep.
-            if let Some(window) = &mut self.campbell {
-                window.visible = true;
-            } else if let Some(model) = self.setup_model() {
-                self.campbell = Some(crate::campbell::CampbellWindow::new(&model.fe));
-            }
+            self.requests.push(Request::Campbell);
         }
-    }
-
-    /// The Campbell diagram window with its sweep over the rotational speed.
-    fn campbell_window(&mut self, ctx: &egui::Context) {
-        let Some(mut window) = self.campbell.take() else {
-            return;
-        };
-        if !window.visible {
-            self.campbell = Some(window);
-            return;
-        }
-        let can_start = self
-            .setup_model()
-            .is_some_and(|m| crate::campbell::applies(&m.fe) && m.mesh.element_count() > 0);
-        let default_solver = self.settings.solver.default_solver();
-        let open = window.show(ctx, can_start, |window, keep| {
-            let model = self
-                .model
-                .as_ref()
-                .ok_or_else(|| "No model is open.".to_string())?;
-            window.start(&self.settings.solver, model, default_solver, keep)
-        });
-        window.visible = open || window.is_running();
-        self.campbell = Some(window);
     }
 
     /// Opens the results of the last run and binds them to the project, once per run.

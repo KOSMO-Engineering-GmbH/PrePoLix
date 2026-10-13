@@ -6,6 +6,7 @@
 //! file is written, so the user never has to define sets by hand.
 
 mod amplitude;
+pub mod campbell;
 mod checks;
 pub mod color_scale;
 mod constraint;
