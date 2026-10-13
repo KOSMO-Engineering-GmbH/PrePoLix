@@ -60,9 +60,12 @@ space; several analyses can share one mesh block.
 Its parameters are rows of the block under #ui("Mesh"), like the inputs of a Blender node:
 #ui("X"), #ui("Y"), #ui("Z") of the corner it starts at and the edge lengths #ui("Lx"),
 #ui("Ly"), #ui("Lz") in the block's units, the numbers of elements #ui("nx"), #ui("ny"),
-#ui("nz") as whole numbers, and the #ui("Element") type. Click a field to type a value, or
-drag it; a rectangle has no Z rows. Once a parameter changes, the #ui("Mesh") row shows the
-mesh out of date.
+#ui("nz") as whole numbers, #ui("Refine") and the #ui("Element") type. Click a field to type a
+value, or drag it; a rectangle has no Z rows. Once a parameter changes, the #ui("Mesh") row
+shows the mesh out of date. #ui("Refine") is a factor on the numbers of elements along every
+edge, rounded: 2 doubles them, 1 meshes them as they are. An optimizer refines a mesh through
+it. The violet pins on the left of the numbers take a value from a Parameters block
+(@parameters-block).
 
 Its sides are node sets and surfaces at once, named after the axis and the side they lie on:
 #ui("X-") at the smallest X, #ui("X+") at the largest, then #ui("Y-"), #ui("Y+") and, for a
@@ -97,3 +100,32 @@ parameters, and the #ui("Mesh") row of the block shows that its mesh is out of d
 and their solutions are out of date.
 
 #screenshot("mesh-block-result.png", [The box held at X- and pressed on Z+, solved])
+
+=== Parameters <parameters-block>
+
+A Parameters block holds named numbers that other blocks take through *value links*, so that
+one number drives several places: the length of two meshes, or a size that is changed in one
+spot. Add it with #menu("Project", "Add Parameters"); it starts with one length.
+
+#screenshot("value-links.png", [The length of a Parameters block gives the edge length Lx of a
+  box: the row of the box is read-only, in violet, and follows the parameter])
+
+Each parameter is a row with its value, typed or dragged in place, and a violet pin on the
+right. Drag the pin to the pin on the left of a number of a mesh block (#ui("X") to #ui("nz"),
+#ui("Refine")). The number then takes the value of the parameter: it is shown in violet and
+read-only, and when the parameter changes the mesh is out of date, so #ui("Update Project")
+meshes and solves again. A value link joins like with like: a length goes to a length, a count
+to a number of elements, a factor to #ui("Refine"); otherwise the output pane says why it was
+refused. Right-click the pin to remove the link; the number keeps its last value.
+
+A double-click on the block opens its editor:
+
+#fields(
+  [Lengths in], [The unit system lengths are shown and typed in; they are stored in SI units.],
+  [Name], [The name of the parameter, unique in the block. Renaming it keeps its links.],
+  [Kind], [#ui("Length"), #ui("Count") (a whole number of at least one) or #ui("Factor") (a
+    number without unit).],
+  [Value], [The number.],
+  [Remove], [Removes the parameter and its links.],
+  [Add Parameter], [Adds a length.],
+)

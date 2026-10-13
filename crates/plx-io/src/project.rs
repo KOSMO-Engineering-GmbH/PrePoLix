@@ -65,6 +65,8 @@ pub enum ProjectNode {
     Materials(MaterialSet),
     /// A mesh made from a few parameters, such as a box.
     Mesh(Box<MeshBlock>),
+    /// Named numbers that value links give to other blocks.
+    Parameters(ParameterSet),
 }
 
 impl ProjectNode {
@@ -74,6 +76,7 @@ impl ProjectNode {
             Self::Analysis(a) => a.id,
             Self::Materials(m) => m.id,
             Self::Mesh(m) => m.id,
+            Self::Parameters(p) => p.id,
         }
     }
 
@@ -82,6 +85,7 @@ impl ProjectNode {
             Self::Analysis(a) => &a.name,
             Self::Materials(m) => &m.name,
             Self::Mesh(m) => &m.name,
+            Self::Parameters(p) => &p.name,
         }
     }
 
@@ -91,6 +95,7 @@ impl ProjectNode {
             Self::Analysis(a) => a.position,
             Self::Materials(m) => m.position,
             Self::Mesh(m) => m.position,
+            Self::Parameters(p) => p.position,
         }
     }
 }
@@ -116,6 +121,32 @@ pub struct MeshBlock {
     /// [`plx_model::MeshPrimitive::fingerprint`]; the mesh is out of date once it differs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated: Option<u64>,
+    /// Factor on the elements along each edge, see [`plx_model::MeshPrimitive::refined`];
+    /// an optimizer refines the mesh through it.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub refinement: f64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+fn is_one(value: &f64) -> bool {
+    *value == 1.0
+}
+
+/// A block of named numbers, which value links give to other blocks: the size of a mesh
+/// block, for example, so that several blocks share one value.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ParameterSet {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The unit system its lengths are shown in; they are stored in SI units.
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    pub parameters: Vec<plx_model::Parameter>,
 }
 
 /// A block that holds materials for analyses to link, item by item or all of them.
@@ -654,7 +685,29 @@ mod tests {
             mesh: primitive.generate(space, "Box"),
             generated: Some(primitive.fingerprint(space)),
             primitive: primitive.clone(),
+            refinement: 1.5,
         })));
+        let parameters = ParameterSet {
+            id: 6,
+            name: "Parameters".into(),
+            position: [0.0, 300.0],
+            units: plx_model::UnitSystem::MmTonSC,
+            parameters: vec![plx_model::Parameter::new(
+                "length",
+                plx_model::ValueKind::Length,
+                0.25,
+            )],
+        };
+        saved
+            .nodes
+            .push(ProjectNode::Parameters(parameters.clone()));
+        saved.links.push(Link {
+            source: 6,
+            target: 5,
+            item: vec!["Value".into(), "length".into()],
+            slot: vec!["Parameters".into(), "lx".into()],
+            ..Default::default()
+        });
         saved.links.push(Link {
             source: 3,
             target: 1,
@@ -668,10 +721,15 @@ mod tests {
         assert!(text.contains(&format!("format:{PROJECT_FORMAT}")));
         assert!(!text.contains("analyses:"), "{text}");
         let project = read_project(&path).unwrap();
-        assert_eq!(project.nodes.len(), 3);
+        assert_eq!(project.nodes.len(), 4);
+        match &project.nodes[3] {
+            ProjectNode::Parameters(read) => assert_eq!(read, &parameters),
+            other => panic!("{other:?}"),
+        }
         match &project.nodes[2] {
             ProjectNode::Mesh(block) => {
                 assert_eq!(block.primitive, primitive);
+                assert_eq!(block.refinement, 1.5);
                 assert_eq!(block.generated, Some(primitive.fingerprint(space)));
                 assert_eq!(block.mesh.element_count(), 40);
                 assert_eq!(block.mesh.surfaces.len(), 6);

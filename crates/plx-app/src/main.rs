@@ -35,6 +35,7 @@ mod node_icons;
 mod node_picker;
 mod numeric;
 mod overlay;
+mod parameter_set;
 mod path_plot;
 mod portable;
 mod project;

@@ -5,7 +5,7 @@
 use plx_mesh::{FeMesh, Fnv};
 use serde::{Deserialize, Serialize};
 
-use crate::ModelSpace;
+use crate::{ModelSpace, ValueKind};
 
 /// The shape and division of a structured mesh, in SI units.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -164,6 +164,56 @@ impl MeshPrimitive {
             _ => return false,
         }
         true
+    }
+
+    /// What the parameter of the key is, for a value link to it.
+    pub fn value_kind(&self, key: &str) -> Option<ValueKind> {
+        match self.get(key)? {
+            ParamValue::Length(_) => Some(ValueKind::Length),
+            ParamValue::Count(_) => Some(ValueKind::Count),
+        }
+    }
+
+    /// The parameter of the key as a number, a length in SI units.
+    pub fn value(&self, key: &str) -> Option<f64> {
+        match self.get(key)? {
+            ParamValue::Length(value) => Some(value),
+            ParamValue::Count(value) => Some(f64::from(value)),
+        }
+    }
+
+    /// Sets the parameter of the key to a number from a value link: a count is rounded to a
+    /// whole number of at least one. Returns whether it changed.
+    pub fn set_value(&mut self, key: &str, value: f64) -> bool {
+        if !value.is_finite() {
+            return false;
+        }
+        let value = match self.get(key) {
+            Some(ParamValue::Length(_)) => ParamValue::Length(value),
+            Some(ParamValue::Count(_)) => {
+                ParamValue::Count(ValueKind::Count.clean(value).min(f64::from(u32::MAX)) as u32)
+            }
+            None => return false,
+        };
+        let before = self.get(key);
+        self.set(key, value) && before != Some(value)
+    }
+
+    /// The same with `factor` times the elements along each edge, rounded, at least one.
+    pub fn refined(&self, factor: f64) -> Self {
+        let mut refined = self.clone();
+        if factor.is_finite() && factor > 0.0 && factor != 1.0 {
+            let divisions: &mut [u32] = match &mut refined {
+                Self::Box { divisions, .. } => divisions,
+                Self::Rectangle { divisions, .. } => divisions,
+            };
+            for n in divisions {
+                *n = (f64::from(*n) * factor)
+                    .round()
+                    .clamp(1.0, f64::from(u32::MAX)) as u32;
+            }
+        }
+        refined
     }
 
     /// The model spaces it is made for.
@@ -370,5 +420,25 @@ mod tests {
         assert_eq!(rectangle.params().len(), 6);
         assert!(rectangle.get("z").is_none());
         assert!(rectangle.get("nz").is_none());
+    }
+
+    #[test]
+    fn value_links_set_lengths_and_whole_counts() {
+        let mut block = MeshPrimitive::default_box();
+        assert_eq!(block.value_kind("lx"), Some(ValueKind::Length));
+        assert_eq!(block.value_kind("nz"), Some(ValueKind::Count));
+        assert_eq!(block.value_kind("element"), None);
+        assert!(block.set_value("lx", 0.25));
+        assert!(!block.set_value("lx", 0.25));
+        assert_eq!(block.value("lx"), Some(0.25));
+        assert!(block.set_value("nx", 7.4));
+        assert_eq!(block.value("nx"), Some(7.0));
+        assert!(block.set_value("ny", 0.0));
+        assert_eq!(block.value("ny"), Some(1.0));
+        let refined = block.refined(1.5);
+        assert_eq!(refined.value("nx"), Some(11.0));
+        assert_eq!(refined.value("ny"), Some(2.0));
+        assert_eq!(refined.value("nz"), Some(3.0));
+        assert_eq!(block.refined(1.0), block);
     }
 }
