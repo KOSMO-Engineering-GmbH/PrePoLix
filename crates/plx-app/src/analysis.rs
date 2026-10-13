@@ -11,7 +11,7 @@ use plx_model::EquationSolver;
 use crate::model::Model;
 use crate::settings::Solver;
 
-/// Lines of solver output kept for the monitor window.
+/// Lines of solver output kept for the monitor.
 const MAX_OUTPUT_LINES: usize = 5000;
 
 pub struct Analysis {
@@ -29,7 +29,6 @@ pub struct Analysis {
     started: Instant,
     finished: Option<f32>,
     status: JobStatus,
-    pub monitor: bool,
     /// The results of this run were bound to the project when they were opened.
     pub bound: bool,
     /// The keywords of the input file, see [`plx_io::inp::keywords::input_keywords`].
@@ -275,7 +274,6 @@ impl Analysis {
             started: Instant::now(),
             finished: None,
             status: JobStatus::Running,
-            monitor: true,
             bound: false,
             keywords,
             restart,
@@ -364,84 +362,69 @@ impl Analysis {
         }
     }
 
-    /// PrePoMax's monitor window.
-    pub fn window(&mut self, ctx: &egui::Context) -> MonitorEvent {
+    /// PrePoMax's monitor, in the Analysis tab below the 3D view: status, progress and
+    /// filter in one row over the output of the run.
+    pub fn monitor(&mut self, ui: &mut egui::Ui) -> MonitorEvent {
         let mut event = MonitorEvent::None;
-        let mut open = self.monitor;
         // Running until `poll` has joined the results of a restart with the earlier ones.
         let status = self.status;
-        egui::Window::new(format!("Monitor: {}", self.name))
-            .open(&mut open)
-            .collapsible(false)
-            .default_size([620.0, 380.0])
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if status == JobStatus::Running {
-                        ui.spinner();
-                    }
-                    let seconds = self.seconds();
-                    ui.label(format!(
-                        "Status: {} ({seconds:.1} s)",
-                        Self::status_text(status)
-                    ));
-                    if let Some(text) = self.progress() {
-                        ui.separator();
-                        ui.label(text);
-                    }
-                });
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(status == JobStatus::Running, egui::Button::new("Kill"))
+                .clicked()
+            {
+                self.kill();
+            }
+            let results = self.job.results().filter(|_| status != JobStatus::Running);
+            if ui
+                .add_enabled(results.is_some(), egui::Button::new("Results"))
+                .on_hover_text("Opens the results of the run")
+                .clicked()
+            {
+                event = MonitorEvent::OpenResults;
+            }
+            ui.separator();
+            ui.label("Filter:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.filter)
+                    .hint_text("Show only lines containing ...")
+                    .desired_width(180.0),
+            );
+            if ui
+                .add_enabled(!self.filter.is_empty(), egui::Button::new("Clear"))
+                .clicked()
+            {
+                self.filter.clear();
+            }
+            ui.separator();
+            if status == JobStatus::Running {
+                ui.spinner();
+            }
+            let seconds = self.seconds();
+            ui.label(format!(
+                "{}: {} ({seconds:.1} s)",
+                self.name,
+                Self::status_text(status)
+            ));
+            if let Some(text) = self.progress() {
                 ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Filter:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.filter)
-                            .hint_text("Show only lines containing ...")
-                            .desired_width(240.0),
-                    );
-                    if ui
-                        .add_enabled(!self.filter.is_empty(), egui::Button::new("Clear"))
-                        .clicked()
-                    {
-                        self.filter.clear();
-                    }
-                });
-                let height = ui.available_height() - 36.0;
-                let area = egui::ScrollArea::both()
-                    .max_height(height.max(80.0))
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true);
-                if self.filter.is_empty() {
-                    crate::virtual_table::lines(ui, area, &self.output);
-                } else {
-                    let needle = self.filter.to_lowercase();
-                    let shown: Vec<&String> = self
-                        .output
-                        .iter()
-                        .filter(|line| line.to_lowercase().contains(&needle))
-                        .collect();
-                    crate::virtual_table::lines(ui, area, &shown);
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(status == JobStatus::Running, egui::Button::new("Kill"))
-                        .clicked()
-                    {
-                        self.kill();
-                    }
-                    let results = self.job.results().filter(|_| status != JobStatus::Running);
-                    if ui
-                        .add_enabled(results.is_some(), egui::Button::new("Results"))
-                        .clicked()
-                    {
-                        event = MonitorEvent::OpenResults;
-                    }
-                });
-            });
-        self.monitor = open;
-        if status == JobStatus::Running {
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                ui.label(text);
+            }
+        });
+        let area = egui::ScrollArea::both()
+            .id_salt("analysis output")
+            .auto_shrink([false, false])
+            .stick_to_bottom(true);
+        if self.filter.is_empty() {
+            crate::virtual_table::lines(ui, area, &self.output);
+        } else {
+            let needle = self.filter.to_lowercase();
+            let shown: Vec<&String> = self
+                .output
+                .iter()
+                .filter(|line| line.to_lowercase().contains(&needle))
+                .collect();
+            crate::virtual_table::lines(ui, area, &shown);
         }
         event
     }

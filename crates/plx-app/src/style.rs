@@ -413,6 +413,71 @@ fn visuals(mut v: Visuals, p: &Palette) -> Visuals {
     v
 }
 
+/// A row of tabs like a Windows tab control, drawn on the panel above a pane. Returns the
+/// index of the tab clicked and the rect of the selected one, for [`open_tab`].
+pub fn tabs(
+    ui: &mut egui::Ui,
+    titles: &[&str],
+    selected: usize,
+) -> (Option<usize>, Option<egui::Rect>) {
+    let mut clicked = None;
+    let mut selected_rect = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add_space(2.0);
+        for (index, title) in titles.iter().enumerate() {
+            let is_selected = index == selected;
+            let galley = ui.painter().layout_no_wrap(
+                title.to_string(),
+                egui::TextStyle::Body.resolve(ui.style()),
+                text(),
+            );
+            let size = galley.size() + egui::vec2(16.0, 8.0);
+            let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+            let fill = if is_selected {
+                window()
+            } else if response.hovered() {
+                hover_fill()
+            } else {
+                control()
+            };
+            let rect = if is_selected {
+                selected_rect = Some(rect);
+                rect
+            } else {
+                rect.shrink2(egui::vec2(0.0, 1.0))
+                    .translate(egui::vec2(0.0, 1.0))
+            };
+            ui.painter().rect(
+                rect,
+                0.0,
+                fill,
+                Stroke::new(1.0, border()),
+                egui::StrokeKind::Inside,
+            );
+            ui.painter()
+                .galley(rect.center() - galley.size() * 0.5, galley, text());
+            if response.clicked() {
+                clicked = Some(index);
+            }
+        }
+    });
+    // Tabs sit flush on the pane: their bottom border is the pane's top border.
+    ui.add_space(-ui.spacing().item_spacing.y - 1.0);
+    (clicked, selected_rect)
+}
+
+/// Opens the selected tab of [`tabs`] into the pane below it, once the pane is drawn.
+pub fn open_tab(ui: &egui::Ui, tab: Option<egui::Rect>) {
+    if let Some(tab) = tab {
+        ui.painter().hline(
+            tab.x_range().shrink(1.0),
+            tab.bottom() - 0.5,
+            Stroke::new(1.0, window()),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// Heights of an unselected and a selected label; the selected one is framed like a hovered

@@ -20,9 +20,10 @@ From top to bottom the window contains:
 / Model tree: on the left, with the three tabs #ui("Geometry"), #ui("FE Model") and
   #ui("Results") (@model-tree).
 / 3D view: in the centre (@view).
-/ Output pane: below the 3D view. It collects messages: what was loaded or saved, warnings,
-  keywords of an imported `.inp` that were skipped ("Not yet evaluated: ..."), unit conversions
-  and the output of the query tool.
+/ Output pane: below the 3D view, with two tabs. #ui("Output") collects messages: what was loaded
+  or saved, warnings, keywords of an imported `.inp` that were skipped ("Not yet evaluated:
+  ..."), unit conversions and the output of the query tool. #ui("Analysis") is the monitor of
+  CalculiX (@monitor); it comes to the front when a run starts.
 / Status bar: on the left what is loaded ("bracket.plx: 12345 nodes, 6789 elements, 3 parts") or
   what is running ("Meshing ..."), on the right the unit system and the model space of the
   analysis.
@@ -46,8 +47,8 @@ From top to bottom the window contains:
   [Query], [Opens and closes the query window (@query). The button stays pressed while it is
     open.],
   [Remove Annotations], [Deletes all query labels of the model shown.],
-  [Solve, Stop, Monitor], [Solve the analysis, stop meshing or CalculiX, and show the monitor
-    (@analysis). Next to them, the state of the solution: #ui("Not solved"),
+  [Solve, Stop, Monitor], [Solve the analysis, stop meshing or CalculiX, and show the
+    #ui("Analysis") tab of the output pane (@monitor). Next to them, the state of the solution: #ui("Not solved"),
     #ui("Solution up to date"), #ui("Solution out of date") and so on. #ui("Problems") appears
     when CalculiX reported problems in the last run and lists them.],
 )
