@@ -175,7 +175,8 @@ linked in the schematic (@results-links):
 + In the submodel, create a boundary condition of type #ui("Submodel") on the cut faces in a
   static step, and choose the displacement components.
 + In the project schematic, drag the results of the global step (the row of the step below
-  #ui("Results") of the global analysis) to that step of the submodel. The output pane confirms
+  #ui("Results") of the global analysis) to the #ui("Global results") input of that step of the
+  submodel, under #ui("Setup") > #ui("Steps"), or to the step itself. The output pane confirms
   "takes the displacements of Step-1 of Global in Step-1 (submodel)". The link sets
   #ui("Model Type") to #ui("Submodel") in the submodel's #ui("Model Properties") and the global
   step of the boundary condition.

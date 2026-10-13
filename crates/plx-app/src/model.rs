@@ -373,53 +373,6 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     })
 }
 
-/// Converts an analysis of a project of format 2, whose values were in its unit system, into
-/// SI units ([`plx_model::STORED`]), as format 3 stores them; the analysis keeps showing them
-/// in its unit system. Its kept results are in the old units and are dropped. Returns notes
-/// on what could not be converted.
-pub fn migrate_to_si(data: &mut plx_io::project::ProjectAnalysis) -> Vec<String> {
-    let units = data.model.properties.units;
-    let mut notes: Vec<String> = (data.model.convert_units(plx_model::STORED))
-        .into_iter()
-        .map(|note| format!("{}: {note}", data.name))
-        .collect();
-    data.model.properties.units = units;
-    let conversion = plx_model::convert::Conversion::new(units, plx_model::STORED);
-    let factor = conversion.length_factor();
-    if factor != 1.0 {
-        data.mesh.scale(factor);
-        if let Some(geometry) = &mut data.geometry {
-            let space = data.model.properties.space;
-            // Parts meshed from the geometry as it is stay meshed.
-            let current: Vec<String> = (data.mesh_inputs.iter())
-                .filter(|(part, print)| {
-                    plx_model::fingerprint::mesh_input(geometry, space, part) == **print
-                })
-                .map(|(part, _)| part.clone())
-                .collect();
-            geometry.convert_sizes(&conversion);
-            match plx_mesher::scale_geometry(geometry, factor) {
-                Ok(scaled) => *geometry = scaled,
-                Err(error) => notes.push(format!(
-                    "{}: geometry could not be converted: {error}",
-                    data.name
-                )),
-            }
-            for part in current {
-                let print = plx_model::fingerprint::mesh_input(geometry, space, &part);
-                data.mesh_inputs.insert(part, print);
-            }
-        }
-    }
-    if data.results.take().is_some() {
-        notes.push(format!(
-            "{}: its results were in the old units and are dropped; solve it again.",
-            data.name
-        ));
-    }
-    notes
-}
-
 /// Builds the model of an analysis of a project; `path` is the project file. An analysis
 /// without a mesh opens on its geometry, if it has one.
 pub fn load_analysis(path: &Path, analysis: plx_io::project::ProjectAnalysis) -> LoadedModel {
@@ -1593,33 +1546,6 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../testdata")
             .join(name)
-    }
-
-    #[test]
-    fn old_projects_in_millimetres_are_migrated_to_si() {
-        let mut data = plx_io::project::ProjectAnalysis {
-            name: "A".into(),
-            ..Default::default()
-        };
-        data.mesh.set_node(1, [1000.0, 0.0, 0.0]);
-        data.model.properties.units = UnitSystem::MmTonSC;
-        data.model.materials.push(plx_model::Material {
-            name: "Steel".into(),
-            elastic: Some(plx_model::Elastic {
-                young: 210_000.0,
-                poisson: 0.3,
-            }),
-            ..Default::default()
-        });
-        data.results = Some(Default::default());
-        let notes = migrate_to_si(&mut data);
-        assert_eq!(data.mesh.coords()[0], [1.0, 0.0, 0.0]);
-        let young = data.model.materials[0].elastic.as_ref().unwrap().young;
-        assert!((young - 2.1e11).abs() < 1.0);
-        // The analysis keeps showing millimetres.
-        assert_eq!(data.model.properties.units, UnitSystem::MmTonSC);
-        assert!(data.results.is_none());
-        assert!(notes.iter().any(|n| n.contains("dropped")));
     }
 
     #[test]

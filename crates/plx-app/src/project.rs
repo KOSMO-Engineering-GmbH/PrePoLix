@@ -2033,7 +2033,7 @@ impl ProjectApp {
                 ));
             }
         }
-        let (what, step) = (links::label(&item), slot.get(1).map_or("", String::as_str));
+        let (what, step) = (links::label(&item), slot.get(2).map_or("", String::as_str));
         let text = match new_usage {
             Some(links::ResultsUse::Submodel) => {
                 format!("{to} takes the displacements of {what} of {from} in {step} (submodel).")
@@ -3058,28 +3058,10 @@ impl ProjectApp {
     }
 }
 
-/// Reads a project file for the project window, converting older formats.
+/// Reads a project file for the project window.
 fn read_opened(file: &Path) -> Opened {
-    let mut project = plx_io::project::read_project(file).map_err(|e| e.to_string())?;
-    // Format 2 kept the values in the project's unit system.
-    let mut notes = Vec::new();
-    if project.format < 3 {
-        let (space, units) = (project.space, project.units);
-        for analysis in project.analyses_mut() {
-            analysis.model.properties.space = space;
-            analysis.model.properties.units = units;
-            notes.extend(crate::model::migrate_to_si(analysis));
-        }
-        notes.push(
-            "The project was converted for this version; once saved, it no longer opens in \
-             older versions."
-                .into(),
-        );
-    }
-    // Format 3 differs only by what it lacks: state links; format 4 by what it lacks too:
-    // blocks besides analyses.
-    project.format = plx_model::PROJECT_FORMAT;
-    Ok((project, notes))
+    let project = plx_io::project::read_project(file).map_err(|e| e.to_string())?;
+    Ok((project, Vec::new()))
 }
 
 /// What the thread reading a project sent, once it is done; a thread that ended without
@@ -3109,6 +3091,11 @@ fn workspace_of(path: &[String]) -> Option<Show> {
     let show = |view| Some(Show { view, step: None });
     match path.first().map(String::as_str) {
         Some(links::GEOMETRY | links::MESH) => show(TreeView::Geometry),
+        // A step of the setup and its inputs select the step.
+        Some(links::SETUP) if path.len() > 2 && path[1] == links::STEPS => Some(Show {
+            view: TreeView::FeModel,
+            step: Some(path[2].clone()),
+        }),
         Some(links::SETUP) => show(TreeView::FeModel),
         // The rows of the steps stand for the steps of the setup.
         Some(links::RESULTS) if path.len() > 1 => Some(Show {
@@ -3416,21 +3403,58 @@ fn block_rows(
                 for name in entries {
                     let mut path = path.clone();
                     path.push(name.clone());
+                    // A step has inputs for the results of other analyses below it.
+                    let step = (category == links::STEPS)
+                        .then(|| fe.and_then(|fe| fe.steps.iter().find(|s| s.name == name)))
+                        .flatten();
+                    let inputs = step.map(links::step_inputs).unwrap_or_default();
+                    let step_open = expanded.contains(&path);
+                    let tip = if step.is_some() {
+                        format!(
+                            "{name}: drag to another analysis to link its definition. Open \
+                             it for its inputs, or drop the results of a step of another \
+                             analysis here: they go to the input that fits."
+                        )
+                    } else {
+                        format!("{name}: drag to another analysis to link it")
+                    };
                     rows.push(Row {
-                        tip: format!("{name}: drag to another analysis to link it"),
-                        text: name,
+                        tip,
+                        text: name.clone(),
                         depth: 2,
-                        icon: category_icon(category),
+                        icon: match step {
+                            Some(step) => NodeIcon::StepType(StepGlyph::from(&step.kind)),
+                            None => category_icon(category),
+                        },
                         state: None,
-                        expander: None,
+                        expander: (!inputs.is_empty()).then_some(step_open),
                         input: true,
                         output: true,
                         linked_from: from(&path),
                         collection: false,
                         partial: false,
                         widget: None,
-                        path,
+                        path: path.clone(),
                     });
+                    for input in inputs.into_iter().filter(|_| step_open) {
+                        let mut path = path.clone();
+                        path.push(input.to_owned());
+                        rows.push(Row {
+                            tip: step_input_tip(&name, input),
+                            text: input.to_owned(),
+                            depth: 3,
+                            icon: NodeIcon::Results,
+                            state: None,
+                            expander: None,
+                            input: true,
+                            output: false,
+                            linked_from: from(&path),
+                            collection: false,
+                            partial: false,
+                            widget: None,
+                            path,
+                        });
+                    }
                 }
             }
         }
@@ -3494,11 +3518,10 @@ fn block_rows(
         let path = vec![links::RESULTS.to_owned(), step.name.clone()];
         let tip = if step.active {
             format!(
-                "Results of {}: drag them to a step of another analysis, which takes the \
-                 temperatures of a thermal step, the eigenmodes of a frequency step for modal \
-                 or steady state dynamics, or else the displacements as a submodel; to the \
-                 State row of another analysis, which continues from them; or to empty space \
-                 to continue in a new analysis",
+                "Results of {}, what it produces: drag them to an input of a step under \
+                 Setup > Steps of another analysis (its Temperatures, Eigenmodes or Global \
+                 results), to the State row of another analysis, which continues from them, \
+                 or to empty space to continue in a new analysis",
                 step.name
             )
         } else {
@@ -3510,7 +3533,8 @@ fn block_rows(
             icon: NodeIcon::StepType(StepGlyph::from(&step.kind)),
             state: None,
             expander: None,
-            input: true,
+            // Results only give; what a step takes is an input of it under Setup.
+            input: false,
             output: step.active,
             linked_from: from(&path),
             collection: false,
@@ -3805,11 +3829,30 @@ fn category_icon(category: &str) -> NodeIcon {
     }
 }
 
-/// Colour of the wires of a link: data in blue, results in orange, states in green.
+/// What an input of a step under Setup takes, for its tooltip.
+fn step_input_tip(step: &str, input: &str) -> String {
+    let what = match input {
+        links::TEMPERATURES => format!(
+            "the temperatures of a thermal step of another analysis, as a defined field of \
+             {step}"
+        ),
+        links::EIGENMODES => format!(
+            "the eigenmodes of a frequency step of another analysis (with Storage on), which \
+             the modal or steady state dynamics of {step} use"
+        ),
+        _ => format!(
+            "the results of a step of another analysis, the global model: {step} reads the \
+             displacements on the cut boundary from them, as a submodel"
+        ),
+    };
+    format!("{input}: takes {what}. Drop the results of a step here.")
+}
+
+/// Colour of the wires of a link: references in blue, results in orange, states in green.
 fn wire_color(path: &[String]) -> egui::Color32 {
     if path.first().is_some_and(|c| c == links::STATE) {
         crate::style::adapt(egui::Color32::from_rgb(40, 150, 60))
-    } else if path.first().is_some_and(|c| c == links::RESULTS) {
+    } else if path.first().is_some_and(|c| c == links::RESULTS) || links::is_step_input(path) {
         crate::style::adapt(egui::Color32::from_rgb(230, 130, 20))
     } else {
         crate::style::adapt(egui::Color32::from_rgb(40, 110, 200))
@@ -4672,6 +4715,13 @@ mod tests {
             Some(Show {
                 view: TreeView::FeModel,
                 step: Some("Step-1".into())
+            })
+        );
+        assert_eq!(
+            workspace_of(&path(&["Setup", "Steps", "Step-2", "Temperatures"])),
+            Some(Show {
+                view: TreeView::FeModel,
+                step: Some("Step-2".into())
             })
         );
         assert_eq!(workspace_of(&path(&["State"])), None);

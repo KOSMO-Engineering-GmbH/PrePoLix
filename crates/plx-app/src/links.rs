@@ -8,6 +8,14 @@
 //! `["Mesh"]`, `["Setup"]`, `["Setup", "Materials"]`, `["Setup", "Materials", "Steel"]` or
 //! `["Results", "Step-1"]`.
 //!
+//! Links are of two kinds. A reference link makes a row of the target the same as the row
+//! of the same path in the source: it goes from like to like, and the target cannot change
+//! what it takes. An operation link gives what a step of the source produced, its results,
+//! to a step of the target that uses it: it starts at a Results row, which only gives, and
+//! ends at an input of a step under `["Setup", "Steps", step]`: its `"Temperatures"`, its
+//! `"Eigenmodes"` or its `"Global results"` (see [`STEP_INPUTS`]), at the temperatures of
+//! the initial conditions, or at the State row.
+//!
 //! A state link, `["State", "Step-1"]`, makes the target continue the source: it takes the
 //! source's model and its steps up to that step, then solves its own steps from the state
 //! CalculiX wrote after it.
@@ -334,20 +342,28 @@ pub struct Continuation {
 /// What the results of a step of another analysis are used for, by the slot they go to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResultsUse {
-    /// The displacements on the cut boundary of a submodel: `["Results", step]`.
+    /// The displacements on the cut boundary of a submodel:
+    /// `["Setup", "Steps", step, "Global results"]`.
     Submodel,
-    /// The temperatures as a defined field of a step: `["Results", step, "Temperature"]`.
+    /// The temperatures as a defined field of a step:
+    /// `["Setup", "Steps", step, "Temperatures"]`.
     Temperature,
     /// The eigenmodes of a frequency step, for modal dynamics and steady state dynamics:
-    /// `["Results", step, "Modes"]`.
+    /// `["Setup", "Steps", step, "Eigenmodes"]`.
     Modes,
     /// The temperatures the model starts at: `["Setup", "Initial Conditions", "Temperature"]`.
     InitialTemperatures,
 }
 
 pub const TEMPERATURE: &str = "Temperature";
-pub const MODES: &str = "Modes";
+pub const STEPS: &str = "Steps";
+pub const TEMPERATURES: &str = "Temperatures";
+pub const EIGENMODES: &str = "Eigenmodes";
+pub const GLOBAL_RESULTS: &str = "Global results";
 const INITIAL_CONDITIONS: &str = "Initial Conditions";
+
+/// The inputs a step has for the results of steps of other analyses, the rows under it.
+pub const STEP_INPUTS: [&str; 3] = [TEMPERATURES, EIGENMODES, GLOBAL_RESULTS];
 
 /// Name of the defined field a temperature link sets in its step.
 pub const LINKED_TEMPERATURES: &str = "Linked Temperatures";
@@ -358,19 +374,54 @@ impl ResultsUse {
         if !is_results(link) {
             return None;
         }
-        Some(match slot(link) {
-            [cell, _, kind] if cell == RESULTS && kind == TEMPERATURE => Self::Temperature,
-            [cell, _, kind] if cell == RESULTS && kind == MODES => Self::Modes,
-            [cell, ..] if cell == SETUP => Self::InitialTemperatures,
-            _ => Self::Submodel,
-        })
+        Self::of_slot(slot(link))
     }
+
+    /// What results that go to `slot` are used for.
+    pub fn of_slot(slot: &[String]) -> Option<Self> {
+        match slot {
+            [cell, steps, _, input] if cell == SETUP && steps == STEPS => match input.as_str() {
+                TEMPERATURES => Some(Self::Temperature),
+                EIGENMODES => Some(Self::Modes),
+                GLOBAL_RESULTS => Some(Self::Submodel),
+                _ => None,
+            },
+            [cell, category, input] if cell == SETUP && category == INITIAL_CONDITIONS => {
+                (input == TEMPERATURE).then_some(Self::InitialTemperatures)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The step of the target a results link goes to.
+pub fn target_step(link: &Link) -> Option<&str> {
+    match slot(link) {
+        [cell, steps, step, _] if cell == SETUP && steps == STEPS => Some(step),
+        _ => None,
+    }
+}
+
+/// The inputs `step` has for results of other analyses, as rows under it: temperatures
+/// when it takes defined fields, eigenmodes for modal and steady state dynamics, and the
+/// global results that make the analysis a submodel.
+pub fn step_inputs(step: &Step) -> Vec<&'static str> {
+    let mut inputs = Vec::new();
+    if step.kind.supports_defined_fields() {
+        inputs.push(TEMPERATURES);
+    }
+    if step.kind.uses_stored_modes() {
+        inputs.push(EIGENMODES);
+    }
+    inputs.push(GLOBAL_RESULTS);
+    inputs
 }
 
 /// Where results of `source_step` dropped on `slot` of `target` go: a step of the target
 /// takes temperatures of a thermal step as a defined field, the eigenmodes of a frequency
 /// step for modal and steady state dynamics, other results for a submodel; the initial
-/// conditions take temperatures. `Err` tells why they cannot go there.
+/// conditions take temperatures. Dropped on a step, they go to the input of it that fits;
+/// dropped on an input, they go there if they fit. `Err` tells why they cannot go there.
 pub fn results_slot(
     source_step: &Step,
     target: &FeModel,
@@ -378,36 +429,56 @@ pub fn results_slot(
 ) -> Result<Vec<String>, String> {
     let path = |parts: &[&str]| parts.iter().map(|p| p.to_string()).collect::<Vec<_>>();
     let thermal = source_step.kind.is_thermal();
+    let source = &source_step.name;
     match slot {
-        [cell, category] if cell == SETUP && category == INITIAL_CONDITIONS => {
+        [cell, category, rest @ ..]
+            if cell == SETUP
+                && category == INITIAL_CONDITIONS
+                && (rest.is_empty() || rest == [TEMPERATURE]) =>
+        {
             if thermal {
                 Ok(path(&[SETUP, INITIAL_CONDITIONS, TEMPERATURE]))
             } else {
                 Err(format!(
-                    "only the temperatures of a thermal step can be initial conditions, and {} \
-                     is none",
-                    source_step.name
+                    "only the temperatures of a thermal step can be initial conditions, and \
+                     {source} is none"
                 ))
             }
         }
-        [cell, step] if cell == RESULTS => {
-            let target_step = target.steps.iter().find(|s| &s.name == step);
-            let kind = target_step.map(|s| &s.kind);
-            if let StepKind::Frequency(frequency) = &source_step.kind
-                && kind.is_some_and(StepKind::uses_stored_modes)
-            {
-                if !frequency.storage {
+        [cell, steps, step, input @ ..] if cell == SETUP && steps == STEPS && input.len() <= 1 => {
+            let Some(target_step) = target.steps.iter().find(|s| &s.name == step) else {
+                return Err(format!("there is no step {step}"));
+            };
+            let inputs = step_inputs(target_step);
+            let modes = match &source_step.kind {
+                StepKind::Frequency(frequency) => Some(frequency.storage),
+                _ => None,
+            };
+            let input = match input.first().map(String::as_str) {
+                Some(input) if !inputs.contains(&input) => {
+                    return Err(format!("{step} has no input {input}"));
+                }
+                Some(input) => input,
+                // Dropped on the step: the input that fits.
+                None if modes.is_some() && inputs.contains(&EIGENMODES) => EIGENMODES,
+                None if thermal && inputs.contains(&TEMPERATURES) => TEMPERATURES,
+                None => GLOBAL_RESULTS,
+            };
+            match input {
+                EIGENMODES if modes.is_none() => {
+                    return Err(format!("{source} is no frequency step"));
+                }
+                EIGENMODES if modes == Some(false) => {
                     return Err(format!(
-                        "{} does not store its eigenmodes; turn on Storage in it",
-                        source_step.name
+                        "{source} does not store its eigenmodes; turn on Storage in it"
                     ));
                 }
-                return Ok(path(&[RESULTS, step, MODES]));
+                TEMPERATURES if !thermal => {
+                    return Err(format!("{source} is no thermal step"));
+                }
+                _ => {}
             }
-            if thermal && kind.is_some_and(StepKind::supports_defined_fields) {
-                return Ok(path(&[RESULTS, step, TEMPERATURE]));
-            }
-            Ok(slot.to_vec())
+            Ok(path(&[SETUP, STEPS, step, input]))
         }
         _ => Err("they cannot go there".into()),
     }
@@ -420,7 +491,7 @@ pub fn apply_results(fe: &mut FeModel, link: &Link, global: u32, file: PathBuf) 
     let Some(kind) = ResultsUse::of(link) else {
         return false;
     };
-    let step = slot(link).get(1).cloned().unwrap_or_default();
+    let step = target_step(link).unwrap_or_default().to_owned();
     match kind {
         ResultsUse::Submodel => apply_submodel(fe, &step, global, file),
         ResultsUse::Modes => {
@@ -468,8 +539,12 @@ pub fn clear_results(fe: &mut FeModel, link: &Link, submodel: bool) {
         Some(ResultsUse::Modes) => fe.properties.stored_modes = None,
         Some(ResultsUse::InitialTemperatures) => fe.properties.initial_temperatures = None,
         Some(ResultsUse::Temperature) => {
-            let step = slot(link).get(1);
-            for s in fe.steps.iter_mut().filter(|s| Some(&s.name) == step) {
+            let step = target_step(link);
+            for s in fe
+                .steps
+                .iter_mut()
+                .filter(|s| Some(s.name.as_str()) == step)
+            {
                 s.defined_fields.retain(|f| f.name != LINKED_TEMPERATURES);
             }
         }
@@ -792,27 +867,44 @@ pub fn clear_submodel(fe: &mut FeModel) {
     fe.properties.global_results = None;
 }
 
-/// Whether a link from `item` of one analysis may go to `slot` of another: like with like,
-/// and the results of a step only to a step or the state row.
+/// Whether a link from `item` of one analysis may go to `slot` of another, by one of two
+/// rules. A reference goes from like to like: a row to the row of the same path, an item of
+/// a category to the category or its item of another name. An operation link goes from the
+/// results of a step to a row that uses results: the State row, the initial conditions, a
+/// step of the setup or one of its inputs (see [`results_slot`]).
 pub fn compatible(item: &[String], slot: &[String]) -> bool {
-    match (item, slot) {
-        ([a], [b]) => a == b && a != RESULTS,
-        ([a, _], [b, _]) if a == RESULTS && b == RESULTS => true,
-        // The results of a step dropped on the state row: continue from it.
-        ([a, _], [b]) if a == RESULTS && b == STATE => true,
-        // Temperatures dropped on the initial conditions.
-        ([a, _], [b, c]) if a == RESULTS && b == SETUP && c == INITIAL_CONDITIONS => true,
-        ([a, ..], [b, ..]) if a == SETUP && b == SETUP => {
-            // A category or an item goes to the target's category, or into its setup.
-            match (item.get(1), slot.get(1)) {
-                (None, None) => true,
-                (Some(_), None) => false,
-                (None, Some(_)) => false,
-                (Some(c), Some(d)) => c == d,
+    match item.first().map(String::as_str) {
+        Some(RESULTS) => item.len() == 2 && takes_results(slot),
+        Some(STATE) | None => false,
+        Some(_) => match (item, slot) {
+            ([a], [b]) => a == b && b != RESULTS && b != STATE,
+            ([a, ..], [b, ..]) if a == SETUP && b == SETUP && slot.len() <= 3 => {
+                // A category or an item goes to the target's category, or into its setup.
+                match (item.get(1), slot.get(1)) {
+                    (None, None) => true,
+                    (Some(c), Some(d)) => c == d,
+                    _ => false,
+                }
             }
-        }
-        _ => false,
+            _ => false,
+        },
     }
+}
+
+/// Whether the row of `path` takes the results of a step of another analysis.
+pub fn takes_results(path: &[String]) -> bool {
+    match path {
+        [cell] => cell == STATE,
+        [cell, category] => cell == SETUP && category == INITIAL_CONDITIONS,
+        [cell, category, _] if cell == SETUP && category == STEPS => true,
+        _ => ResultsUse::of_slot(path).is_some(),
+    }
+}
+
+/// Whether the row of `path` takes nothing but results: an input of a step.
+pub fn is_step_input(path: &[String]) -> bool {
+    matches!(path, [cell, steps, _, input]
+        if cell == SETUP && steps == STEPS && STEP_INPUTS.contains(&input.as_str()))
 }
 
 /// The analyses that come before `target` through links, nearest first.
@@ -1304,10 +1396,17 @@ mod tests {
         target.steps.push(Step::new_static("Load"));
         target.steps.push(Step::new_modal_dynamics("Shake"));
         let slot = |parts: &[&str]| results_slot(&heat, &target, &path(parts));
+        // Dropped on a step, they go to the input of it that fits.
         assert_eq!(
-            slot(&["Results", "Load"]).unwrap(),
-            path(&["Results", "Load", "Temperature"])
+            slot(&["Setup", "Steps", "Load"]).unwrap(),
+            path(&["Setup", "Steps", "Load", "Temperatures"])
         );
+        assert_eq!(
+            slot(&["Setup", "Steps", "Load", "Temperatures"]).unwrap(),
+            path(&["Setup", "Steps", "Load", "Temperatures"])
+        );
+        assert!(slot(&["Setup", "Steps", "Load", "Eigenmodes"]).is_err());
+        assert!(slot(&["Setup", "Steps", "Nowhere"]).is_err());
         assert_eq!(
             slot(&["Setup", "Initial Conditions"]).unwrap(),
             path(&["Setup", "Initial Conditions", "Temperature"])
@@ -1322,18 +1421,26 @@ mod tests {
             .is_err()
         );
         // Displacements of a static step drive a submodel.
+        let load = path(&["Setup", "Steps", "Load"]);
         assert_eq!(
-            results_slot(&static_step, &target, &path(&["Results", "Load"])).unwrap(),
-            path(&["Results", "Load"])
+            results_slot(&static_step, &target, &load).unwrap(),
+            path(&["Setup", "Steps", "Load", "Global results"])
         );
+        let temperatures = path(&["Setup", "Steps", "Load", "Temperatures"]);
+        assert!(results_slot(&static_step, &target, &temperatures).is_err());
         // Eigenmodes only when the frequency step stores them.
-        let shake = path(&["Results", "Shake"]);
+        let shake = path(&["Setup", "Steps", "Shake"]);
         assert!(results_slot(&frequency, &target, &shake).is_err());
         if let StepKind::Frequency(f) = &mut frequency.kind {
             f.storage = true;
         }
         let modes = results_slot(&frequency, &target, &shake).unwrap();
-        assert_eq!(modes, path(&["Results", "Shake", "Modes"]));
+        assert_eq!(modes, path(&["Setup", "Steps", "Shake", "Eigenmodes"]));
+        assert_eq!(
+            step_inputs(&target.steps[0]),
+            ["Temperatures", "Global results"]
+        );
+        assert!(step_inputs(&target.steps[1]).contains(&"Eigenmodes"));
 
         let link = |item: &[&str], slot: Vec<String>| Link {
             source: 1,
@@ -1342,11 +1449,9 @@ mod tests {
             slot,
             ..Default::default()
         };
-        let temperature = link(
-            &["Results", "Heat"],
-            path(&["Results", "Load", "Temperature"]),
-        );
+        let temperature = link(&["Results", "Heat"], temperatures);
         assert_eq!(ResultsUse::of(&temperature), Some(ResultsUse::Temperature));
+        assert_eq!(target_step(&temperature), Some("Load"));
         assert!(apply_results(
             &mut target,
             &temperature,
@@ -1361,6 +1466,7 @@ mod tests {
         ));
         assert_eq!(target.result_files(), [std::path::Path::new("heat.frd")]);
         let modes = link(&["Results", "Modes"], modes);
+        assert_eq!(ResultsUse::of(&modes), Some(ResultsUse::Modes));
         assert!(apply_results(&mut target, &modes, 1, "modes.eig".into()));
         assert_eq!(target.properties.stored_modes, Some("modes.eig".into()));
         clear_results(&mut target, &temperature, false);
@@ -1370,7 +1476,7 @@ mod tests {
     }
 
     #[test]
-    fn like_goes_with_like() {
+    fn references_go_like_to_like_and_results_to_where_they_are_used() {
         assert!(compatible(&path(&["Mesh"]), &path(&["Mesh"])));
         assert!(!compatible(&path(&["Mesh"]), &path(&["Geometry"])));
         let steel = path(&["Setup", "Materials", "Steel"]);
@@ -1379,8 +1485,21 @@ mod tests {
         assert!(!compatible(&steel, &path(&["Setup", "Sections"])));
         assert!(!compatible(&steel, &path(&["Setup"])));
         assert!(compatible(&path(&["Setup"]), &path(&["Setup"])));
+        let step = path(&["Setup", "Steps", "Step-1"]);
+        assert!(compatible(&step, &path(&["Setup", "Steps", "Step-2"])));
+        // A step's definition never goes to an input of a step.
+        let input = path(&["Setup", "Steps", "Step-2", "Temperatures"]);
+        assert!(!compatible(&step, &input));
+        // Results only give: nothing goes to them, not even other results.
         let results = path(&["Results", "Step-1"]);
-        assert!(compatible(&results, &path(&["Results", "Step-2"])));
+        assert!(!compatible(&results, &path(&["Results", "Step-2"])));
+        assert!(!compatible(&path(&["Results"]), &path(&["Results"])));
+        assert!(compatible(&results, &step));
+        assert!(compatible(&results, &input));
+        assert!(compatible(
+            &results,
+            &path(&["Setup", "Steps", "Step-2", "Global results"])
+        ));
         assert!(!compatible(&results, &path(&["Setup", "Steps"])));
         assert!(compatible(&results, &path(&["State"])));
         assert!(!compatible(&path(&["Mesh"]), &path(&["State"])));
@@ -1389,6 +1508,8 @@ mod tests {
             &path(&["Setup", "Initial Conditions"])
         ));
         assert!(!compatible(&results, &path(&["Setup", "Materials"])));
+        assert!(is_step_input(&input));
+        assert!(!is_step_input(&step));
         assert!(is_collection(&path(&["Setup", "Materials"])));
         assert!(!is_collection(&path(&["Setup", "Materials", "Steel"])));
         assert!(!is_collection(&path(&["Mesh"])));

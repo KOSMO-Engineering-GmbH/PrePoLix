@@ -51,10 +51,11 @@ at the moment:
     front of it opens its categories (#ui("Features"), #ui("Materials"), #ui("Sections"),
     #ui("Constraints"), #ui("Contacts"), #ui("Amplitudes"), #ui("Initial Conditions"),
     #ui("Steps")), and those open to their single items, so that each can be linked on its
-    own.],
+    own. A step opens to its inputs for results of other analyses (@results-links).],
   [Solution], [The last CalculiX run whose results the analysis keeps.],
   [Results], [The results of that run, followed by one row per step. The row of a step gives
-    the results of that step to other analyses (@results-links, @state-links).],
+    the results of that step to other analyses (@results-links, @state-links); it takes
+    nothing, so it has a pin on the right only.],
 )
 
 The symbol on the right of a cell shows its state; its tooltip says what it means:
@@ -74,10 +75,11 @@ Changes that CalculiX does not see, such as result paths or planes, leave the so
 date. Within the solution, PrePoLix also remembers which steps are unchanged, so that CalculiX
 can start after them (@restart).
 
-The pins on both sides of a row take and give links. Blue wires carry data (geometry, mesh,
-setup items), orange wires carry results and green wires carry the state after a step. A round
-pin on the left takes one wire, a tall one (the categories of the setup) takes any number, and
-the green square takes the state of another analysis (@data-links).
+The pins on both sides of a row take and give links. Blue wires are references (geometry, mesh,
+setup items: the target has the same as the source), orange wires carry results into the inputs
+of steps and green wires carry the state after a step (@links). A round pin on the left takes
+one wire, a tall one (the categories of the setup) takes any number, and the green square takes
+the state of another analysis (@data-links).
 
 === Working with the schematic
 
