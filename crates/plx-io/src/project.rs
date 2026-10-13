@@ -377,6 +377,24 @@ struct Header {
     format: u32,
 }
 
+/// The format of a project file as written, `(format:6,...`: the first field. Reading it as a
+/// [`Header`] goes through the whole file without types, which takes minutes for a large
+/// mesh, as RON looks ahead through the rest of the file at every number.
+fn leading_format(text: &str) -> Option<u32> {
+    let text = text.trim_start();
+    let rest = text
+        .strip_prefix("Project")
+        .unwrap_or(text)
+        .trim_start()
+        .strip_prefix('(')?;
+    let rest = rest.trim_start().strip_prefix("format")?;
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
 pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
     let text = std::fs::read_to_string(path).map_err(|source| ProjectError::Io {
         path: path.to_owned(),
@@ -386,17 +404,20 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
         path: path.to_owned(),
         message: e.to_string(),
     };
-    let header: Header = ron::from_str(&text).map_err(format_error)?;
-    if header.format > PROJECT_FORMAT {
+    let format = match leading_format(&text) {
+        Some(format) => format,
+        None => ron::from_str::<Header>(&text).map_err(format_error)?.format,
+    };
+    if format > PROJECT_FORMAT {
         return Err(ProjectError::Newer {
             path: path.to_owned(),
-            format: header.format,
+            format,
         });
     }
-    if header.format < FIRST_PROJECT_FORMAT {
+    if format < FIRST_PROJECT_FORMAT {
         return Err(ProjectError::Older {
             path: path.to_owned(),
-            format: header.format,
+            format,
         });
     }
     let mut project: Project = ron::from_str(&text).map_err(format_error)?;
@@ -535,6 +556,20 @@ mod tests {
             }))],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn the_format_is_read_from_the_start_of_the_file() {
+        // Reading it as a Header instead took minutes for a project with a large mesh.
+        let project = single(None, &FeMesh::default(), &FeModel::default(), None);
+        let path = std::env::temp_dir().join(format!("plx-format-{}.plx", std::process::id()));
+        save_project(&path, &project).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(leading_format(&text), Some(PROJECT_FORMAT));
+        assert_eq!(leading_format("Project( format : 3, nodes: [])"), Some(3));
+        assert_eq!(leading_format("(nodes: [], format: 3)"), None);
+        assert_eq!(leading_format("(format: x)"), None);
     }
 
     #[test]
