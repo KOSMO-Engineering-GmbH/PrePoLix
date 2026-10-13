@@ -2437,12 +2437,27 @@ impl ProjectApp {
                     return None;
                 }
                 if usage == links::ResultsUse::Modes {
-                    // CalculiX reads them from the run's own folder.
+                    // CalculiX writes them into the run's own folder, where the next run of
+                    // the source overwrites them. The target takes a copy in a folder named
+                    // after the solved model, so that new modes make it out of date.
+                    let project = crate::analysis::job_name(&self.project_name());
                     let job = crate::analysis::job_name(&source.name);
-                    let file = (self.settings.solver.work_dir())
-                        .join(crate::analysis::job_name(&self.project_name()))
-                        .join(&job)
+                    let solved = (self.settings.solver.work_dir().join(&project).join(&job))
                         .join(format!("{job}.eig"));
+                    let dir = (self.settings.solver.work_dir().join(project))
+                        .join(crate::analysis::job_name(&target.name))
+                        .join(format!(
+                            "Modes-{job}-{:016x}",
+                            bound.input.unwrap_or_default()
+                        ));
+                    let file = dir.join(format!("{job}.eig"));
+                    if !file.is_file()
+                        && (std::fs::create_dir_all(&dir).is_err()
+                            || std::fs::copy(&solved, &file).is_err())
+                    {
+                        missing.push(source.name.clone());
+                        return None;
+                    }
                     return Some(Payload::Results(global, file));
                 }
                 let frd = bound.files.iter().find(|f| {

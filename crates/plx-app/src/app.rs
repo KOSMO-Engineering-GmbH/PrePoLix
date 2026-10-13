@@ -181,6 +181,8 @@ struct Workbench {
     findings_window: Option<Vec<plx_model::Finding>>,
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
+    /// The results file asked for last; see [`is_latest_results`].
+    results_asked: Option<PathBuf>,
     screenshot: Screenshot,
     /// Animation export taking its frames from the 3D view.
     recording: Option<animation_export::Recording>,
@@ -301,6 +303,7 @@ impl AnalysisWindow {
                 solver_findings: Vec::new(),
                 findings_window: None,
                 open_results: None,
+                results_asked: None,
                 screenshot: Screenshot::default(),
                 recording: None,
                 animation_encoding: None,
@@ -1523,6 +1526,7 @@ impl AnalysisWindow {
         self.workbench.poll_bound_results(&ctx);
         self.workbench.campbell_window(&ctx);
         if let Some(path) = self.workbench.open_results.take() {
+            self.workbench.results_asked = Some(path.clone());
             self.open_results(path, &ctx);
         }
         self.workbench.update_highlight();
@@ -1584,6 +1588,14 @@ fn take_over_empty_model(model: &mut Model, old: &Model) {
     model.path = old.path.clone();
 }
 
+/// Whether results read from `loaded` are the ones asked for last. Results are read on
+/// worker threads, so those of an earlier request, e.g. the results kept in the project
+/// being restored when a new run's results are opened, can arrive after newer ones and
+/// would replace them.
+fn is_latest_results(asked: Option<&std::path::Path>, loaded: &std::path::Path) -> bool {
+    asked.is_none_or(|asked| asked == loaded)
+}
+
 impl Workbench {
     fn model_loaded(&mut self, path: PathBuf, result: Result<Box<LoadedModel>, String>) {
         match result {
@@ -1593,6 +1605,15 @@ impl Workbench {
                     render_meshes,
                     geometry_view,
                 } = *loaded;
+                if model.results.is_some()
+                    && !is_latest_results(self.results_asked.as_deref(), &path)
+                {
+                    self.output.push(format!(
+                        "{} not shown: newer results were opened since.",
+                        path.display()
+                    ));
+                    return;
+                }
                 // Geometry imported into a model that has nothing yet, such as one just
                 // created with File > New, has to fit its model space.
                 let into_empty = (self.model.as_ref()).filter(|old| {
@@ -3416,6 +3437,18 @@ impl Workbench {
         };
         // A result removed from the project is not bound again until the next run.
         analysis.bound = true;
+        // A killed run's results stop somewhere in it: they can be looked at, but are not
+        // kept as the solution of the model.
+        if !matches!(
+            analysis.status(),
+            plx_job::JobStatus::Completed | plx_job::JobStatus::FailedWithResults
+        ) {
+            self.output.push(format!(
+                "Results of {} not kept: the run did not finish.",
+                self.analysis_name
+            ));
+            return;
+        }
         let with_errors = analysis.status() == plx_job::JobStatus::FailedWithResults;
         let input = analysis.input;
         let Some(model) = &self.model else {
@@ -3598,6 +3631,11 @@ impl Workbench {
         }
         if self.setup_model().is_none() {
             return;
+        }
+        // The run writes its results where those kept last may have been opened from: the
+        // kept ones are restored from the project from now on.
+        if let Some(model) = &mut self.model {
+            model.bound_results_file = None;
         }
         let default_solver = self.settings.solver.default_solver();
         let Some(model) = self.setup_model() else {
@@ -6828,6 +6866,16 @@ mod tests {
         assert_eq!(results_workspace(&mut pinned), TreeView::Geometry);
         // Results opened later, e.g. by a solve, show the Results tab again.
         assert_eq!(results_workspace(&mut pinned), TreeView::Results);
+    }
+
+    #[test]
+    fn results_of_an_earlier_request_do_not_replace_newer_ones() {
+        let kept = std::path::Path::new("/tmp/Kept_Results/Analysis-1.frd");
+        let new = std::path::Path::new("/tmp/Analysis-1/Analysis-1.frd");
+        // The kept results were asked for first, the new run's after them.
+        assert!(is_latest_results(Some(new), new));
+        assert!(!is_latest_results(Some(new), kept));
+        assert!(is_latest_results(None, kept));
     }
 
     #[test]
