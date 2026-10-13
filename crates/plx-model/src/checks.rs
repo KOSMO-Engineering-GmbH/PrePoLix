@@ -164,7 +164,7 @@ impl Problem {
             Problem::IncrementExceedsStep => "Increment larger than the step",
             Problem::NoLoad => "No load",
             Problem::NoRigidBody => "Reference point without rigid body",
-            Problem::SharedRigidBody => "Nodes in several rigid bodies",
+            Problem::SharedRigidBody => "Nodes in several rigid bodies or remote points",
             Problem::InvalidPlastic => "Invalid plasticity",
             Problem::InvalidCreep => "Invalid creep law",
             Problem::NoExpansion => "Temperature without thermal expansion",
@@ -218,9 +218,10 @@ impl Problem {
                  density CalculiX aborts with \"no density was assigned\"."
             }
             Problem::SharedRigidBody => {
-                "A node can belong to one rigid body only. Rigid body constraints and remote \
-                 displacements each make their selection a rigid body; where two share nodes, \
-                 CalculiX leaves these nodes in the first one and the second moves without them."
+                "A node can follow one rigid body or remote point only. Rigid body constraints \
+                 and remote displacements each tie their selection to a point; where two share \
+                 nodes, CalculiX leaves these nodes in the first rigid body and the second \
+                 moves without them, or it stops on equations that depend on each other."
             }
             Problem::NoRigidBody => {
                 "A boundary condition or load on a reference point acts on the rigid body the \
@@ -930,36 +931,40 @@ impl FeModel {
     /// Nodes in more than one rigid body: of rigid body constraints, and of remote
     /// displacements, one per selection as in the input file.
     fn check_shared_rigid_bodies(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
-        let mut bodies: Vec<(ModelItem, &str, &Region)> = Vec::new();
+        let mut bodies: Vec<(ModelItem, &str, HashSet<NodeId>)> = Vec::new();
         for (i, constraint) in self.constraints.iter().enumerate() {
             if let Constraint::RigidBody(body) = constraint
                 && body.active
             {
-                bodies.push((ModelItem::Constraint(i), &body.name, &body.region));
+                let nodes = body.region.nodes(mesh).into_iter().collect();
+                bodies.push((ModelItem::Constraint(i), &body.name, nodes));
             }
         }
-        let mut remote: Vec<&Region> = Vec::new();
+        let mut points: Vec<(&Region, &crate::RemoteDisplacement)> = Vec::new();
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             for (i, bc) in step.boundary_conditions.iter().enumerate() {
-                if matches!(bc.kind, BoundaryKind::RemoteDisplacement(_))
-                    && bc.active
-                    && step.kind.supports_boundary(&bc.kind)
-                    && !remote.contains(&&bc.region)
+                let BoundaryKind::RemoteDisplacement(remote) = &bc.kind else {
+                    continue;
+                };
+                if !bc.active
+                    || !step.kind.supports_boundary(&bc.kind)
+                    || (points.iter()).any(|(r, p)| **r == bc.region && p.same_point(remote))
                 {
-                    remote.push(&bc.region);
-                    bodies.push((ModelItem::BoundaryCondition(s, i), &bc.name, &bc.region));
+                    continue;
+                }
+                points.push((&bc.region, remote));
+                if let Ok(point) = remote.resolve(self, mesh, &bc.region) {
+                    let nodes = point.nodes.into_iter().collect();
+                    bodies.push((ModelItem::BoundaryCondition(s, i), &bc.name, nodes));
                 }
             }
         }
-        let nodes: Vec<HashSet<NodeId>> = (bodies.iter())
-            .map(|(_, _, region)| region.nodes(mesh).into_iter().collect())
-            .collect();
-        for (b, &(item, name, _)) in bodies.iter().enumerate() {
-            for (a, &(_, other, _)) in bodies[..b].iter().enumerate() {
-                let shared = nodes[b].intersection(&nodes[a]).count();
+        for (b, (item, name, nodes)) in bodies.iter().enumerate() {
+            for (_, other, others) in &bodies[..b] {
+                let shared = nodes.intersection(others).count();
                 if shared > 0 {
                     findings.push(Finding::new(
-                        item,
+                        *item,
                         Problem::SharedRigidBody,
                         format!("{name}: {shared} nodes also in {other}"),
                     ));
@@ -1697,31 +1702,39 @@ impl FeModel {
                 }
             }
         }
-        // A remote displacement moves its region as a rigid body, held like one with a
-        // boundary condition on its reference point.
+        // A rigid or deformable remote displacement holds its region like a rigid body
+        // with a boundary condition on its point; a coupled one each node in the held
+        // directions.
         let step = &self.steps[s];
         for bc in &step.boundary_conditions {
-            let BoundaryKind::RemoteDisplacement(values) = bc.kind else {
+            let BoundaryKind::RemoteDisplacement(remote) = &bc.kind else {
                 continue;
             };
             if !bc.active || !step.kind.supports_boundary(&bc.kind) {
                 continue;
             }
-            let tied = pieces(&bc.region);
+            let Ok(point) = remote.resolve(self, mesh, &bc.region) else {
+                continue;
+            };
+            let axes = (point.axes).unwrap_or([axis(0), axis(1), axis(2)]);
+            let held = remote.held(space);
+            if remote.behavior == crate::RemoteBehavior::Coupled {
+                for &node in &point.nodes {
+                    for d in (0..3).filter(|&d| held[d].is_some()) {
+                        support(node, axes[d], false);
+                    }
+                }
+                continue;
+            }
+            let region = Region::Nodes(point.nodes.clone());
+            let tied = pieces(&region);
             join(&mut ties, &tied, &[]);
             join(&mut contacts, &tied, &[]);
-            let Some(centre) = bc.region.centroid(mesh) else {
+            let Some(node) = nearest_node(mesh, &region, point.position) else {
                 continue;
             };
-            let Some(node) = nearest_node(mesh, &bc.region, centre) else {
-                continue;
-            };
-            for &dof in space.remote_dofs().iter().filter(|&&d| values[d].is_some()) {
-                if dof < 3 {
-                    support(node, axis(dof), false);
-                } else {
-                    support(node, axis(dof - 3), true);
-                }
+            for dof in (0..6).filter(|&d| held[d].is_some()) {
+                support(node, axes[dof % 3], dof >= 3);
             }
         }
         for tie in self.node_ties.iter().filter(|t| t.active) {
@@ -1889,10 +1902,10 @@ impl FeModel {
         }
         let step = &self.steps[s];
         for bc in &step.boundary_conditions {
-            if let BoundaryKind::RemoteDisplacement(values) = bc.kind
+            if let BoundaryKind::RemoteDisplacement(remote) = &bc.kind
                 && bc.active
                 && step.kind.supports_boundary(&bc.kind)
-                && values.iter().any(Option::is_some)
+                && remote.values.iter().any(Option::is_some)
             {
                 mark(&bc.region, &mut held_otherwise);
             }
@@ -3038,7 +3051,7 @@ mod tests {
         let mut model = model(&mesh);
         let bc = &mut model.steps[0].boundary_conditions[0];
         bc.region = Region::Nodes(vec![1, 4, 5, 8]);
-        bc.kind = BoundaryKind::RemoteDisplacement([Some(0.0); 6]);
+        bc.kind = BoundaryKind::RemoteDisplacement(crate::RemoteDisplacement::new([Some(0.0); 6]));
         assert_eq!(problems(&check(&model, &mesh)), []);
         // A rigid body constraint on some of the same nodes takes them away.
         model
@@ -3056,7 +3069,14 @@ mod tests {
         model.constraints.clear();
         // Translations alone let the cube turn about the point.
         model.steps[0].boundary_conditions[0].kind =
-            BoundaryKind::RemoteDisplacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
+            BoundaryKind::RemoteDisplacement(crate::RemoteDisplacement::new([
+                Some(0.0),
+                Some(0.0),
+                Some(0.0),
+                None,
+                None,
+                None,
+            ]));
         let found = problems(&check(&model, &mesh));
         assert!(
             found.contains(&(ModelItem::Part(0), Problem::RigidBodyMotion)),

@@ -114,7 +114,14 @@ impl FeModel {
             for (i, bc) in step.boundary_conditions.iter().enumerate() {
                 let reason = (bc.region.missing_reference(mesh))
                     .or_else(|| self.missing_region_point(&bc.region))
-                    .or_else(|| self.missing_amplitude([&bc.amplitude]));
+                    .or_else(|| self.missing_amplitude([&bc.amplitude]))
+                    .or_else(|| match &bc.kind {
+                        // An unknown coordinate system, or no node in the pinball region.
+                        crate::BoundaryKind::RemoteDisplacement(remote) => {
+                            remote.resolve(self, mesh, &bc.region).err()
+                        }
+                        _ => None,
+                    });
                 if let Some(reason) = reason {
                     invalid.push(Invalid {
                         item: ModelItem::BoundaryCondition(s, i),

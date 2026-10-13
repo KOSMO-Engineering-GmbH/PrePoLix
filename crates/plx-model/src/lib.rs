@@ -26,6 +26,7 @@ mod parameter;
 mod primitive;
 mod properties;
 mod region;
+mod remote;
 mod section;
 mod symmetry;
 pub mod units;
@@ -61,6 +62,7 @@ pub use parameter::{Parameter, ValueKind};
 pub use primitive::{MAX_PRIMITIVE_ELEMENTS, MeshPrimitive, Param, ParamSlot, ParamValue};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
+pub use remote::{RemoteBehavior, RemoteDisplacement, RemoteDof, RemotePoint};
 pub use section::{
     BeamOrientation, BeamProfile, BeamSection, Section, SectionKind, line_tangent, membrane_type,
     unit_thickness,
@@ -1435,15 +1437,15 @@ pub struct BoundaryCondition {
     pub amplitude: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BoundaryKind {
     /// Prescribed displacements (U1..U3) and rotations (UR1..UR3); `None` leaves one free.
     Displacement([Option<f64>; 6]),
-    /// Prescribed displacements and rotations of a point at the area-weighted centre of the
-    /// region, which moves with the point as a rigid body (Ansys' remote displacement). The
-    /// point and the rigid body exist only in the input file (`*RIGID BODY`); `None` leaves
-    /// a degree of freedom free.
-    RemoteDisplacement([Option<f64>; 6]),
+    /// Prescribed displacements and rotations of a point at the centre of the region or
+    /// elsewhere, which the region follows rigidly, as a mean or node by node (Ansys' remote
+    /// displacement). The point and its coupling exist only in the input file (`*RIGID BODY`
+    /// or `*EQUATION`).
+    RemoteDisplacement(RemoteDisplacement),
     /// Prescribed temperature (degree of freedom 11), PrePoMax's `TemperatureBC`.
     Temperature(f64),
     /// Displacements (U1..U3) and rotations (UR1..UR3) taken from the results of the global

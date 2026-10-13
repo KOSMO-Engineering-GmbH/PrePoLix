@@ -344,22 +344,25 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
             }
             // The supports at the remote point with lines to it from nodes spread over the
             // region, like a rigid body's.
-            Kind::Boundary(BoundaryKind::RemoteDisplacement(values)) => {
-                let Some(centre) = item.region.centroid(&model.mesh).map(DVec3::from) else {
+            Kind::Boundary(BoundaryKind::RemoteDisplacement(ref remote)) => {
+                let Ok(point) = remote.resolve(&model.fe, &model.mesh, &item.region) else {
                     continue;
                 };
-                for &axis in model.fe.properties.space.remote_dofs() {
+                let centre = DVec3::from(point.position);
+                let axes = point.axes.map_or(DVec3::AXES, |a| a.map(DVec3::from));
+                let held = remote.held(model.fe.properties.space);
+                for (axis, value) in held.iter().enumerate() {
                     let shape = if axis < 3 {
                         SymbolShape::Cone
                     } else {
                         SymbolShape::RotationLock
                     };
-                    if values[axis].is_some() {
-                        add(centre, DVec3::AXES[axis % 3], shape);
+                    if value.is_some() {
+                        add(centre, axes[axis % 3], shape);
                     }
                 }
                 let to = (centre - model.origin()).as_vec3();
-                let points = node_points(model, &item.region, &visible);
+                let points = node_points(model, &Region::Nodes(point.nodes), &visible);
                 for index in sample(&points, DIVISIONS / 2.0) {
                     symbols.push(Symbol {
                         position: (points[index] - model.origin()).as_vec3(),
@@ -369,8 +372,8 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     });
                 }
             }
-            Kind::Boundary(kind) => {
-                let held: [bool; 6] = match kind {
+            Kind::Boundary(ref kind) => {
+                let held: [bool; 6] = match *kind {
                     BoundaryKind::Displacement(values) => values.map(|v| v.is_some()),
                     BoundaryKind::Temperature(_) => [false; 6],
                     BoundaryKind::Submodel { dofs, .. } => dofs,

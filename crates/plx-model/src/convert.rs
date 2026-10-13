@@ -53,6 +53,10 @@ impl FeModel {
         if !c.from.has_units() || !c.to.has_units() {
             return notes;
         }
+        let cylindrical: Vec<String> = (self.coordinate_systems.iter())
+            .filter(|s| s.kind == crate::CoordinateSystemKind::Cylindrical)
+            .map(|s| s.name.clone())
+            .collect();
         for material in &mut self.materials {
             material.convert_units(&c);
         }
@@ -161,17 +165,20 @@ impl FeModel {
             for bc in &mut step.boundary_conditions {
                 match &mut bc.kind {
                     BoundaryKind::Submodel { .. } | BoundaryKind::Symmetry { .. } => {}
-                    BoundaryKind::Displacement(values)
-                    | BoundaryKind::RemoteDisplacement(values) => {
-                        for (i, value) in values.iter_mut().enumerate() {
-                            let quantity = if i < 3 {
-                                Quantity::Length
+                    BoundaryKind::RemoteDisplacement(remote) => {
+                        convert_displacements(&mut remote.values, &c);
+                        c.option(&mut remote.pinball, Quantity::Length);
+                        if let Some(location) = &mut remote.location {
+                            // The angle of cylindrical coordinates stays.
+                            if cylindrical.contains(&remote.system) {
+                                c.value(&mut location[0], Quantity::Length);
+                                c.value(&mut location[2], Quantity::Length);
                             } else {
-                                Quantity::Angle
-                            };
-                            c.option(value, quantity);
+                                c.all(location, Quantity::Length);
+                            }
                         }
                     }
+                    BoundaryKind::Displacement(values) => convert_displacements(values, &c),
                     BoundaryKind::Temperature(t) => c.value(t, Quantity::Temperature),
                 }
             }
@@ -448,6 +455,18 @@ fn convert_modal_damping(damping: &mut Option<crate::ModalDamping>, c: &Conversi
     if let Some(crate::ModalDamping::Rayleigh(r)) = damping {
         c.value(&mut r.alpha, Quantity::Frequency);
         c.value(&mut r.beta, Quantity::Time);
+    }
+}
+
+/// Displacements (lengths) and rotations (angles) of a boundary condition.
+fn convert_displacements(values: &mut [Option<f64>; 6], c: &Conversion) {
+    for (i, value) in values.iter_mut().enumerate() {
+        let quantity = if i < 3 {
+            Quantity::Length
+        } else {
+            Quantity::Angle
+        };
+        c.option(value, quantity);
     }
 }
 

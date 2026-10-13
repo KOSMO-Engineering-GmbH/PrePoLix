@@ -538,6 +538,17 @@ impl FeModel {
                 moving.system = new.to_string();
             }
         }
+        for bc in self
+            .steps
+            .iter_mut()
+            .flat_map(|s| &mut s.boundary_conditions)
+        {
+            if let crate::BoundaryKind::RemoteDisplacement(remote) = &mut bc.kind
+                && remote.system == old
+            {
+                remote.system = new.to_string();
+            }
+        }
     }
 
     /// Results on a renamed plane follow it.

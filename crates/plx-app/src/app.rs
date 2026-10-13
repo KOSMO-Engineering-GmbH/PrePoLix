@@ -5317,7 +5317,7 @@ impl Workbench {
             let selected = is_selected(TreeItem::BoundaryCondition(index, i));
             if step.active && bc.active && (bc.visible || selected) && !replaced(false, i) {
                 items.push(symbols::Item {
-                    kind: symbols::Kind::Boundary(bc.kind),
+                    kind: symbols::Kind::Boundary(bc.kind.clone()),
                     region: bc.region.clone(),
                     selected,
                 });

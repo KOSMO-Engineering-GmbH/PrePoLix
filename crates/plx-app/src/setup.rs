@@ -16,10 +16,10 @@ use plx_model::{
     FeModel, FieldOutput, FrequencyStep, GLOBAL, Hardening, HeatTransferStep, HistoryKind,
     HistoryOutput, Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind,
     Material, MeshSet, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad,
-    NodeTie, OutputDimension, OutputKind, PlasticPoint, Quantity, Region, Section, SectionKind,
-    SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
-    SurfaceInteraction, SymmetryError, Tie, UnitSystem, ViscoStep, Wheel, next_name,
-    symmetry_plane,
+    NodeTie, OutputDimension, OutputKind, PlasticPoint, Quantity, Region, RemoteBehavior,
+    RemoteDisplacement, Section, SectionKind, SensitivityStep, SetKind, StaticStep,
+    SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction, SymmetryError, Tie, UnitSystem,
+    ViscoStep, Wheel, next_name, symmetry_plane,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
@@ -1045,7 +1045,7 @@ fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 5] {
         (
             "Remote Displacement",
             REMOTE_DISPLACEMENT,
-            BoundaryKind::RemoteDisplacement([Some(0.0); 6]),
+            BoundaryKind::RemoteDisplacement(RemoteDisplacement::new([Some(0.0); 6])),
         ),
         ("Temperature", TEMPERATURE, BoundaryKind::Temperature(0.0)),
         (
@@ -1072,6 +1072,149 @@ fn boundary_kind_name(kind: &BoundaryKind) -> &'static str {
         BoundaryKind::Submodel { .. } => SUBMODEL,
         BoundaryKind::Symmetry { .. } => SYMMETRY,
     }
+}
+
+/// Rows of a remote displacement, Ansys' fields: how the selection follows the point, the
+/// coordinate system of the point and its directions, where the point is and the pinball
+/// region.
+fn remote_rows(
+    ui: &mut Ui,
+    remote: &mut RemoteDisplacement,
+    region: &Region,
+    model: &Model,
+    units: UnitSystem,
+) {
+    let fe = &model.fe;
+    ui.label("Behavior");
+    egui::ComboBox::from_id_salt("remote behavior")
+        .selected_text(remote.behavior.label())
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            for behavior in RemoteBehavior::ALL {
+                ui.selectable_value(&mut remote.behavior, behavior, behavior.label());
+            }
+        });
+    ui.end_row();
+    ui.label("");
+    ui.weak(match remote.behavior {
+        RemoteBehavior::Rigid => "The selection keeps its shape.",
+        RemoteBehavior::Deformable => "Mean motion; the selection deforms.",
+        RemoteBehavior::Coupled => "Nodes shift with the point; no rotations.",
+    });
+    ui.end_row();
+    ui.label("Coordinate system");
+    egui::ComboBox::from_id_salt("remote system")
+        .selected_text(remote.system.as_str())
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            let names = std::iter::once(GLOBAL)
+                .chain(fe.coordinate_systems.iter().map(|c| c.name.as_str()));
+            for name in names {
+                ui.selectable_value(&mut remote.system, name.to_string(), name);
+            }
+        });
+    ui.end_row();
+    let system = fe.coordinate_system_or_global(&remote.system);
+    let cylindrical = system
+        .as_ref()
+        .is_some_and(|s| s.kind == plx_model::CoordinateSystemKind::Cylindrical);
+    ui.label("Location");
+    ui.horizontal(|ui| {
+        if ui.radio(remote.location.is_none(), "Centroid").clicked() {
+            remote.location = None;
+        }
+        if ui.radio(remote.location.is_some(), "Coordinates").clicked() && remote.location.is_none()
+        {
+            // Starts from the centroid, in the coordinates of the system.
+            let centre = region.centroid(&model.mesh).unwrap_or([0.0; 3]);
+            let local = (system.as_ref())
+                .and_then(|s| s.local(centre).ok())
+                .unwrap_or(centre);
+            remote.location = Some(if cylindrical {
+                [local[0], local[1].to_degrees(), local[2]]
+            } else {
+                local
+            });
+        }
+    });
+    ui.end_row();
+    if let Some(location) = &mut remote.location {
+        let labels = if cylindrical {
+            ["R", "Theta", "Z"]
+        } else {
+            ["X", "Y", "Z"]
+        };
+        for (k, (value, label)) in location.iter_mut().zip(labels).enumerate() {
+            ui.label(label);
+            if cylindrical && k == 1 {
+                ui.add(numeric::drag_value(value).speed(1.0).suffix(" °"));
+            } else {
+                ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1));
+            }
+            ui.end_row();
+        }
+    }
+    ui.label("Point");
+    match remote.resolve(fe, &model.mesh, region) {
+        Ok(point) => {
+            let [x, y, z] = point
+                .position
+                .map(|v| crate::results::format_value(units.shown(v, Quantity::Length) as f32));
+            let unit = units.unit(Quantity::Length);
+            let text = format!("({x}, {y}, {z}) {unit}");
+            let nodes = point.nodes.len();
+            ui.label(text.trim_end()).on_hover_text(format!(
+                "Global position of the point, followed by {nodes} nodes"
+            ));
+        }
+        Err(error) if region.nodes(&model.mesh).is_empty() => {
+            let _ = error;
+            ui.weak("Select faces, edges or nodes");
+        }
+        Err(error) => {
+            ui.add(
+                egui::Label::new(egui::RichText::new(error).color(crate::style::error())).wrap(),
+            );
+        }
+    }
+    ui.end_row();
+    ui.label("Pinball region");
+    ui.horizontal(|ui| {
+        let mut limited = remote.pinball.is_some();
+        let switched = ui
+            .checkbox(&mut limited, "")
+            .on_hover_text("Only the nodes within this distance of the point follow it")
+            .changed();
+        if switched && limited {
+            // Starts from the farthest node of the selection, which still takes them all.
+            let all = RemoteDisplacement {
+                pinball: None,
+                ..remote.clone()
+            };
+            let farthest = all.resolve(fe, &model.mesh, region).ok().map(|point| {
+                (point.nodes.iter())
+                    .filter_map(|&n| model.mesh.node(n))
+                    .map(|x| {
+                        let d: [f64; 3] = std::array::from_fn(|i| x[i] - point.position[i]);
+                        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+                    })
+                    .fold(0.0, f64::max)
+            });
+            // Rounded up to three digits, so the farthest node stays inside.
+            let rounded = farthest.filter(|&r| r > 0.0).map(|r| {
+                let scale = 10f64.powi(2 - r.log10().floor() as i32);
+                (r * scale).ceil() / scale
+            });
+            remote.pinball = Some(rounded.unwrap_or(0.0));
+        }
+        let mut radius = remote.pinball.unwrap_or(0.0);
+        ui.add_enabled(
+            limited,
+            numeric::quantity(&mut radius, units, Quantity::Length).speed(0.1),
+        );
+        remote.pinball = limited.then_some(radius.max(0.0));
+    });
+    ui.end_row();
 }
 
 /// Rows of a symmetry boundary condition: where the normal of the plane comes from, the
@@ -1713,7 +1856,9 @@ impl Editor {
     /// index (`None` for a new one) and the symbol item, for the 3D view.
     pub fn step_item(&self) -> Option<(usize, Option<usize>, crate::symbols::Item)> {
         let (step, kind, region) = match &self.draft {
-            Draft::BoundaryCondition(s, bc, r) => (*s, crate::symbols::Kind::Boundary(bc.kind), r),
+            Draft::BoundaryCondition(s, bc, r) => {
+                (*s, crate::symbols::Kind::Boundary(bc.kind.clone()), r)
+            }
             Draft::Load(s, load, r) => (*s, crate::symbols::Kind::Load(load.kind.clone()), r),
             _ => return None,
         };
@@ -1998,40 +2143,25 @@ impl Editor {
                     ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0));
                     ui.end_row();
                 }
-                if let BoundaryKind::RemoteDisplacement(_) = bc.kind {
-                    ui.label("Point");
-                    match region.region().centroid(&model.mesh) {
-                        Some(p) => {
-                            let [x, y, z] =
-                                p.map(|v| {
-                                    crate::results::format_value(
-                                        units.shown(v, Quantity::Length) as f32
-                                    )
-                                });
-                            let unit = units.unit(Quantity::Length);
-                            ui.label(format!("({x}, {y}, {z}) {unit}").trim_end().to_owned());
-                        }
-                        None => {
-                            ui.weak("Select faces, edges or nodes");
-                        }
-                    }
-                    ui.end_row();
-                    ui.label("");
-                    ui.weak("The selection moves rigidly with it.");
-                    ui.end_row();
+                if let BoundaryKind::RemoteDisplacement(remote) = &mut bc.kind {
+                    remote_rows(ui, remote, &region.region(), model, units);
                 }
-                let remote = matches!(bc.kind, BoundaryKind::RemoteDisplacement(_));
-                if let BoundaryKind::Displacement(values)
-                | BoundaryKind::RemoteDisplacement(values) = &mut bc.kind
-                {
-                    // Nodes of 2D models only move in the x-y plane; the point of a remote
-                    // displacement in a plane model also turns about z.
-                    let dofs: &[usize] = match (remote, two_d) {
-                        (true, _) => model.fe.properties.space.remote_dofs(),
-                        (false, true) => &[0, 1],
-                        (false, false) => &[0, 1, 2, 3, 4, 5],
-                    };
-                    for &i in dofs {
+                // Nodes of 2D models only move in the x-y plane; the point of a remote
+                // displacement in a plane model also turns about z.
+                let dofs: Vec<usize> = match &bc.kind {
+                    BoundaryKind::RemoteDisplacement(remote) => {
+                        remote.dofs(model.fe.properties.space)
+                    }
+                    _ if two_d => vec![0, 1],
+                    _ => (0..6).collect(),
+                };
+                let values = match &mut bc.kind {
+                    BoundaryKind::Displacement(values) => Some(values),
+                    BoundaryKind::RemoteDisplacement(remote) => Some(&mut remote.values),
+                    _ => None,
+                };
+                if let Some(values) = values {
+                    for i in dofs {
                         let (value, label) = (&mut values[i], DOF_LABELS[i]);
                         let mut set = value.is_some();
                         ui.checkbox(&mut set, label);
