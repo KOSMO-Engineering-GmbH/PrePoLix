@@ -182,6 +182,14 @@ pub fn mesh_header() -> Color32 {
         Color32::from_rgb(212, 230, 214)
     }
 }
+/// Header band of an export block in the project schematic: a muted blue-grey.
+pub fn export_header() -> Color32 {
+    if dark() {
+        Color32::from_rgb(52, 62, 84)
+    } else {
+        Color32::from_rgb(214, 222, 238)
+    }
+}
 /// Outline of the pins of the project schematic.
 pub fn pin_edge() -> Color32 {
     if dark() {

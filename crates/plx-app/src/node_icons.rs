@@ -40,6 +40,8 @@ pub enum NodeIcon {
     Results,
     /// Taken over from another analysis: two chain links.
     Link,
+    /// A file written by an export block: an arrow out of a tray.
+    Export,
     /// A step of this type, drawn like in the tree of the FE model.
     StepType(StepGlyph),
 }
@@ -85,6 +87,11 @@ pub fn paint(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32) {
             };
             link(1.5, 8.0);
             link(6.0, 1.5);
+        }
+        NodeIcon::Export => {
+            line(&[p(1.5, 8.0), p(1.5, 12.5), p(12.5, 12.5), p(12.5, 8.0)]);
+            line(&[p(7.0, 9.5), p(7.0, 1.5)]);
+            line(&[p(4.2, 4.3), p(7.0, 1.5), p(9.8, 4.3)]);
         }
         NodeIcon::State => {
             line(&[p(0.5, 7.0), p(5.0, 7.0)]);

@@ -79,6 +79,8 @@ pub enum ProjectNode {
     Materials(MaterialSet),
     /// A mesh made from a few parameters, such as a box.
     Mesh(Box<MeshBlock>),
+    /// A sink that writes the mesh it takes to a file.
+    MeshExport(MeshExport),
 }
 
 impl ProjectNode {
@@ -88,6 +90,7 @@ impl ProjectNode {
             Self::Analysis(a) => a.id,
             Self::Materials(m) => m.id,
             Self::Mesh(m) => m.id,
+            Self::MeshExport(e) => e.id,
         }
     }
 
@@ -96,6 +99,7 @@ impl ProjectNode {
             Self::Analysis(a) => &a.name,
             Self::Materials(m) => &m.name,
             Self::Mesh(m) => &m.name,
+            Self::MeshExport(e) => &e.name,
         }
     }
 
@@ -105,6 +109,7 @@ impl ProjectNode {
             Self::Analysis(a) => a.position,
             Self::Materials(m) => m.position,
             Self::Mesh(m) => m.position,
+            Self::MeshExport(e) => e.position,
         }
     }
 }
@@ -130,6 +135,24 @@ pub struct MeshBlock {
     /// [`plx_model::MeshPrimitive::fingerprint`]; the mesh is out of date once it differs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated: Option<u64>,
+}
+
+/// A block that writes the mesh linked to it to a file when the project is updated. It keeps
+/// no mesh: the link brings it again when the project is opened.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MeshExport {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The file to write: an input file for CalculiX. A relative path is taken from the
+    /// folder of the project file.
+    #[serde(default)]
+    pub path: String,
+    /// Fingerprint of the mesh and the path as last written; nothing is written while it
+    /// is the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written: Option<u64>,
 }
 
 /// A block that holds materials for analyses to link, item by item or all of them.
@@ -676,6 +699,14 @@ mod tests {
             generated: Some(primitive.fingerprint(space)),
             primitive: primitive.clone(),
         })));
+        let export = MeshExport {
+            id: 7,
+            name: "Mesh Export".into(),
+            position: [300.0, 20.0],
+            path: "out/box.inp".into(),
+            written: Some(42),
+        };
+        saved.nodes.push(ProjectNode::MeshExport(export.clone()));
         saved.links.push(Link {
             source: 3,
             target: 1,
@@ -689,7 +720,7 @@ mod tests {
         assert!(text.contains(&format!("format:{PROJECT_FORMAT}")));
         assert!(!text.contains("analyses:"), "{text}");
         let project = read_project(&path).unwrap();
-        assert_eq!(project.nodes.len(), 3);
+        assert_eq!(project.nodes.len(), 4);
         match &project.nodes[2] {
             ProjectNode::Mesh(block) => {
                 assert_eq!(block.primitive, primitive);
@@ -705,6 +736,10 @@ mod tests {
         );
         match &project.nodes[1] {
             ProjectNode::Materials(read) => assert_eq!(read, &set),
+            other => panic!("{other:?}"),
+        }
+        match &project.nodes[3] {
+            ProjectNode::MeshExport(read) => assert_eq!(read, &export),
             other => panic!("{other:?}"),
         }
         assert_eq!(project.links, saved.links);
