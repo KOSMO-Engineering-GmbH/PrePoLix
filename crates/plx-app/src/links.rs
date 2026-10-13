@@ -47,6 +47,11 @@ pub const VALUE: &str = "Value";
 pub const PARAMETERS: &str = "Parameters";
 /// The row of a measure block that takes the results of a step.
 pub const MEASURE: &str = "Measure";
+/// The value an optimizer gives, `["Loop", "Value"]`: a value link that may lead back to the
+/// optimizer, the feedback of its loop.
+pub const LOOP: &str = "Loop";
+/// The row of an optimizer that takes the value of a measure.
+pub const OBJECTIVE: &str = "Objective";
 
 /// The categories of the setup in the order of the FE Model tree; each can be linked as a
 /// whole or item by item.
@@ -116,9 +121,15 @@ pub fn is_results(link: &Link) -> bool {
     link.item.first().is_some_and(|c| c == RESULTS)
 }
 
-/// Whether the link gives a number to a parameter.
+/// Whether the link gives a number to a parameter, or to an optimizer.
 pub fn is_value(link: &Link) -> bool {
-    link.item.first().is_some_and(|c| c == VALUE)
+    link.item.first().is_some_and(|c| c == VALUE || c == LOOP)
+}
+
+/// Whether the link is the feedback of an optimizer's loop: it gives the optimizer's value
+/// to the blocks before it, and is left out of the order of the blocks.
+pub fn is_feedback(link: &Link) -> bool {
+    link.item.first().is_some_and(|c| c == LOOP)
 }
 
 /// The key of the parameter a value link sets.
@@ -899,7 +910,12 @@ pub fn compatible(item: &[String], slot: &[String]) -> bool {
     match item.first().map(String::as_str) {
         Some(RESULTS) => item.len() == 2 && takes_results(slot),
         // A number goes to a parameter; whether its kind fits, the blocks tell.
-        Some(VALUE) => item.len() == 2 && matches!(slot, [cell, _] if cell == PARAMETERS),
+        Some(VALUE) => {
+            item.len() == 2
+                && (matches!(slot, [cell, _] if cell == PARAMETERS)
+                    || matches!(slot, [cell] if cell == OBJECTIVE))
+        }
+        Some(LOOP) => item.len() == 2 && matches!(slot, [cell, _] if cell == PARAMETERS),
         Some(STATE) | None => false,
         Some(_) => match (item, slot) {
             ([a], [b]) => a == b && b != RESULTS && b != STATE,
@@ -932,12 +948,13 @@ pub fn is_step_input(path: &[String]) -> bool {
         if cell == SETUP && steps == STEPS && STEP_INPUTS.contains(&input.as_str()))
 }
 
-/// The analyses that come before `target` through links, nearest first.
+/// The analyses that come before `target` through links, nearest first; the feedback of a
+/// loop is left out.
 pub fn upstream(links: &[Link], target: u64) -> Vec<u64> {
     let mut found = Vec::new();
     let mut queue = vec![target];
     while let Some(id) = queue.pop() {
-        for link in links.iter().filter(|l| l.target == id) {
+        for link in links.iter().filter(|l| l.target == id && !is_feedback(l)) {
             if !found.contains(&link.source) && link.source != target {
                 found.push(link.source);
                 queue.push(link.source);
@@ -960,7 +977,7 @@ pub fn order(ids: &[u64], links: &[Link]) -> Vec<u64> {
         let before = left.len();
         left.retain(|&id| {
             let ready = (links.iter())
-                .filter(|l| l.target == id && ids.contains(&l.source))
+                .filter(|l| l.target == id && ids.contains(&l.source) && !is_feedback(l))
                 .all(|l| done.contains(&l.source));
             if ready {
                 done.push(id);
@@ -1361,6 +1378,43 @@ mod tests {
         assert!(!makes_cycle(&links, 1, 3));
         assert_eq!(order(&[3, 2, 1], &links), [1, 2, 3]);
         assert_eq!(upstream(&links, 3), [2, 1]);
+    }
+
+    #[test]
+    fn the_feedback_of_a_loop_is_left_out_of_the_order() {
+        // Optimizer 4 varies mesh block 1, analysis 2 solves on it, measure 3 reads it and the
+        // optimizer reads the measure.
+        let link = |source, target, item: &[&str], slot: &[&str]| Link {
+            source,
+            target,
+            item: path(item),
+            slot: path(slot),
+            ..Default::default()
+        };
+        let links = vec![
+            link(4, 1, &["Loop", "Value"], &["Parameters", "refinement"]),
+            link(1, 2, &["Mesh"], &[]),
+            link(2, 3, &["Results", "Step-1"], &["Measure"]),
+            link(3, 4, &["Value", "Result"], &["Objective"]),
+        ];
+        assert!(is_feedback(&links[0]) && is_value(&links[0]));
+        assert!(!is_feedback(&links[3]) && is_value(&links[3]));
+        assert_eq!(order(&[4, 3, 2, 1], &links), [1, 2, 3, 4]);
+        assert_eq!(upstream(&links, 1), Vec::<u64>::new());
+        assert!(!makes_cycle(&links, 3, 4));
+        // The value of an optimizer goes to parameters, that of a measure to an optimizer.
+        assert!(compatible(
+            &path(&["Loop", "Value"]),
+            &path(&["Parameters", "nx"])
+        ));
+        assert!(!compatible(
+            &path(&["Loop", "Value"]),
+            &path(&["Objective"])
+        ));
+        assert!(compatible(
+            &path(&["Value", "Result"]),
+            &path(&["Objective"])
+        ));
     }
 
     #[test]

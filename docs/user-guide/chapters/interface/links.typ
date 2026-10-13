@@ -30,7 +30,8 @@ The colour of a wire tells its kind, the row tells where it acts:
     further steps of the same CalculiX run (@state-links).],
   [Value (violet)], [A number of the target, such as the edge length of a mesh block, takes
     the value of a parameter (@parameters-block). Like a reference, it is then the same
-    number.],
+    number. The value of an optimizer goes back to the blocks before it as a dashed wire, the
+    feedback of its loop (@optimization-loops).],
 )
 
 A block thus reads from top to bottom: where it starts (#ui("State")), what it is (the blue

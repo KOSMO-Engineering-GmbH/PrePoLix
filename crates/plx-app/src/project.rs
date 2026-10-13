@@ -11,11 +11,12 @@ use crate::node_picker::{self, NodePicker};
 use egui_snarl::ui::{AnyPins, PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
 use plx_io::project::{
-    Link, MaterialSet, MeasureBlock, MeshBlock, ParameterSet, Project, ProjectAnalysis, ProjectNode,
+    Link, MaterialSet, MeasureBlock, MeshBlock, OptimizerBlock, ParameterSet, Project,
+    ProjectAnalysis, ProjectNode,
 };
 use plx_model::{
-    MeasureKind, MeshPrimitive, ModelProperties, ModelSpace, Param, ParamSlot, Parameter, Quantity,
-    UnitSystem, ValueKind,
+    Iteration, MeasureKind, MeshPrimitive, ModelProperties, ModelSpace, Next, OptimizerKind,
+    Outcome as LoopOutcome, Param, ParamSlot, Parameter, Quantity, UnitSystem, ValueKind,
 };
 
 use crate::app::{AnalysisWindow, Request, Show};
@@ -27,6 +28,7 @@ use crate::mesh_block::{MeshBlockEditor, MeshBlockResult};
 use crate::model::PROJECT_EXTENSION;
 use crate::model_properties::{DialogResult, ModelPropertiesDialog};
 use crate::node_icons::{self, NodeIcon};
+use crate::optimizer::{OptimizerEditor, OptimizerEditorResult};
 use crate::parameter_set::{ParameterSetEditor, ParameterSetResult};
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::solution_monitor::{BackgroundSolve, Outcome};
@@ -50,6 +52,8 @@ enum Kind {
     Parameters,
     /// A key figure computed from the results of a step linked to it.
     Measure,
+    /// A loop that gives values to the blocks before a measure until it is done.
+    Optimizer,
 }
 
 impl Kind {
@@ -66,6 +70,7 @@ impl Kind {
             Self::Mesh => "mesh block",
             Self::Parameters => "parameters block",
             Self::Measure => "measure block",
+            Self::Optimizer => "optimizer",
         }
     }
 }
@@ -97,6 +102,8 @@ struct Node {
     parameters: Vec<Parameter>,
     /// What a measure block computes and what it computed.
     measure: Option<MeasureState>,
+    /// What an optimizer varies and its last run.
+    optimizer: Option<OptimizerState>,
     /// Solved in the background, its window closed.
     solving: bool,
     /// Mesh blocks before it whose mesh is out of date, see
@@ -131,6 +138,7 @@ impl Node {
             refinement: 1.0,
             parameters: Vec::new(),
             measure: None,
+            optimizer: None,
             solving: false,
             stale_meshes: Vec::new(),
         };
@@ -250,6 +258,24 @@ impl Node {
                 });
                 node
             }
+            ProjectNode::Optimizer(block) => {
+                let mut data = ProjectAnalysis {
+                    id: block.id,
+                    name: block.name.clone(),
+                    position: block.position,
+                    ..Default::default()
+                };
+                data.model.properties.units = block.units;
+                let mut node = Self::of_kind(Kind::Optimizer, block.id, block.name, data);
+                node.optimizer = Some(OptimizerState {
+                    kind: block.kind,
+                    value: block.value,
+                    history: block.history,
+                    report: block.report,
+                    done: block.done,
+                });
+                node
+            }
         }
     }
 
@@ -297,6 +323,20 @@ impl Node {
                     kind: measure.kind.clone(),
                     value: measure.value,
                     evaluated: measure.evaluated,
+                })
+            }
+            Kind::Optimizer => {
+                let optimizer = self.optimizer.as_ref()?;
+                ProjectNode::Optimizer(OptimizerBlock {
+                    id: data.id,
+                    name: data.name,
+                    position,
+                    units: data.model.properties.units,
+                    kind: optimizer.kind.clone(),
+                    value: optimizer.value,
+                    history: optimizer.history.clone(),
+                    report: optimizer.report.clone(),
+                    done: optimizer.done,
                 })
             }
         })
@@ -367,6 +407,25 @@ struct MeasureState {
     error: Option<String>,
 }
 
+/// What an optimizer varies, the value it gives now and its last run: the iterations, how
+/// it ended and the fingerprint of the measure it ended on, see [`ProjectApp::measure_key`].
+struct OptimizerState {
+    kind: OptimizerKind,
+    value: f64,
+    history: Vec<Iteration>,
+    report: Option<String>,
+    done: Option<u64>,
+}
+
+/// The loop of an optimizer under way: the values of the round left to solve, the one being
+/// solved with when it started, and whether Update Project was asked for it.
+struct LoopRun {
+    id: u64,
+    batch: Vec<f64>,
+    current: Option<(f64, Instant)>,
+    updating: bool,
+}
+
 /// What a link copies into its target.
 enum Payload {
     Setup(Box<plx_model::FeModel>),
@@ -404,6 +463,11 @@ enum Action {
     AddParameters(egui::Pos2),
     /// A new measure block at the position.
     AddMeasure(egui::Pos2),
+    /// A new optimizer at the position.
+    AddOptimizer(egui::Pos2),
+    /// Run the loop of an optimizer, or forget its iterations.
+    RunLoop(u64),
+    ResetLoop(u64),
     /// The value of a parameter of a parameters block, by its index, changed in its block.
     SetParameter(u64, usize, f64),
     /// The refinement of a mesh block changed in its block.
@@ -475,6 +539,11 @@ pub struct ProjectApp {
     /// Measures being computed on worker threads, by block, with the fingerprint they are
     /// computed for.
     measuring: HashMap<u64, (u64, Receiver<Result<f64, String>>)>,
+    /// The editor of an optimizer.
+    optimizer_editor: Option<OptimizerEditor>,
+    /// The loop being run, and the optimizers Update Project runs after it.
+    looping: Option<LoopRun>,
+    loops_due: VecDeque<u64>,
     /// Update Project made meshes anew and goes on once links took them.
     update_after_sync: bool,
     /// The overview of blocks to add, open after a double-click into the schematic.
@@ -550,6 +619,9 @@ impl ProjectApp {
             parameter_set: None,
             measure_editor: None,
             measuring: HashMap::new(),
+            optimizer_editor: None,
+            looping: None,
+            loops_due: VecDeque::new(),
             update_after_sync: false,
             picker: None,
             show_all: false,
@@ -978,6 +1050,552 @@ impl ProjectApp {
         }
     }
 
+    /// Adds an optimizer of the mesh convergence; returns its id.
+    fn add_optimizer(&mut self, position: egui::Pos2) -> u64 {
+        let id = self.next_id();
+        let name = self.unique_name("Optimizer");
+        let mut data = ProjectAnalysis {
+            id,
+            name: name.clone(),
+            ..Default::default()
+        };
+        data.model.properties.units = self.settings.new_model.units;
+        let mut node = Node::of_kind(Kind::Optimizer, id, name.clone(), data);
+        let kind = OptimizerKind::default();
+        node.optimizer = Some(OptimizerState {
+            value: kind.start(),
+            kind,
+            history: Vec::new(),
+            report: None,
+            done: None,
+        });
+        self.nodes.push(node);
+        self.graph.insert_node(position, id);
+        self.output.push(format!(
+            "{name} created: drag its value to Refine of a mesh block and the value of a Measure \
+             block to its Measure row; Update Project then runs the loop."
+        ));
+        id
+    }
+
+    fn edit_optimizer(&mut self, id: u64) {
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            return;
+        };
+        let Some(optimizer) = &node.optimizer else {
+            return;
+        };
+        let units =
+            (node.data.as_ref()).map_or(UnitSystem::default(), |d| d.model.properties.units);
+        self.optimizer_editor = Some(OptimizerEditor::new(
+            id,
+            &node.name,
+            optimizer.kind.clone(),
+            units,
+        ));
+    }
+
+    fn optimizer_window(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.optimizer_editor.as_ref().map(|e| e.id) else {
+            return;
+        };
+        let history = self.optimizer_history(id);
+        let Some(editor) = &mut self.optimizer_editor else {
+            return;
+        };
+        let result = editor.show(ctx, &history);
+        let settle = |app: &mut Self, kind: OptimizerKind, units: UnitSystem| {
+            if let Some(node) = app.node(id) {
+                if let Some(data) = &mut node.data {
+                    data.model.properties.units = units;
+                }
+                if let Some(optimizer) = &mut node.optimizer
+                    && optimizer.kind != kind
+                {
+                    // Other settings: the last run is no longer what it would give.
+                    if optimizer.kind.value_kind() != kind.value_kind() {
+                        optimizer.value = kind.start();
+                    }
+                    optimizer.kind = kind;
+                    optimizer.done = None;
+                }
+            }
+            app.sync_due = true;
+        };
+        match result {
+            OptimizerEditorResult::Open => {}
+            OptimizerEditorResult::Cancel => self.optimizer_editor = None,
+            OptimizerEditorResult::Ok(kind, units) => {
+                self.optimizer_editor = None;
+                settle(self, kind, units);
+            }
+            OptimizerEditorResult::Run(kind, units) => {
+                settle(self, kind, units);
+                self.start_loop(id);
+            }
+            OptimizerEditorResult::Reset => self.reset_loop(id),
+        }
+    }
+
+    /// The Measure block an optimizer reads.
+    fn objective_of(&self, id: u64) -> Option<u64> {
+        (self.links.iter())
+            .find(|l| {
+                l.target == id
+                    && links::slot(l)
+                        .first()
+                        .is_some_and(|c| c == links::OBJECTIVE)
+            })
+            .map(|l| l.source)
+    }
+
+    /// The feedback links of an optimizer: where its value goes.
+    fn feedback_of(&self, id: u64) -> Vec<&Link> {
+        (self.links.iter())
+            .filter(|l| l.source == id && links::is_feedback(l))
+            .collect()
+    }
+
+    /// The measure of an optimizer as text, in the units of its Measure block.
+    fn shown_measure(&self, id: u64, value: f64) -> String {
+        let measure = (self.objective_of(id))
+            .and_then(|m| self.nodes.iter().find(|n| n.id == m))
+            .and_then(|n| Some((n.measure.as_ref()?, n.data.as_ref()?)));
+        match measure {
+            Some((measure, data)) => {
+                crate::measure::shown(&measure.kind, value, data.model.properties.units)
+            }
+            None => crate::results::format_value(value as f32),
+        }
+    }
+
+    /// The value of an optimizer as text.
+    fn shown_loop_value(&self, id: u64, value: f64) -> String {
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            return String::new();
+        };
+        let units =
+            (node.data.as_ref()).map_or(UnitSystem::default(), |d| d.model.properties.units);
+        let kind = (node.optimizer.as_ref()).map_or(ValueKind::Factor, |o| o.kind.value_kind());
+        crate::optimizer::shown(kind, value, units)
+    }
+
+    /// How many elements the mesh blocks an optimizer varies would have at `value`; `None`
+    /// when it varies no mesh block.
+    fn elements_at(&self, id: u64, value: f64) -> Option<u64> {
+        (self.feedback_of(id).into_iter())
+            .filter_map(|link| {
+                let node = self.nodes.iter().find(|n| n.id == link.target)?;
+                let key = links::parameter_key(link)?;
+                let (mut primitive, mut refinement) = (node.primitive.clone()?, node.refinement);
+                if key == REFINEMENT {
+                    refinement = value;
+                } else {
+                    primitive.set_value(key, value);
+                }
+                Some(primitive.refined(refinement).element_count())
+            })
+            .max()
+    }
+
+    /// The elements of the meshes an optimizer varies, as they are now.
+    fn loop_elements(&self, id: u64) -> Option<u64> {
+        (self.feedback_of(id).into_iter())
+            .filter_map(|link| self.nodes.iter().find(|n| n.id == link.target))
+            .filter_map(|n| n.data.as_ref())
+            .map(|d| d.mesh.element_count() as u64)
+            .max()
+    }
+
+    /// The state of an optimizer: up to date while its measure is what its last run ended on.
+    fn optimizer_state(&self, id: u64) -> CellState {
+        let Some(optimizer) =
+            (self.nodes.iter().find(|n| n.id == id)).and_then(|n| n.optimizer.as_ref())
+        else {
+            return CellState::Missing;
+        };
+        if self.looping.as_ref().is_some_and(|run| run.id == id) {
+            return CellState::OutOfDate;
+        }
+        let measure = self.objective_of(id);
+        let current = measure.and_then(|m| {
+            (self.measure_state(m) == CellState::UpToDate).then(|| self.measure_key(m))?
+        });
+        match optimizer.done {
+            Some(done) if Some(done) == current => CellState::UpToDate,
+            _ if optimizer.history.is_empty() => CellState::Missing,
+            _ => CellState::OutOfDate,
+        }
+    }
+
+    /// The iterations of an optimizer for its editor.
+    fn optimizer_history(&self, id: u64) -> crate::optimizer::History {
+        let mut history = crate::optimizer::History::default();
+        let Some(optimizer) =
+            (self.nodes.iter().find(|n| n.id == id)).and_then(|n| n.optimizer.as_ref())
+        else {
+            return history;
+        };
+        let study = matches!(optimizer.kind, OptimizerKind::ParameterStudy { .. });
+        let measure_of = |value: f64| {
+            let (measure, units) = (self.objective_of(id))
+                .and_then(|m| self.nodes.iter().find(|n| n.id == m))
+                .and_then(|n| {
+                    Some((n.measure.as_ref()?, n.data.as_ref()?.model.properties.units))
+                })?;
+            let (field, component) = measure.kind.field();
+            Some(if field == "FREQ" {
+                units.shown(value, Quantity::Frequency)
+            } else {
+                crate::results::shown_field_value(value, field, component, units)
+            })
+        };
+        for (index, iteration) in optimizer.history.iter().enumerate() {
+            history.rows.push([
+                self.shown_loop_value(id, iteration.value),
+                (iteration.measure).map_or("failed".into(), |m| self.shown_measure(id, m)),
+                iteration.elements.map_or(String::new(), |e| e.to_string()),
+                format!("{:.1} s", iteration.seconds),
+            ]);
+            if let Some(y) = iteration.measure.and_then(measure_of) {
+                let x = match iteration.elements {
+                    _ if study => iteration.value,
+                    Some(elements) => elements as f64,
+                    None => (index + 1) as f64,
+                };
+                history.plot.x.push(x);
+                if history.plot.curves.is_empty() {
+                    history.plot.curves.push(("Measure".into(), Vec::new()));
+                }
+                history.plot.curves[0].1.push(y);
+            }
+        }
+        history.plot.x_label = if study {
+            "Value".into()
+        } else {
+            "Elements".into()
+        };
+        history.running = self.looping.as_ref().is_some_and(|run| run.id == id);
+        history.report = if history.running {
+            format!(
+                "Running iteration {} of at most {} …",
+                optimizer.history.len() + 1,
+                optimizer.kind.planned()
+            )
+        } else {
+            optimizer
+                .report
+                .clone()
+                .unwrap_or_else(|| "Not run yet.".into())
+        };
+        history
+    }
+
+    /// The rows of an optimizer: the measure it reads, what it does, how far it got and the
+    /// value it gives.
+    fn optimizer_rows(
+        &self,
+        node: &Node,
+        incoming: &HashMap<u64, Vec<(Vec<String>, String)>>,
+    ) -> Vec<Row> {
+        let Some(optimizer) = &node.optimizer else {
+            return Vec::new();
+        };
+        let row = |path: &[&str], text: String, icon, tip: &str| Row {
+            path: path.iter().map(|p| p.to_string()).collect(),
+            text,
+            depth: 0,
+            icon,
+            state: None,
+            expander: None,
+            input: false,
+            output: false,
+            linked_from: None,
+            collection: false,
+            partial: false,
+            widget: None,
+            tip: tip.to_owned(),
+        };
+        let linked_from = (incoming.get(&node.id).into_iter().flatten())
+            .find(|(slot, _)| slot.len() == 1 && slot[0] == links::OBJECTIVE)
+            .map(|(_, source)| source.clone());
+        let measure = Row {
+            input: true,
+            linked_from,
+            ..row(
+                &[links::OBJECTIVE],
+                "Measure".into(),
+                NodeIcon::Results,
+                "The measure it reads: drag the value of a Measure block here.",
+            )
+        };
+        let what = row(
+            &[],
+            optimizer.kind.label().into(),
+            NodeIcon::Setup,
+            "What it does; double-click the block to set it up and see its iterations.",
+        );
+        let running = self.looping.as_ref().is_some_and(|run| run.id == node.id);
+        let progress = match optimizer.history.last() {
+            _ if running => format!("Iteration {} …", optimizer.history.len() + 1),
+            None => "Not run yet".to_owned(),
+            Some(last) => format!(
+                "{} it., {}",
+                optimizer.history.len(),
+                last.measure
+                    .map_or("failed".into(), |m| self.shown_measure(node.id, m))
+            ),
+        };
+        let report = optimizer.report.clone().unwrap_or_default();
+        let progress = row(&[], progress, NodeIcon::Solution, &report);
+        let value = Row {
+            output: true,
+            state: Some(self.optimizer_state(node.id)),
+            ..row(
+                &[links::LOOP, "Value"],
+                format!("Value {}", self.shown_loop_value(node.id, optimizer.value)),
+                NodeIcon::Setup,
+                "The value it gives: drag it to Refine or another number of a mesh block. The \
+                 wire is dashed, as it closes the loop.",
+            )
+        };
+        vec![measure, what, progress, value]
+    }
+
+    /// Update Project: runs the loops of optimizers that are not up to date, each of which
+    /// updates the project at every iteration, or else updates the project.
+    fn update_all(&mut self) {
+        self.loops_due = (self.nodes.iter())
+            .filter(|n| n.kind == Kind::Optimizer)
+            .map(|n| n.id)
+            .filter(|&id| {
+                self.optimizer_state(id) != CellState::UpToDate
+                    && self.objective_of(id).is_some()
+                    && !self.feedback_of(id).is_empty()
+            })
+            .collect();
+        match self.loops_due.pop_front() {
+            Some(id) => self.start_loop(id),
+            None => self.update_project(),
+        }
+    }
+
+    /// Starts the loop of an optimizer from the beginning.
+    fn start_loop(&mut self, id: u64) {
+        if self.looping.is_some() {
+            return;
+        }
+        let name = self.name_of(id);
+        if self.objective_of(id).is_none() || self.feedback_of(id).is_empty() {
+            self.output.push(format!(
+                "{name} cannot run: link its value to a parameter of a mesh block and the value \
+                 of a Measure block to its Measure row."
+            ));
+            return;
+        }
+        if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+            optimizer.history.clear();
+            optimizer.report = None;
+            optimizer.done = None;
+        }
+        self.output.push(format!("{name}: loop started"));
+        self.looping = Some(LoopRun {
+            id,
+            batch: Vec::new(),
+            current: None,
+            updating: false,
+        });
+    }
+
+    /// Forgets the iterations of an optimizer and gives its start value.
+    fn reset_loop(&mut self, id: u64) {
+        if self.looping.as_ref().is_some_and(|run| run.id == id) {
+            return;
+        }
+        if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+            optimizer.history.clear();
+            optimizer.report = None;
+            optimizer.done = None;
+            optimizer.value = optimizer.kind.start();
+        }
+        self.sync_due = true;
+    }
+
+    /// Works through the loop of an optimizer: gives the next value, has the project updated,
+    /// reads the measure once all is done, and asks the optimizer for the next values.
+    fn run_loop(&mut self) {
+        let Some(run) = &self.looping else {
+            return;
+        };
+        let id = run.id;
+        match run.current {
+            None => self.next_iteration(id),
+            Some(_) if !run.updating => {
+                // The value went to its parameters; then the update.
+                if !self.sync_due {
+                    if let Some(run) = &mut self.looping {
+                        run.updating = true;
+                    }
+                    self.update_project();
+                }
+            }
+            Some((value, started)) => {
+                let idle = !self.update_after_sync
+                    && !self.sync_due
+                    && self.update_queue.is_empty()
+                    && self.updating.is_empty()
+                    && self.measuring.is_empty()
+                    && !self.restoring.values().any(Option::is_some);
+                if !idle {
+                    return;
+                }
+                let measure = (self.objective_of(id)).and_then(|m| {
+                    let node = self.nodes.iter().find(|n| n.id == m)?;
+                    (self.measure_state(m) == CellState::UpToDate)
+                        .then(|| node.measure.as_ref()?.value)?
+                });
+                let iteration = Iteration {
+                    value,
+                    measure,
+                    elements: self.loop_elements(id),
+                    seconds: started.elapsed().as_secs_f64(),
+                };
+                let line = format!(
+                    "{}: iteration {}, value {}: {}",
+                    self.name_of(id),
+                    (self.nodes.iter().find(|n| n.id == id))
+                        .and_then(|n| n.optimizer.as_ref())
+                        .map_or(0, |o| o.history.len())
+                        + 1,
+                    self.shown_loop_value(id, value),
+                    measure.map_or("no measure".into(), |m| self.shown_measure(id, m))
+                );
+                self.output.push(line);
+                if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+                    optimizer.history.push(iteration);
+                }
+                if let Some(run) = &mut self.looping {
+                    run.current = None;
+                    run.updating = false;
+                }
+            }
+        }
+    }
+
+    /// Gives the next value of the loop, or ends it.
+    fn next_iteration(&mut self, id: u64) {
+        let Some(optimizer) =
+            (self.nodes.iter().find(|n| n.id == id)).and_then(|n| n.optimizer.as_ref())
+        else {
+            self.looping = None;
+            return;
+        };
+        let batch = self
+            .looping
+            .as_ref()
+            .map(|run| run.batch.clone())
+            .unwrap_or_default();
+        let batch = if batch.is_empty() {
+            match optimizer
+                .kind
+                .next_values(&optimizer.history, |value| self.elements_at(id, value))
+            {
+                Next::Run(values) => values,
+                Next::Finished { value, outcome } => return self.finish_loop(id, value, outcome),
+            }
+        } else {
+            batch
+        };
+        let Some((&value, rest)) = batch.split_first() else {
+            return self.finish_loop(id, None, LoopOutcome::StudyDone);
+        };
+        if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+            optimizer.value = value;
+        }
+        self.looping = Some(LoopRun {
+            id,
+            batch: rest.to_vec(),
+            current: Some((value, Instant::now())),
+            updating: false,
+        });
+        self.sync_due = true;
+    }
+
+    /// Ends the loop of an optimizer: leaves its value, says why it is done and goes on with
+    /// the next optimizer of Update Project.
+    fn finish_loop(&mut self, id: u64, value: Option<f64>, outcome: LoopOutcome) {
+        self.looping = None;
+        let name = self.name_of(id);
+        let Some(optimizer) =
+            (self.nodes.iter().find(|n| n.id == id)).and_then(|n| n.optimizer.as_ref())
+        else {
+            return;
+        };
+        let count = optimizer.history.len();
+        let last = optimizer.history.last().cloned();
+        let measure = |iteration: &Option<Iteration>| {
+            (iteration.as_ref())
+                .and_then(|i| i.measure)
+                .map_or_else(String::new, |m| self.shown_measure(id, m))
+        };
+        let elements = (last.as_ref())
+            .and_then(|i| i.elements)
+            .map_or_else(String::new, |e| format!(" at {e} elements"));
+        let report = match &outcome {
+            LoopOutcome::Converged { change } => format!(
+                "Converged after {count} iterations: {}{elements} (change {:.2} %).",
+                measure(&last),
+                change * 100.0
+            ),
+            LoopOutcome::NotConverged { change } => format!(
+                "Not converged after {count} iterations: {}{elements}{}.",
+                measure(&last),
+                change.map_or_else(String::new, |c| format!(", last change {:.2} %", c * 100.0))
+            ),
+            LoopOutcome::ElementLimit { elements: next } => format!(
+                "Stopped after {count} iterations: the next mesh would have {next} elements, \
+                 more than allowed. Last: {}{elements}.",
+                measure(&last)
+            ),
+            LoopOutcome::Failed { iteration } => format!(
+                "Iteration {iteration} gave no measure; the solution monitor and the output \
+                 tell why."
+            ),
+            LoopOutcome::StudyDone => format!("Study done: {count} values solved."),
+        };
+        // A stress at a corner or a point load grows with every refinement and never
+        // converges.
+        let measures: Vec<f64> = (optimizer.history.iter())
+            .filter_map(|i| i.measure)
+            .collect();
+        let growing = measures.len() > 2 && measures.windows(2).all(|w| w[1].abs() > w[0].abs());
+        let report = match outcome {
+            LoopOutcome::NotConverged { .. } | LoopOutcome::ElementLimit { .. } if growing => {
+                format!(
+                    "{report} The measure grew with every refinement, as at a singularity such \
+                     as a sharp corner or a point load; measure a displacement, or a region \
+                     away from it."
+                )
+            }
+            _ => report,
+        };
+        self.output.push(format!("{name}: {report}"));
+        let done = (self.objective_of(id))
+            .filter(|&m| value.is_none() && self.measure_state(m) == CellState::UpToDate)
+            .and_then(|m| self.measure_key(m));
+        if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+            if let Some(value) = value {
+                optimizer.value = value;
+            }
+            optimizer.report = Some(report);
+            optimizer.done = done;
+        }
+        self.sync_due = true;
+        if let Some(next) = self.loops_due.pop_front() {
+            self.start_loop(next);
+        }
+    }
+
     /// Gives the numbers of value links to the parameters they go to; a mesh block whose
     /// parameters change is out of date and made anew by Update Project.
     fn apply_values(&mut self) {
@@ -1006,9 +1624,12 @@ impl ProjectApp {
     /// The number a block gives at `item`, `["Value", name]`.
     fn value_of(&self, id: u64, item: &[String]) -> Option<f64> {
         let node = self.nodes.iter().find(|n| n.id == id)?;
-        let [_, name] = item else {
+        let [cell, name] = item else {
             return None;
         };
+        if cell == links::LOOP {
+            return node.optimizer.as_ref().map(|o| o.value);
+        }
         (node.parameters.iter())
             .find(|p| &p.name == name)
             .map(|p| p.value)
@@ -1033,6 +1654,7 @@ impl ProjectApp {
             [cell, name] if cell == links::VALUE => (node.parameters.iter())
                 .find(|p| &p.name == name)
                 .map(|p| p.kind),
+            [cell, _] if cell == links::LOOP => Some(node.optimizer.as_ref()?.kind.value_kind()),
             [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => {
                 Some(ValueKind::Factor)
             }
@@ -1181,6 +1803,7 @@ impl ProjectApp {
             }
             Some(Kind::Parameters) => return self.edit_parameters(id),
             Some(Kind::Measure) => return self.edit_measure(id),
+            Some(Kind::Optimizer) => return self.edit_optimizer(id),
             None => return,
         }
         // Solved in the background: the window opens with the new results.
@@ -1465,6 +2088,13 @@ impl ProjectApp {
         let name = format!("Copy of {}", node.name);
         let (kind, primitive, generated) = (node.kind, node.primitive.clone(), node.generated);
         let (refinement, parameters) = (node.refinement, node.parameters.clone());
+        let optimizer = (node.optimizer.as_ref()).map(|o| OptimizerState {
+            kind: o.kind.clone(),
+            value: o.kind.start(),
+            history: Vec::new(),
+            report: None,
+            done: None,
+        });
         let measure = (node.measure.as_ref()).map(|m| MeasureState {
             kind: m.kind.clone(),
             value: None,
@@ -1482,6 +2112,7 @@ impl ProjectApp {
         copy.refinement = refinement;
         copy.parameters = parameters;
         copy.measure = measure;
+        copy.optimizer = optimizer;
         self.nodes.push(copy);
         self.graph.insert_node(position, new_id);
         self.output.push(format!("{name} created"));
@@ -1518,6 +2149,13 @@ impl ProjectApp {
             self.measure_editor = None;
         }
         self.measuring.remove(&id);
+        if self.optimizer_editor.as_ref().is_some_and(|e| e.id == id) {
+            self.optimizer_editor = None;
+        }
+        if self.looping.as_ref().is_some_and(|run| run.id == id) {
+            self.looping = None;
+        }
+        self.loops_due.retain(|&due| due != id);
         self.update_queue.retain(|&queued| queued != id);
     }
 
@@ -1739,6 +2377,16 @@ impl ProjectApp {
 
     /// Stops Update Project: nothing more is started, and what runs is stopped.
     fn stop_update(&mut self) {
+        if let Some(run) = self.looping.take() {
+            self.loops_due.clear();
+            let name = self.name_of(run.id);
+            if let Some(optimizer) = self.node(run.id).and_then(|n| n.optimizer.as_mut()) {
+                let line = format!("Stopped after {} iterations.", optimizer.history.len());
+                optimizer.report = Some(line.clone());
+                optimizer.done = None;
+                self.output.push(format!("{name}: {line}"));
+            }
+        }
         self.update_queue.clear();
         for id in std::mem::take(&mut self.updating) {
             if let Some(window) = self.node(id).and_then(|n| n.window.as_mut()) {
@@ -2003,9 +2651,14 @@ impl ProjectApp {
 
     /// F5, as Solve in an analysis window: Update Project, unless it is under way.
     fn solve_shortcut(&mut self) {
-        if self.updating.is_empty() && self.update_queue.is_empty() {
-            self.update_project();
+        if !self.busy() {
+            self.update_all();
         }
+    }
+
+    /// Whether Update Project is under way, or the loop of an optimizer.
+    fn busy(&self) -> bool {
+        !self.updating.is_empty() || !self.update_queue.is_empty() || self.looping.is_some()
     }
 
     fn toggle_monitor(&mut self) {
@@ -2023,7 +2676,8 @@ impl ProjectApp {
         let mut found = Vec::new();
         let mut queue = vec![id];
         while let Some(source) = queue.pop() {
-            for link in self.links.iter().filter(|l| l.source == source) {
+            for link in (self.links.iter()).filter(|l| l.source == source && !links::is_feedback(l))
+            {
                 if !found.contains(&link.target) && link.target != id {
                     found.push(link.target);
                     queue.push(link.target);
@@ -2077,8 +2731,8 @@ impl ProjectApp {
                 }
                 ui.separator();
                 let update = egui::Button::new("Update Project").shortcut_text("F5");
-                if ui.add(update).on_hover_text(UPDATE_TIP).clicked() {
-                    self.update_project();
+                if ui.add(update).on_hover_text(UPDATE_TIP).clicked() && !self.busy() {
+                    self.update_all();
                 }
                 if ui
                     .button("Solution Monitor")
@@ -2134,12 +2788,12 @@ impl ProjectApp {
                 self.save(false);
             }
             ui.separator();
-            let updating = !self.updating.is_empty() || !self.update_queue.is_empty();
+            let updating = self.busy();
             let update = icons::button(ui, Icon::Solve, UPDATE_TIP, !updating, false).clicked();
             let text = egui::Button::new("Update Project").frame(false);
             let text = ui.add_enabled(!updating, text).on_hover_text(UPDATE_TIP);
             if update || text.clicked() {
-                self.update_project();
+                self.update_all();
             }
             ui.add_space(4.0);
             if icons::button(ui, Icon::Stop, "Stop Update Project", updating, false).clicked() {
@@ -2200,6 +2854,7 @@ impl ProjectApp {
                         mesh_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
                     }
                     (Kind::Parameters, _) => parameter_rows(n),
+                    (Kind::Optimizer, _) => self.optimizer_rows(n, &incoming),
                     (Kind::Measure, _) => measure_rows(
                         n,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
@@ -2245,11 +2900,18 @@ impl ProjectApp {
             actions: Vec::new(),
             to_global: Default::default(),
             show_all: std::mem::take(&mut self.show_all).then(|| ui.max_rect()),
+            feedback: (self.links.iter())
+                .filter(|l| links::is_feedback(l))
+                .map(|l| (l.source, l.target, l.slot.clone()))
+                .collect(),
+            bottom: f32::MIN,
         };
         let response = SnarlWidget::new()
             .id_salt(("project schematic", self.graph_generation))
             .style(schematic_style())
             .show(&mut self.graph, &mut viewer, ui);
+        let clip = viewer.to_global.inverse() * ui.clip_rect();
+        draw_feedback(ui.ctx(), &viewer.feedback, viewer.bottom, clip);
         // A double-click into empty space shows the blocks to add there, as in Blender.
         // The response lies on the zoomed and panned layer of the schematic, so its pointer
         // position is in the schematic; the picker needs the one on the screen.
@@ -2360,7 +3022,10 @@ impl ProjectApp {
             (self.nodes.iter())
                 .find(|n| {
                     n.id == id
-                        && !matches!(n.kind, Kind::Materials | Kind::Parameters | Kind::Measure)
+                        && !matches!(
+                            n.kind,
+                            Kind::Materials | Kind::Parameters | Kind::Measure | Kind::Optimizer
+                        )
                 })
                 .map(|n| n.space)
         };
@@ -2375,7 +3040,8 @@ impl ProjectApp {
             ));
             return;
         }
-        if links::makes_cycle(&self.links, source, target) {
+        let feedback = item.first().is_some_and(|c| c == links::LOOP);
+        if !feedback && links::makes_cycle(&self.links, source, target) {
             self.output.push(format!(
                 "Not linked: {to} comes before {from} already, and a link cannot go back."
             ));
@@ -2399,8 +3065,17 @@ impl ProjectApp {
             self.link_state(source, item, target);
             return;
         }
-        let value = item.first().is_some_and(|c| c == links::VALUE);
-        if value {
+        let value = item.first().is_some_and(|c| c == links::VALUE) || feedback;
+        let objective = slot.first().is_some_and(|c| c == links::OBJECTIVE);
+        if objective {
+            let measure = (self.nodes.iter()).any(|n| n.id == source && n.kind == Kind::Measure);
+            if !measure {
+                self.output.push(format!(
+                    "Not linked: {to} reads the value of a Measure block, and {from} is none."
+                ));
+                return;
+            }
+        } else if value {
             let (given, taken) = (
                 self.value_kind(source, &item),
                 self.value_kind(target, &slot),
@@ -2578,6 +3253,11 @@ impl ProjectApp {
             Some(links::ResultsUse::InitialTemperatures) => {
                 format!("{to} starts at the temperatures of {what} of {from}.")
             }
+            None if objective => format!("{to} reads the value of {from}."),
+            None if feedback => format!(
+                "{} of {to} takes the value of {from}: the loop of {from} varies it.",
+                self.parameter_label(target, &slot)
+            ),
             None if value => format!(
                 "{} of {to} takes the value of {} of {from}.",
                 self.parameter_label(target, &slot),
@@ -3337,6 +4017,11 @@ impl ProjectApp {
             Action::AddMeasure(pos) => {
                 self.add_measure(pos);
             }
+            Action::AddOptimizer(pos) => {
+                self.add_optimizer(pos);
+            }
+            Action::RunLoop(id) => self.start_loop(id),
+            Action::ResetLoop(id) => self.reset_loop(id),
             Action::SetParameter(id, index, value) => {
                 if let Some(parameter) = self.node(id).and_then(|n| n.parameters.get_mut(index)) {
                     parameter.value = parameter.kind.clean(value);
@@ -3464,6 +4149,9 @@ impl ProjectApp {
             if let Some(editor) = self.measure_editor.as_mut().filter(|e| e.id == id) {
                 editor.rename(&name);
             }
+            if let Some(editor) = self.optimizer_editor.as_mut().filter(|e| e.id == id) {
+                editor.rename(&name);
+            }
         } else if open {
             self.rename = Some((id, name));
         }
@@ -3484,6 +4172,7 @@ impl ProjectApp {
             Kind::Mesh => "with its mesh",
             Kind::Parameters => "with its parameters",
             Kind::Measure => "with its value",
+            Kind::Optimizer => "with its iterations",
         };
         let users = (self.links.iter())
             .filter(|l| l.source == id)
@@ -3807,6 +4496,7 @@ impl eframe::App for ProjectApp {
         self.mesh_block_window(&ctx);
         self.parameter_set_window(&ctx);
         self.measure_window(&ctx);
+        self.optimizer_window(&ctx);
         self.new_analysis_window(&ctx);
         self.settings_window(&ctx);
         self.updater.show(&ctx, &mut self.output);
@@ -3817,6 +4507,7 @@ impl eframe::App for ProjectApp {
         }
         self.poll_solves(&ctx);
         self.run_update(&ctx);
+        self.run_loop();
         self.monitor_window(&ctx);
         self.analysis_windows(&ctx);
     }
@@ -4440,6 +5131,7 @@ enum BlockKind {
     Mesh(MeshPrimitive),
     Parameters,
     Measure,
+    Optimizer,
 }
 
 fn block_kinds() -> Vec<BlockKind> {
@@ -4450,6 +5142,7 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::Mesh(MeshPrimitive::default_rectangle()),
         BlockKind::Parameters,
         BlockKind::Measure,
+        BlockKind::Optimizer,
     ]
 }
 
@@ -4487,6 +5180,12 @@ impl BlockKind {
                 "result value maximum stress displacement eigenfrequency key figure objective",
                 MEASURE_TIP,
             ),
+            Self::Optimizer => (
+                "Optimizer",
+                "Optimizer",
+                "loop iterate mesh convergence refine parameter study sweep",
+                OPTIMIZER_TIP,
+            ),
         };
         node_picker::Entry {
             category,
@@ -4504,6 +5203,7 @@ impl BlockKind {
             Self::Mesh(primitive) => primitive.label(),
             Self::Parameters => "Add Parameters",
             Self::Measure => "Add Measure",
+            Self::Optimizer => "Add Optimizer",
         }
     }
 
@@ -4515,6 +5215,7 @@ impl BlockKind {
             Self::Mesh(primitive) => Action::AddMesh(pos, primitive.clone()),
             Self::Parameters => Action::AddParameters(pos),
             Self::Measure => Action::AddMeasure(pos),
+            Self::Optimizer => Action::AddOptimizer(pos),
         }
     }
 }
@@ -4634,10 +5335,9 @@ fn step_input_tip(step: &str, input: &str) -> String {
 /// Colour of the wires of a link: references in blue, results in orange, states in green,
 /// numbers in violet.
 fn wire_color(path: &[String]) -> egui::Color32 {
-    if path
-        .first()
-        .is_some_and(|c| c == links::VALUE || c == links::PARAMETERS)
-    {
+    if path.first().is_some_and(|c| {
+        c == links::VALUE || c == links::PARAMETERS || c == links::LOOP || c == links::OBJECTIVE
+    }) {
         crate::style::adapt(egui::Color32::from_rgb(140, 80, 200))
     } else if path.first().is_some_and(|c| c == links::STATE) {
         crate::style::adapt(egui::Color32::from_rgb(40, 150, 60))
@@ -4659,6 +5359,10 @@ struct Viewer {
     to_global: egui::emath::TSTransform,
     /// Where the schematic is shown, when its view is to fit all blocks.
     show_all: Option<egui::Rect>,
+    /// The feedback wires of loops: optimizer, target and slot.
+    feedback: Vec<(u64, u64, Vec<String>)>,
+    /// The lowest edge of the blocks, which feedback wires go around below.
+    bottom: f32,
 }
 
 impl Viewer {
@@ -4872,6 +5576,11 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Results, ink);
                 icon.on_hover_text("A key figure of the results of a step");
             }
+            Kind::Optimizer => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Solution, ink);
+                icon.on_hover_text("A loop that solves until it is done");
+            }
         }
         let text = egui::RichText::new(&block.name).strong();
         let label = ui.add(
@@ -4895,6 +5604,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Mesh => "Double-click edits the size and division of the mesh.",
             Kind::Parameters => "Double-click adds, renames or removes parameters.",
             Kind::Measure => "Double-click chooses what it measures.",
+            Kind::Optimizer => "Double-click sets what it varies and shows its iterations.",
         };
         // The name takes the clicks of the header, so it opens the block's menu too.
         label.on_hover_text(tip).context_menu(|ui| {
@@ -4930,7 +5640,15 @@ impl SnarlViewer<u64> for Viewer {
             }
             // A number of another block can give it its value.
             let color = wire_color(&row.path);
-            return BlockPin::single(PinInfo::circle().with_fill(color).with_wire_color(color));
+            let info = PinInfo::circle().with_fill(color).with_wire_color(color);
+            if self
+                .feedback
+                .iter()
+                .any(|(_, target, slot)| *target == id && *slot == row.path)
+            {
+                return BlockPin::anchored(info, feedback_end(id, &row.path));
+            }
+            return BlockPin::single(info);
         }
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::click());
@@ -5029,6 +5747,7 @@ impl SnarlViewer<u64> for Viewer {
                 info,
                 collection: row.collection,
                 partial: row.partial,
+                anchor: None,
             }
         } else {
             BlockPin::single(hidden_pin())
@@ -5047,6 +5766,15 @@ impl SnarlViewer<u64> for Viewer {
     ) -> impl egui_snarl::ui::SnarlPin + 'static {
         ui.allocate_exact_size(egui::vec2(0.0, ROW_HEIGHT), egui::Sense::hover());
         match self.row(snarl, pin.id.node, pin.id.output) {
+            Some((id, row)) if row.output && row.path.first().is_some_and(|c| c == links::LOOP) => {
+                let color = wire_color(&row.path);
+                let info = PinInfo::circle().with_fill(color).with_wire_color(color);
+                if pin.remotes.is_empty() {
+                    BlockPin::single(info)
+                } else {
+                    BlockPin::anchored(info, feedback_start(id))
+                }
+            }
             Some((_, row)) if row.output => {
                 let color = wire_color(&row.path);
                 // A wire takes the mixed colour of its two pins, so the results pin of a step
@@ -5058,14 +5786,24 @@ impl SnarlViewer<u64> for Viewer {
                             .is_some_and(|(_, row)| row.path == state)
                     });
                 let wire = if continues { wire_color(&state) } else { color };
-                PinInfo::circle().with_fill(color).with_wire_color(wire)
+                BlockPin::single(PinInfo::circle().with_fill(color).with_wire_color(wire))
             }
-            _ => hidden_pin(),
+            _ => BlockPin::single(hidden_pin()),
         }
     }
 
     fn has_body(&mut self, _node: &u64) -> bool {
         false
+    }
+
+    fn final_node_rect(
+        &mut self,
+        _node: NodeId,
+        rect: egui::Rect,
+        _ui: &mut egui::Ui,
+        _snarl: &mut Snarl<u64>,
+    ) {
+        self.bottom = self.bottom.max(rect.bottom());
     }
 
     /// A grid of dots behind the blocks, like the background of a node editor.
@@ -5189,6 +5927,7 @@ impl SnarlViewer<u64> for Viewer {
             Some(Kind::Mesh) => default.fill(crate::style::mesh_header()),
             Some(Kind::Parameters) => default.fill(crate::style::parameters_header()),
             Some(Kind::Measure) => default.fill(crate::style::measure_header()),
+            Some(Kind::Optimizer) => default.fill(crate::style::optimizer_header()),
             _ => default,
         }
     }
@@ -5325,6 +6064,9 @@ struct BlockPin {
     collection: bool,
     /// A category link to the collection leaves out items: drawn lighter.
     partial: bool,
+    /// Where the pin is drawn is kept under this id, for a wire drawn by the project window:
+    /// the dashed feedback of a loop. The wire of the schematic is then not drawn.
+    anchor: Option<egui::Id>,
 }
 
 impl BlockPin {
@@ -5333,6 +6075,15 @@ impl BlockPin {
             info,
             collection: false,
             partial: false,
+            anchor: None,
+        }
+    }
+
+    /// A pin of a feedback wire, whose position is kept under `anchor`.
+    fn anchored(info: PinInfo, anchor: egui::Id) -> Self {
+        Self {
+            anchor: Some(anchor),
+            ..Self::single(info)
         }
     }
 }
@@ -5354,6 +6105,14 @@ impl egui_snarl::ui::SnarlPin for BlockPin {
         rect: egui::Rect,
         painter: &egui::Painter,
     ) -> egui_snarl::ui::PinWireInfo {
+        if let Some(anchor) = self.anchor {
+            let pass = painter.ctx().cumulative_pass_nr();
+            let at = (painter.layer_id(), rect.center(), pass);
+            painter.ctx().data_mut(|d| d.insert_temp(anchor, at));
+            let mut info = self.info.draw(snarl_style, style, rect, painter);
+            info.color = egui::Color32::TRANSPARENT;
+            return info;
+        }
         if !self.collection {
             return self.info.draw(snarl_style, style, rect, painter);
         }
@@ -5383,6 +6142,86 @@ impl egui_snarl::ui::SnarlPin for BlockPin {
     }
 }
 
+/// Where the value pin of an optimizer is kept, see [`BlockPin::anchor`].
+fn feedback_start(optimizer: u64) -> egui::Id {
+    egui::Id::new(("loop value pin", optimizer))
+}
+
+/// Where the pin of a parameter a loop varies is kept.
+fn feedback_end(target: u64, slot: &[String]) -> egui::Id {
+    egui::Id::new(("loop parameter pin", target, slot))
+}
+
+/// Draws the feedback wires of loops dashed, between the pins drawn in this pass: from the
+/// value of the optimizer out to the right, below the blocks back to the left and into the
+/// parameter, so that the loop reads as one.
+fn draw_feedback(
+    ctx: &egui::Context,
+    feedback: &[(u64, u64, Vec<String>)],
+    bottom: f32,
+    clip: egui::Rect,
+) {
+    let pass = ctx.cumulative_pass_nr();
+    let at = |id: egui::Id| {
+        ctx.data(|d| d.get_temp::<(egui::LayerId, egui::Pos2, u64)>(id))
+            .filter(|(_, _, drawn)| *drawn == pass)
+    };
+    let color = wire_color(&[links::LOOP.to_owned()]);
+    for (index, (optimizer, target, slot)) in feedback.iter().enumerate() {
+        let (Some((layer, from, _)), Some((_, to, _))) = (
+            at(feedback_start(*optimizer)),
+            at(feedback_end(*target, slot)),
+        ) else {
+            continue;
+        };
+        // Several loops run below one another.
+        let below = bottom.max(from.y).max(to.y) + 30.0 + 14.0 * index as f32;
+        let (out, back) = (from.x + 24.0, to.x - 24.0);
+        let corners = [
+            from,
+            egui::pos2(out, from.y),
+            egui::pos2(out, below),
+            egui::pos2(back, below),
+            egui::pos2(back, to.y),
+            to,
+        ];
+        // The painter of the layer clips to the screen as if it were not zoomed or panned.
+        let mut painter = ctx.layer_painter(layer);
+        painter.set_clip_rect(clip);
+        painter.extend(egui::Shape::dashed_line(
+            &rounded(&corners, 10.0),
+            egui::Stroke::new(2.0, color),
+            8.0,
+            5.0,
+        ));
+    }
+}
+
+/// A path through `corners` with each inner corner rounded by up to `radius`.
+fn rounded(corners: &[egui::Pos2], radius: f32) -> Vec<egui::Pos2> {
+    let mut points = Vec::new();
+    for (i, &corner) in corners.iter().enumerate() {
+        let (Some(&before), Some(&after)) = (corners.get(i.wrapping_sub(1)), corners.get(i + 1))
+        else {
+            points.push(corner);
+            continue;
+        };
+        let into = before - corner;
+        let out = after - corner;
+        let r = radius.min(into.length() * 0.5).min(out.length() * 0.5);
+        let (a, b) = (
+            corner + into.normalized() * r,
+            corner + out.normalized() * r,
+        );
+        for step in 0..=6 {
+            let t = step as f32 / 6.0;
+            // A quadratic curve through the corner.
+            points.push(a.lerp(corner, t).lerp(corner.lerp(b, t), t));
+        }
+    }
+    points
+}
+
 /// The pin of a row that takes or gives no link: there, but not to be seen.
 fn hidden_pin() -> PinInfo {
     PinInfo::circle()
@@ -5410,6 +6249,10 @@ fn node_menu(
         entry(ui, "Edit …", Action::Open(id, None));
         if kind == Kind::Mesh {
             entry(ui, "Generate Mesh", Action::Generate(id));
+        }
+        if kind == Kind::Optimizer {
+            entry(ui, "Run", Action::RunLoop(id));
+            entry(ui, "Reset", Action::ResetLoop(id));
         }
         ui.separator();
         entry(ui, "Rename …", Action::Rename(id));
@@ -5506,6 +6349,9 @@ const PARAMETERS_TIP: &str = "Adds a block of named numbers: drag the pin of one
 const MEASURE_TIP: &str = "Adds a block that computes a key figure from the results of a \
                            step linked to it, such as the largest von Mises stress, the \
                            displacement of a node or an eigenfrequency.";
+const OPTIMIZER_TIP: &str = "Adds a loop: it gives values to a parameter of a mesh block, has \
+                             the analyses solved and reads a Measure block, until the mesh \
+                             has converged or every value of a study is solved.";
 const MATERIALS_TIP: &str = "Adds a block of materials kept in the project: analyses link \
      them one by one or all at once, so that they are defined in one place.";
 
@@ -5839,6 +6685,32 @@ mod tests {
         assert!(!made);
         assert!(lines[0].contains("no mesh made"), "{lines:?}");
         assert_eq!(stale_meshes(&nodes, &links, 3), ["Box"]);
+    }
+
+    #[test]
+    fn an_optimizer_reads_back_with_its_iterations() {
+        let block = OptimizerBlock {
+            id: 7,
+            name: "Optimizer".into(),
+            position: [7.0, 8.0],
+            units: plx_model::UnitSystem::MmTonSC,
+            kind: OptimizerKind::default(),
+            value: 2.25,
+            history: vec![Iteration {
+                value: 1.0,
+                measure: Some(3.0),
+                elements: Some(40),
+                seconds: 0.5,
+            }],
+            report: Some("Converged".into()),
+            done: Some(9),
+        };
+        let mut node = Node::read(ProjectNode::Optimizer(block.clone()));
+        assert_eq!(node.kind, Kind::Optimizer);
+        match node.written([7.0, 8.0]) {
+            Some(ProjectNode::Optimizer(written)) => assert_eq!(written, block),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

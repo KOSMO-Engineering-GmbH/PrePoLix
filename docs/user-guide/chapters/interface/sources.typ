@@ -154,7 +154,7 @@ last row, the value in its units with the state of the value:
 The value is computed anew in the background whenever the results or its definition change,
 and the output pane prints it ("Max stress: Maximum of STRESS MISES = 8.6 MPa"). The project
 file keeps the value, so a reopened project shows it at once. The pin on the right of the
-value row will give it to an optimizer.
+value row gives it to an optimizer (@optimization-loops).
 
 #screenshot("measure-editor.png", [The editor of a Measure block])
 

@@ -7,7 +7,7 @@ use egui::{Color32, Pos2, Rect, Stroke, Ui, pos2, vec2};
 use crate::results::format_value;
 
 /// Data of a diagram: x values and the y values of each named curve, row by row.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct XyData {
     pub title: String,
     pub x_label: String,
