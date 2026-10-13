@@ -129,3 +129,49 @@ A double-click on the block opens its editor:
   [Remove], [Removes the parameter and its links.],
   [Add Parameter], [Adds a length.],
 )
+
+=== Measure <measure-block>
+
+A Measure block computes one key figure from the results of a step: the largest von Mises
+stress, the displacement of a node, a total force or an eigenfrequency. It is the number an
+optimizer reads, and a quick way to see the figure that matters without opening the results.
+Add it with #menu("Project", "Add Measure"); it starts with the largest von Mises stress.
+
+#screenshot("measure-blocks.png", [Two Measure blocks: the lowest temperature of the thermal
+  step Heat and the largest von Mises stress of the step Load that uses those temperatures])
+
+Drag the pin of a step under #ui("Results") of an analysis to the #ui("Results") row of the
+block, with an orange wire like every link of results. A Measure block measures one step;
+another wire to it takes the place of the first. The block shows what it measures and, in its
+last row, the value in its units with the state of the value:
+
+- a green tick when it was computed from the results as they are and those are up to date;
+- the orange arrows when the results are out of date, after a change of the analysis or of a
+  block it links to; #ui("Update Project") solves the analysis again and the value follows;
+- a dash while there are no results, or when the results lack what it measures. The output
+  pane then says why, for example "step 1 has no field STRESS in the results".
+
+The value is computed anew in the background whenever the results or its definition change,
+and the output pane prints it ("Max stress: Maximum of STRESS MISES = 8.6 MPa"). The project
+file keeps the value, so a reopened project shows it at once. The pin on the right of the
+value row gives it to an optimizer (@optimization-loops).
+
+#screenshot("measure-editor.png", [The editor of a Measure block])
+
+A double-click on the block opens its editor:
+
+#fields(
+  [Measure], [What it computes: #ui("Field extreme"), #ui("Value at a node"),
+    #ui("History output") or #ui("Eigenfrequency").],
+  [Shown in], [The unit system of the value; it is stored in SI units.],
+  [Field, Component], [The field and its component as the Results workspace names them:
+    STRESS MISES, DISP ALL, NDTEMP T, TOTAL_FORCE RF3 for a history output. The value is
+    that of the last increment of the step.],
+  [Take], [For a field extreme: #ui("Maximum"), #ui("Minimum") or #ui("Largest magnitude"),
+    which keeps the sign.],
+  [Region], [For a field extreme: all nodes, or a node set of the mesh of the analysis whose
+    results are linked.],
+  [Node], [For a value at a node: its number.],
+  [Set], [For a history output: the set of the history output, as written to the `.dat` file.],
+  [Mode], [For an eigenfrequency: the mode, counted from 1, of a frequency step.],
+)

@@ -67,6 +67,10 @@ pub enum ProjectNode {
     Mesh(Box<MeshBlock>),
     /// Named numbers that value links give to other blocks.
     Parameters(ParameterSet),
+    /// A key figure computed from the results of a step.
+    Measure(MeasureBlock),
+    /// A loop that gives values to a parameter until a measure says it is done.
+    Optimizer(OptimizerBlock),
 }
 
 impl ProjectNode {
@@ -77,6 +81,8 @@ impl ProjectNode {
             Self::Materials(m) => m.id,
             Self::Mesh(m) => m.id,
             Self::Parameters(p) => p.id,
+            Self::Measure(m) => m.id,
+            Self::Optimizer(o) => o.id,
         }
     }
 
@@ -86,6 +92,8 @@ impl ProjectNode {
             Self::Materials(m) => &m.name,
             Self::Mesh(m) => &m.name,
             Self::Parameters(p) => &p.name,
+            Self::Measure(m) => &m.name,
+            Self::Optimizer(o) => &o.name,
         }
     }
 
@@ -96,6 +104,8 @@ impl ProjectNode {
             Self::Materials(m) => m.position,
             Self::Mesh(m) => m.position,
             Self::Parameters(p) => p.position,
+            Self::Measure(m) => m.position,
+            Self::Optimizer(o) => o.position,
         }
     }
 }
@@ -133,6 +143,50 @@ fn one() -> f64 {
 
 fn is_one(value: &f64) -> bool {
     *value == 1.0
+}
+
+/// A block that computes a key figure from the results of a step another block links to it,
+/// such as the largest von Mises stress.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MeasureBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The unit system its value is shown in; it is stored in SI units.
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    pub kind: plx_model::MeasureKind,
+    /// The value as last computed, and the fingerprint of the results and the definition it
+    /// was computed from: out of date once that differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluated: Option<u64>,
+}
+
+/// A block that runs a loop: it gives a value to a parameter of the blocks before a measure,
+/// has them solved and reads the measure, until it is done.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OptimizerBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    pub kind: plx_model::OptimizerKind,
+    /// The value it gives now, stored in SI units.
+    pub value: f64,
+    /// The iterations of its last run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<plx_model::Iteration>,
+    /// How its last run ended, and the fingerprint of the measure it ended on: up to date
+    /// while the measure is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done: Option<u64>,
 }
 
 /// A block of named numbers, which value links give to other blocks: the size of a mesh

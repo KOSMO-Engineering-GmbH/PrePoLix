@@ -24,12 +24,14 @@ The colour of a wire tells its kind, the row tells where it acts:
     single item of the source, for example one material (@data-links).],
   [Results (orange)], [A step of the target takes the results of a step of the source: the
     temperatures of a thermal step, the eigenmodes of a frequency step, or the displacements of
-    the global model of a submodel (@results-links).],
+    the global model of a submodel (@results-links). A Measure block takes the results of a
+    step the same way, to compute a key figure of them (@measure-block).],
   [State (green)], [The target continues the source from the state after one of its steps, as
     further steps of the same CalculiX run (@state-links).],
   [Value (violet)], [A number of the target, such as the edge length of a mesh block, takes
     the value of a parameter (@parameters-block). Like a reference, it is then the same
-    number.],
+    number. The value of an optimizer goes back to the blocks before it as a dashed wire, the
+    feedback of its loop (@optimization-loops).],
 )
 
 A block thus reads from top to bottom: where it starts (#ui("State")), what it is (the blue
