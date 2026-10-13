@@ -130,6 +130,73 @@ fn run(job: &Job) -> Result<f64, String> {
     evaluate(&job.kind, job.step, &frd, dat.as_ref(), &job.node_sets)
 }
 
+/// Fields by name, each with the names of its components.
+pub type Fields = Vec<(String, Vec<String>)>;
+
+/// The fields and components the results of a step offer, to pick from in the editor.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Offered {
+    /// Nodal fields of the step and their components, in the order of the results.
+    pub fields: Fields,
+    /// History output: the sets, each with its fields and their components.
+    pub history: Vec<(String, Fields)>,
+}
+
+impl Offered {
+    /// The fields of a history set, if the results have it.
+    pub fn history_fields(&self, set: &str) -> Option<&[(String, Vec<String>)]> {
+        (self.history.iter())
+            .find(|(name, _)| name.eq_ignore_ascii_case(set))
+            .map(|(_, fields)| fields.as_slice())
+    }
+}
+
+/// What the results of step `step` offer to measure.
+pub fn offered(step: u32, frd: &FrdImport, dat: Option<&plx_io::dat::DatImport>) -> Offered {
+    let mut fields: Fields = Vec::new();
+    for increment in frd.increments.iter().filter(|i| i.step == step) {
+        for field in &increment.fields {
+            let components = field.components.iter().map(|c| c.name.clone()).collect();
+            match fields.iter_mut().find(|(name, _)| *name == field.name) {
+                Some(entry) => entry.1 = components,
+                None => fields.push((field.name.clone(), components)),
+            }
+        }
+    }
+    let history = (dat.iter().flat_map(|d| &d.sets))
+        .filter(|set| set.rows.iter().any(|(s, _, _)| *s == step))
+        .map(|set| {
+            let fields = (set.fields.iter())
+                .map(|f| {
+                    let components = f.components.iter().map(|c| c.name.clone()).collect();
+                    (f.name.clone(), components)
+                })
+                .collect();
+            (set.name.clone(), fields)
+        })
+        .collect();
+    Offered { fields, history }
+}
+
+/// Reads what the results offer to measure on a worker thread, into `dir`.
+pub fn read_offered(
+    results: BoundResults,
+    step: u32,
+    dir: PathBuf,
+) -> Receiver<Result<Offered, String>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let read = || {
+            let frd_path =
+                plx_io::project::restore_results(&results, &dir).map_err(|e| e.to_string())?;
+            let frd = plx_io::frd::read_frd(&frd_path).map_err(|e| e.to_string())?;
+            Ok(offered(step, &frd, read_dat_beside(&frd_path).as_ref()))
+        };
+        let _ = sender.send(read());
+    });
+    receiver
+}
+
 fn read_dat_beside(frd: &Path) -> Option<plx_io::dat::DatImport> {
     plx_io::dat::read_dat(&frd.with_extension("dat")).ok()
 }
@@ -165,6 +232,17 @@ pub struct MeasureEditor {
     units: UnitSystem,
     /// The node sets of the mesh of the results linked to it, to pick from.
     node_sets: Vec<String>,
+    /// The fields and components of the results linked to it, to pick from.
+    choices: Choices,
+}
+
+/// What the editor offers for field and component: free text without linked results, the
+/// names in the results once they are read.
+enum Choices {
+    Typed,
+    Reading(Receiver<Result<Offered, String>>),
+    Read(Offered),
+    Failed(String),
 }
 
 impl MeasureEditor {
@@ -174,6 +252,7 @@ impl MeasureEditor {
         kind: MeasureKind,
         units: UnitSystem,
         node_sets: Vec<String>,
+        offered: Option<Receiver<Result<Offered, String>>>,
     ) -> Self {
         Self {
             id,
@@ -181,6 +260,7 @@ impl MeasureEditor {
             kind,
             units,
             node_sets,
+            choices: offered.map_or(Choices::Typed, Choices::Reading),
         }
     }
 
@@ -189,6 +269,16 @@ impl MeasureEditor {
     }
 
     pub fn show(&mut self, ctx: &egui::Context) -> MeasureEditorResult {
+        if let Choices::Reading(receiver) = &self.choices {
+            match receiver.try_recv() {
+                Ok(Ok(offered)) => self.choices = Choices::Read(offered),
+                Ok(Err(why)) => self.choices = Choices::Failed(why),
+                Err(std::sync::mpsc::TryRecvError::Empty) => ctx.request_repaint(),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.choices = Choices::Failed("the reading stopped".into());
+                }
+            }
+        }
         let mut result = MeasureEditorResult::Open;
         let mut open = true;
         egui::Window::new(format!("Measure - {}", self.name))
@@ -203,11 +293,22 @@ impl MeasureEditor {
                     .num_columns(2)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| self.form(ui));
-                ui.weak(
-                    "Field and component as the Results workspace names them, such as STRESS \
-                     MISES, DISP ALL or NDTEMP T. The value is that of the last increment of \
-                     the step whose results are linked to the block.",
-                );
+                ui.weak(match &self.choices {
+                    Choices::Read(_) => {
+                        "Fields and components as the linked results have them. The value is \
+                         that of the last increment of the step whose results are linked to \
+                         the block."
+                            .to_owned()
+                    }
+                    Choices::Reading(_) => "Reading the fields of the linked results...".into(),
+                    Choices::Typed => {
+                        "Field and component as the Results workspace names them, such as \
+                         STRESS MISES, DISP ALL or NDTEMP T. Link the results of a step to the \
+                         block to pick them from a list."
+                            .to_owned()
+                    }
+                    Choices::Failed(why) => format!("The linked results were not read: {why}"),
+                });
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     if ui.button("Cancel").clicked() {
@@ -249,10 +350,9 @@ impl MeasureEditor {
                 }
             });
         ui.end_row();
-        let text = |ui: &mut egui::Ui, label: &str, value: &mut String| {
-            ui.label(label);
-            ui.add_sized([200.0, 18.0], egui::TextEdit::singleline(value));
-            ui.end_row();
+        let offered = match &self.choices {
+            Choices::Read(offered) => Some(offered),
+            _ => None,
         };
         match &mut self.kind {
             MeasureKind::FieldExtreme {
@@ -261,8 +361,7 @@ impl MeasureEditor {
                 extreme,
                 region,
             } => {
-                text(ui, "Field", field);
-                text(ui, "Component", component);
+                field_and_component(ui, offered.map(|o| o.fields.as_slice()), field, component);
                 ui.label("Take");
                 egui::ComboBox::from_id_salt("measure extreme")
                     .selected_text(extreme.label())
@@ -294,8 +393,7 @@ impl MeasureEditor {
                 component,
                 node,
             } => {
-                text(ui, "Field", field);
-                text(ui, "Component", component);
+                field_and_component(ui, offered.map(|o| o.fields.as_slice()), field, component);
                 ui.label("Node");
                 ui.add(egui::DragValue::new(node).range(1..=u32::MAX));
                 ui.end_row();
@@ -305,9 +403,21 @@ impl MeasureEditor {
                 field,
                 component,
             } => {
-                text(ui, "Set", set);
-                text(ui, "Field", field);
-                text(ui, "Component", component);
+                let sets: Option<Vec<String>> =
+                    offered.map(|o| o.history.iter().map(|(name, _)| name.clone()).collect());
+                if pick(ui, "Set", set, sets.as_deref())
+                    && let Some(fields) = offered.and_then(|o| o.history_fields(set))
+                    && !fields.iter().any(|(name, _)| name == field)
+                    && let Some((first, components)) = fields.first()
+                {
+                    first.clone_into(field);
+                    components
+                        .first()
+                        .unwrap_or(&String::new())
+                        .clone_into(component);
+                }
+                let fields = offered.map(|o| o.history_fields(set).unwrap_or_default());
+                field_and_component(ui, fields, field, component);
             }
             MeasureKind::Eigenfrequency { mode } => {
                 ui.label("Mode");
@@ -316,6 +426,77 @@ impl MeasureEditor {
             }
         }
     }
+}
+
+/// The Field and Component rows: lists of what `offered` has, or free text without it. A
+/// field picked from the list keeps the component if it has one of that name, otherwise takes
+/// its first.
+fn field_and_component(
+    ui: &mut egui::Ui,
+    offered: Option<&[(String, Vec<String>)]>,
+    field: &mut String,
+    component: &mut String,
+) {
+    let fields: Option<Vec<String>> =
+        offered.map(|list| list.iter().map(|(name, _)| name.clone()).collect());
+    let components_of = |field: &str| -> Vec<String> {
+        (offered.into_iter().flatten())
+            .find(|(name, _)| name == field)
+            .map(|(_, components)| components.clone())
+            .unwrap_or_default()
+    };
+    if pick(ui, "Field", field, fields.as_deref()) {
+        let components = components_of(field);
+        if !components.contains(component)
+            && let Some(first) = components.first()
+        {
+            first.clone_into(component);
+        }
+    }
+    let components = offered.map(|_| components_of(field));
+    pick(ui, "Component", component, components.as_deref());
+}
+
+/// A row with a list of `options` to pick `value` from, or a text field without options; true
+/// when the value changed. A value the options lack is shown in the warning color.
+fn pick(ui: &mut egui::Ui, label: &str, value: &mut String, options: Option<&[String]>) -> bool {
+    ui.label(label);
+    let changed = match options {
+        None => (ui.add_sized([200.0, 18.0], egui::TextEdit::singleline(value))).changed(),
+        Some(options) => {
+            let known = options.contains(value);
+            let shown = if value.is_empty() {
+                egui::RichText::new("(none)")
+            } else if known {
+                egui::RichText::new(value.as_str())
+            } else {
+                egui::RichText::new(value.as_str()).color(ui.visuals().warn_fg_color)
+            };
+            let mut changed = false;
+            let combo = egui::ComboBox::from_id_salt(("measure pick", label))
+                .selected_text(shown)
+                .width(200.0)
+                .show_ui(ui, |ui| {
+                    for option in options {
+                        if ui.selectable_label(option == value, option).clicked() && option != value
+                        {
+                            option.clone_into(value);
+                            changed = true;
+                        }
+                    }
+                });
+            if !known {
+                combo.response.on_hover_text(if options.is_empty() {
+                    "The linked results have nothing to pick here."
+                } else {
+                    "Not in the linked results."
+                });
+            }
+            changed
+        }
+    };
+    ui.end_row();
+    changed
 }
 
 #[cfg(test)]
@@ -361,5 +542,25 @@ mod tests {
         assert!(evaluate(&missing, step, &frd, None, &sets).is_err());
         let eigen = MeasureKind::Eigenfrequency { mode: 1 };
         assert!(evaluate(&eigen, step, &frd, None, &sets).is_err());
+    }
+
+    #[test]
+    fn the_results_offer_their_fields_and_components() {
+        let frd = plx_io::frd::read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
+        let step = frd.increments.last().unwrap().step;
+        let offered = offered(step, &frd, None);
+        let stress = (offered.fields.iter())
+            .find(|(name, _)| name == "STRESS")
+            .map(|(_, components)| components)
+            .unwrap();
+        assert!(stress.iter().any(|c| c == "MISES"));
+        let disp = offered
+            .fields
+            .iter()
+            .find(|(name, _)| name == "DISP")
+            .unwrap();
+        assert!(disp.1.iter().any(|c| c == "ALL"));
+        assert!(offered.history.is_empty());
+        assert_eq!(super::offered(step + 1, &frd, None), Offered::default());
     }
 }

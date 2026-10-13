@@ -330,7 +330,7 @@ impl BackgroundSolve {
             &model.mesh_inputs,
             model.bound_results.as_ref(),
             // The project makes the mesh blocks it takes its mesh from before it starts.
-            &[],
+            &Default::default(),
             false,
         );
         let parts = match status.mesh {
@@ -527,7 +527,7 @@ mod tests {
             &data.model,
             &data.mesh_inputs,
             Some(&results),
-            &[],
+            &Default::default(),
             false,
         );
         assert!(!status.needs_solve(), "{status:?}");

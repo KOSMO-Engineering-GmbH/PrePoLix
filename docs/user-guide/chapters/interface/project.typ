@@ -80,6 +80,10 @@ analyses that take it through another analysis: the analysis still holds the blo
 #ui("Solve") in the analysis window then has the project window make the block's mesh anew and
 take it over before CalculiX runs, so the results always belong to the block's current mesh.
 
+The same holds for results and states taken from another analysis: when the source analysis is
+out of date, so is the analysis that takes its results or continues from its state, and
+#ui("Solve") in its window solves the source again first instead of taking its old results.
+
 #screenshot("mesh-block-out-of-date.png", [After #ui("nx") of the box changed from 10 to 20, the
 mesh, solution and results of the analysis that takes the box's mesh are out of date])
 
@@ -161,8 +165,8 @@ properties first (@new-analysis).
     view.],
   [Project > Update Project (#key("F5"))], [Solves every analysis that is not up to date
     (@update-project). #key("F5") in an analysis window solves only that analysis.],
-  [Project > Solution Monitor], [Shows the analyses being solved with the output of CalculiX
-    (@solution-monitor).],
+  [Project > Solution Monitor], [Shows the #ui("Analyses") tab of the output pane, with the
+    analyses being solved and the output of CalculiX (@solution-monitor).],
   [Tools > Settings ...], [The settings (@settings); they apply to all windows.],
   [Help], [#ui("User Guide") opens this guide, #ui("Check for Updates ...") looks
     for a new version.],
@@ -203,9 +207,11 @@ first (@mesh-block).
 
 === Solution monitor <solution-monitor>
 
-The project window has its own monitor, like the monitor of an analysis window (@analysis) but
-for all analyses of the project. It opens when an update or #ui("Solve") on a block starts;
-#menu("Project", "Solution Monitor") or the monitor button in the toolbar shows and hides it.
+The project window has its own monitor, like the monitor of an analysis window (@monitor) but
+for all analyses of the project. It is the #ui("Analyses") tab of the output pane below the
+schematic and comes to the front when an update or #ui("Solve") on a block starts;
+#menu("Project", "Solution Monitor") or the monitor button in the toolbar switches between it
+and the #ui("Output") tab.
 
 #screenshot("solution-monitor.png", [Solution monitor after Update Project solved three
   analyses in the background])
@@ -213,7 +219,7 @@ for all analyses of the project. It opens when an update or #ui("Solve") on a bl
 The list shows each analysis being solved, queued or done, with its status (preparing,
 meshing, running, keeping results, solved, failed or stopped), its running time and the current
 step and increment of CalculiX. Analyses solved in their open window are marked
-#ui("(window)"). Below the list is the output of the analysis picked in it: the lines of
+#ui("(window)"). Right of the list is the output of the analysis picked in it: the lines of
 PrePoLix (meshing, model checks, restart, keeping the results) around those of CalculiX, which
 #ui("Filter") narrows down to the lines containing a text.
 

@@ -151,6 +151,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         meshing: MeshingParameters::for_diagonal(diagonal),
         mesh_items: Vec::new(),
         part_names,
+        refinement: 1.0,
     };
     let display = tessellate(&geometry)?;
     Ok(CadImport {

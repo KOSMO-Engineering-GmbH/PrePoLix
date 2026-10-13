@@ -2,7 +2,7 @@
 //! blocks of a node graph, each with the state of its cells. An analysis opens in a window of
 //! its own, the [`AnalysisWindow`], which looks like PrePoMax's main window.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -119,9 +119,9 @@ struct Node {
     export_path: String,
     written: Option<u64>,
     export_error: Option<String>,
-    /// Mesh blocks before it whose mesh is out of date, see
-    /// [`crate::status::Upstream::stale_meshes`]; found by [`ProjectApp::sync_links`].
-    stale_meshes: Vec<String>,
+    /// What it takes from other blocks that is not ready yet; found by
+    /// [`ProjectApp::sync_links`].
+    upstream: crate::status::Upstream,
     /// The sweep and diagram of a Campbell block, and the fingerprint of the analysis linked
     /// to it as last found by [`ProjectApp::sync_links`], see
     /// [`crate::campbell::sweep_fingerprint`].
@@ -161,7 +161,7 @@ impl Node {
             written: None,
             export_error: None,
             solving: false,
-            stale_meshes: Vec::new(),
+            upstream: crate::status::Upstream::default(),
             campbell: None,
             campbell_input: None,
         };
@@ -483,7 +483,7 @@ impl Node {
                 &data.model,
                 &data.mesh_inputs,
                 data.results.as_ref(),
-                &self.stale_meshes,
+                &self.upstream,
                 self.solving,
             ));
         }
@@ -508,7 +508,50 @@ impl Node {
         }
     }
 
+    /// The refinement of its mesh: of a mesh block, or of the geometry an analysis meshes;
+    /// `None` for other blocks and an analysis without geometry.
+    fn refinement(&self) -> Option<f64> {
+        match self.kind {
+            Kind::Mesh => Some(self.refinement),
+            Kind::Analysis => self.link_data()?.geometry.map(|g| g.refinement),
+            _ => None,
+        }
+    }
+
+    /// Sets the refinement of its mesh; the mesh is out of date once it changes.
+    fn set_refinement(&mut self, value: f64) {
+        if !(value.is_finite() && value > 0.0) {
+            return;
+        }
+        match self.kind {
+            Kind::Mesh => self.refinement = value,
+            Kind::Analysis => {
+                if let Some(window) = &mut self.window {
+                    window.set_refinement(value);
+                } else if let Some(geometry) =
+                    (self.data.as_mut()).and_then(|d| d.geometry.as_mut())
+                    && geometry.refinement != value
+                {
+                    geometry.refinement = value;
+                    self.refresh_closed();
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// The results the analysis keeps.
+    /// Whether it has results, but made from data that changed since or being made anew.
+    fn results_out_of_date(&self) -> bool {
+        self.bound_results().is_some()
+            && (self.status.as_ref()).is_some_and(|s| {
+                matches!(
+                    s.solution,
+                    status::CellState::OutOfDate | status::CellState::Running
+                )
+            })
+    }
+
     fn bound_results(&self) -> Option<&plx_io::project::BoundResults> {
         match (&self.window, &self.data) {
             (Some(window), _) => window.model()?.bound_results.as_ref(),
@@ -703,7 +746,7 @@ pub struct ProjectApp {
     /// Analyses solved in their open window, for the solution monitor.
     window_runs: Vec<u64>,
     /// The solution monitor, with the analysis whose output it shows and its filter.
-    monitor: Option<Monitor>,
+    monitor: Monitor,
     /// Files given on the command line, imported into the first analysis once it is open.
     startup_import: Vec<PathBuf>,
     /// Fingerprint of the geometry or mesh a link last copied into its target, by target and
@@ -774,7 +817,7 @@ impl ProjectApp {
             update_failed: false,
             solves: Vec::new(),
             window_runs: Vec::new(),
-            monitor: None,
+            monitor: Monitor::default(),
             startup_import: Vec::new(),
             applied: HashMap::new(),
             last_sync: None,
@@ -1022,15 +1065,39 @@ impl ProjectApp {
         let node_sets = (self.links.iter().find(|l| l.target == id))
             .and_then(|l| self.nodes.iter().find(|n| n.id == l.source))
             .and_then(Node::link_data)
-            .map(|d| d.mesh.node_sets.keys().cloned().collect())
+            .map(|d| measure_regions(&d).into_keys().collect())
             .unwrap_or_default();
+        let offered = (self.measured(id)).map(|(source, step, bound)| {
+            let dir = self.measure_dir(id, source, bound, "-fields");
+            crate::measure::read_offered(bound.clone(), step, dir)
+        });
         self.measure_editor = Some(MeasureEditor::new(
             id,
             &node.name,
             measure.kind.clone(),
             units,
             node_sets,
+            offered,
         ));
+    }
+
+    /// Where a measure block restores the results it reads: one folder per results, with
+    /// `suffix` for a reader that must not share it.
+    fn measure_dir(
+        &self,
+        id: u64,
+        source: &Node,
+        bound: &plx_io::project::BoundResults,
+        suffix: &str,
+    ) -> std::path::PathBuf {
+        (self.settings.solver.work_dir())
+            .join(crate::analysis::job_name(&self.project_name()))
+            .join(crate::analysis::job_name(&self.name_of(id)))
+            .join(format!(
+                "{}-{:016x}{suffix}",
+                crate::analysis::job_name(&source.name),
+                bound.input.unwrap_or_default()
+            ))
     }
 
     fn measure_window(&mut self, ctx: &egui::Context) {
@@ -1172,16 +1239,9 @@ impl ProjectApp {
                 continue;
             };
             let node_sets = (source.link_data())
-                .map(|d| d.mesh.node_sets.clone())
+                .map(|d| measure_regions(&d))
                 .unwrap_or_default();
-            let dir = (self.settings.solver.work_dir())
-                .join(crate::analysis::job_name(&self.project_name()))
-                .join(crate::analysis::job_name(&self.name_of(id)))
-                .join(format!(
-                    "{}-{:016x}",
-                    crate::analysis::job_name(&source.name),
-                    bound.input.unwrap_or_default()
-                ));
+            let dir = self.measure_dir(id, source, bound, "");
             let job = crate::measure::Job {
                 kind,
                 step,
@@ -1323,13 +1383,19 @@ impl ProjectApp {
         crate::optimizer::shown(kind, value, units)
     }
 
-    /// How many elements the mesh blocks an optimizer varies would have at `value`; `None`
-    /// when it varies no mesh block.
+    /// How many elements the meshes an optimizer varies would have at `value`: of a mesh
+    /// block exactly, of the geometry of an analysis estimated from its mesh now, its element
+    /// sizes scaling with the refinement. `None` when it varies no mesh.
     fn elements_at(&self, id: u64, value: f64) -> Option<u64> {
         (self.feedback_of(id).into_iter())
             .filter_map(|link| {
                 let node = self.nodes.iter().find(|n| n.id == link.target)?;
                 let key = links::parameter_key(link)?;
+                if node.kind == Kind::Analysis {
+                    return (key == REFINEMENT)
+                        .then(|| estimated_elements(node, value))
+                        .flatten();
+                }
                 let (mut primitive, mut refinement) = (node.primitive.clone()?, node.refinement);
                 if key == REFINEMENT {
                     refinement = value;
@@ -1345,7 +1411,7 @@ impl ProjectApp {
     fn loop_elements(&self, id: u64) -> Option<u64> {
         (self.feedback_of(id).into_iter())
             .filter_map(|link| self.nodes.iter().find(|n| n.id == link.target))
-            .filter_map(|n| n.data.as_ref())
+            .filter_map(Node::link_data)
             .map(|d| d.mesh.element_count() as u64)
             .max()
     }
@@ -1758,9 +1824,7 @@ impl ProjectApp {
                 continue;
             };
             if key == REFINEMENT {
-                if value.is_finite() && value > 0.0 {
-                    node.refinement = value;
-                }
+                node.set_refinement(value);
             } else if let Some(primitive) = &mut node.primitive {
                 primitive.set_value(&key, value);
             }
@@ -2787,17 +2851,33 @@ impl ProjectApp {
             self.solves.retain(|s| s.id != id);
             self.window_runs.retain(|&run| run != id);
             self.window_runs.push(id);
-            self.monitor.get_or_insert_default().selected = Some(id);
+            self.monitor.show(id);
             return true;
         }
-        if !node.stale_meshes.is_empty() {
-            // Update Project could not make them anew: the old mesh is not solved.
-            let line = format!(
-                "{} not solved: the mesh of {} is out of date.",
-                node.name,
-                node.stale_meshes.join(", ")
-            );
-            self.output.push(line);
+        if !node.upstream.is_ready() {
+            // Update Project could not bring them up to date: the old data is not solved.
+            let upstream = &node.upstream;
+            let mut reasons = Vec::new();
+            if !upstream.stale_meshes.is_empty() {
+                reasons.push(format!(
+                    "the mesh of {} is out of date",
+                    upstream.stale_meshes.join(", ")
+                ));
+            }
+            if !upstream.stale_results.is_empty() {
+                reasons.push(format!(
+                    "the results of {} are out of date",
+                    upstream.stale_results.join(", ")
+                ));
+            }
+            if !upstream.missing_results.is_empty() {
+                reasons.push(format!(
+                    "{} has no results yet",
+                    upstream.missing_results.join(", ")
+                ));
+            }
+            self.output
+                .push(format!("{} not solved: {}.", node.name, reasons.join("; ")));
             return false;
         }
         let Some(data) = node.data.clone() else {
@@ -2812,7 +2892,7 @@ impl ProjectApp {
         self.solves.retain(|s| s.id != id);
         self.window_runs.retain(|&run| run != id);
         self.solves.push(solve);
-        self.monitor.get_or_insert_default().selected = Some(id);
+        self.monitor.show(id);
         true
     }
 
@@ -2953,16 +3033,14 @@ impl ProjectApp {
         rows
     }
 
-    /// PrePoMax's monitor for the whole project: the analyses being solved, with their
-    /// state, and the output of the one picked.
-    fn monitor_window(&mut self, ctx: &egui::Context) {
-        let Some(monitor) = &self.monitor else {
-            return;
-        };
+    /// PrePoMax's monitor for the whole project, in the Analyses tab below the schematic:
+    /// the analyses being solved with their state on the left, the output of the one
+    /// picked on the right.
+    fn monitor_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let rows = self.monitor_rows();
-        let selected = monitor.selected;
-        let mut filter = monitor.filter.clone();
-        let mut open = true;
+        let selected = self.monitor.selected;
+        let mut filter = self.monitor.filter.clone();
         let (mut pick, mut stop, mut stop_all, mut open_analysis, mut clear) =
             (None, None, false, None, false);
         let output: Vec<String> = match selected {
@@ -2975,19 +3053,62 @@ impl ProjectApp {
             },
             None => Vec::new(),
         };
-        egui::Window::new("Solution Monitor")
-            .open(&mut open)
-            .collapsible(false)
-            .default_size([760.0, 480.0])
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .show(ctx, |ui| {
-                let row_height = ui.spacing().interact_size.y + 6.0;
-                let list_height = ((rows.len().max(1) + 1) as f32 * row_height).min(200.0);
+        ui.horizontal(|ui| {
+            let row = rows.iter().find(|r| Some(r.id) == selected);
+            let active = row.is_some_and(|r| r.active);
+            if ui
+                .add_enabled(active, egui::Button::new("Stop"))
+                .on_hover_text("Stops the solve of the analysis picked in the list")
+                .clicked()
+            {
+                stop = selected;
+            }
+            let any = rows.iter().any(|r| r.active);
+            if ui
+                .add_enabled(any, egui::Button::new("Stop All"))
+                .on_hover_text("Stops Update Project and every solve")
+                .clicked()
+            {
+                stop_all = true;
+            }
+            let tip = "Opens the window of the analysis picked in the list, with its results";
+            if ui
+                .add_enabled(row.is_some(), egui::Button::new("Open Analysis"))
+                .on_hover_text(tip)
+                .clicked()
+            {
+                open_analysis = selected;
+            }
+            let finished = rows.iter().any(|r| !r.active);
+            if ui
+                .add_enabled(finished, egui::Button::new("Clear Finished"))
+                .clicked()
+            {
+                clear = true;
+            }
+            ui.separator();
+            ui.label("Filter:");
+            ui.add(
+                egui::TextEdit::singleline(&mut filter)
+                    .hint_text("Show only lines containing ...")
+                    .desired_width(180.0),
+            );
+            if ui
+                .add_enabled(!filter.is_empty(), egui::Button::new("Clear"))
+                .clicked()
+            {
+                filter.clear();
+            }
+        });
+        ui.horizontal_top(|ui| {
+            let height = ui.available_height();
+            ui.allocate_ui_with_layout(
+                egui::vec2(420.0, height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("monitor list")
-                    .max_height(list_height)
-                    .auto_shrink([false, true])
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
                         egui::Grid::new("monitor rows")
                             .num_columns(5)
@@ -3001,10 +3122,7 @@ impl ProjectApp {
                                 ui.end_row();
                                 if rows.is_empty() {
                                     ui.label("");
-                                    ui.weak(
-                                        "Nothing solved yet: Update Project solves the \
-                                             analyses that are not up to date.",
-                                    );
+                                    ui.weak("Nothing solved yet: Update Project solves the analyses that are not up to date.");
                                     ui.end_row();
                                 }
                                 for row in &rows {
@@ -3032,25 +3150,13 @@ impl ProjectApp {
                                 }
                             });
                     });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Filter:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut filter)
-                            .hint_text("Show only lines containing ...")
-                            .desired_width(240.0),
-                    );
-                    if ui
-                        .add_enabled(!filter.is_empty(), egui::Button::new("Clear"))
-                        .clicked()
-                    {
-                        filter.clear();
-                    }
-                });
-                let height = ui.available_height() - 36.0;
+                },
+            );
+            ui.separator();
+            // The lines go one below the other, not in the row of the list.
+            ui.vertical(|ui| {
                 let area = egui::ScrollArea::both()
                     .id_salt(("monitor output", selected))
-                    .max_height(height.max(80.0))
                     .auto_shrink([false, false])
                     .stick_to_bottom(true);
                 if filter.is_empty() {
@@ -3062,48 +3168,11 @@ impl ProjectApp {
                         .collect();
                     crate::virtual_table::lines(ui, area, &shown);
                 }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    let row = rows.iter().find(|r| Some(r.id) == selected);
-                    let active = row.is_some_and(|r| r.active);
-                    if ui
-                        .add_enabled(active, egui::Button::new("Stop"))
-                        .on_hover_text("Stops the solve of the analysis picked in the list")
-                        .clicked()
-                    {
-                        stop = selected;
-                    }
-                    let any = rows.iter().any(|r| r.active);
-                    if ui
-                        .add_enabled(any, egui::Button::new("Stop All"))
-                        .on_hover_text("Stops Update Project and every solve")
-                        .clicked()
-                    {
-                        stop_all = true;
-                    }
-                    let tip = "Opens the window of the analysis picked in the list, with its \
-                               results";
-                    if ui
-                        .add_enabled(row.is_some(), egui::Button::new("Open Analysis"))
-                        .on_hover_text(tip)
-                        .clicked()
-                    {
-                        open_analysis = selected;
-                    }
-                    let finished = rows.iter().any(|r| !r.active);
-                    if ui
-                        .add_enabled(finished, egui::Button::new("Clear Finished"))
-                        .clicked()
-                    {
-                        clear = true;
-                    }
-                });
             });
-        if let Some(monitor) = &mut self.monitor {
-            monitor.filter = filter;
-            if pick.is_some() {
-                monitor.selected = pick;
-            }
+        });
+        self.monitor.filter = filter;
+        if pick.is_some() {
+            self.monitor.selected = pick;
         }
         if let Some(id) = stop {
             self.stop_solve(id);
@@ -3118,16 +3187,13 @@ impl ProjectApp {
         }
         if let Some(id) = open_analysis {
             self.open_window(
-                ctx,
+                &ctx,
                 id,
                 Some(Show {
                     view: TreeView::Results,
                     step: None,
                 }),
             );
-        }
-        if !open {
-            self.monitor = None;
         }
     }
 
@@ -3158,13 +3224,10 @@ impl ProjectApp {
     }
 
     fn toggle_monitor(&mut self) {
-        self.monitor = match self.monitor.take() {
-            Some(_) => None,
-            None => Some(Monitor {
-                selected: self.updating.first().copied(),
-                ..Default::default()
-            }),
-        };
+        self.monitor.shown = !self.monitor.shown;
+        if self.monitor.shown && self.monitor.selected.is_none() {
+            self.monitor.selected = self.updating.first().copied();
+        }
     }
 
     /// The analyses that take data from `id`, directly or through others.
@@ -3296,7 +3359,7 @@ impl ProjectApp {
                 self.stop_update();
             }
             ui.add_space(4.0);
-            let shown = self.monitor.is_some();
+            let shown = self.monitor.shown;
             if icons::button(ui, Icon::Monitor, MONITOR_TIP, true, shown).clicked() {
                 self.toggle_monitor();
             }
@@ -3371,6 +3434,7 @@ impl ProjectApp {
                     (Kind::Analysis, Some(status)) => block_rows(
                         status,
                         fe,
+                        n.refinement(),
                         &n.expanded,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                         bundles.get(&n.id).map_or(&[][..], Vec::as_slice),
@@ -3395,7 +3459,7 @@ impl ProjectApp {
                     loading: n.window.as_ref().is_some_and(|w| w.model().is_none()),
                     open: n.window.is_some(),
                     primitive: n.primitive.clone(),
-                    refinement: n.refinement,
+                    refinement: n.refinement().unwrap_or(1.0),
                     parameters: n.parameters.clone(),
                     units: (n.data.as_ref())
                         .map_or(UnitSystem::default(), |d| d.model.properties.units),
@@ -4120,10 +4184,10 @@ impl ProjectApp {
                 .filter(|l| l.target == target)
                 .cloned()
                 .collect();
-            let mut missing = Vec::new();
+            let mut upstream = crate::status::Upstream::default();
             for link in &to_target {
                 let source = self.name_of(link.source);
-                if let Some(payload) = self.payload(link, &mut missing)
+                if let Some(payload) = self.payload(link, &mut upstream)
                     && let Some(inherited) = self.apply(target, &source, link, payload)
                     && let Some(own) = self.links.iter_mut().find(|l| *l == link)
                 {
@@ -4144,15 +4208,12 @@ impl ProjectApp {
                 continue;
             }
             let incoming = self.incoming(target);
-            let upstream = crate::status::Upstream {
-                missing_results: missing,
-                stale_meshes: self.stale_meshes(target),
-            };
+            upstream.stale_meshes = self.stale_meshes(target);
             if let Some(node) = self.node(target) {
                 match &mut node.window {
                     Some(window) => window.set_links(incoming, upstream),
                     None => {
-                        node.stale_meshes = upstream.stale_meshes;
+                        node.upstream = upstream;
                         node.refresh_closed();
                     }
                 }
@@ -4217,7 +4278,7 @@ impl ProjectApp {
     /// What `link` has to copy into its target to bring it up to date with the source;
     /// `None` when it is up to date or cannot be brought up to date now. Sources of results
     /// links that have no results go to `missing`.
-    fn payload(&mut self, link: &Link, missing: &mut Vec<String>) -> Option<Payload> {
+    fn payload(&mut self, link: &Link, upstream: &mut crate::status::Upstream) -> Option<Payload> {
         let source = self.nodes.iter().find(|n| n.id == link.source)?;
         let target = self.nodes.iter().find(|n| n.id == link.target)?;
         // A Campbell block reads the analysis when its sweep starts.
@@ -4235,9 +4296,15 @@ impl ProjectApp {
             Some(links::RESULTS) => {
                 let step = path.get(1)?;
                 let Some(bound) = source.bound_results() else {
-                    missing.push(source.name.clone());
+                    upstream.missing_results.push(source.name.clone());
                     return None;
                 };
+                if source.results_out_of_date() {
+                    // Its results were made from data that changed since: the target waits
+                    // for it to be solved again rather than take them.
+                    upstream.stale_results.push(source.name.clone());
+                    return None;
+                }
                 let data = data?;
                 let global = links::global_step_number(data.fe, step)?;
                 let usage = links::ResultsUse::of(link)?;
@@ -4276,7 +4343,7 @@ impl ProjectApp {
                         && (std::fs::create_dir_all(&dir).is_err()
                             || std::fs::copy(&solved, &file).is_err())
                     {
-                        missing.push(source.name.clone());
+                        upstream.missing_results.push(source.name.clone());
                         return None;
                     }
                     return Some(Payload::Results(global, file));
@@ -4297,7 +4364,7 @@ impl ProjectApp {
                 let file = dir.join(&frd.name);
                 if !file.is_file() {
                     match self.restoring.get(&dir) {
-                        Some(Some(_)) => missing.push(source.name.clone()),
+                        Some(Some(_)) => upstream.missing_results.push(source.name.clone()),
                         Some(None) => {}
                         None => {
                             let (sender, receiver) = std::sync::mpsc::channel();
@@ -4308,7 +4375,7 @@ impl ProjectApp {
                                 let _ = sender.send(written);
                             });
                             self.restoring.insert(dir, Some(receiver));
-                            missing.push(source.name.clone());
+                            upstream.missing_results.push(source.name.clone());
                         }
                     }
                 }
@@ -4317,7 +4384,10 @@ impl ProjectApp {
             Some(links::STATE) => {
                 if source.bound_results().is_none() {
                     // Solved first, so that this one continues from its states.
-                    missing.push(source.name.clone());
+                    upstream.missing_results.push(source.name.clone());
+                } else if source.results_out_of_date() {
+                    // Its states belong to data that changed since.
+                    upstream.stale_results.push(source.name.clone());
                 }
                 let (data, own) = (data?, target.link_data()?);
                 let step = links::state_step(data.fe, link)?;
@@ -4562,7 +4632,11 @@ impl ProjectApp {
                 }
             }
         }
-        sources.retain(|s| (self.nodes.iter()).any(|n| n.id == *s && n.bound_results().is_none()));
+        // Those with results made from data that changed since are solved again too.
+        sources.retain(|s| {
+            (self.nodes.iter())
+                .any(|n| n.id == *s && (n.bound_results().is_none() || n.results_out_of_date()))
+        });
         sources.push(id);
         let chain = links::order(&sources, &self.links);
         self.update_queue.retain(|queued| !chain.contains(queued));
@@ -4599,8 +4673,9 @@ impl ProjectApp {
             }
             Action::SetRefinement(id, value) => {
                 if let Some(node) = self.node(id) {
-                    node.refinement = value;
+                    node.set_refinement(value);
                 }
+                self.sync_due = true;
             }
             Action::AddMeshExport(pos) => {
                 self.add_mesh_export(pos);
@@ -5061,18 +5136,32 @@ impl eframe::App for ProjectApp {
             .stroke(egui::Stroke::new(1.0, crate::style::border()));
         egui::Panel::bottom("project output")
             .resizable(true)
-            .default_size(110.0)
-            .size_range(40.0..=400.0)
-            .frame(pane.inner_margin(4))
+            .default_size(170.0)
+            .size_range(70.0..=500.0)
+            .frame(egui::Frame::new().fill(crate::style::control()))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for line in &self.output {
-                            ui.label(line);
-                        }
-                    });
+                let titles = ["Output", "Analyses"];
+                let selected = usize::from(self.monitor.shown);
+                let (clicked, tab) = crate::style::tabs(ui, &titles, selected);
+                if let Some(index) = clicked {
+                    self.monitor.shown = index == 1;
+                }
+                pane.inner_margin(4).show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    if self.monitor.shown {
+                        self.monitor_panel(ui);
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                for line in &self.output {
+                                    ui.label(line);
+                                }
+                            });
+                    }
+                });
+                crate::style::open_tab(ui, tab);
             });
         let actions = egui::CentralPanel::no_frame()
             .show(ui, |ui| self.schematic(ui))
@@ -5100,7 +5189,6 @@ impl eframe::App for ProjectApp {
         self.run_update(&ctx);
         self.run_loop();
         self.run_exports();
-        self.monitor_window(&ctx);
         self.analysis_windows(&ctx);
     }
 }
@@ -5191,6 +5279,7 @@ struct BlockView {
 fn block_rows(
     status: &AnalysisStatus,
     fe: Option<&plx_model::FeModel>,
+    refinement: Option<f64>,
     expanded: &BTreeSet<Vec<String>>,
     incoming: &[(Vec<String>, String)],
     bundles: &[Bundle],
@@ -5253,6 +5342,28 @@ fn block_rows(
         rows[1]
             .tip
             .push_str(&format!(" ({})", status.stale_parts.join(", ")));
+    }
+    // The mesh of geometry can be refined as a whole, by a value link too.
+    if refinement.is_some() {
+        let path = vec![PARAMETERS.to_owned(), REFINEMENT.to_owned()];
+        rows.push(Row {
+            text: "Refine".to_owned(),
+            depth: 1,
+            icon: NodeIcon::Mesh,
+            state: None,
+            expander: None,
+            input: true,
+            output: false,
+            linked_from: from(&path),
+            collection: false,
+            partial: false,
+            widget: Some(RowWidget::Refinement),
+            tip: "Refine: every element size of the mesh setup is divided by this factor when \
+                  the geometry is meshed; the sizes as set stay. An optimizer refines the mesh \
+                  through it; 1 meshes with the sizes as they are."
+                .to_owned(),
+            path,
+        });
     }
     let setup = vec![links::SETUP.to_owned()];
     let setup_open = expanded.contains(&setup);
@@ -5699,8 +5810,51 @@ fn export_rows(node: &Node, base: Option<&Path>, incoming: &[(Vec<String>, Strin
 /// The first part of the path of a parameter row of a mesh block.
 const PARAMETERS: &str = links::PARAMETERS;
 
-/// The key of the refinement of a mesh block, a parameter beside those of its primitive.
+/// The regions a measure block can take its value in, by name, with their nodes on the mesh
+/// as it is now: the node sets of the mesh and of the model, and the regions of the boundary
+/// conditions and loads, such as "Fixed (boundary condition)". Those picked on the geometry
+/// or on the sides of a mesh block are found on each new mesh again.
+fn measure_regions(data: &links::Data) -> BTreeMap<String, Vec<plx_mesh::NodeId>> {
+    let mut regions: BTreeMap<String, Vec<plx_mesh::NodeId>> = data.mesh.node_sets.clone();
+    let mut add = |name: String, region: &plx_model::Region| {
+        let nodes = region.nodes(data.mesh);
+        if !nodes.is_empty() {
+            regions.entry(name).or_insert(nodes);
+        }
+    };
+    for set in &data.fe.mesh_sets {
+        add(set.name.clone(), &set.region);
+    }
+    for step in &data.fe.steps {
+        for bc in &step.boundary_conditions {
+            add(format!("{} (boundary condition)", bc.name), &bc.region);
+        }
+        for load in &step.loads {
+            add(format!("{} (load)", load.name), &load.region);
+        }
+    }
+    regions
+}
+
+/// The key of the refinement of a mesh block, a parameter beside those of its primitive,
+/// and of the mesh of an analysis' geometry.
 const REFINEMENT: &str = "refinement";
+
+/// How many elements the geometry of an analysis would mesh at the refinement `value`: its
+/// elements now times the change of the refinement to the power of the dimensions the
+/// elements fill. `None` before it is meshed.
+fn estimated_elements(node: &Node, value: f64) -> Option<u64> {
+    let data = node.link_data()?;
+    let now = data.geometry?.refinement;
+    let elements = data.mesh.element_count() as f64;
+    if elements == 0.0 || !(now > 0.0 && value > 0.0) {
+        return None;
+    }
+    let solid =
+        (data.mesh.elements().iter()).any(|e| e.shape.family() == plx_mesh::ElementFamily::Solid);
+    let dimensions = if solid { 3 } else { 2 };
+    Some((elements * (value / now).powi(dimensions)).round() as u64)
+}
 
 /// The rows of a parameters block: a number each, edited in place, with a pin to give it.
 fn parameter_rows(node: &Node) -> Vec<Row> {
@@ -7201,14 +7355,24 @@ const UPDATE_TIP: &str = "Update Project (F5): solves every analysis that is not
      one after the other, and keeps the new results.";
 
 const MONITOR_TIP: &str = "Solution Monitor: the analyses being solved, with the output of \
-     CalculiX";
+     CalculiX, in the Analyses tab below the schematic";
 
 /// The project window's solution monitor: which analysis' output it shows, and the text
 /// the output is filtered by.
 #[derive(Default)]
 struct Monitor {
+    /// The output pane shows the Analyses tab instead of the messages.
+    shown: bool,
     selected: Option<u64>,
     filter: String,
+}
+
+impl Monitor {
+    /// A solve of `id` starts: the monitor shows its output.
+    fn show(&mut self, id: u64) {
+        self.shown = true;
+        self.selected = Some(id);
+    }
 }
 
 /// A line of the solution monitor's list.
@@ -7431,6 +7595,89 @@ mod tests {
     }
 
     #[test]
+    fn the_mesh_of_geometry_is_refined_as_a_whole() {
+        let geometry = plx_model::Geometry {
+            source: "block.step".into(),
+            brep: "shapes".into(),
+            meshing: Default::default(),
+            mesh_items: Vec::new(),
+            part_names: Vec::new(),
+            refinement: 1.0,
+        };
+        let mesh = MeshPrimitive::default_box().generate(ModelSpace::ThreeD, "Solid-1");
+        let space = ModelSpace::ThreeD;
+        let mesh_inputs = BTreeMap::from([(
+            "SOLID-1".to_owned(),
+            plx_model::fingerprint::mesh_input(&geometry, space, "SOLID-1"),
+        )]);
+        let mut model = plx_model::FeModel::default();
+        model.properties.space = space;
+        let data = ProjectAnalysis {
+            id: 3,
+            name: "Analysis".into(),
+            geometry: Some(geometry),
+            mesh,
+            model,
+            mesh_inputs,
+            ..Default::default()
+        };
+        let mut node = Node::read(ProjectNode::Analysis(Box::new(data)));
+        assert_eq!(node.refinement(), Some(1.0));
+        assert_eq!(node.status.as_ref().unwrap().mesh, CellState::UpToDate);
+        // A Refine row below the mesh takes a value link.
+        let rows = block_rows(
+            node.status.as_ref().unwrap(),
+            None,
+            node.refinement(),
+            &BTreeSet::new(),
+            &[],
+            &[],
+            None,
+        );
+        let refine = rows.iter().find(|r| r.text == "Refine").unwrap();
+        assert_eq!(refine.path, [PARAMETERS, REFINEMENT]);
+        assert!(refine.input && matches!(refine.widget, Some(RowWidget::Refinement)));
+        // Twice as fine: the mesh is out of date, about 2^3 times the elements.
+        assert_eq!(estimated_elements(&node, 2.0), Some(320));
+        node.set_refinement(2.0);
+        assert_eq!(node.refinement(), Some(2.0));
+        assert_eq!(node.status.as_ref().unwrap().mesh, CellState::OutOfDate);
+        assert_eq!(estimated_elements(&node, 2.0), Some(40));
+        // An analysis without geometry has no Refine row.
+        node.data.as_mut().unwrap().geometry = None;
+        assert_eq!(node.refinement(), None);
+    }
+
+    #[test]
+    fn a_measure_takes_the_regions_of_the_model_on_each_new_mesh() {
+        let mut fe = plx_model::FeModel::default();
+        let mut step = plx_model::Step::new_static("Step-1");
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            name: "Fixed".into(),
+            active: true,
+            visible: true,
+            region: plx_model::Region::Geometry(vec![plx_mesh::CadEntity::Face(2)]),
+            kind: plx_model::BoundaryKind::Fixed,
+            amplitude: None,
+        });
+        fe.steps.push(step);
+        for refinement in [1.0, 2.0] {
+            let mesh = (MeshPrimitive::default_box().refined(refinement))
+                .generate(ModelSpace::ThreeD, "Box");
+            let data = links::Data {
+                geometry: None,
+                mesh: &mesh,
+                fe: &fe,
+                mesh_inputs: &BTreeMap::new(),
+            };
+            let regions = measure_regions(&data);
+            // The face picked on the box is its side X+ on the coarse and the fine mesh.
+            assert_eq!(regions["Fixed (boundary condition)"], mesh.node_sets["X+"]);
+            assert!(regions.contains_key("X-"));
+        }
+    }
+
+    #[test]
     fn a_parameters_block_reads_back_and_gives_its_values() {
         let set = ParameterSet {
             id: 4,
@@ -7483,6 +7730,23 @@ mod tests {
             Some(ProjectNode::Measure(written)) => assert_eq!(written, block),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn results_made_from_changed_data_are_out_of_date() {
+        // Never solved: nothing to take, and nothing out of date either.
+        let mut node = Node::new(1, "Static".into(), ProjectAnalysis::default());
+        node.refresh_closed();
+        assert!(node.bound_results().is_none() && !node.results_out_of_date());
+        // Results whose model changed since: a results link waits for them to be made anew,
+        // and Solve of the target solves this one first.
+        let data = ProjectAnalysis {
+            results: Some(Default::default()),
+            ..Default::default()
+        };
+        let mut node = Node::new(1, "Static".into(), data);
+        node.refresh_closed();
+        assert!(node.results_out_of_date());
     }
 
     #[test]

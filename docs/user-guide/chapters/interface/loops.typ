@@ -2,7 +2,7 @@
 
 == Optimization loops <optimization-loops>
 
-An *Optimizer* block runs a loop: it gives a value to a number of a mesh block, has the
+An *Optimizer* block runs a loop: it gives a value to a number of a mesh, has the
 project updated, reads a Measure block (@measure-block) and decides on the next value, until it
 is done. Two optimizers are there:
 
@@ -13,11 +13,23 @@ is done. Two optimizers are there:
 
 Add one with #menu("Project", "Add Optimizer"). Then make the loop:
 
-+ Drag the pin of its #ui("Value") row to the number it varies: #ui("Refine") of a mesh block
-  for a mesh convergence, any number of a mesh block for a study. The wire is violet and
-  dashed and runs below the blocks, so that the loop can be seen.
++ Drag the pin of its #ui("Value") row to the number it varies: #ui("Refine") of an analysis
+  with imported geometry or of a mesh block for a mesh convergence, any number of a mesh block
+  for a study. The wire is violet and dashed and runs below the blocks, so that the loop can
+  be seen.
 + Drag the value pin of a Measure block of the results on that mesh to its #ui("Measure")
   row.
+
+An analysis with imported geometry has a #ui("Refine") row under #ui("Mesh"). Every element
+size of its mesh setup is divided by this factor when the geometry is meshed: the max. and
+min. element size of the meshing parameters, those of Meshing Parameters items and the local
+mesh sizes; the sizes as set in the mesh setup stay. Once it changes, the mesh is out of date,
+and #ui("Update Project") meshes the geometry again before it solves. Regions picked on the
+geometry are found on each new mesh.
+
+#screenshot("optimizer-geometry.png", [A mesh convergence on a plate with a hole, imported
+  from a STEP file: the optimizer varies Refine of the analysis and reads the largest von Mises
+  stress; it converged after two meshes])
 
 #screenshot("optimizer-loop.png", [A mesh convergence: the optimizer Convergence varies Refine
   of the box (dashed wire) and reads the largest von Mises stress of the step Load, which the
@@ -43,12 +55,14 @@ value (study):
 #fields(
   [Optimizer], [#ui("Mesh convergence") or #ui("Parameter study").],
   [Start refinement], [The refinement of the first iteration; 1 meshes the divisions of the
-    mesh block as they are.],
-  [Factor per step], [The refinement grows by this factor from one iteration to the next. The
-    divisions are rounded, so in 3D the elements grow about by its cube.],
+    mesh block, or the element sizes of the geometry, as they are.],
+  [Factor per step], [The refinement grows by this factor from one iteration to the next. In
+    3D the elements grow about by its cube.],
   [Tolerance], [The relative change of the measure below which the mesh has converged.],
   [Max iterations], [The loop ends after this many iterations, converged or not.],
-  [Max elements], [No mesh with more elements is solved: the loop ends before it.],
+  [Max elements], [No mesh with more elements is solved: the loop ends before it. For a mesh
+    block the count is exact; for geometry it is estimated from the last mesh, its elements
+    growing with the cube of the refinement (the square for shells and 2D).],
   [Kind, Value 1 ...], [For a study: what the values are (#ui("Length"), #ui("Count") or
     #ui("Factor")) and the values, in the units shown in.],
   [Run, Reset], [As in the context menu.],

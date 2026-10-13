@@ -21,7 +21,7 @@ each other's files.
   [Check Model], [Lets CalculiX only read and check the model (`*NO ANALYSIS`), without solving
     it.],
   [Stop], [Stops meshing for a solve, or the running CalculiX job.],
-  [Monitor], [Shows the monitor window.],
+  [Monitor], [Shows the #ui("Analysis") tab of the output pane (@monitor).],
   [Open Results], [Opens the results the analysis keeps on the #ui("Results") tab.],
   [Remove Results], [Drops the results the analysis keeps (@bind-result).],
 )
@@ -37,20 +37,23 @@ the analysis in its folder are deleted before CalculiX starts. PrePoLix refuses 
 without mesh, without step or with all steps deactivated, and it stops if the input file cannot
 be written (for example because a region is empty).
 
-=== Monitor
+=== Monitor <monitor>
 
-The monitor opens when a run starts. It shows the status and running time, the current step,
-increment and iteration, and the output of CalculiX. #ui("Results") opens the results when the run
-is finished.
+The monitor is the #ui("Analysis") tab of the output pane below the 3D view; it comes to the
+front when a run starts, so the model and its results stay in view while CalculiX runs. Its
+top row has #ui("Kill") to stop CalculiX, #ui("Results") to open the results once the run is
+finished, the #ui("Filter") field and the status with the running time and the current step,
+increment and iteration; below it is the output of CalculiX. The #ui("Output") tab goes back to
+the messages, and the pane can be made taller by dragging its upper edge.
 
-#screenshot("monitor.png", [Monitor after a completed run])
+#screenshot("monitor.png", [The Analysis tab after a completed run])
 
-The #ui("Filter") field above the output shows only the lines that contain the text you type,
+The #ui("Filter") field shows only the lines that contain the text you type,
 ignoring upper and lower case. With "average force", for example, you see the average force of
 every increment one below the other. The filter applies while CalculiX is still running, and
 #ui("Clear") or an empty field shows all lines again.
 
-#screenshot("monitor-filter.png", [Monitor showing only the lines with "average force"])
+#screenshot("monitor-filter.png", [The Analysis tab showing only the lines with "cpu"])
 
 The status at the end is #ui("completed"), #ui("finished with errors, results available"),
 #ui("failed") or #ui("killed"). If CalculiX failed, PrePoLix looks for known error messages
@@ -77,8 +80,6 @@ of the two happened:
     are turned off, or the step to continue from is not a step over time (a frequency, buckle
     or perturbation step leaves no state to continue from).],
 )
-
-#screenshot("monitor-restart.png", [Monitor of a run that continues after the first step])
 
 A restart that CalculiX cannot finish is solved once more in full, so a changed analysis always
 ends up solved. The state files stay in the folder of the analysis in the work directory, next

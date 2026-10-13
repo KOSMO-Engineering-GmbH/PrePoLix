@@ -104,6 +104,7 @@ mod tests {
             meshing: MeshingParameters::default(),
             mesh_items: Vec::new(),
             part_names: Vec::new(),
+            refinement: 1.0,
         }
     }
 
@@ -153,5 +154,14 @@ mod tests {
         // New shapes need every part meshed again.
         geometry.brep = "other shapes".into();
         assert_ne!(mesh_input(&geometry, space, "Solid-2"), b);
+    }
+
+    #[test]
+    fn a_refinement_puts_every_part_out_of_date() {
+        let mut geometry = geometry();
+        let space = ModelSpace::default();
+        let before = mesh_input(&geometry, space, "SOLID-1");
+        geometry.refinement = 1.5;
+        assert_ne!(mesh_input(&geometry, space, "SOLID-1"), before);
     }
 }
