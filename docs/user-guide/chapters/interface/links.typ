@@ -27,6 +27,9 @@ The colour of a wire tells its kind, the row tells where it acts:
     the global model of a submodel (@results-links).],
   [State (green)], [The target continues the source from the state after one of its steps, as
     further steps of the same CalculiX run (@state-links).],
+  [Value (violet)], [A number of the target, such as the edge length of a mesh block, takes
+    the value of a parameter (@parameters-block). Like a reference, it is then the same
+    number.],
 )
 
 A block thus reads from top to bottom: where it starts (#ui("State")), what it is (the blue

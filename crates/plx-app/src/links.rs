@@ -16,6 +16,10 @@
 //! `"Eigenmodes"` or its `"Global results"` (see [`STEP_INPUTS`]), at the temperatures of
 //! the initial conditions, or at the State row.
 //!
+//! A value link gives a number, a row `["Value", name]` of a Parameters block, to a
+//! parameter of another block, `["Parameters", key]`, such as the length of a mesh block.
+//! Like a reference, the parameter is then the same as the number and read-only.
+//!
 //! A state link, `["State", "Step-1"]`, makes the target continue the source: it takes the
 //! source's model and its steps up to that step, then solves its own steps from the state
 //! CalculiX wrote after it.
@@ -37,6 +41,10 @@ pub const MESH: &str = "Mesh";
 pub const SETUP: &str = "Setup";
 pub const RESULTS: &str = "Results";
 pub const STATE: &str = "State";
+/// The rows of numbers a block gives, `["Value", name]`.
+pub const VALUE: &str = "Value";
+/// The rows of numbers a block takes, `["Parameters", key]`.
+pub const PARAMETERS: &str = "Parameters";
 
 /// The categories of the setup in the order of the FE Model tree; each can be linked as a
 /// whole or item by item.
@@ -104,6 +112,19 @@ pub fn slot(link: &Link) -> &[String] {
 /// Whether the link carries the results of a step, for a submodel.
 pub fn is_results(link: &Link) -> bool {
     link.item.first().is_some_and(|c| c == RESULTS)
+}
+
+/// Whether the link gives a number to a parameter.
+pub fn is_value(link: &Link) -> bool {
+    link.item.first().is_some_and(|c| c == VALUE)
+}
+
+/// The key of the parameter a value link sets.
+pub fn parameter_key(link: &Link) -> Option<&str> {
+    match slot(link) {
+        [cell, key] if cell == PARAMETERS => Some(key),
+        _ => None,
+    }
 }
 
 /// Whether the link makes its target continue from the state after a step of the source.
@@ -875,6 +896,8 @@ pub fn clear_submodel(fe: &mut FeModel) {
 pub fn compatible(item: &[String], slot: &[String]) -> bool {
     match item.first().map(String::as_str) {
         Some(RESULTS) => item.len() == 2 && takes_results(slot),
+        // A number goes to a parameter; whether its kind fits, the blocks tell.
+        Some(VALUE) => item.len() == 2 && matches!(slot, [cell, _] if cell == PARAMETERS),
         Some(STATE) | None => false,
         Some(_) => match (item, slot) {
             ([a], [b]) => a == b && b != RESULTS && b != STATE,
@@ -1510,6 +1533,10 @@ mod tests {
         assert!(!compatible(&results, &path(&["Setup", "Materials"])));
         assert!(is_step_input(&input));
         assert!(!is_step_input(&step));
+        let value = path(&["Value", "length"]);
+        assert!(compatible(&value, &path(&["Parameters", "lx"])));
+        assert!(!compatible(&value, &path(&["Mesh"])));
+        assert!(!compatible(&path(&["Mesh"]), &path(&["Parameters", "lx"])));
         assert!(is_collection(&path(&["Setup", "Materials"])));
         assert!(!is_collection(&path(&["Setup", "Materials", "Steel"])));
         assert!(!is_collection(&path(&["Mesh"])));

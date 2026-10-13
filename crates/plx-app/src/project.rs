@@ -10,9 +10,12 @@ use std::time::{Duration, Instant};
 use crate::node_picker::{self, NodePicker};
 use egui_snarl::ui::{AnyPins, PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
-use plx_io::project::{Link, MaterialSet, MeshBlock, Project, ProjectAnalysis, ProjectNode};
+use plx_io::project::{
+    Link, MaterialSet, MeshBlock, ParameterSet, Project, ProjectAnalysis, ProjectNode,
+};
 use plx_model::{
-    MeshPrimitive, ModelProperties, ModelSpace, Param, ParamSlot, Quantity, UnitSystem,
+    MeshPrimitive, ModelProperties, ModelSpace, Param, ParamSlot, Parameter, Quantity, UnitSystem,
+    ValueKind,
 };
 
 use crate::app::{AnalysisWindow, Request, Show};
@@ -23,6 +26,7 @@ use crate::mesh_block::{MeshBlockEditor, MeshBlockResult};
 use crate::model::PROJECT_EXTENSION;
 use crate::model_properties::{DialogResult, ModelPropertiesDialog};
 use crate::node_icons::{self, NodeIcon};
+use crate::parameter_set::{ParameterSetEditor, ParameterSetResult};
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::solution_monitor::{BackgroundSolve, Outcome};
 use crate::status::{self, AnalysisStatus, CellState};
@@ -41,6 +45,8 @@ enum Kind {
     Materials,
     /// A structured mesh made from a few parameters, held in the mesh of its data.
     Mesh,
+    /// Named numbers that value links give to other blocks.
+    Parameters,
 }
 
 impl Kind {
@@ -55,6 +61,7 @@ impl Kind {
             Self::Analysis => "analysis",
             Self::Materials => "materials block",
             Self::Mesh => "mesh block",
+            Self::Parameters => "parameters block",
         }
     }
 }
@@ -80,6 +87,10 @@ struct Node {
     /// What a mesh block meshes, and the fingerprint of what its mesh was made from.
     primitive: Option<MeshPrimitive>,
     generated: Option<u64>,
+    /// Factor on the divisions of a mesh block, see [`MeshPrimitive::refined`].
+    refinement: f64,
+    /// The numbers of a parameters block.
+    parameters: Vec<Parameter>,
     /// Solved in the background, its window closed.
     solving: bool,
     /// Mesh blocks before it whose mesh is out of date, see
@@ -111,6 +122,8 @@ impl Node {
             space,
             primitive: None,
             generated: None,
+            refinement: 1.0,
+            parameters: Vec::new(),
             solving: false,
             stale_meshes: Vec::new(),
         };
@@ -138,7 +151,7 @@ impl Node {
             .data
             .as_ref()
             .is_some_and(|d| d.mesh.element_count() > 0);
-        match &self.primitive {
+        match self.meshed() {
             _ if !made => CellState::Missing,
             Some(primitive) if Some(primitive.fingerprint(self.space)) == self.generated => {
                 CellState::UpToDate
@@ -147,10 +160,15 @@ impl Node {
         }
     }
 
+    /// What a mesh block meshes: its primitive with the divisions refined.
+    fn meshed(&self) -> Option<MeshPrimitive> {
+        (self.primitive.as_ref()).map(|p| p.refined(self.refinement))
+    }
+
     /// Makes a mesh block's mesh from its parameters; returns the number of elements, or
     /// why it cannot be made.
     fn generate(&mut self) -> Result<usize, String> {
-        let primitive = self.primitive.as_ref().ok_or("not a mesh block")?;
+        let primitive = self.meshed().ok_or("not a mesh block")?;
         if let Some(problem) = primitive.problem(self.space) {
             return Err(problem);
         }
@@ -191,7 +209,22 @@ impl Node {
                 };
                 data.model.properties.space = block.space;
                 data.model.properties.units = block.units;
-                Self::mesh_block(block.id, block.name, data, block.primitive, block.generated)
+                let mut node =
+                    Self::mesh_block(block.id, block.name, data, block.primitive, block.generated);
+                node.refinement = block.refinement;
+                node
+            }
+            ProjectNode::Parameters(set) => {
+                let mut data = ProjectAnalysis {
+                    id: set.id,
+                    name: set.name.clone(),
+                    position: set.position,
+                    ..Default::default()
+                };
+                data.model.properties.units = set.units;
+                let mut node = Self::of_kind(Kind::Parameters, set.id, set.name, data);
+                node.parameters = set.parameters;
+                node
             }
         }
     }
@@ -221,7 +254,15 @@ impl Node {
                 primitive: self.primitive.clone()?,
                 mesh: data.mesh,
                 generated: self.generated,
+                refinement: self.refinement,
             })),
+            Kind::Parameters => ProjectNode::Parameters(ParameterSet {
+                id: data.id,
+                name: data.name,
+                position,
+                units: data.model.properties.units,
+                parameters: self.parameters.clone(),
+            }),
         })
     }
 
@@ -313,6 +354,12 @@ enum Action {
     AddMesh(egui::Pos2, MeshPrimitive),
     /// Parameters of a mesh block changed in its block.
     SetPrimitive(u64, MeshPrimitive),
+    /// A new parameters block at the position.
+    AddParameters(egui::Pos2),
+    /// The value of a parameter of a parameters block, by its index, changed in its block.
+    SetParameter(u64, usize, f64),
+    /// The refinement of a mesh block changed in its block.
+    SetRefinement(u64, f64),
     /// Make the mesh of a mesh block anew.
     Generate(u64),
     /// Open the analysis' window, in the workspace of a cell if given.
@@ -373,6 +420,8 @@ pub struct ProjectApp {
     material_set: Option<MaterialSetEditor>,
     /// The editor of a mesh block.
     mesh_block: Option<MeshBlockEditor>,
+    /// The editor of a parameters block.
+    parameter_set: Option<ParameterSetEditor>,
     /// Update Project made meshes anew and goes on once links took them.
     update_after_sync: bool,
     /// The overview of blocks to add, open after a double-click into the schematic.
@@ -445,6 +494,7 @@ impl ProjectApp {
             confirm_delete: None,
             material_set: None,
             mesh_block: None,
+            parameter_set: None,
             update_after_sync: false,
             picker: None,
             show_all: false,
@@ -585,6 +635,147 @@ impl ProjectApp {
         id
     }
 
+    /// Adds a parameters block with one length; returns its id.
+    fn add_parameters(&mut self, position: egui::Pos2) -> u64 {
+        let id = self.next_id();
+        let name = self.unique_name("Parameters");
+        let mut data = ProjectAnalysis {
+            id,
+            name: name.clone(),
+            ..Default::default()
+        };
+        data.model.properties.units = self.settings.new_model.units;
+        let mut node = Node::of_kind(Kind::Parameters, id, name.clone(), data);
+        node.parameters = vec![Parameter::new("Length", ValueKind::Length, 0.1)];
+        self.nodes.push(node);
+        self.graph.insert_node(position, id);
+        self.output.push(format!(
+            "{name} created: drag the pin of a parameter to a parameter of a mesh block; \
+             double-click it to add, rename or remove parameters."
+        ));
+        id
+    }
+
+    /// Opens the editor of a parameters block.
+    fn edit_parameters(&mut self, id: u64) {
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            return;
+        };
+        let units = node
+            .data
+            .as_ref()
+            .map_or(UnitSystem::default(), |d| d.model.properties.units);
+        self.parameter_set = Some(ParameterSetEditor::new(
+            id,
+            &node.name,
+            &node.parameters,
+            units,
+        ));
+    }
+
+    fn parameter_set_window(&mut self, ctx: &egui::Context) {
+        let Some(editor) = &mut self.parameter_set else {
+            return;
+        };
+        let id = editor.id;
+        match editor.show(ctx) {
+            ParameterSetResult::Open => {}
+            ParameterSetResult::Cancel => self.parameter_set = None,
+            ParameterSetResult::Ok(rows, units) => {
+                self.parameter_set = None;
+                // Links follow a renamed parameter; those of a removed one go.
+                let kept: Vec<(String, String)> = (rows.iter())
+                    .filter_map(|(old, p)| Some((old.clone()?, p.name.clone())))
+                    .collect();
+                self.links.retain_mut(|link| {
+                    if link.source != id || !links::is_value(link) {
+                        return true;
+                    }
+                    let Some(name) = link.item.get(1) else {
+                        return false;
+                    };
+                    match kept.iter().find(|(old, _)| old == name) {
+                        Some((_, new)) => {
+                            link.item[1] = new.clone();
+                            true
+                        }
+                        None => false,
+                    }
+                });
+                if let Some(node) = self.node(id) {
+                    node.parameters = rows.into_iter().map(|(_, p)| p).collect();
+                    if let Some(data) = &mut node.data {
+                        data.model.properties.units = units;
+                    }
+                }
+                self.sync_due = true;
+            }
+        }
+    }
+
+    /// Gives the numbers of value links to the parameters they go to; a mesh block whose
+    /// parameters change is out of date and made anew by Update Project.
+    fn apply_values(&mut self) {
+        let values: Vec<(u64, String, f64)> = (self.links.iter())
+            .filter(|l| links::is_value(l))
+            .filter_map(|link| {
+                let key = links::parameter_key(link)?;
+                let value = self.value_of(link.source, &link.item)?;
+                Some((link.target, key.to_owned(), value))
+            })
+            .collect();
+        for (target, key, value) in values {
+            let Some(node) = self.node(target) else {
+                continue;
+            };
+            if key == REFINEMENT {
+                if value.is_finite() && value > 0.0 {
+                    node.refinement = value;
+                }
+            } else if let Some(primitive) = &mut node.primitive {
+                primitive.set_value(&key, value);
+            }
+        }
+    }
+
+    /// The number a block gives at `item`, `["Value", name]`.
+    fn value_of(&self, id: u64, item: &[String]) -> Option<f64> {
+        let node = self.nodes.iter().find(|n| n.id == id)?;
+        let [_, name] = item else {
+            return None;
+        };
+        (node.parameters.iter())
+            .find(|p| &p.name == name)
+            .map(|p| p.value)
+    }
+
+    /// The label of the parameter row `slot`, `["Parameters", key]`, of a block.
+    fn parameter_label(&self, id: u64, slot: &[String]) -> String {
+        let key = slot.get(1).map_or("", String::as_str);
+        if key == REFINEMENT {
+            return "Refine".into();
+        }
+        (self.nodes.iter().find(|n| n.id == id))
+            .and_then(|n| n.primitive.as_ref())
+            .and_then(|p| p.params().iter().find(|param| param.key == key))
+            .map_or_else(|| key.to_owned(), |param| param.label.to_owned())
+    }
+
+    /// What kind of number a block gives at `item` or takes at `slot`.
+    fn value_kind(&self, id: u64, path: &[String]) -> Option<ValueKind> {
+        let node = self.nodes.iter().find(|n| n.id == id)?;
+        match path {
+            [cell, name] if cell == links::VALUE => (node.parameters.iter())
+                .find(|p| &p.name == name)
+                .map(|p| p.kind),
+            [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => {
+                Some(ValueKind::Factor)
+            }
+            [cell, key] if cell == links::PARAMETERS => node.primitive.as_ref()?.value_kind(key),
+            _ => None,
+        }
+    }
+
     /// Makes the meshes of the mesh blocks that are out of date anew; returns whether it
     /// made any. A block whose mesh cannot be made stays out of date, and so do the
     /// analyses that take their mesh from it.
@@ -723,6 +914,7 @@ impl ProjectApp {
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 return self.edit_mesh(id);
             }
+            Some(Kind::Parameters) => return self.edit_parameters(id),
             None => return,
         }
         // Solved in the background: the window opens with the new results.
@@ -1006,14 +1198,18 @@ impl ProjectApp {
         };
         let name = format!("Copy of {}", node.name);
         let (kind, primitive, generated) = (node.kind, node.primitive.clone(), node.generated);
+        let (refinement, parameters) = (node.refinement, node.parameters.clone());
         let new_id = self.next_id();
         let name = self.unique_name(&name);
         data.id = new_id;
         data.name = name.clone();
-        self.nodes.push(match primitive {
+        let mut copy = match primitive {
             Some(primitive) => Node::mesh_block(new_id, name.clone(), data, primitive, generated),
             None => Node::of_kind(kind, new_id, name.clone(), data),
-        });
+        };
+        copy.refinement = refinement;
+        copy.parameters = parameters;
+        self.nodes.push(copy);
         self.graph.insert_node(position, new_id);
         self.output.push(format!("{name} created"));
     }
@@ -1041,6 +1237,9 @@ impl ProjectApp {
         }
         if self.mesh_block.as_ref().is_some_and(|e| e.id == id) {
             self.mesh_block = None;
+        }
+        if self.parameter_set.as_ref().is_some_and(|e| e.id == id) {
+            self.parameter_set = None;
         }
         self.update_queue.retain(|&queued| queued != id);
     }
@@ -1720,7 +1919,10 @@ impl ProjectApp {
                     (Kind::Materials, _) => fe
                         .map(|fe| material_rows(fe, &n.expanded))
                         .unwrap_or_default(),
-                    (Kind::Mesh, _) => mesh_rows(n),
+                    (Kind::Mesh, _) => {
+                        mesh_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
+                    }
+                    (Kind::Parameters, _) => parameter_rows(n),
                     (Kind::Analysis, Some(status)) => block_rows(
                         status,
                         fe,
@@ -1747,6 +1949,8 @@ impl ProjectApp {
                     loading: n.window.as_ref().is_some_and(|w| w.model().is_none()),
                     open: n.window.is_some(),
                     primitive: n.primitive.clone(),
+                    refinement: n.refinement,
+                    parameters: n.parameters.clone(),
                     units: (n.data.as_ref())
                         .map_or(UnitSystem::default(), |d| d.model.properties.units),
                 }
@@ -1871,7 +2075,7 @@ impl ProjectApp {
         // Materials have no model space.
         let space = |id: u64| {
             (self.nodes.iter())
-                .find(|n| n.id == id && n.kind != Kind::Materials)
+                .find(|n| n.id == id && !matches!(n.kind, Kind::Materials | Kind::Parameters))
                 .map(|n| n.space)
         };
         if let (Some(a), Some(b)) = (space(source), space(target))
@@ -1905,6 +2109,24 @@ impl ProjectApp {
             self.link_state(source, item, target);
             return;
         }
+        let value = item.first().is_some_and(|c| c == links::VALUE);
+        if value {
+            let (given, taken) = (
+                self.value_kind(source, &item),
+                self.value_kind(target, &slot),
+            );
+            if given.is_none() || given != taken {
+                let kind = |k: Option<ValueKind>| k.map_or("no number", ValueKind::label);
+                self.output.push(format!(
+                    "Not linked: {} of {from} is a {} and {} of {to} a {}.",
+                    item.get(1).map_or("", String::as_str),
+                    kind(given).to_lowercase(),
+                    self.parameter_label(target, &slot),
+                    kind(taken).to_lowercase()
+                ));
+                return;
+            }
+        }
         let results = item.first().is_some_and(|c| c == links::RESULTS);
         // A category or item links into the same place of the target; a step's results go
         // to the step they are dropped on.
@@ -1935,6 +2157,8 @@ impl ProjectApp {
                     return;
                 }
             }
+        } else if value {
+            slot
         } else {
             item.clone()
         };
@@ -2064,6 +2288,11 @@ impl ProjectApp {
             Some(links::ResultsUse::InitialTemperatures) => {
                 format!("{to} starts at the temperatures of {what} of {from}.")
             }
+            None if value => format!(
+                "{} of {to} takes the value of {} of {from}.",
+                self.parameter_label(target, &slot),
+                item.get(1).map_or("", String::as_str)
+            ),
             None => format!("{to} takes {} from {from}.", links::label(&item)),
         };
         self.output.push(text);
@@ -2071,7 +2300,7 @@ impl ProjectApp {
         self.links.push(Link {
             source,
             target,
-            slot: if results { slot } else { Vec::new() },
+            slot: if results || value { slot } else { Vec::new() },
             item,
             ..Default::default()
         });
@@ -2333,6 +2562,7 @@ impl ProjectApp {
         }
         self.sync_due = false;
         self.last_sync = Some(Instant::now());
+        self.apply_values();
         let ids: Vec<u64> = self.nodes.iter().map(|n| n.id).collect();
         for target in links::order(&ids, &self.links) {
             let to_target: Vec<Link> = (self.links.iter())
@@ -2782,6 +3012,20 @@ impl ProjectApp {
             Action::AddMesh(pos, primitive) => {
                 self.add_mesh(pos, primitive);
             }
+            Action::AddParameters(pos) => {
+                self.add_parameters(pos);
+            }
+            Action::SetParameter(id, index, value) => {
+                if let Some(parameter) = self.node(id).and_then(|n| n.parameters.get_mut(index)) {
+                    parameter.value = parameter.kind.clean(value);
+                }
+                self.sync_due = true;
+            }
+            Action::SetRefinement(id, value) => {
+                if let Some(node) = self.node(id) {
+                    node.refinement = value;
+                }
+            }
             Action::Generate(id) => self.generate_mesh(id),
             Action::SetPrimitive(id, primitive) => {
                 if let Some(node) = self.node(id) {
@@ -2892,6 +3136,9 @@ impl ProjectApp {
             if let Some(editor) = self.mesh_block.as_mut().filter(|e| e.id == id) {
                 editor.rename(&name);
             }
+            if let Some(editor) = self.parameter_set.as_mut().filter(|e| e.id == id) {
+                editor.rename(&name);
+            }
         } else if open {
             self.rename = Some((id, name));
         }
@@ -2910,6 +3157,7 @@ impl ProjectApp {
             Kind::Analysis => "with its model and results",
             Kind::Materials => "with its materials",
             Kind::Mesh => "with its mesh",
+            Kind::Parameters => "with its parameters",
         };
         let users = (self.links.iter())
             .filter(|l| l.source == id)
@@ -3231,6 +3479,7 @@ impl eframe::App for ProjectApp {
         self.confirm_delete_window(&ctx);
         self.material_set_window(&ctx);
         self.mesh_block_window(&ctx);
+        self.parameter_set_window(&ctx);
         self.new_analysis_window(&ctx);
         self.settings_window(&ctx);
         self.updater.show(&ctx, &mut self.output);
@@ -3278,6 +3527,10 @@ enum RowWidget {
     Param(Param),
     /// The element type of a mesh block.
     Element,
+    /// The refinement of a mesh block.
+    Refinement,
+    /// A number of a parameters block, by its index.
+    Value(usize),
 }
 
 /// A link of a whole category to a block, for its row: from where, how many items it takes
@@ -3313,6 +3566,9 @@ struct BlockView {
     open: bool,
     /// What a mesh block meshes, and the units its parameters are shown in.
     primitive: Option<MeshPrimitive>,
+    refinement: f64,
+    /// The numbers of a parameters block.
+    parameters: Vec<Parameter>,
     units: UnitSystem,
 }
 
@@ -3662,8 +3918,9 @@ fn stale_meshes(nodes: &[Node], links: &[Link], id: u64) -> Vec<String> {
         .collect()
 }
 
-/// The row of a mesh block: its mesh, to link to analyses, with its state.
-fn mesh_rows(node: &Node) -> Vec<Row> {
+/// The row of a mesh block: its mesh, to link to analyses, with its state, and its
+/// parameters, which value links fill as `incoming` says.
+fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     let state = node.mesh_state();
     let mesh = node.data.as_ref().map(|d| &d.mesh);
     let count = mesh.map_or(0, plx_mesh::FeMesh::element_count);
@@ -3703,25 +3960,39 @@ fn mesh_rows(node: &Node) -> Vec<Row> {
     let Some(primitive) = &node.primitive else {
         return rows;
     };
-    let row = |key: &str, text: &str, widget: RowWidget, tip: String| Row {
-        path: vec![PARAMETERS.to_owned(), key.to_owned()],
-        text: text.to_owned(),
-        depth: 0,
-        icon: NodeIcon::Mesh,
-        state: None,
-        expander: None,
-        input: false,
-        output: false,
-        linked_from: None,
-        collection: false,
-        partial: false,
-        widget: Some(widget),
-        tip,
+    let row = |key: &str, text: &str, widget: RowWidget, tip: String| {
+        let path = vec![PARAMETERS.to_owned(), key.to_owned()];
+        Row {
+            text: text.to_owned(),
+            depth: 0,
+            icon: NodeIcon::Mesh,
+            state: None,
+            expander: None,
+            // A number of another block can give it its value.
+            input: !matches!(widget, RowWidget::Element),
+            output: false,
+            linked_from: (incoming.iter())
+                .find(|(slot, _)| *slot == path)
+                .map(|(_, source)| source.clone()),
+            collection: false,
+            partial: false,
+            widget: Some(widget),
+            tip,
+            path,
+        }
     };
     for param in primitive.params() {
-        let tip = format!("{}; the mesh is out of date once it changes.", param.tip);
+        let tip = format!(
+            "{}; the mesh is out of date once it changes. Drop a parameter of a Parameters \
+             block on its pin to give it that value.",
+            param.tip
+        );
         rows.push(row(param.key, param.label, RowWidget::Param(*param), tip));
     }
+    let tip = "Refine: a factor on the elements along each edge, rounded. An optimizer \
+               refines the mesh through it; 1 meshes the divisions as they are."
+        .to_owned();
+    rows.push(row(REFINEMENT, "Refine", RowWidget::Refinement, tip));
     let tip = match primitive {
         MeshPrimitive::Box { .. } => "Element type of the hexahedra".to_owned(),
         MeshPrimitive::Rectangle { .. } => format!(
@@ -3735,7 +4006,36 @@ fn mesh_rows(node: &Node) -> Vec<Row> {
 }
 
 /// The first part of the path of a parameter row of a mesh block.
-const PARAMETERS: &str = "Parameters";
+const PARAMETERS: &str = links::PARAMETERS;
+
+/// The key of the refinement of a mesh block, a parameter beside those of its primitive.
+const REFINEMENT: &str = "refinement";
+
+/// The rows of a parameters block: a number each, edited in place, with a pin to give it.
+fn parameter_rows(node: &Node) -> Vec<Row> {
+    (node.parameters.iter().enumerate())
+        .map(|(index, parameter)| Row {
+            path: vec![links::VALUE.to_owned(), parameter.name.clone()],
+            text: parameter.name.clone(),
+            depth: 0,
+            icon: NodeIcon::Setup,
+            state: None,
+            expander: None,
+            input: false,
+            output: true,
+            linked_from: None,
+            collection: false,
+            partial: false,
+            widget: Some(RowWidget::Value(index)),
+            tip: format!(
+                "{}, a {}: drag its pin to a parameter of another block, such as a length of \
+                 a mesh block, which then takes this value.",
+                parameter.name,
+                parameter.kind.label().to_lowercase()
+            ),
+        })
+        .collect()
+}
 
 /// Tooltip of an Add Mesh entry.
 /// A kind of block the schematic adds: the menus and the picker list these, in this order.
@@ -3743,6 +4043,7 @@ enum BlockKind {
     Analysis,
     Materials,
     Mesh(MeshPrimitive),
+    Parameters,
 }
 
 fn block_kinds() -> Vec<BlockKind> {
@@ -3751,6 +4052,7 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::Materials,
         BlockKind::Mesh(MeshPrimitive::default_box()),
         BlockKind::Mesh(MeshPrimitive::default_rectangle()),
+        BlockKind::Parameters,
     ]
 }
 
@@ -3776,6 +4078,12 @@ impl BlockKind {
                 };
                 ("Mesh", primitive.label(), keywords, mesh_tip(primitive))
             }
+            Self::Parameters => (
+                "Parameters",
+                "Parameters",
+                "number value variable length count factor",
+                PARAMETERS_TIP,
+            ),
         };
         node_picker::Entry {
             category,
@@ -3791,6 +4099,7 @@ impl BlockKind {
             Self::Analysis => "New Analysis …",
             Self::Materials => "Add Materials",
             Self::Mesh(primitive) => primitive.label(),
+            Self::Parameters => "Add Parameters",
         }
     }
 
@@ -3800,6 +4109,7 @@ impl BlockKind {
             Self::Analysis => Action::New(pos),
             Self::Materials => Action::AddMaterials(pos),
             Self::Mesh(primitive) => Action::AddMesh(pos, primitive.clone()),
+            Self::Parameters => Action::AddParameters(pos),
         }
     }
 }
@@ -3916,9 +4226,15 @@ fn step_input_tip(step: &str, input: &str) -> String {
     format!("{input}: takes {what}. Drop the results of a step here.")
 }
 
-/// Colour of the wires of a link: references in blue, results in orange, states in green.
+/// Colour of the wires of a link: references in blue, results in orange, states in green,
+/// numbers in violet.
 fn wire_color(path: &[String]) -> egui::Color32 {
-    if path.first().is_some_and(|c| c == links::STATE) {
+    if path
+        .first()
+        .is_some_and(|c| c == links::VALUE || c == links::PARAMETERS)
+    {
+        crate::style::adapt(egui::Color32::from_rgb(140, 80, 200))
+    } else if path.first().is_some_and(|c| c == links::STATE) {
         crate::style::adapt(egui::Color32::from_rgb(40, 150, 60))
     } else if path.first().is_some_and(|c| c == links::RESULTS) || links::is_step_input(path) {
         crate::style::adapt(egui::Color32::from_rgb(230, 130, 20))
@@ -3953,28 +4269,35 @@ impl Viewer {
         }
     }
 
-    /// A row that edits a parameter of a mesh block in place: its label, and the field at
-    /// the right.
+    /// A row that edits a number of a block in place: its label, and the field at the
+    /// right; read-only, in the link colour, while a value link gives it.
     fn edit_row(&mut self, ui: &mut egui::Ui, id: u64, row: &Row, widget: RowWidget) {
         let Some(block) = self.block(id) else {
             return;
         };
-        let (Some(mut primitive), units, space) =
-            (block.primitive.clone(), block.units, block.space)
-        else {
-            return;
-        };
-        let before = primitive.clone();
+        let (units, space, refinement) = (block.units, block.space, block.refinement);
+        let parameters = block.parameters.clone();
         let (rect, label) =
             ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::hover());
+        let link_color = wire_color(&[links::VALUE.to_owned()]);
         ui.painter().text(
             egui::pos2(rect.left() + 30.0, rect.center().y),
             egui::Align2::LEFT_CENTER,
             &row.text,
             egui::TextStyle::Body.resolve(ui.style()),
-            ui.visuals().text_color(),
+            if row.linked_from.is_some() {
+                link_color
+            } else {
+                ui.visuals().text_color()
+            },
         );
-        label.on_hover_text(&row.tip);
+        let mut tip = row.tip.clone();
+        if let Some(source) = &row.linked_from {
+            tip.push_str(&format!(
+                "\nIts value comes from {source}; change it there."
+            ));
+        }
+        label.on_hover_text(&tip);
         let field = egui::Rect::from_min_max(
             egui::pos2(rect.right() - 122.0, rect.top() + 1.0),
             egui::pos2(rect.right() - 4.0, rect.bottom() - 1.0),
@@ -3985,6 +4308,50 @@ impl Viewer {
                 .id_salt((id, &row.path)),
         );
         ui.spacing_mut().interact_size.y = field.height();
+        match widget {
+            RowWidget::Value(index) => {
+                let Some(mut parameter) = parameters.get(index).cloned() else {
+                    return;
+                };
+                let before = parameter.value;
+                let response = ui.add_sized(
+                    field.size(),
+                    crate::parameter_set::field(&mut parameter.value, parameter.kind, units),
+                );
+                response.on_hover_text(&tip);
+                if parameter.value != before {
+                    self.actions
+                        .push(Action::SetParameter(id, index, parameter.value));
+                }
+                return;
+            }
+            RowWidget::Refinement => {
+                let mut value = refinement;
+                if row.linked_from.is_some() {
+                    ui.disable();
+                }
+                let response = ui.add_sized(
+                    field.size(),
+                    egui::DragValue::new(&mut value)
+                        .range(0.05..=20.0)
+                        .speed(0.01)
+                        .max_decimals(3),
+                );
+                response.on_hover_text(&tip);
+                if value != refinement {
+                    self.actions.push(Action::SetRefinement(id, value));
+                }
+                return;
+            }
+            RowWidget::Param(_) | RowWidget::Element => {}
+        }
+        let Some(mut primitive) = block.primitive.clone() else {
+            return;
+        };
+        let before = primitive.clone();
+        if row.linked_from.is_some() {
+            ui.disable();
+        }
         let response = match widget {
             RowWidget::Param(param) => match primitive.slot(param.key) {
                 Some(ParamSlot::Length(value)) => ui.add_sized(
@@ -4039,8 +4406,9 @@ impl Viewer {
                         .response
                 }
             },
+            RowWidget::Refinement | RowWidget::Value(_) => return,
         };
-        response.on_hover_text(&row.tip);
+        response.on_hover_text(&tip);
         if primitive != before {
             self.actions.push(Action::SetPrimitive(id, primitive));
         }
@@ -4085,6 +4453,11 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Materials, ink);
                 icon.on_hover_text("Materials for analyses to link");
             }
+            Kind::Parameters => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Setup, ink);
+                icon.on_hover_text("Numbers for other blocks to link");
+            }
         }
         let text = egui::RichText::new(&block.name).strong();
         let label = ui.add(
@@ -4106,6 +4479,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Analysis => "Double-click opens the analysis in its own window.",
             Kind::Materials => "Double-click edits the materials.",
             Kind::Mesh => "Double-click edits the size and division of the mesh.",
+            Kind::Parameters => "Double-click adds, renames or removes parameters.",
         };
         // The name takes the clicks of the header, so it opens the block's menu too.
         label.on_hover_text(tip).context_menu(|ui| {
@@ -4136,8 +4510,12 @@ impl SnarlViewer<u64> for Viewer {
         let row = row.clone();
         if let Some(widget) = row.widget {
             self.edit_row(ui, id, &row, widget);
-            // A numeric input will link to the parameter's pin.
-            return BlockPin::single(hidden_pin());
+            if !row.input {
+                return BlockPin::single(hidden_pin());
+            }
+            // A number of another block can give it its value.
+            let color = wire_color(&row.path);
+            return BlockPin::single(PinInfo::circle().with_fill(color).with_wire_color(color));
         }
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::click());
@@ -4394,6 +4772,7 @@ impl SnarlViewer<u64> for Viewer {
         {
             Some(Kind::Materials) => default.fill(crate::style::materials_header()),
             Some(Kind::Mesh) => default.fill(crate::style::mesh_header()),
+            Some(Kind::Parameters) => default.fill(crate::style::parameters_header()),
             _ => default,
         }
     }
@@ -4705,6 +5084,9 @@ fn schematic_style() -> SnarlStyle {
 const ANALYSIS_TIP: &str = "Adds an analysis: a model of its own with geometry, mesh, setup \
      and steps, solved with CalculiX. Double-click its block to open it in its own window.";
 
+const PARAMETERS_TIP: &str = "Adds a block of named numbers: drag the pin of one to a \
+                              parameter of another block, such as a length of a mesh block, \
+                              which then takes its value.";
 const MATERIALS_TIP: &str = "Adds a block of materials kept in the project: analyses link \
      them one by one or all at once, so that they are defined in one place.";
 
@@ -4888,6 +5270,7 @@ mod tests {
             primitive: MeshPrimitive::default_box(),
             mesh: Default::default(),
             generated: None,
+            refinement: 1.0,
         };
         let mut node = Node::read(ProjectNode::Mesh(Box::new(block)));
         assert_eq!(node.kind, Kind::Mesh);
@@ -4898,18 +5281,29 @@ mod tests {
         let mesh = vec![links::MESH.to_owned()];
         assert!(links::exists(data, &mesh));
         assert_eq!(links::MeshCopy::of(data).mesh.node_sets.len(), 6);
-        let rows = mesh_rows(&node);
+        let rows = mesh_rows(&node, &[]);
         assert!(rows[0].output && !rows[0].input);
-        // Its parameters are rows below the mesh, the element type last; none has a pin yet.
+        // Its parameters are rows below the mesh, the element type last; the numbers take
+        // value links, the element type does not.
         let params: Vec<String> = (rows[1..].iter()).map(|row| row.path.join("/")).collect();
         assert_eq!(params[0], "Parameters/x");
         assert_eq!(params[6], "Parameters/nx");
+        assert_eq!(params[9], "Parameters/refinement");
         assert_eq!(params.last().unwrap(), "Parameters/element");
+        let (numbers, element) = rows[1..].split_at(rows.len() - 2);
         assert!(
-            rows[1..]
+            numbers
                 .iter()
-                .all(|r| r.widget.is_some() && !r.input && !r.output)
+                .all(|r| r.widget.is_some() && r.input && !r.output)
         );
+        assert!(!element[0].input && !element[0].output);
+        // A refinement of 1.5 makes 15 x 3 x 3 elements.
+        node.refinement = 1.5;
+        assert_eq!(node.mesh_state(), CellState::OutOfDate);
+        assert_eq!(node.generate(), Ok(135));
+        node.refinement = 1.0;
+        assert_eq!(node.mesh_state(), CellState::OutOfDate);
+        assert_eq!(node.generate(), Ok(40));
         // What the rows edit: the count of elements along X and the element type.
         let primitive = node.primitive.as_mut().unwrap();
         assert!(primitive.set("nx", plx_model::ParamValue::Count(20)));
@@ -4917,7 +5311,7 @@ mod tests {
             *element = "C3D8I".into();
         }
         assert_eq!(node.mesh_state(), CellState::OutOfDate);
-        assert!(mesh_rows(&node)[0].tip.contains("out of date"));
+        assert!(mesh_rows(&node, &[])[0].tip.contains("out of date"));
         match node.written([1.0, 2.0]) {
             Some(ProjectNode::Mesh(written)) => {
                 assert_eq!(written.mesh.element_count(), 40);
@@ -4931,6 +5325,30 @@ mod tests {
     }
 
     #[test]
+    fn a_parameters_block_reads_back_and_gives_its_values() {
+        let set = ParameterSet {
+            id: 4,
+            name: "Parameters".into(),
+            position: [3.0, 4.0],
+            units: plx_model::UnitSystem::MmTonSC,
+            parameters: vec![
+                Parameter::new("Length", ValueKind::Length, 0.3),
+                Parameter::new("Cells", ValueKind::Count, 12.0),
+            ],
+        };
+        let node = Node::read(ProjectNode::Parameters(set.clone()));
+        assert_eq!(node.kind, Kind::Parameters);
+        let rows = parameter_rows(&node);
+        assert_eq!(rows[1].path, ["Value", "Cells"]);
+        assert!(rows.iter().all(|r| r.output && !r.input));
+        let mut node = node;
+        match node.written([3.0, 4.0]) {
+            Some(ProjectNode::Parameters(written)) => assert_eq!(written, set),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn analyses_taking_the_mesh_of_a_changed_block_are_out_of_date() {
         let block = MeshBlock {
             id: 2,
@@ -4941,6 +5359,7 @@ mod tests {
             primitive: MeshPrimitive::default_box(),
             mesh: Default::default(),
             generated: None,
+            refinement: 1.0,
         };
         let mut nodes = vec![
             Node::read(ProjectNode::Mesh(Box::new(block))),
