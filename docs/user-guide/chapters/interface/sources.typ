@@ -165,13 +165,16 @@ A double-click on the block opens its editor:
     #ui("History output") or #ui("Eigenfrequency").],
   [Shown in], [The unit system of the value; it is stored in SI units.],
   [Field, Component], [The field and its component as the Results workspace names them:
-    STRESS MISES, DISP ALL, NDTEMP T, TOTAL_FORCE RF3 for a history output. The value is
-    that of the last increment of the step.],
+    STRESS MISES, DISP ALL, NDTEMP T, TOTAL_FORCE RF3 for a history output. With results
+    linked, both are lists of what those results have (a name they lack is shown in the
+    warning color); without, they are typed. The value is that of the last increment of the
+    step.],
   [Take], [For a field extreme: #ui("Maximum"), #ui("Minimum") or #ui("Largest magnitude"),
     which keeps the sign.],
   [Region], [For a field extreme: all nodes, or a node set of the mesh of the analysis whose
     results are linked.],
   [Node], [For a value at a node: its number.],
-  [Set], [For a history output: the set of the history output, as written to the `.dat` file.],
+  [Set], [For a history output: the set of the history output, as written to the `.dat` file;
+    a list of the sets of the linked results.],
   [Mode], [For an eigenfrequency: the mode, counted from 1, of a frequency step.],
 )

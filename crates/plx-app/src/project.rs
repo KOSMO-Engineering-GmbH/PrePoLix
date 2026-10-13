@@ -881,13 +881,37 @@ impl ProjectApp {
             .and_then(Node::link_data)
             .map(|d| d.mesh.node_sets.keys().cloned().collect())
             .unwrap_or_default();
+        let offered = (self.measured(id)).map(|(source, step, bound)| {
+            let dir = self.measure_dir(id, source, bound, "-fields");
+            crate::measure::read_offered(bound.clone(), step, dir)
+        });
         self.measure_editor = Some(MeasureEditor::new(
             id,
             &node.name,
             measure.kind.clone(),
             units,
             node_sets,
+            offered,
         ));
+    }
+
+    /// Where a measure block restores the results it reads: one folder per results, with
+    /// `suffix` for a reader that must not share it.
+    fn measure_dir(
+        &self,
+        id: u64,
+        source: &Node,
+        bound: &plx_io::project::BoundResults,
+        suffix: &str,
+    ) -> std::path::PathBuf {
+        (self.settings.solver.work_dir())
+            .join(crate::analysis::job_name(&self.project_name()))
+            .join(crate::analysis::job_name(&self.name_of(id)))
+            .join(format!(
+                "{}-{:016x}{suffix}",
+                crate::analysis::job_name(&source.name),
+                bound.input.unwrap_or_default()
+            ))
     }
 
     fn measure_window(&mut self, ctx: &egui::Context) {
@@ -1031,14 +1055,7 @@ impl ProjectApp {
             let node_sets = (source.link_data())
                 .map(|d| d.mesh.node_sets.clone())
                 .unwrap_or_default();
-            let dir = (self.settings.solver.work_dir())
-                .join(crate::analysis::job_name(&self.project_name()))
-                .join(crate::analysis::job_name(&self.name_of(id)))
-                .join(format!(
-                    "{}-{:016x}",
-                    crate::analysis::job_name(&source.name),
-                    bound.input.unwrap_or_default()
-                ));
+            let dir = self.measure_dir(id, source, bound, "");
             let job = crate::measure::Job {
                 kind,
                 step,
