@@ -175,6 +175,14 @@ pub fn materials_header() -> Color32 {
     }
 }
 /// Header band of a mesh block in the project schematic: a muted green-grey.
+pub fn measure_header() -> Color32 {
+    if dark() {
+        Color32::from_rgb(88, 64, 40)
+    } else {
+        Color32::from_rgb(244, 224, 200)
+    }
+}
+
 pub fn parameters_header() -> Color32 {
     if dark() {
         Color32::from_rgb(70, 54, 88)

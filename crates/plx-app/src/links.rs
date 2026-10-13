@@ -45,6 +45,8 @@ pub const STATE: &str = "State";
 pub const VALUE: &str = "Value";
 /// The rows of numbers a block takes, `["Parameters", key]`.
 pub const PARAMETERS: &str = "Parameters";
+/// The row of a measure block that takes the results of a step.
+pub const MEASURE: &str = "Measure";
 
 /// The categories of the setup in the order of the FE Model tree; each can be linked as a
 /// whole or item by item.
@@ -917,7 +919,7 @@ pub fn compatible(item: &[String], slot: &[String]) -> bool {
 /// Whether the row of `path` takes the results of a step of another analysis.
 pub fn takes_results(path: &[String]) -> bool {
     match path {
-        [cell] => cell == STATE,
+        [cell] => cell == STATE || cell == MEASURE,
         [cell, category] => cell == SETUP && category == INITIAL_CONDITIONS,
         [cell, category, _] if cell == SETUP && category == STEPS => true,
         _ => ResultsUse::of_slot(path).is_some(),

@@ -25,6 +25,7 @@ mod keywords;
 mod links;
 mod material_library;
 mod material_set;
+mod measure;
 mod mesh_block;
 mod mesh_tools;
 mod meshing;

@@ -18,6 +18,7 @@ pub mod fingerprint;
 mod geometry;
 mod history;
 pub mod library;
+mod measure;
 mod mesh_set;
 mod moving_load;
 mod parameter;
@@ -51,6 +52,7 @@ pub use geometry::{
 };
 pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use library::MaterialLibrary;
+pub use measure::{Extreme, MeasureKind, MeasureRegion};
 pub use mesh_set::{MeshSet, SetKind};
 pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel, load_stations};
 pub use parameter::{Parameter, ValueKind};

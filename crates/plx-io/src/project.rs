@@ -67,6 +67,8 @@ pub enum ProjectNode {
     Mesh(Box<MeshBlock>),
     /// Named numbers that value links give to other blocks.
     Parameters(ParameterSet),
+    /// A key figure computed from the results of a step.
+    Measure(MeasureBlock),
 }
 
 impl ProjectNode {
@@ -77,6 +79,7 @@ impl ProjectNode {
             Self::Materials(m) => m.id,
             Self::Mesh(m) => m.id,
             Self::Parameters(p) => p.id,
+            Self::Measure(m) => m.id,
         }
     }
 
@@ -86,6 +89,7 @@ impl ProjectNode {
             Self::Materials(m) => &m.name,
             Self::Mesh(m) => &m.name,
             Self::Parameters(p) => &p.name,
+            Self::Measure(m) => &m.name,
         }
     }
 
@@ -96,6 +100,7 @@ impl ProjectNode {
             Self::Materials(m) => m.position,
             Self::Mesh(m) => m.position,
             Self::Parameters(p) => p.position,
+            Self::Measure(m) => m.position,
         }
     }
 }
@@ -133,6 +138,26 @@ fn one() -> f64 {
 
 fn is_one(value: &f64) -> bool {
     *value == 1.0
+}
+
+/// A block that computes a key figure from the results of a step another block links to it,
+/// such as the largest von Mises stress.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MeasureBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The unit system its value is shown in; it is stored in SI units.
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    pub kind: plx_model::MeasureKind,
+    /// The value as last computed, and the fingerprint of the results and the definition it
+    /// was computed from: out of date once that differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluated: Option<u64>,
 }
 
 /// A block of named numbers, which value links give to other blocks: the size of a mesh
