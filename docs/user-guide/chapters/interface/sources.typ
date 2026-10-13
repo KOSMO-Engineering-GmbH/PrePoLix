@@ -73,6 +73,15 @@ box, #ui("Z-") and #ui("Z+"). Boundary conditions and loads pick them under #ui(
 #ui("Surface") without selecting anything. The elements form the part #ui("BOX") or
 #ui("RECTANGLE"), which a section takes.
 
+The sides, edges and corners are also faces, edges and points of geometry. A selection in
+the 3D view with #ui("Faces, edges and points") picks a whole side of the box, and it stays on
+that side when the mesh is made anew with other divisions, other lengths or another
+refinement, as on imported geometry. A selection of single nodes or element faces holds only
+for the mesh it was made on.
+
+#screenshot("box-face-remeshed.png", [A boundary condition picked on the end face of a box with
+  12 x 2 x 2 elements, after the box was made anew with 24 x 4 x 2 elements])
+
 A double-click on the block's name opens all its parameters in a dialog, with what the rows
 leave out: the model space of a rectangle and the units the lengths are shown in.
 
@@ -171,8 +180,11 @@ A double-click on the block opens its editor:
     step.],
   [Take], [For a field extreme: #ui("Maximum"), #ui("Minimum") or #ui("Largest magnitude"),
     which keeps the sign.],
-  [Region], [For a field extreme: all nodes, or a node set of the mesh of the analysis whose
-    results are linked.],
+  [Region], [For a field extreme: all nodes, or a region of the analysis whose results are
+    linked: a node set of its mesh or model, or the region of a boundary condition or load,
+    such as #ui("Fixed (boundary condition)"). The region is found on the mesh the results
+    were solved on, so a region picked on geometry or on the sides of a mesh block follows
+    every new mesh of an optimization loop.],
   [Node], [For a value at a node: its number.],
   [Set], [For a history output: the set of the history output, as written to the `.dat` file;
     a list of the sets of the linked results.],

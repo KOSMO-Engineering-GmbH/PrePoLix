@@ -369,6 +369,17 @@ impl AnalysisWindow {
         }
     }
 
+    /// Sets the refinement of the geometry's mesh, given by a value link; the parts are
+    /// out of date once it changes.
+    pub fn set_refinement(&mut self, value: f64) {
+        if let Some(geometry) = (self.workbench.model.as_mut()).and_then(|m| m.geometry.as_mut())
+            && geometry.refinement != value
+        {
+            geometry.refinement = value;
+            self.workbench.status = None;
+        }
+    }
+
     /// Replaces the user keywords of the analysis, after its steps moved.
     pub fn set_user_keywords(&mut self, keywords: Vec<plx_model::UserKeyword>) {
         if let Some(model) = &mut self.workbench.model {

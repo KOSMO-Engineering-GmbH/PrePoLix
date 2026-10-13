@@ -2,7 +2,7 @@
 //! blocks of a node graph, each with the state of its cells. An analysis opens in a window of
 //! its own, the [`AnalysisWindow`], which looks like PrePoMax's main window.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -376,6 +376,38 @@ impl Node {
                 mesh_inputs: &data.mesh_inputs,
             }),
             _ => None,
+        }
+    }
+
+    /// The refinement of its mesh: of a mesh block, or of the geometry an analysis meshes;
+    /// `None` for other blocks and an analysis without geometry.
+    fn refinement(&self) -> Option<f64> {
+        match self.kind {
+            Kind::Mesh => Some(self.refinement),
+            Kind::Analysis => self.link_data()?.geometry.map(|g| g.refinement),
+            _ => None,
+        }
+    }
+
+    /// Sets the refinement of its mesh; the mesh is out of date once it changes.
+    fn set_refinement(&mut self, value: f64) {
+        if !(value.is_finite() && value > 0.0) {
+            return;
+        }
+        match self.kind {
+            Kind::Mesh => self.refinement = value,
+            Kind::Analysis => {
+                if let Some(window) = &mut self.window {
+                    window.set_refinement(value);
+                } else if let Some(geometry) =
+                    (self.data.as_mut()).and_then(|d| d.geometry.as_mut())
+                    && geometry.refinement != value
+                {
+                    geometry.refinement = value;
+                    self.refresh_closed();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -879,7 +911,7 @@ impl ProjectApp {
         let node_sets = (self.links.iter().find(|l| l.target == id))
             .and_then(|l| self.nodes.iter().find(|n| n.id == l.source))
             .and_then(Node::link_data)
-            .map(|d| d.mesh.node_sets.keys().cloned().collect())
+            .map(|d| measure_regions(&d).into_keys().collect())
             .unwrap_or_default();
         let offered = (self.measured(id)).map(|(source, step, bound)| {
             let dir = self.measure_dir(id, source, bound, "-fields");
@@ -1053,7 +1085,7 @@ impl ProjectApp {
                 continue;
             };
             let node_sets = (source.link_data())
-                .map(|d| d.mesh.node_sets.clone())
+                .map(|d| measure_regions(&d))
                 .unwrap_or_default();
             let dir = self.measure_dir(id, source, bound, "");
             let job = crate::measure::Job {
@@ -1197,13 +1229,19 @@ impl ProjectApp {
         crate::optimizer::shown(kind, value, units)
     }
 
-    /// How many elements the mesh blocks an optimizer varies would have at `value`; `None`
-    /// when it varies no mesh block.
+    /// How many elements the meshes an optimizer varies would have at `value`: of a mesh
+    /// block exactly, of the geometry of an analysis estimated from its mesh now, its element
+    /// sizes scaling with the refinement. `None` when it varies no mesh.
     fn elements_at(&self, id: u64, value: f64) -> Option<u64> {
         (self.feedback_of(id).into_iter())
             .filter_map(|link| {
                 let node = self.nodes.iter().find(|n| n.id == link.target)?;
                 let key = links::parameter_key(link)?;
+                if node.kind == Kind::Analysis {
+                    return (key == REFINEMENT)
+                        .then(|| estimated_elements(node, value))
+                        .flatten();
+                }
                 let (mut primitive, mut refinement) = (node.primitive.clone()?, node.refinement);
                 if key == REFINEMENT {
                     refinement = value;
@@ -1219,7 +1257,7 @@ impl ProjectApp {
     fn loop_elements(&self, id: u64) -> Option<u64> {
         (self.feedback_of(id).into_iter())
             .filter_map(|link| self.nodes.iter().find(|n| n.id == link.target))
-            .filter_map(|n| n.data.as_ref())
+            .filter_map(Node::link_data)
             .map(|d| d.mesh.element_count() as u64)
             .max()
     }
@@ -1629,9 +1667,7 @@ impl ProjectApp {
                 continue;
             };
             if key == REFINEMENT {
-                if value.is_finite() && value > 0.0 {
-                    node.refinement = value;
-                }
+                node.set_refinement(value);
             } else if let Some(primitive) = &mut node.primitive {
                 primitive.set_value(&key, value);
             }
@@ -2881,6 +2917,7 @@ impl ProjectApp {
                     (Kind::Analysis, Some(status)) => block_rows(
                         status,
                         fe,
+                        n.refinement(),
                         &n.expanded,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                         bundles.get(&n.id).map_or(&[][..], Vec::as_slice),
@@ -2904,7 +2941,7 @@ impl ProjectApp {
                     loading: n.window.as_ref().is_some_and(|w| w.model().is_none()),
                     open: n.window.is_some(),
                     primitive: n.primitive.clone(),
-                    refinement: n.refinement,
+                    refinement: n.refinement().unwrap_or(1.0),
                     parameters: n.parameters.clone(),
                     units: (n.data.as_ref())
                         .map_or(UnitSystem::default(), |d| d.model.properties.units),
@@ -4047,8 +4084,9 @@ impl ProjectApp {
             }
             Action::SetRefinement(id, value) => {
                 if let Some(node) = self.node(id) {
-                    node.refinement = value;
+                    node.set_refinement(value);
                 }
+                self.sync_due = true;
             }
             Action::Generate(id) => self.generate_mesh(id),
             Action::SetPrimitive(id, primitive) => {
@@ -4612,6 +4650,7 @@ struct BlockView {
 fn block_rows(
     status: &AnalysisStatus,
     fe: Option<&plx_model::FeModel>,
+    refinement: Option<f64>,
     expanded: &BTreeSet<Vec<String>>,
     incoming: &[(Vec<String>, String)],
     bundles: &[Bundle],
@@ -4674,6 +4713,28 @@ fn block_rows(
         rows[1]
             .tip
             .push_str(&format!(" ({})", status.stale_parts.join(", ")));
+    }
+    // The mesh of geometry can be refined as a whole, by a value link too.
+    if refinement.is_some() {
+        let path = vec![PARAMETERS.to_owned(), REFINEMENT.to_owned()];
+        rows.push(Row {
+            text: "Refine".to_owned(),
+            depth: 1,
+            icon: NodeIcon::Mesh,
+            state: None,
+            expander: None,
+            input: true,
+            output: false,
+            linked_from: from(&path),
+            collection: false,
+            partial: false,
+            widget: Some(RowWidget::Refinement),
+            tip: "Refine: every element size of the mesh setup is divided by this factor when \
+                  the geometry is meshed; the sizes as set stay. An optimizer refines the mesh \
+                  through it; 1 meshes with the sizes as they are."
+                .to_owned(),
+            path,
+        });
     }
     let setup = vec![links::SETUP.to_owned()];
     let setup_open = expanded.contains(&setup);
@@ -5043,8 +5104,51 @@ fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
 /// The first part of the path of a parameter row of a mesh block.
 const PARAMETERS: &str = links::PARAMETERS;
 
-/// The key of the refinement of a mesh block, a parameter beside those of its primitive.
+/// The regions a measure block can take its value in, by name, with their nodes on the mesh
+/// as it is now: the node sets of the mesh and of the model, and the regions of the boundary
+/// conditions and loads, such as "Fixed (boundary condition)". Those picked on the geometry
+/// or on the sides of a mesh block are found on each new mesh again.
+fn measure_regions(data: &links::Data) -> BTreeMap<String, Vec<plx_mesh::NodeId>> {
+    let mut regions: BTreeMap<String, Vec<plx_mesh::NodeId>> = data.mesh.node_sets.clone();
+    let mut add = |name: String, region: &plx_model::Region| {
+        let nodes = region.nodes(data.mesh);
+        if !nodes.is_empty() {
+            regions.entry(name).or_insert(nodes);
+        }
+    };
+    for set in &data.fe.mesh_sets {
+        add(set.name.clone(), &set.region);
+    }
+    for step in &data.fe.steps {
+        for bc in &step.boundary_conditions {
+            add(format!("{} (boundary condition)", bc.name), &bc.region);
+        }
+        for load in &step.loads {
+            add(format!("{} (load)", load.name), &load.region);
+        }
+    }
+    regions
+}
+
+/// The key of the refinement of a mesh block, a parameter beside those of its primitive,
+/// and of the mesh of an analysis' geometry.
 const REFINEMENT: &str = "refinement";
+
+/// How many elements the geometry of an analysis would mesh at the refinement `value`: its
+/// elements now times the change of the refinement to the power of the dimensions the
+/// elements fill. `None` before it is meshed.
+fn estimated_elements(node: &Node, value: f64) -> Option<u64> {
+    let data = node.link_data()?;
+    let now = data.geometry?.refinement;
+    let elements = data.mesh.element_count() as f64;
+    if elements == 0.0 || !(now > 0.0 && value > 0.0) {
+        return None;
+    }
+    let solid =
+        (data.mesh.elements().iter()).any(|e| e.shape.family() == plx_mesh::ElementFamily::Solid);
+    let dimensions = if solid { 3 } else { 2 };
+    Some((elements * (value / now).powi(dimensions)).round() as u64)
+}
 
 /// The rows of a parameters block: a number each, edited in place, with a pin to give it.
 fn parameter_rows(node: &Node) -> Vec<Row> {
@@ -6604,6 +6708,89 @@ mod tests {
         }
         assert_eq!(node.generate(), Ok(80));
         assert_eq!(node.mesh_state(), CellState::UpToDate);
+    }
+
+    #[test]
+    fn the_mesh_of_geometry_is_refined_as_a_whole() {
+        let geometry = plx_model::Geometry {
+            source: "block.step".into(),
+            brep: "shapes".into(),
+            meshing: Default::default(),
+            mesh_items: Vec::new(),
+            part_names: Vec::new(),
+            refinement: 1.0,
+        };
+        let mesh = MeshPrimitive::default_box().generate(ModelSpace::ThreeD, "Solid-1");
+        let space = ModelSpace::ThreeD;
+        let mesh_inputs = BTreeMap::from([(
+            "SOLID-1".to_owned(),
+            plx_model::fingerprint::mesh_input(&geometry, space, "SOLID-1"),
+        )]);
+        let mut model = plx_model::FeModel::default();
+        model.properties.space = space;
+        let data = ProjectAnalysis {
+            id: 3,
+            name: "Analysis".into(),
+            geometry: Some(geometry),
+            mesh,
+            model,
+            mesh_inputs,
+            ..Default::default()
+        };
+        let mut node = Node::read(ProjectNode::Analysis(Box::new(data)));
+        assert_eq!(node.refinement(), Some(1.0));
+        assert_eq!(node.status.as_ref().unwrap().mesh, CellState::UpToDate);
+        // A Refine row below the mesh takes a value link.
+        let rows = block_rows(
+            node.status.as_ref().unwrap(),
+            None,
+            node.refinement(),
+            &BTreeSet::new(),
+            &[],
+            &[],
+            None,
+        );
+        let refine = rows.iter().find(|r| r.text == "Refine").unwrap();
+        assert_eq!(refine.path, [PARAMETERS, REFINEMENT]);
+        assert!(refine.input && matches!(refine.widget, Some(RowWidget::Refinement)));
+        // Twice as fine: the mesh is out of date, about 2^3 times the elements.
+        assert_eq!(estimated_elements(&node, 2.0), Some(320));
+        node.set_refinement(2.0);
+        assert_eq!(node.refinement(), Some(2.0));
+        assert_eq!(node.status.as_ref().unwrap().mesh, CellState::OutOfDate);
+        assert_eq!(estimated_elements(&node, 2.0), Some(40));
+        // An analysis without geometry has no Refine row.
+        node.data.as_mut().unwrap().geometry = None;
+        assert_eq!(node.refinement(), None);
+    }
+
+    #[test]
+    fn a_measure_takes_the_regions_of_the_model_on_each_new_mesh() {
+        let mut fe = plx_model::FeModel::default();
+        let mut step = plx_model::Step::new_static("Step-1");
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            name: "Fixed".into(),
+            active: true,
+            visible: true,
+            region: plx_model::Region::Geometry(vec![plx_mesh::CadEntity::Face(2)]),
+            kind: plx_model::BoundaryKind::Fixed,
+            amplitude: None,
+        });
+        fe.steps.push(step);
+        for refinement in [1.0, 2.0] {
+            let mesh = (MeshPrimitive::default_box().refined(refinement))
+                .generate(ModelSpace::ThreeD, "Box");
+            let data = links::Data {
+                geometry: None,
+                mesh: &mesh,
+                fe: &fe,
+                mesh_inputs: &BTreeMap::new(),
+            };
+            let regions = measure_regions(&data);
+            // The face picked on the box is its side X+ on the coarse and the fine mesh.
+            assert_eq!(regions["Fixed (boundary condition)"], mesh.node_sets["X+"]);
+            assert!(regions.contains_key("X-"));
+        }
     }
 
     #[test]

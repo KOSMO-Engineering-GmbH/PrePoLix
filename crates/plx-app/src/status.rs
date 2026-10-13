@@ -296,6 +296,7 @@ mod tests {
             meshing: MeshingParameters::default(),
             mesh_items: Vec::new(),
             part_names: Vec::new(),
+            refinement: 1.0,
         };
         let fe = FeModel::default();
         let space = fe.properties.space;
