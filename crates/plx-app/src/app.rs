@@ -373,6 +373,17 @@ impl AnalysisWindow {
         }
     }
 
+    /// Sets the refinement of the geometry's mesh, given by a value link; the parts are
+    /// out of date once it changes.
+    pub fn set_refinement(&mut self, value: f64) {
+        if let Some(geometry) = (self.workbench.model.as_mut()).and_then(|m| m.geometry.as_mut())
+            && geometry.refinement != value
+        {
+            geometry.refinement = value;
+            self.workbench.status = None;
+        }
+    }
+
     /// Replaces the user keywords of the analysis, after its steps moved.
     pub fn set_user_keywords(&mut self, keywords: Vec<plx_model::UserKeyword>) {
         if let Some(model) = &mut self.workbench.model {
@@ -3550,7 +3561,7 @@ impl Workbench {
             &model.fe,
             &model.mesh_inputs,
             model.bound_results.as_ref(),
-            &self.upstream.stale_meshes,
+            &self.upstream,
             self.analysis.as_ref().is_some_and(Analysis::is_running),
         ))
     }
@@ -3581,7 +3592,7 @@ impl Workbench {
         // A submodel needs the results of its global model, a mesh taken from a mesh block
         // the block's current mesh: the project makes them first, then solves this one.
         let upstream = &self.upstream;
-        if !upstream.missing_results.is_empty() || !status.stale_sources.is_empty() {
+        if !upstream.is_ready() {
             let mut why = Vec::new();
             if !upstream.missing_results.is_empty() {
                 why.push(format!(
@@ -3589,10 +3600,16 @@ impl Workbench {
                     upstream.missing_results.join(", ")
                 ));
             }
-            if !status.stale_sources.is_empty() {
+            if !upstream.stale_results.is_empty() {
+                why.push(format!(
+                    "the results of {} are out of date",
+                    upstream.stale_results.join(", ")
+                ));
+            }
+            if !upstream.stale_meshes.is_empty() {
                 why.push(format!(
                     "the mesh of {} is out of date",
-                    status.stale_sources.join(", ")
+                    upstream.stale_meshes.join(", ")
                 ));
             }
             if by_project {

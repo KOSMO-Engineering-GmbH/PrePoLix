@@ -71,6 +71,8 @@ pub enum ProjectNode {
     Measure(MeasureBlock),
     /// A loop that gives values to a parameter until a measure says it is done.
     Optimizer(OptimizerBlock),
+    /// A sink that writes the mesh it takes to a file.
+    MeshExport(MeshExport),
 }
 
 impl ProjectNode {
@@ -83,6 +85,7 @@ impl ProjectNode {
             Self::Parameters(p) => p.id,
             Self::Measure(m) => m.id,
             Self::Optimizer(o) => o.id,
+            Self::MeshExport(e) => e.id,
         }
     }
 
@@ -94,6 +97,7 @@ impl ProjectNode {
             Self::Parameters(p) => &p.name,
             Self::Measure(m) => &m.name,
             Self::Optimizer(o) => &o.name,
+            Self::MeshExport(e) => &e.name,
         }
     }
 
@@ -106,6 +110,7 @@ impl ProjectNode {
             Self::Parameters(p) => p.position,
             Self::Measure(m) => m.position,
             Self::Optimizer(o) => o.position,
+            Self::MeshExport(e) => e.position,
         }
     }
 }
@@ -201,6 +206,24 @@ pub struct ParameterSet {
     #[serde(default)]
     pub units: plx_model::UnitSystem,
     pub parameters: Vec<plx_model::Parameter>,
+}
+
+/// A block that writes the mesh linked to it to a file when the project is updated. It keeps
+/// no mesh: the link brings it again when the project is opened.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MeshExport {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The file to write: an input file for CalculiX. A relative path is taken from the
+    /// folder of the project file.
+    #[serde(default)]
+    pub path: String,
+    /// Fingerprint of the mesh and the path as last written; nothing is written while it
+    /// is the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written: Option<u64>,
 }
 
 /// A block that holds materials for analyses to link, item by item or all of them.
@@ -643,6 +666,7 @@ mod tests {
                 },
             ],
             part_names: vec!["SOLID-1".into()],
+            refinement: 1.0,
         };
         let mut saved = single(Some(&geometry), &mesh, &model, None);
         (saved.analyses_mut().next().unwrap())
@@ -776,6 +800,14 @@ mod tests {
             slot: vec!["Parameters".into(), "lx".into()],
             ..Default::default()
         });
+        let export = MeshExport {
+            id: 7,
+            name: "Mesh Export".into(),
+            position: [300.0, 20.0],
+            path: "out/box.inp".into(),
+            written: Some(42),
+        };
+        saved.nodes.push(ProjectNode::MeshExport(export.clone()));
         saved.links.push(Link {
             source: 3,
             target: 1,
@@ -789,7 +821,11 @@ mod tests {
         assert!(text.contains(&format!("format:{PROJECT_FORMAT}")));
         assert!(!text.contains("analyses:"), "{text}");
         let project = read_project(&path).unwrap();
-        assert_eq!(project.nodes.len(), 4);
+        assert_eq!(project.nodes.len(), 5);
+        match &project.nodes[4] {
+            ProjectNode::MeshExport(read) => assert_eq!(read, &export),
+            other => panic!("{other:?}"),
+        }
         match &project.nodes[3] {
             ProjectNode::Parameters(read) => assert_eq!(read, &parameters),
             other => panic!("{other:?}"),

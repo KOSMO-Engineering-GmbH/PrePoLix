@@ -3,8 +3,9 @@
 == Source blocks <source-blocks>
 
 Besides analyses, the project schematic holds *source blocks*: blocks that only give data to
-analyses through links. They have no steps, are not solved, and #ui("Update Project") passes
-them by. Add one from #menu("Project") or by right-clicking the background of the schematic;
+analyses through links. They have no steps and are not solved, and #ui("Update Project")
+passes them by; the mesh export block at the end of this section takes data instead of giving
+it. Add one from #menu("Project") or by right-clicking the background of the schematic;
 its header has its own tint, so that it stands apart from the analyses. Its context menu has
 #ui("Edit ..."), #ui("Rename ..."), #ui("Duplicate") and #ui("Delete ..."); a double-click
 opens its editor in the project window. Deleting a source block removes its links; the
@@ -72,6 +73,15 @@ Its sides are node sets and surfaces at once, named after the axis and the side 
 box, #ui("Z-") and #ui("Z+"). Boundary conditions and loads pick them under #ui("Node set") or
 #ui("Surface") without selecting anything. The elements form the part #ui("BOX") or
 #ui("RECTANGLE"), which a section takes.
+
+The sides, edges and corners are also faces, edges and points of geometry. A selection in
+the 3D view with #ui("Faces, edges and points") picks a whole side of the box, and it stays on
+that side when the mesh is made anew with other divisions, other lengths or another
+refinement, as on imported geometry. A selection of single nodes or element faces holds only
+for the mesh it was made on.
+
+#screenshot("box-face-remeshed.png", [A boundary condition picked on the end face of a box with
+  12 x 2 x 2 elements, after the box was made anew with 24 x 4 x 2 elements])
 
 A double-click on the block's name opens all its parameters in a dialog, with what the rows
 leave out: the model space of a rectangle and the units the lengths are shown in.
@@ -165,13 +175,46 @@ A double-click on the block opens its editor:
     #ui("History output") or #ui("Eigenfrequency").],
   [Shown in], [The unit system of the value; it is stored in SI units.],
   [Field, Component], [The field and its component as the Results workspace names them:
-    STRESS MISES, DISP ALL, NDTEMP T, TOTAL_FORCE RF3 for a history output. The value is
-    that of the last increment of the step.],
+    STRESS MISES, DISP ALL, NDTEMP T, TOTAL_FORCE RF3 for a history output. With results
+    linked, both are lists of what those results have (a name they lack is shown in the
+    warning color); without, they are typed. The value is that of the last increment of the
+    step.],
   [Take], [For a field extreme: #ui("Maximum"), #ui("Minimum") or #ui("Largest magnitude"),
     which keeps the sign.],
-  [Region], [For a field extreme: all nodes, or a node set of the mesh of the analysis whose
-    results are linked.],
+  [Region], [For a field extreme: all nodes, or a region of the analysis whose results are
+    linked: a node set of its mesh or model, or the region of a boundary condition or load,
+    such as #ui("Fixed (boundary condition)"). The region is found on the mesh the results
+    were solved on, so a region picked on geometry or on the sides of a mesh block follows
+    every new mesh of an optimization loop.],
   [Node], [For a value at a node: its number.],
-  [Set], [For a history output: the set of the history output, as written to the `.dat` file.],
+  [Set], [For a history output: the set of the history output, as written to the `.dat` file;
+    a list of the sets of the linked results.],
   [Mode], [For an eigenfrequency: the mode, counted from 1, of a frequency step.],
 )
+
+=== Mesh Export <mesh-export>
+
+A mesh export block is the opposite of a source: it takes a mesh and writes it to a file, as
+a CalculiX input file (`.inp`) with the nodes, the elements, and the node sets and surfaces
+of the mesh. Add it with #menu("Project", "Add Mesh Export") or from the picker under
+#ui("Export"), and drag the #ui("Mesh") row of a mesh block or an analysis to its #ui("Mesh")
+row. Several export blocks may take the same mesh.
+
+#screenshot("mesh-export.png", [A box whose mesh is written to box.inp])
+
+The block has two rows. #ui("Mesh") is the input; its symbol shows whether the file is up to
+date. #ui("File") is the file to write: type its path, or double-click the block's name to
+pick it in a dialog. A relative path starts at the folder of the project file, so a project
+moved together with its export folder keeps working; while the project is unsaved it starts
+at the folder the program was started in.
+
+#ui("Update Project") writes the file once everything before the block is done: the mesh of
+a mesh block is made first, an analysis is solved first, and the file is written from the mesh
+as it is then. It writes only when something changed, that is when the mesh or the path is
+new or the file is gone, so an update of a project that did not change leaves the file alone.
+If an analysis before the block fails, the block does not write. #ui("Export Now") in the
+block's context menu writes the file at once, whatever the state.
+
+The file holds the mesh only, not the loads or steps of an analysis that takes the same mesh,
+so it reads back as a mesh when an analysis imports it. A path the program cannot write
+shows as an error in the #ui("Mesh") row's tooltip and in the output window.

@@ -23,20 +23,46 @@ pub struct Geometry {
     /// while the names Gmsh gives are the parts' names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub part_names: Vec<String>,
+    /// Factor on the fineness of the whole mesh: every element size of the mesh setup is
+    /// divided by it when the parts are meshed, the sizes as set staying as they are. A value
+    /// link of the project schematic, such as a mesh convergence, gives it.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub refinement: f64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+fn is_one(value: &f64) -> bool {
+    *value == 1.0
 }
 
 impl Geometry {
     /// The meshing parameters of a part: of the last Meshing Parameters item naming it, else
-    /// the defaults.
+    /// the defaults; its sizes divided by the refinement.
     pub fn parameters(&self, part: &str) -> MeshingParameters {
-        (self.mesh_items.iter().rev())
+        let mut parameters = (self.mesh_items.iter().rev())
             .find_map(|item| match &item.kind {
                 MeshSetupKind::MeshingParameters { parts, parameters } if names(parts, part) => {
                     Some(*parameters)
                 }
                 _ => None,
             })
-            .unwrap_or(self.meshing)
+            .unwrap_or(self.meshing);
+        parameters.max_size = self.refined(parameters.max_size);
+        parameters.min_size = self.refined(parameters.min_size);
+        parameters
+    }
+
+    /// An element size of the mesh setup as the parts are meshed with it: divided by the
+    /// refinement.
+    pub fn refined(&self, size: f64) -> f64 {
+        if self.refinement.is_finite() && self.refinement > 0.0 {
+            size / self.refinement
+        } else {
+            size
+        }
     }
 
     /// Gmsh's algorithms for a part: of the last Tetrahedral Gmsh item naming it, else the
@@ -77,11 +103,11 @@ impl Geometry {
             })
     }
 
-    /// The local mesh sizes as (faces, edges, size).
+    /// The local mesh sizes as (faces, edges, size), the sizes divided by the refinement.
     pub fn local_sizes(&self) -> impl Iterator<Item = (&[i32], &[i32], f64)> {
         self.mesh_items.iter().filter_map(|item| match &item.kind {
             MeshSetupKind::LocalMeshSize { faces, edges, size } => {
-                Some((faces.as_slice(), edges.as_slice(), *size))
+                Some((faces.as_slice(), edges.as_slice(), self.refined(*size)))
             }
             _ => None,
         })
@@ -374,6 +400,7 @@ mod tests {
                 },
             ],
             part_names: Vec::new(),
+            refinement: 1.0,
         };
         assert_eq!(geometry.parameters("solid-1"), fine);
         assert_eq!(geometry.parameters("SOLID-2").max_size, 5.0);
@@ -384,6 +411,13 @@ mod tests {
         assert_eq!(geometry.algorithms("SOLID-1"), Default::default());
         let local: Vec<_> = geometry.local_sizes().collect();
         assert_eq!(local, vec![(&[3][..], &[][..], 0.5)]);
+        // A refinement divides every size; the sizes as set stay.
+        geometry.refinement = 2.0;
+        assert_eq!(geometry.parameters("SOLID-2").max_size, 2.5);
+        let local: Vec<_> = geometry.local_sizes().collect();
+        assert_eq!(local, vec![(&[3][..], &[][..], 0.25)]);
+        assert_eq!(geometry.meshing.max_size, 5.0);
+        geometry.refinement = 1.0;
         geometry.mesh_items.clear();
         assert_eq!(geometry.parameters("SOLID-1").max_size, 5.0);
     }
@@ -449,6 +483,7 @@ mod tests {
             meshing: MeshingParameters::default(),
             mesh_items: vec![tet.clone(), extrude(&["A", "B"])],
             part_names: Vec::new(),
+            refinement: 1.0,
         };
         assert!(geometry.extrusion("a").is_some());
         assert!(geometry.extrusion("C").is_none());

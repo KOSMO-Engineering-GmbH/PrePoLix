@@ -478,6 +478,7 @@ fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
         meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
         mesh_items: Vec::new(),
         part_names: Vec::new(),
+        refinement: 1.0,
     }
 }
 
@@ -587,6 +588,7 @@ fn box_and_lines() -> Geometry {
         },
         mesh_items: Vec::new(),
         part_names: Vec::new(),
+        refinement: 1.0,
     }
 }
 
@@ -894,6 +896,7 @@ fn beam_on_block() -> Geometry {
         meshing: MeshingParameters::for_diagonal(40.0),
         mesh_items: Vec::new(),
         part_names: Vec::new(),
+        refinement: 1.0,
     }
 }
 
@@ -1319,6 +1322,7 @@ fn revolved(origin: [f64; 3], size: [f64; 2], radius: f64, angle: f64) -> Geomet
         meshing: MeshingParameters::for_diagonal(size[0].hypot(size[1])),
         mesh_items: Vec::new(),
         part_names: Vec::new(),
+        refinement: 1.0,
     }
 }
 
