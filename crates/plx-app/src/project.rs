@@ -11,7 +11,7 @@ use crate::node_picker::{self, NodePicker};
 use egui_snarl::ui::{AnyPins, PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
 use plx_io::project::{
-    Link, MaterialSet, MeasureBlock, MeshBlock, OptimizerBlock, ParameterSet, Project,
+    Link, MaterialSet, MeasureBlock, MeshBlock, MeshExport, OptimizerBlock, ParameterSet, Project,
     ProjectAnalysis, ProjectNode,
 };
 use plx_model::{
@@ -54,6 +54,8 @@ enum Kind {
     Measure,
     /// A loop that gives values to the blocks before a measure until it is done.
     Optimizer,
+    /// A sink that writes the mesh linked to it to a file, held in the mesh of its data.
+    MeshExport,
 }
 
 impl Kind {
@@ -71,6 +73,7 @@ impl Kind {
             Self::Parameters => "parameters block",
             Self::Measure => "measure block",
             Self::Optimizer => "optimizer",
+            Self::MeshExport => "mesh export block",
         }
     }
 }
@@ -106,6 +109,11 @@ struct Node {
     optimizer: Option<OptimizerState>,
     /// Solved in the background, its window closed.
     solving: bool,
+    /// What a mesh export block writes to, the fingerprint of the mesh and path it last
+    /// wrote, and why its last write failed.
+    export_path: String,
+    written: Option<u64>,
+    export_error: Option<String>,
     /// Mesh blocks before it whose mesh is out of date, see
     /// [`crate::status::Upstream::stale_meshes`]; found by [`ProjectApp::sync_links`].
     stale_meshes: Vec<String>,
@@ -139,6 +147,9 @@ impl Node {
             parameters: Vec::new(),
             measure: None,
             optimizer: None,
+            export_path: String::new(),
+            written: None,
+            export_error: None,
             solving: false,
             stale_meshes: Vec::new(),
         };
@@ -158,6 +169,65 @@ impl Node {
         node.primitive = Some(primitive);
         node.generated = generated;
         node
+    }
+
+    /// A mesh export block writing to `path`, which it wrote with `written`.
+    fn mesh_export(id: u64, name: String, path: String, written: Option<u64>) -> Self {
+        let data = ProjectAnalysis {
+            id,
+            name: name.clone(),
+            ..Default::default()
+        };
+        let mut node = Self::of_kind(Kind::MeshExport, id, name, data);
+        node.export_path = path;
+        node.written = written;
+        node
+    }
+
+    /// Fingerprint of the mesh a mesh export block holds and the path it writes to; `None`
+    /// while no mesh is linked to it.
+    fn export_print(&self) -> Option<u64> {
+        let data = self.link_data()?;
+        if data.mesh.element_count() == 0 {
+            return None;
+        }
+        let mut hash = plx_mesh::Fnv::new();
+        hash.add(&links::fingerprint(data, &[links::MESH.to_owned()]).to_le_bytes());
+        hash.add_str(&self.export_path);
+        Some(hash.finish())
+    }
+
+    /// The state of a mesh export block's file; `base` is the folder of the project file.
+    fn export_state(&self, base: Option<&Path>) -> CellState {
+        let Some(print) = self.export_print() else {
+            return CellState::Missing;
+        };
+        if self.export_path.trim().is_empty() {
+            CellState::Missing
+        } else if self.export_error.is_some() {
+            CellState::Failed
+        } else if self.written == Some(print) && export_file(&self.export_path, base).is_file() {
+            CellState::UpToDate
+        } else {
+            CellState::OutOfDate
+        }
+    }
+
+    /// Writes the mesh of a mesh export block as an input file; returns the file.
+    fn write_export(&mut self, base: Option<&Path>) -> Result<PathBuf, String> {
+        let print = self
+            .export_print()
+            .ok_or("no mesh is linked to it, drag the mesh of a block to its Mesh row")?;
+        if self.export_path.trim().is_empty() {
+            return Err("no file is chosen".into());
+        }
+        let file = export_file(&self.export_path, base);
+        let data = self.data.as_ref().ok_or("no data")?;
+        let text = plx_io::inp::write_inp(&data.mesh, &data.model, &self.name)
+            .map_err(|e| e.to_string())?;
+        std::fs::write(&file, text).map_err(|e| format!("{} not written: {e}", file.display()))?;
+        self.written = Some(print);
+        Ok(file)
     }
 
     /// The state of a mesh block's mesh: out of date once its parameters changed.
@@ -276,18 +346,30 @@ impl Node {
                 });
                 node
             }
+            ProjectNode::MeshExport(e) => Self::mesh_export(e.id, e.name, e.path, e.written),
         }
     }
 
     /// The block as the project file keeps it, from the window of an analysis if it is
     /// open; `position` is that of its block.
     fn written(&mut self, position: [f32; 2]) -> Option<ProjectNode> {
+        if self.kind == Kind::MeshExport {
+            // It keeps no mesh: the link brings it again.
+            return Some(ProjectNode::MeshExport(MeshExport {
+                id: self.id,
+                name: self.name.clone(),
+                position,
+                path: self.export_path.clone(),
+                written: self.written,
+            }));
+        }
         let mut data = self.data()?;
         data.id = self.id;
         data.name = self.name.clone();
         data.position = position;
         Some(match self.kind {
             Kind::Analysis => ProjectNode::Analysis(Box::new(data)),
+            Kind::MeshExport => return None,
             Kind::Materials => ProjectNode::Materials(MaterialSet {
                 id: data.id,
                 name: data.name,
@@ -457,6 +539,12 @@ enum Action {
     AddMaterials(egui::Pos2),
     /// A new mesh block meshing the primitive at the position.
     AddMesh(egui::Pos2, MeshPrimitive),
+    /// A new mesh export block at the position.
+    AddMeshExport(egui::Pos2),
+    /// The file a mesh export block writes to was edited in its block.
+    SetExportPath(u64, String),
+    /// Write the file of a mesh export block now.
+    ExportNow(u64),
     /// Parameters of a mesh block changed in its block.
     SetPrimitive(u64, MeshPrimitive),
     /// A new parameters block at the position.
@@ -557,6 +645,10 @@ pub struct ProjectApp {
     /// Analyses Update Project still has to solve, in order, and those it solves.
     update_queue: VecDeque<u64>,
     updating: Vec<u64>,
+    /// Mesh export blocks Update Project writes once the analyses are done, and whether an
+    /// analysis failed meanwhile.
+    export_queue: Vec<u64>,
+    update_failed: bool,
     /// Analyses solved without their window, running and done, for the solution monitor.
     solves: Vec<BackgroundSolve>,
     /// Analyses solved in their open window, for the solution monitor.
@@ -629,6 +721,8 @@ impl ProjectApp {
             opening: None,
             update_queue: VecDeque::new(),
             updating: Vec::new(),
+            export_queue: Vec::new(),
+            update_failed: false,
             solves: Vec::new(),
             window_runs: Vec::new(),
             monitor: None,
@@ -1593,6 +1687,9 @@ impl ProjectApp {
         self.sync_due = true;
         if let Some(next) = self.loops_due.pop_front() {
             self.start_loop(next);
+        } else {
+            // What the loop made goes to the files of the export blocks.
+            self.queue_exports(false);
         }
     }
 
@@ -1660,6 +1757,133 @@ impl ProjectApp {
             }
             [cell, key] if cell == links::PARAMETERS => node.primitive.as_ref()?.value_kind(key),
             _ => None,
+        }
+    }
+
+    /// Adds a mesh export block with no file yet; returns its id.
+    fn add_mesh_export(&mut self, position: egui::Pos2) -> u64 {
+        let id = self.next_id();
+        let name = self.unique_name("Mesh Export");
+        self.nodes
+            .push(Node::mesh_export(id, name.clone(), String::new(), None));
+        self.graph.insert_node(position, id);
+        self.output.push(format!(
+            "{name} created: drag the mesh of a block to its Mesh row and type the file to \
+             write; Update Project writes it."
+        ));
+        id
+    }
+
+    /// The folder relative export paths are taken from: that of the project file.
+    fn export_base(&self) -> Option<PathBuf> {
+        self.path.as_deref()?.parent().map(Path::to_path_buf)
+    }
+
+    /// Writes the file of a mesh export block, unless it is up to date and `force` is off;
+    /// returns whether it is fine afterwards.
+    fn run_export(&mut self, id: u64, force: bool) -> bool {
+        let base = self.export_base();
+        let Some(node) = self.node(id) else {
+            return true;
+        };
+        if !force && node.export_state(base.as_deref()) == CellState::UpToDate {
+            return true;
+        }
+        let name = node.name.clone();
+        let line = match node.write_export(base.as_deref()) {
+            Ok(file) => {
+                node.export_error = None;
+                format!("{name}: {} written", file.display())
+            }
+            Err(why) => {
+                node.export_error = Some(why.clone());
+                format!("{name}: not written: {why}")
+            }
+        };
+        let ok = self.node(id).is_some_and(|n| n.export_error.is_none());
+        self.output.push(line);
+        ok
+    }
+
+    /// Queues the mesh export blocks that have a file, for [`Self::run_exports`]; with
+    /// `changed_only` those whose file is up to date stay out, which is only known while no
+    /// analysis is to be solved before them.
+    fn queue_exports(&mut self, changed_only: bool) {
+        self.export_queue.clear();
+        self.update_failed = false;
+        let base = self.export_base();
+        let ids: Vec<u64> = self.nodes.iter().map(|n| n.id).collect();
+        for id in links::order(&ids, &self.links) {
+            let Some(node) = (self.nodes.iter()).find(|n| n.id == id && n.kind == Kind::MeshExport)
+            else {
+                continue;
+            };
+            if node.export_path.trim().is_empty() {
+                self.output
+                    .push(format!("{} skipped: no file is chosen.", node.name));
+            } else if !changed_only || node.export_state(base.as_deref()) != CellState::UpToDate {
+                self.export_queue.push(id);
+            }
+        }
+    }
+
+    /// Writes the files of the mesh export blocks Update Project queued, once the analyses
+    /// before them are done and their links have brought the meshes.
+    fn run_exports(&mut self) {
+        if self.export_queue.is_empty()
+            || !self.updating.is_empty()
+            || !self.update_queue.is_empty()
+            || self.looping.is_some()
+            || self.sync_due
+            || self.update_after_sync
+            || self.restoring.values().any(Option::is_some)
+        {
+            return;
+        }
+        let mut failed = std::mem::take(&mut self.update_failed);
+        for id in std::mem::take(&mut self.export_queue) {
+            failed |= !self.run_export(id, false);
+        }
+        self.output.push(if failed {
+            "Update finished with errors".into()
+        } else {
+            "Project updated".into()
+        });
+    }
+
+    /// Asks for the file a mesh export block writes to.
+    fn choose_export_file(&mut self, id: u64) {
+        let base = self.export_base();
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            return;
+        };
+        let current = export_file(&node.export_path, base.as_deref());
+        let name = Path::new(&node.export_path).file_name().map_or_else(
+            || format!("{}.inp", node.name),
+            |n| n.to_string_lossy().into(),
+        );
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Mesh Export File")
+            .add_filter("CalculiX input (*.inp)", &["inp"])
+            .set_file_name(name);
+        if let Some(dir) = current.parent().filter(|d| d.is_dir()).or(base.as_deref()) {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(mut file) = dialog.save_file() else {
+            return;
+        };
+        if file.extension().is_none() {
+            file.set_extension("inp");
+        }
+        // A file next to the project is kept relative, so the project can be moved.
+        let shown = match &base {
+            Some(base) => file.strip_prefix(base).unwrap_or(&file),
+            None => &file,
+        };
+        let shown = shown.to_string_lossy().into_owned();
+        if let Some(node) = self.node(id) {
+            node.export_path = shown;
+            node.export_error = None;
         }
     }
 
@@ -1804,6 +2028,10 @@ impl ProjectApp {
             Some(Kind::Parameters) => return self.edit_parameters(id),
             Some(Kind::Measure) => return self.edit_measure(id),
             Some(Kind::Optimizer) => return self.edit_optimizer(id),
+            Some(Kind::MeshExport) => {
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                return self.choose_export_file(id);
+            }
             None => return,
         }
         // Solved in the background: the window opens with the new results.
@@ -2105,8 +2333,12 @@ impl ProjectApp {
         let name = self.unique_name(&name);
         data.id = new_id;
         data.name = name.clone();
+        let path = (self.nodes.iter().find(|n| n.id == id)).map(|n| n.export_path.clone());
         let mut copy = match primitive {
             Some(primitive) => Node::mesh_block(new_id, name.clone(), data, primitive, generated),
+            None if kind == Kind::MeshExport => {
+                Node::mesh_export(new_id, name.clone(), path.unwrap_or_default(), None)
+            }
             None => Node::of_kind(kind, new_id, name.clone(), data),
         };
         copy.refinement = refinement;
@@ -2192,7 +2424,12 @@ impl ProjectApp {
                 "{name} skipped: it has no mesh or geometry, or no step yet."
             ));
         }
-        if self.update_queue.is_empty() {
+        // The files of the mesh export blocks come after everything they may depend on, and
+        // after the loop of an optimizer: a loop updates the project at every iteration.
+        if self.looping.is_none() && self.loops_due.is_empty() {
+            self.queue_exports(self.update_queue.is_empty());
+        }
+        if self.update_queue.is_empty() && self.export_queue.is_empty() {
             self.output.push("Nothing to update.".into());
         }
     }
@@ -2233,10 +2470,16 @@ impl ProjectApp {
                 // What depends on it is not solved; independent analyses go on.
                 let dependent = self.dependents(id);
                 let skipped: Vec<String> = (self.nodes.iter())
-                    .filter(|n| dependent.contains(&n.id) && self.update_queue.contains(&n.id))
+                    .filter(|n| {
+                        dependent.contains(&n.id)
+                            && (self.update_queue.contains(&n.id)
+                                || self.export_queue.contains(&n.id))
+                    })
                     .map(|n| n.name.clone())
                     .collect();
                 self.update_queue
+                    .retain(|queued| !dependent.contains(queued));
+                self.export_queue
                     .retain(|queued| !dependent.contains(queued));
                 self.output.push(if skipped.is_empty() {
                     format!("{name} could not be solved; the solution monitor tells why.")
@@ -2251,11 +2494,17 @@ impl ProjectApp {
                 self.output.push(format!("{name} solved"));
             }
             if self.updating.is_empty() && self.update_queue.is_empty() {
-                self.output.push(if failed {
-                    "Update finished with errors".into()
+                if self.export_queue.is_empty() {
+                    self.output
+                        .push(if failed || std::mem::take(&mut self.update_failed) {
+                            "Update finished with errors".into()
+                        } else {
+                            "Project updated".into()
+                        });
                 } else {
-                    "Project updated".into()
-                });
+                    // The export blocks write their files, then the update is done.
+                    self.update_failed |= failed;
+                }
             }
             // The analyses after it take its new results before they are solved.
             self.sync_due = true;
@@ -2388,6 +2637,8 @@ impl ProjectApp {
             }
         }
         self.update_queue.clear();
+        self.export_queue.clear();
+        self.update_failed = false;
         for id in std::mem::take(&mut self.updating) {
             if let Some(window) = self.node(id).and_then(|n| n.window.as_mut()) {
                 window.stop_solve();
@@ -2407,6 +2658,7 @@ impl ProjectApp {
         self.solves.clear();
         self.window_runs.clear();
         self.update_queue.clear();
+        self.export_queue.clear();
         self.updating.clear();
     }
 
@@ -2658,7 +2910,10 @@ impl ProjectApp {
 
     /// Whether Update Project is under way, or the loop of an optimizer.
     fn busy(&self) -> bool {
-        !self.updating.is_empty() || !self.update_queue.is_empty() || self.looping.is_some()
+        !self.updating.is_empty()
+            || !self.update_queue.is_empty()
+            || !self.export_queue.is_empty()
+            || self.looping.is_some()
     }
 
     fn toggle_monitor(&mut self) {
@@ -2843,6 +3098,7 @@ impl ProjectApp {
                 }
             }
         }
+        let base = self.export_base();
         let blocks: Vec<BlockView> = (self.nodes.iter())
             .map(|n| {
                 let fe = n.link_data().map(|d| d.fe);
@@ -2853,6 +3109,11 @@ impl ProjectApp {
                     (Kind::Mesh, _) => {
                         mesh_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
                     }
+                    (Kind::MeshExport, _) => export_rows(
+                        n,
+                        base.as_deref(),
+                        incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                    ),
                     (Kind::Parameters, _) => parameter_rows(n),
                     (Kind::Optimizer, _) => self.optimizer_rows(n, &incoming),
                     (Kind::Measure, _) => measure_rows(
@@ -2877,6 +3138,7 @@ impl ProjectApp {
                 BlockView {
                     id: n.id,
                     name: n.name.clone(),
+                    export_path: n.export_path.clone(),
                     kind: n.kind,
                     space: n.space,
                     steps: (fe.into_iter().flat_map(|fe| &fe.steps))
@@ -3024,7 +3286,11 @@ impl ProjectApp {
                     n.id == id
                         && !matches!(
                             n.kind,
-                            Kind::Materials | Kind::Parameters | Kind::Measure | Kind::Optimizer
+                            Kind::Materials
+                                | Kind::Parameters
+                                | Kind::Measure
+                                | Kind::Optimizer
+                                | Kind::MeshExport
                         )
                 })
                 .map(|n| n.space)
@@ -4033,6 +4299,21 @@ impl ProjectApp {
                     node.refinement = value;
                 }
             }
+            Action::AddMeshExport(pos) => {
+                self.add_mesh_export(pos);
+            }
+            Action::SetExportPath(id, path) => {
+                if let Some(node) = self.node(id) {
+                    node.export_path = path;
+                    node.export_error = None;
+                }
+            }
+            Action::ExportNow(id) => {
+                // The mesh the link brings comes first.
+                self.sync_due = true;
+                self.sync_links(ctx);
+                self.run_export(id, true);
+            }
             Action::Generate(id) => self.generate_mesh(id),
             Action::SetPrimitive(id, primitive) => {
                 if let Some(node) = self.node(id) {
@@ -4173,6 +4454,7 @@ impl ProjectApp {
             Kind::Parameters => "with its parameters",
             Kind::Measure => "with its value",
             Kind::Optimizer => "with its iterations",
+            Kind::MeshExport => "(the file it wrote stays)",
         };
         let users = (self.links.iter())
             .filter(|l| l.source == id)
@@ -4508,6 +4790,7 @@ impl eframe::App for ProjectApp {
         self.poll_solves(&ctx);
         self.run_update(&ctx);
         self.run_loop();
+        self.run_exports();
         self.monitor_window(&ctx);
         self.analysis_windows(&ctx);
     }
@@ -4549,6 +4832,8 @@ enum RowWidget {
     Refinement,
     /// A number of a parameters block, by its index.
     Value(usize),
+    /// The file a mesh export block writes to.
+    ExportPath,
 }
 
 /// A link of a whole category to a block, for its row: from where, how many items it takes
@@ -4588,6 +4873,8 @@ struct BlockView {
     /// The numbers of a parameters block.
     parameters: Vec<Parameter>,
     units: UnitSystem,
+    /// What a mesh export block writes to.
+    export_path: String,
 }
 
 /// The rows of an analysis' block: its cells, the setup opened as far as `expanded` says, and
@@ -5023,6 +5310,83 @@ fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     rows
 }
 
+/// The file a relative export path names: next to the project file, or in the working folder
+/// while the project has none.
+fn export_file(path: &str, base: Option<&Path>) -> PathBuf {
+    let path = Path::new(path.trim());
+    match base {
+        Some(base) if path.is_relative() => base.join(path),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// The rows of a mesh export block: the mesh it takes, with the state of its file, and the
+/// file it writes.
+fn export_rows(node: &Node, base: Option<&Path>, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
+    let state = node.export_state(base);
+    let mesh = [links::MESH.to_owned()];
+    let source = (incoming.iter())
+        .find(|(slot, _)| links::covers(slot, &mesh))
+        .map(|(_, source)| source.clone());
+    let mut tip = match state {
+        CellState::Missing if node.export_path.trim().is_empty() => {
+            "Mesh: no file is chosen".to_owned()
+        }
+        CellState::Missing => "Mesh: nothing is linked yet, drag the mesh of a block here".into(),
+        CellState::UpToDate => "Mesh: the file is up to date".into(),
+        CellState::OutOfDate => {
+            "Mesh: the file is not written yet or the mesh changed since: Update Project or \
+             Export Now writes it"
+                .into()
+        }
+        _ => "Mesh: the file could not be written".into(),
+    };
+    if let Some(why) = &node.export_error {
+        tip.push_str(&format!("\n{why}"));
+    }
+    let count = (node.data.as_ref()).map_or(0, |d| d.mesh.element_count());
+    if count > 0 {
+        tip.push_str(&format!(
+            "\n{count} elements, written as a CalculiX input file."
+        ));
+    }
+    vec![
+        Row {
+            path: mesh.to_vec(),
+            text: links::MESH.to_owned(),
+            depth: 0,
+            icon: NodeIcon::Mesh,
+            state: Some(state),
+            expander: None,
+            input: true,
+            output: false,
+            linked_from: source,
+            collection: false,
+            partial: false,
+            widget: None,
+            tip,
+        },
+        Row {
+            path: vec![PARAMETERS.to_owned(), "File".to_owned()],
+            text: "File".to_owned(),
+            depth: 0,
+            icon: NodeIcon::Export,
+            state: None,
+            expander: None,
+            input: false,
+            output: false,
+            linked_from: None,
+            collection: false,
+            partial: false,
+            widget: Some(RowWidget::ExportPath),
+            tip: "The CalculiX input file (.inp) to write, with the nodes, elements, node sets \
+                  and surfaces of the mesh. A relative path starts at the folder of the \
+                  project file. Double-click the block to choose it."
+                .into(),
+        },
+    ]
+}
+
 /// The first part of the path of a parameter row of a mesh block.
 const PARAMETERS: &str = links::PARAMETERS;
 
@@ -5132,6 +5496,7 @@ enum BlockKind {
     Parameters,
     Measure,
     Optimizer,
+    MeshExport,
 }
 
 fn block_kinds() -> Vec<BlockKind> {
@@ -5143,6 +5508,7 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::Parameters,
         BlockKind::Measure,
         BlockKind::Optimizer,
+        BlockKind::MeshExport,
     ]
 }
 
@@ -5186,6 +5552,13 @@ impl BlockKind {
                 "loop iterate mesh convergence refine parameter study sweep",
                 OPTIMIZER_TIP,
             ),
+            Self::MeshExport => (
+                "Export",
+                "Mesh Export",
+                "write save file inp calculix output sink",
+                "Adds a block that writes the mesh linked to it to a CalculiX input file when \
+                 the project is updated, after the analyses, optimizers and blocks before it.",
+            ),
         };
         node_picker::Entry {
             category,
@@ -5204,6 +5577,7 @@ impl BlockKind {
             Self::Parameters => "Add Parameters",
             Self::Measure => "Add Measure",
             Self::Optimizer => "Add Optimizer",
+            Self::MeshExport => "Add Mesh Export",
         }
     }
 
@@ -5216,6 +5590,7 @@ impl BlockKind {
             Self::Parameters => Action::AddParameters(pos),
             Self::Measure => Action::AddMeasure(pos),
             Self::Optimizer => Action::AddOptimizer(pos),
+            Self::MeshExport => Action::AddMeshExport(pos),
         }
     }
 }
@@ -5388,6 +5763,38 @@ impl Viewer {
         let Some(block) = self.block(id) else {
             return;
         };
+        if let RowWidget::ExportPath = widget {
+            let mut path = block.export_path.clone();
+            let (rect, label) =
+                ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::hover());
+            ui.painter().text(
+                egui::pos2(rect.left() + 30.0, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                &row.text,
+                egui::TextStyle::Body.resolve(ui.style()),
+                ui.visuals().text_color(),
+            );
+            label.on_hover_text(&row.tip);
+            let field = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 62.0, rect.top() + 1.0),
+                egui::pos2(rect.right() - 4.0, rect.bottom() - 1.0),
+            );
+            let mut ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(field)
+                    .id_salt((id, &row.path)),
+            );
+            let response = ui
+                .add_sized(
+                    field.size(),
+                    egui::TextEdit::singleline(&mut path).hint_text("folder/mesh.inp"),
+                )
+                .on_hover_text(&row.tip);
+            if response.changed() {
+                self.actions.push(Action::SetExportPath(id, path));
+            }
+            return;
+        }
         let (units, space, refinement) = (block.units, block.space, block.refinement);
         let parameters = block.parameters.clone();
         let (rect, label) =
@@ -5456,7 +5863,7 @@ impl Viewer {
                 }
                 return;
             }
-            RowWidget::Param(_) | RowWidget::Element => {}
+            RowWidget::Param(_) | RowWidget::Element | RowWidget::ExportPath => {}
         }
         let Some(mut primitive) = block.primitive.clone() else {
             return;
@@ -5466,6 +5873,7 @@ impl Viewer {
             ui.disable();
         }
         let response = match widget {
+            RowWidget::ExportPath => return,
             RowWidget::Param(param) => match primitive.slot(param.key) {
                 Some(ParamSlot::Length(value)) => ui.add_sized(
                     field.size(),
@@ -5581,6 +5989,11 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Solution, ink);
                 icon.on_hover_text("A loop that solves until it is done");
             }
+            Kind::MeshExport => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Export, ink);
+                icon.on_hover_text("Writes the mesh linked to it to a file");
+            }
         }
         let text = egui::RichText::new(&block.name).strong();
         let label = ui.add(
@@ -5602,6 +6015,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Analysis => "Double-click opens the analysis in its own window.",
             Kind::Materials => "Double-click edits the materials.",
             Kind::Mesh => "Double-click edits the size and division of the mesh.",
+            Kind::MeshExport => "Double-click chooses the file to write.",
             Kind::Parameters => "Double-click adds, renames or removes parameters.",
             Kind::Measure => "Double-click chooses what it measures.",
             Kind::Optimizer => "Double-click sets what it varies and shows its iterations.",
@@ -5928,6 +6342,7 @@ impl SnarlViewer<u64> for Viewer {
             Some(Kind::Parameters) => default.fill(crate::style::parameters_header()),
             Some(Kind::Measure) => default.fill(crate::style::measure_header()),
             Some(Kind::Optimizer) => default.fill(crate::style::optimizer_header()),
+            Some(Kind::MeshExport) => default.fill(crate::style::export_header()),
             _ => default,
         }
     }
@@ -6246,7 +6661,12 @@ fn node_menu(
     };
     if kind.is_source() {
         // Sources have no steps and are not solved.
-        entry(ui, "Edit …", Action::Open(id, None));
+        if kind == Kind::MeshExport {
+            entry(ui, "Export Now", Action::ExportNow(id));
+            entry(ui, "Choose File …", Action::Open(id, None));
+        } else {
+            entry(ui, "Edit …", Action::Open(id, None));
+        }
         if kind == Kind::Mesh {
             entry(ui, "Generate Mesh", Action::Generate(id));
         }
@@ -6711,6 +7131,107 @@ mod tests {
             Some(ProjectNode::Optimizer(written)) => assert_eq!(written, block),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A mesh block with its mesh made, and a mesh export block that took it over.
+    fn export_of_a_box(path: &Path) -> (Node, Node) {
+        let block = MeshBlock {
+            id: 1,
+            name: "Box".into(),
+            position: [0.0; 2],
+            space: ModelSpace::ThreeD,
+            units: Default::default(),
+            primitive: MeshPrimitive::default_box(),
+            mesh: Default::default(),
+            generated: None,
+            refinement: 1.0,
+        };
+        let mut source = Node::read(ProjectNode::Mesh(Box::new(block)));
+        source.generate().unwrap();
+        let mut export = Node::mesh_export(
+            2,
+            "Mesh Export".into(),
+            path.to_string_lossy().into_owned(),
+            None,
+        );
+        // What the link does.
+        let copy = links::MeshCopy::of(source.link_data().unwrap());
+        let data = export.data.as_mut().unwrap();
+        data.mesh = copy.mesh;
+        data.model.mesh_sets = copy.mesh_sets;
+        data.model.element_types = copy.element_types;
+        (source, export)
+    }
+
+    #[test]
+    fn a_mesh_export_block_writes_the_mesh_as_an_input_file_once() {
+        let dir = std::env::temp_dir().join(format!("plx-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("box.inp");
+        let (source, mut export) = export_of_a_box(&file);
+        assert_eq!(export.export_state(None), CellState::OutOfDate);
+        let written = export.write_export(None).unwrap();
+        assert_eq!(written, file);
+        assert_eq!(export.export_state(None), CellState::UpToDate);
+        // What it wrote reads back with the same mesh and the sides as sets.
+        let text = std::fs::read_to_string(&file).unwrap();
+        let read = plx_io::inp::read_inp_str(&text, None).unwrap();
+        let made = &source.data.as_ref().unwrap().mesh;
+        assert_eq!(read.mesh.element_count(), made.element_count());
+        assert_eq!(read.mesh.node_ids().len(), made.node_ids().len());
+        for (name, nodes) in &made.node_sets {
+            assert_eq!(
+                read.mesh.node_sets.get(name),
+                Some(nodes),
+                "node set {name}"
+            );
+        }
+        assert_eq!(read.mesh.surfaces.len(), made.surfaces.len());
+        let upper = text.to_uppercase();
+        assert!(upper.contains("*NSET") && upper.contains("*SURFACE"));
+        // A relative path starts at the folder of the project file; a new mesh, a new path,
+        // or a deleted file makes it out of date again.
+        export.export_path = "box.inp".into();
+        assert_eq!(export.export_state(Some(&dir)), CellState::OutOfDate);
+        export.write_export(Some(&dir)).unwrap();
+        assert_eq!(export.export_state(Some(&dir)), CellState::UpToDate);
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(export.export_state(Some(&dir)), CellState::OutOfDate);
+        export.write_export(Some(&dir)).unwrap();
+        export
+            .data
+            .as_mut()
+            .unwrap()
+            .mesh
+            .set_node(1, [9.0, 9.0, 9.0]);
+        assert_eq!(export.export_state(Some(&dir)), CellState::OutOfDate);
+        // The block is saved with the path and what it wrote, but without the mesh.
+        match export.written([3.0, 4.0]) {
+            Some(ProjectNode::MeshExport(saved)) => {
+                assert_eq!(
+                    (saved.path.as_str(), saved.position),
+                    ("box.inp", [3.0, 4.0])
+                );
+                assert!(saved.written.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_mesh_export_block_says_why_it_cannot_write() {
+        let (_, mut export) = export_of_a_box(Path::new("/nonexistent-folder/box.inp"));
+        let why = export.write_export(None).unwrap_err();
+        assert!(why.contains("not written"), "{why}");
+        export.export_path = String::new();
+        assert!(export.write_export(None).unwrap_err().contains("no file"));
+        assert_eq!(export.export_state(None), CellState::Missing);
+        // Nothing linked yet.
+        let mut empty = Node::mesh_export(3, "Empty".into(), "x.inp".into(), None);
+        assert!(empty.write_export(None).unwrap_err().contains("no mesh"));
+        let rows = export_rows(&empty, None, &[]);
+        assert!(rows[0].input && !rows[0].output && rows[1].widget.is_some());
     }
 
     #[test]

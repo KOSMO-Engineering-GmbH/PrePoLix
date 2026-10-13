@@ -3,8 +3,9 @@
 == Source blocks <source-blocks>
 
 Besides analyses, the project schematic holds *source blocks*: blocks that only give data to
-analyses through links. They have no steps, are not solved, and #ui("Update Project") passes
-them by. Add one from #menu("Project") or by right-clicking the background of the schematic;
+analyses through links. They have no steps and are not solved, and #ui("Update Project")
+passes them by; the mesh export block at the end of this section takes data instead of giving
+it. Add one from #menu("Project") or by right-clicking the background of the schematic;
 its header has its own tint, so that it stands apart from the analyses. Its context menu has
 #ui("Edit ..."), #ui("Rename ..."), #ui("Duplicate") and #ui("Delete ..."); a double-click
 opens its editor in the project window. Deleting a source block removes its links; the
@@ -175,3 +176,30 @@ A double-click on the block opens its editor:
   [Set], [For a history output: the set of the history output, as written to the `.dat` file.],
   [Mode], [For an eigenfrequency: the mode, counted from 1, of a frequency step.],
 )
+
+=== Mesh Export <mesh-export>
+
+A mesh export block is the opposite of a source: it takes a mesh and writes it to a file, as
+a CalculiX input file (`.inp`) with the nodes, the elements, and the node sets and surfaces
+of the mesh. Add it with #menu("Project", "Add Mesh Export") or from the picker under
+#ui("Export"), and drag the #ui("Mesh") row of a mesh block or an analysis to its #ui("Mesh")
+row. Several export blocks may take the same mesh.
+
+#screenshot("mesh-export.png", [A box whose mesh is written to box.inp])
+
+The block has two rows. #ui("Mesh") is the input; its symbol shows whether the file is up to
+date. #ui("File") is the file to write: type its path, or double-click the block's name to
+pick it in a dialog. A relative path starts at the folder of the project file, so a project
+moved together with its export folder keeps working; while the project is unsaved it starts
+at the folder the program was started in.
+
+#ui("Update Project") writes the file once everything before the block is done: the mesh of
+a mesh block is made first, an analysis is solved first, and the file is written from the mesh
+as it is then. It writes only when something changed, that is when the mesh or the path is
+new or the file is gone, so an update of a project that did not change leaves the file alone.
+If an analysis before the block fails, the block does not write. #ui("Export Now") in the
+block's context menu writes the file at once, whatever the state.
+
+The file holds the mesh only, not the loads or steps of an analysis that takes the same mesh,
+so it reads back as a mesh when an analysis imports it. A path the program cannot write
+shows as an error in the #ui("Mesh") row's tooltip and in the output window.
