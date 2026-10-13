@@ -114,9 +114,9 @@ struct Node {
     export_path: String,
     written: Option<u64>,
     export_error: Option<String>,
-    /// Mesh blocks before it whose mesh is out of date, see
-    /// [`crate::status::Upstream::stale_meshes`]; found by [`ProjectApp::sync_links`].
-    stale_meshes: Vec<String>,
+    /// What it takes from other blocks that is not ready yet; found by
+    /// [`ProjectApp::sync_links`].
+    upstream: crate::status::Upstream,
 }
 
 impl Node {
@@ -151,7 +151,7 @@ impl Node {
             written: None,
             export_error: None,
             solving: false,
-            stale_meshes: Vec::new(),
+            upstream: crate::status::Upstream::default(),
         };
         node.refresh_closed();
         node
@@ -436,7 +436,7 @@ impl Node {
                 &data.model,
                 &data.mesh_inputs,
                 data.results.as_ref(),
-                &self.stale_meshes,
+                &self.upstream,
                 self.solving,
             ));
         }
@@ -462,6 +462,17 @@ impl Node {
     }
 
     /// The results the analysis keeps.
+    /// Whether it has results, but made from data that changed since or being made anew.
+    fn results_out_of_date(&self) -> bool {
+        self.bound_results().is_some()
+            && (self.status.as_ref()).is_some_and(|s| {
+                matches!(
+                    s.solution,
+                    status::CellState::OutOfDate | status::CellState::Running
+                )
+            })
+    }
+
     fn bound_results(&self) -> Option<&plx_io::project::BoundResults> {
         match (&self.window, &self.data) {
             (Some(window), _) => window.model()?.bound_results.as_ref(),
@@ -2549,14 +2560,30 @@ impl ProjectApp {
             self.monitor.get_or_insert_default().selected = Some(id);
             return true;
         }
-        if !node.stale_meshes.is_empty() {
-            // Update Project could not make them anew: the old mesh is not solved.
-            let line = format!(
-                "{} not solved: the mesh of {} is out of date.",
-                node.name,
-                node.stale_meshes.join(", ")
-            );
-            self.output.push(line);
+        if !node.upstream.is_ready() {
+            // Update Project could not bring them up to date: the old data is not solved.
+            let upstream = &node.upstream;
+            let mut reasons = Vec::new();
+            if !upstream.stale_meshes.is_empty() {
+                reasons.push(format!(
+                    "the mesh of {} is out of date",
+                    upstream.stale_meshes.join(", ")
+                ));
+            }
+            if !upstream.stale_results.is_empty() {
+                reasons.push(format!(
+                    "the results of {} are out of date",
+                    upstream.stale_results.join(", ")
+                ));
+            }
+            if !upstream.missing_results.is_empty() {
+                reasons.push(format!(
+                    "{} has no results yet",
+                    upstream.missing_results.join(", ")
+                ));
+            }
+            self.output
+                .push(format!("{} not solved: {}.", node.name, reasons.join("; ")));
             return false;
         }
         let Some(data) = node.data.clone() else {
@@ -3834,10 +3861,10 @@ impl ProjectApp {
                 .filter(|l| l.target == target)
                 .cloned()
                 .collect();
-            let mut missing = Vec::new();
+            let mut upstream = crate::status::Upstream::default();
             for link in &to_target {
                 let source = self.name_of(link.source);
-                if let Some(payload) = self.payload(link, &mut missing)
+                if let Some(payload) = self.payload(link, &mut upstream)
                     && let Some(inherited) = self.apply(target, &source, link, payload)
                     && let Some(own) = self.links.iter_mut().find(|l| *l == link)
                 {
@@ -3845,15 +3872,12 @@ impl ProjectApp {
                 }
             }
             let incoming = self.incoming(target);
-            let upstream = crate::status::Upstream {
-                missing_results: missing,
-                stale_meshes: self.stale_meshes(target),
-            };
+            upstream.stale_meshes = self.stale_meshes(target);
             if let Some(node) = self.node(target) {
                 match &mut node.window {
                     Some(window) => window.set_links(incoming, upstream),
                     None => {
-                        node.stale_meshes = upstream.stale_meshes;
+                        node.upstream = upstream;
                         node.refresh_closed();
                     }
                 }
@@ -3918,7 +3942,7 @@ impl ProjectApp {
     /// What `link` has to copy into its target to bring it up to date with the source;
     /// `None` when it is up to date or cannot be brought up to date now. Sources of results
     /// links that have no results go to `missing`.
-    fn payload(&mut self, link: &Link, missing: &mut Vec<String>) -> Option<Payload> {
+    fn payload(&mut self, link: &Link, upstream: &mut crate::status::Upstream) -> Option<Payload> {
         let source = self.nodes.iter().find(|n| n.id == link.source)?;
         let target = self.nodes.iter().find(|n| n.id == link.target)?;
         if let Some(window) = &target.window
@@ -3932,9 +3956,15 @@ impl ProjectApp {
             Some(links::RESULTS) => {
                 let step = path.get(1)?;
                 let Some(bound) = source.bound_results() else {
-                    missing.push(source.name.clone());
+                    upstream.missing_results.push(source.name.clone());
                     return None;
                 };
+                if source.results_out_of_date() {
+                    // Its results were made from data that changed since: the target waits
+                    // for it to be solved again rather than take them.
+                    upstream.stale_results.push(source.name.clone());
+                    return None;
+                }
                 let data = data?;
                 let global = links::global_step_number(data.fe, step)?;
                 let usage = links::ResultsUse::of(link)?;
@@ -3973,7 +4003,7 @@ impl ProjectApp {
                         && (std::fs::create_dir_all(&dir).is_err()
                             || std::fs::copy(&solved, &file).is_err())
                     {
-                        missing.push(source.name.clone());
+                        upstream.missing_results.push(source.name.clone());
                         return None;
                     }
                     return Some(Payload::Results(global, file));
@@ -3994,7 +4024,7 @@ impl ProjectApp {
                 let file = dir.join(&frd.name);
                 if !file.is_file() {
                     match self.restoring.get(&dir) {
-                        Some(Some(_)) => missing.push(source.name.clone()),
+                        Some(Some(_)) => upstream.missing_results.push(source.name.clone()),
                         Some(None) => {}
                         None => {
                             let (sender, receiver) = std::sync::mpsc::channel();
@@ -4005,7 +4035,7 @@ impl ProjectApp {
                                 let _ = sender.send(written);
                             });
                             self.restoring.insert(dir, Some(receiver));
-                            missing.push(source.name.clone());
+                            upstream.missing_results.push(source.name.clone());
                         }
                     }
                 }
@@ -4014,7 +4044,10 @@ impl ProjectApp {
             Some(links::STATE) => {
                 if source.bound_results().is_none() {
                     // Solved first, so that this one continues from its states.
-                    missing.push(source.name.clone());
+                    upstream.missing_results.push(source.name.clone());
+                } else if source.results_out_of_date() {
+                    // Its states belong to data that changed since.
+                    upstream.stale_results.push(source.name.clone());
                 }
                 let (data, own) = (data?, target.link_data()?);
                 let step = links::state_step(data.fe, link)?;
@@ -4259,7 +4292,11 @@ impl ProjectApp {
                 }
             }
         }
-        sources.retain(|s| (self.nodes.iter()).any(|n| n.id == *s && n.bound_results().is_none()));
+        // Those with results made from data that changed since are solved again too.
+        sources.retain(|s| {
+            (self.nodes.iter())
+                .any(|n| n.id == *s && (n.bound_results().is_none() || n.results_out_of_date()))
+        });
         sources.push(id);
         let chain = links::order(&sources, &self.links);
         self.update_queue.retain(|queued| !chain.contains(queued));
@@ -7062,6 +7099,23 @@ mod tests {
             Some(ProjectNode::Measure(written)) => assert_eq!(written, block),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn results_made_from_changed_data_are_out_of_date() {
+        // Never solved: nothing to take, and nothing out of date either.
+        let mut node = Node::new(1, "Static".into(), ProjectAnalysis::default());
+        node.refresh_closed();
+        assert!(node.bound_results().is_none() && !node.results_out_of_date());
+        // Results whose model changed since: a results link waits for them to be made anew,
+        // and Solve of the target solves this one first.
+        let data = ProjectAnalysis {
+            results: Some(Default::default()),
+            ..Default::default()
+        };
+        let mut node = Node::new(1, "Static".into(), data);
+        node.refresh_closed();
+        assert!(node.results_out_of_date());
     }
 
     #[test]
