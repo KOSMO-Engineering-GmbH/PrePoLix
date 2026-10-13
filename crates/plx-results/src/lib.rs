@@ -35,7 +35,12 @@ pub struct ResultsSettings {
     pub planes: Vec<plx_model::Plane>,
     pub result_paths: Vec<plx_model::ResultPath>,
     pub result_planes: Vec<plx_model::ResultPlane>,
-    /// Parts shown without colour contours, by index.
+    /// Parts shown without colour contours, by name: results of another run may have other
+    /// parts, or the same ones in another order.
+    pub plain_part_names: Vec<String>,
+    /// The same by index, as projects saved before the names were kept have it; only
+    /// read, and only applied to results of the same mesh.
+    #[serde(skip_serializing)]
     pub plain_parts: Vec<usize>,
     /// The increment shown, by index.
     pub increment: usize,
