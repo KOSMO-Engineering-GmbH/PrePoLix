@@ -3378,12 +3378,12 @@ impl Workbench {
             .setup_model()
             .is_some_and(|m| crate::campbell::applies(&m.fe) && m.mesh.element_count() > 0);
         let default_solver = self.settings.solver.default_solver();
-        let open = window.show(ctx, can_start, |window| {
+        let open = window.show(ctx, can_start, |window, keep| {
             let model = self
                 .model
                 .as_ref()
                 .ok_or_else(|| "No model is open.".to_string())?;
-            window.start(&self.settings.solver, model, default_solver)
+            window.start(&self.settings.solver, model, default_solver, keep)
         });
         window.visible = open || window.is_running();
         self.campbell = Some(window);
