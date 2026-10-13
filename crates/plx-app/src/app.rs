@@ -3437,6 +3437,18 @@ impl Workbench {
         };
         // A result removed from the project is not bound again until the next run.
         analysis.bound = true;
+        // A killed run's results stop somewhere in it: they can be looked at, but are not
+        // kept as the solution of the model.
+        if !matches!(
+            analysis.status(),
+            plx_job::JobStatus::Completed | plx_job::JobStatus::FailedWithResults
+        ) {
+            self.output.push(format!(
+                "Results of {} not kept: the run did not finish.",
+                self.analysis_name
+            ));
+            return;
+        }
         let with_errors = analysis.status() == plx_job::JobStatus::FailedWithResults;
         let input = analysis.input;
         let Some(model) = &self.model else {
@@ -3619,6 +3631,11 @@ impl Workbench {
         }
         if self.setup_model().is_none() {
             return;
+        }
+        // The run writes its results where those kept last may have been opened from: the
+        // kept ones are restored from the project from now on.
+        if let Some(model) = &mut self.model {
+            model.bound_results_file = None;
         }
         let default_solver = self.settings.solver.default_solver();
         let Some(model) = self.setup_model() else {
