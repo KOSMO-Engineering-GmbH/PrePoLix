@@ -50,6 +50,9 @@ pub struct AnalysisStatus {
     pub results: CellState,
     /// Parts of the geometry whose mesh is out of date, to be meshed again.
     pub stale_parts: Vec<String>,
+    /// Mesh blocks the mesh is taken from whose mesh is out of date: the project window
+    /// makes them anew before the analysis is solved.
+    pub stale_sources: Vec<String>,
 }
 
 impl AnalysisStatus {
@@ -66,13 +69,26 @@ impl AnalysisStatus {
     }
 }
 
+/// What an analysis takes from other blocks of the project that is not ready yet, as the
+/// project window finds it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Upstream {
+    /// Analyses whose results it needs, e.g. as global model, that have none yet.
+    pub missing_results: Vec<String>,
+    /// Mesh blocks it takes its mesh from, directly or through other analyses, whose mesh
+    /// is out of date: the mesh it holds is not the one it is meant to be solved with.
+    pub stale_meshes: Vec<String>,
+}
+
 /// The state of each cell of an analysis with this data; `running` while CalculiX solves it.
+/// `stale_sources` are the mesh blocks of [`Upstream::stale_meshes`].
 pub fn analysis_status(
     geometry: Option<&Geometry>,
     mesh: &FeMesh,
     fe: &FeModel,
     mesh_inputs: &BTreeMap<String, u64>,
     results: Option<&BoundResults>,
+    stale_sources: &[String],
     running: bool,
 ) -> AnalysisStatus {
     let space = fe.properties.space;
@@ -94,9 +110,10 @@ pub fn analysis_status(
             .collect(),
         None => Vec::new(),
     };
+    // A mesh taken from a mesh block is out of date with the block.
     let mesh_state = if !meshed {
         CellState::Missing
-    } else if stale_parts.is_empty() {
+    } else if stale_parts.is_empty() && stale_sources.is_empty() {
         CellState::UpToDate
     } else {
         CellState::OutOfDate
@@ -132,6 +149,7 @@ pub fn analysis_status(
         solution,
         results: results_state,
         stale_parts,
+        stale_sources: stale_sources.to_vec(),
     }
 }
 
@@ -227,17 +245,41 @@ mod tests {
         let mut fe = FeModel::default();
         fe.steps.push(Step::new_static("Step-1"));
         let solved = results(fingerprint::solve_input(&mesh, &fe));
-        let status = analysis_status(None, &mesh, &fe, &BTreeMap::new(), Some(&solved), false);
+        let status = analysis_status(
+            None,
+            &mesh,
+            &fe,
+            &BTreeMap::new(),
+            Some(&solved),
+            &[],
+            false,
+        );
         assert_eq!(status.geometry, CellState::NotUsed);
         assert_eq!(status.mesh, CellState::UpToDate);
         assert_eq!(status.solution, CellState::UpToDate);
         assert!(!status.needs_solve());
         // A result path changes nothing that CalculiX solves.
         fe.result_paths.push(plx_model::ResultPath::new("Path-1"));
-        let status = analysis_status(None, &mesh, &fe, &BTreeMap::new(), Some(&solved), false);
+        let status = analysis_status(
+            None,
+            &mesh,
+            &fe,
+            &BTreeMap::new(),
+            Some(&solved),
+            &[],
+            false,
+        );
         assert_eq!(status.solution, CellState::UpToDate);
         fe.steps[0].name = "Loading".into();
-        let status = analysis_status(None, &mesh, &fe, &BTreeMap::new(), Some(&solved), false);
+        let status = analysis_status(
+            None,
+            &mesh,
+            &fe,
+            &BTreeMap::new(),
+            Some(&solved),
+            &[],
+            false,
+        );
         assert_eq!(status.mesh, CellState::UpToDate);
         assert_eq!(status.solution, CellState::OutOfDate);
         assert_eq!(status.results, CellState::OutOfDate);
@@ -262,15 +304,51 @@ mod tests {
             fingerprint::mesh_input(&geometry, space, &part),
         )]);
         let solved = results(fingerprint::solve_input(&mesh, &fe));
-        let status = analysis_status(Some(&geometry), &mesh, &fe, &inputs, Some(&solved), false);
+        let status = analysis_status(
+            Some(&geometry),
+            &mesh,
+            &fe,
+            &inputs,
+            Some(&solved),
+            &[],
+            false,
+        );
         assert_eq!(status.mesh, CellState::UpToDate);
         assert_eq!(status.setup, CellState::Missing);
         geometry.meshing.max_size *= 0.5;
-        let status = analysis_status(Some(&geometry), &mesh, &fe, &inputs, Some(&solved), false);
+        let status = analysis_status(
+            Some(&geometry),
+            &mesh,
+            &fe,
+            &inputs,
+            Some(&solved),
+            &[],
+            false,
+        );
         assert_eq!(status.mesh, CellState::OutOfDate);
         assert_eq!(status.stale_parts, [part]);
         // The solution follows the mesh.
         assert_eq!(status.solution, CellState::OutOfDate);
+    }
+
+    #[test]
+    fn a_changed_mesh_block_makes_the_mesh_taken_from_it_out_of_date() {
+        let mesh = block();
+        let mut fe = FeModel::default();
+        fe.steps.push(Step::new_static("Step-1"));
+        let solved = results(fingerprint::solve_input(&mesh, &fe));
+        let inputs = BTreeMap::new();
+        let status = analysis_status(None, &mesh, &fe, &inputs, Some(&solved), &[], false);
+        assert!(!status.needs_solve());
+        // The block's divisions changed; the analysis still holds the block's old mesh.
+        let stale = ["Box-1".to_string()];
+        let status = analysis_status(None, &mesh, &fe, &inputs, Some(&solved), &stale, false);
+        assert_eq!(status.mesh, CellState::OutOfDate);
+        assert_eq!(status.solution, CellState::OutOfDate);
+        assert_eq!(status.results, CellState::OutOfDate);
+        assert_eq!(status.stale_sources, stale);
+        assert!(status.stale_parts.is_empty());
+        assert!(status.needs_solve());
     }
 
     #[test]
@@ -281,6 +359,7 @@ mod tests {
             &FeModel::default(),
             &BTreeMap::new(),
             None,
+            &[],
             false,
         );
         assert_eq!(status.geometry, CellState::Missing);
@@ -292,6 +371,7 @@ mod tests {
             &FeModel::default(),
             &BTreeMap::new(),
             None,
+            &[],
             true,
         );
         assert_eq!(running.solution, CellState::Running);

@@ -82,6 +82,9 @@ struct Node {
     generated: Option<u64>,
     /// Solved in the background, its window closed.
     solving: bool,
+    /// Mesh blocks before it whose mesh is out of date, see
+    /// [`crate::status::Upstream::stale_meshes`]; found by [`ProjectApp::sync_links`].
+    stale_meshes: Vec<String>,
 }
 
 impl Node {
@@ -109,6 +112,7 @@ impl Node {
             primitive: None,
             generated: None,
             solving: false,
+            stale_meshes: Vec::new(),
         };
         node.refresh_closed();
         node
@@ -233,6 +237,7 @@ impl Node {
                 &data.model,
                 &data.mesh_inputs,
                 data.results.as_ref(),
+                &self.stale_meshes,
                 self.solving,
             ));
         }
@@ -581,24 +586,21 @@ impl ProjectApp {
     }
 
     /// Makes the meshes of the mesh blocks that are out of date anew; returns whether it
-    /// made any.
+    /// made any. A block whose mesh cannot be made stays out of date, and so do the
+    /// analyses that take their mesh from it.
     fn generate_meshes(&mut self) -> bool {
-        let mut lines = Vec::new();
-        for node in (self.nodes.iter_mut()).filter(|n| n.kind == Kind::Mesh) {
-            if node.mesh_state() == CellState::UpToDate {
-                continue;
-            }
-            lines.push(match node.generate() {
-                Ok(count) => format!("{}: mesh made, {count} elements", node.name),
-                Err(why) => format!("{}: no mesh made: {why}", node.name),
-            });
-        }
-        if lines.is_empty() {
-            return false;
-        }
+        let (made, lines) = generate_stale_meshes(&mut self.nodes);
         self.output.extend(lines);
-        self.sync_due = true;
-        true
+        if made {
+            self.sync_due = true;
+        }
+        made
+    }
+
+    /// The mesh blocks before the analysis `id` whose mesh is out of date, see
+    /// [`stale_meshes`].
+    fn stale_meshes(&self, id: u64) -> Vec<String> {
+        stale_meshes(&self.nodes, &self.links, id)
     }
 
     /// Makes the mesh of one mesh block anew.
@@ -742,6 +744,10 @@ impl ProjectApp {
         let import = std::mem::take(&mut self.startup_import);
         // What it takes from others is known before it is solved.
         let incoming = self.incoming(id);
+        let upstream = crate::status::Upstream {
+            stale_meshes: self.stale_meshes(id),
+            ..Default::default()
+        };
         self.sync_due = true;
         let Some(node) = self.node(id) else {
             return;
@@ -760,7 +766,7 @@ impl ProjectApp {
         };
         let mut window = AnalysisWindow::new(render_state, settings, &node.name);
         window.set_project_folder(folder);
-        window.set_links(incoming, Vec::new());
+        window.set_links(incoming, upstream);
         if let Some(view) = view {
             window.show_workspace(view.clone());
         }
@@ -1179,6 +1185,16 @@ impl ProjectApp {
             self.window_runs.push(id);
             self.monitor.get_or_insert_default().selected = Some(id);
             return true;
+        }
+        if !node.stale_meshes.is_empty() {
+            // Update Project could not make them anew: the old mesh is not solved.
+            let line = format!(
+                "{} not solved: the mesh of {} is out of date.",
+                node.name,
+                node.stale_meshes.join(", ")
+            );
+            self.output.push(line);
+            return false;
         }
         let Some(data) = node.data.clone() else {
             return false;
@@ -2334,10 +2350,17 @@ impl ProjectApp {
                 }
             }
             let incoming = self.incoming(target);
+            let upstream = crate::status::Upstream {
+                missing_results: missing,
+                stale_meshes: self.stale_meshes(target),
+            };
             if let Some(node) = self.node(target) {
                 match &mut node.window {
-                    Some(window) => window.set_links(incoming, missing),
-                    None => node.refresh_closed(),
+                    Some(window) => window.set_links(incoming, upstream),
+                    None => {
+                        node.stale_meshes = upstream.stale_meshes;
+                        node.refresh_closed();
+                    }
                 }
             }
         }
@@ -2437,12 +2460,27 @@ impl ProjectApp {
                     return None;
                 }
                 if usage == links::ResultsUse::Modes {
-                    // CalculiX reads them from the run's own folder.
+                    // CalculiX writes them into the run's own folder, where the next run of
+                    // the source overwrites them. The target takes a copy in a folder named
+                    // after the solved model, so that new modes make it out of date.
+                    let project = crate::analysis::job_name(&self.project_name());
                     let job = crate::analysis::job_name(&source.name);
-                    let file = (self.settings.solver.work_dir())
-                        .join(crate::analysis::job_name(&self.project_name()))
-                        .join(&job)
+                    let solved = (self.settings.solver.work_dir().join(&project).join(&job))
                         .join(format!("{job}.eig"));
+                    let dir = (self.settings.solver.work_dir().join(project))
+                        .join(crate::analysis::job_name(&target.name))
+                        .join(format!(
+                            "Modes-{job}-{:016x}",
+                            bound.input.unwrap_or_default()
+                        ));
+                    let file = dir.join(format!("{job}.eig"));
+                    if !file.is_file()
+                        && (std::fs::create_dir_all(&dir).is_err()
+                            || std::fs::copy(&solved, &file).is_err())
+                    {
+                        missing.push(source.name.clone());
+                        return None;
+                    }
                     return Some(Payload::Results(global, file));
                 }
                 let frd = bound.files.iter().find(|f| {
@@ -3592,6 +3630,36 @@ fn material_rows(fe: &plx_model::FeModel, expanded: &BTreeSet<Vec<String>>) -> V
         });
     }
     rows
+}
+
+/// Makes the meshes of the mesh blocks among `nodes` that are out of date anew; returns
+/// whether it made any, and a line on each.
+fn generate_stale_meshes(nodes: &mut [Node]) -> (bool, Vec<String>) {
+    let mut lines = Vec::new();
+    let mut made = false;
+    for node in (nodes.iter_mut()).filter(|n| n.kind == Kind::Mesh) {
+        if node.mesh_state() == CellState::UpToDate {
+            continue;
+        }
+        lines.push(match node.generate() {
+            Ok(count) => {
+                made = true;
+                format!("{}: mesh made, {count} elements", node.name)
+            }
+            Err(why) => format!("{}: no mesh made: {why}", node.name),
+        });
+    }
+    (made, lines)
+}
+
+/// The mesh blocks before the analysis `id` whose mesh is out of date: what takes its mesh
+/// from them, directly or through other analyses, holds a mesh that is not the block's.
+fn stale_meshes(nodes: &[Node], links: &[Link], id: u64) -> Vec<String> {
+    (links::upstream(links, id).into_iter())
+        .filter_map(|source| nodes.iter().find(|n| n.id == source))
+        .filter(|n| n.kind == Kind::Mesh && n.mesh_state() != CellState::UpToDate)
+        .map(|n| n.name.clone())
+        .collect()
 }
 
 /// The row of a mesh block: its mesh, to link to analyses, with its state.
@@ -4860,6 +4928,48 @@ mod tests {
         }
         assert_eq!(node.generate(), Ok(80));
         assert_eq!(node.mesh_state(), CellState::UpToDate);
+    }
+
+    #[test]
+    fn analyses_taking_the_mesh_of_a_changed_block_are_out_of_date() {
+        let block = MeshBlock {
+            id: 2,
+            name: "Box".into(),
+            position: [0.0; 2],
+            space: ModelSpace::ThreeD,
+            units: plx_model::UnitSystem::MmTonSC,
+            primitive: MeshPrimitive::default_box(),
+            mesh: Default::default(),
+            generated: None,
+        };
+        let mut nodes = vec![
+            Node::read(ProjectNode::Mesh(Box::new(block))),
+            Node::new(1, "Analysis-1".into(), ProjectAnalysis::default()),
+            Node::new(3, "Analysis-2".into(), ProjectAnalysis::default()),
+        ];
+        let link = |source, target| Link {
+            source,
+            target,
+            item: vec![links::MESH.to_owned()],
+            ..Default::default()
+        };
+        // Analysis-2 takes the mesh of Analysis-1, which takes that of the block.
+        let links = [link(2, 1), link(1, 3)];
+        assert_eq!(stale_meshes(&nodes, &links, 3), ["Box"]);
+        assert!(generate_stale_meshes(&mut nodes).0);
+        assert!(stale_meshes(&nodes, &links, 3).is_empty());
+        // New divisions: the analyses hold the old mesh until the block makes the new one.
+        let primitive = nodes[0].primitive.as_mut().unwrap();
+        assert!(primitive.set("nx", plx_model::ParamValue::Count(20)));
+        assert_eq!(stale_meshes(&nodes, &links, 1), ["Box"]);
+        assert_eq!(stale_meshes(&nodes, &links, 3), ["Box"]);
+        // A mesh that cannot be made leaves the block out of date and is not reported as
+        // made, so that Update Project does not try again and again.
+        nodes[0].primitive = Some(MeshPrimitive::default_rectangle());
+        let (made, lines) = generate_stale_meshes(&mut nodes);
+        assert!(!made);
+        assert!(lines[0].contains("no mesh made"), "{lines:?}");
+        assert_eq!(stale_meshes(&nodes, &links, 3), ["Box"]);
     }
 
     #[test]

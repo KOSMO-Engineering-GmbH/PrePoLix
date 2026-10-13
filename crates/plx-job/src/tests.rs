@@ -70,3 +70,27 @@ fn a_missing_solver_is_reported_at_start() {
     assert!(Job::start(&solver, &dir, "Analysis-1", "").is_err());
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn a_solver_that_crashes_after_writing_results_fails() {
+    use std::os::unix::fs::PermissionsExt;
+    // Writes results as CalculiX would, then ends with an error code but no error message,
+    // as a CalculiX that runs out of memory does.
+    let dir = work_dir("crash");
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = dir.join("crashing-ccx.sh");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\nhead -c 1000 /dev/zero | tr '\\0' 'x' > \"$1.frd\"\nexit 3\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let solver = Solver {
+        executable: script,
+        threads: 1,
+    };
+    let mut job = Job::start(&solver, &dir, "job", "*HEADING\n").unwrap();
+    assert_eq!(job.wait(), JobStatus::FailedWithResults);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
