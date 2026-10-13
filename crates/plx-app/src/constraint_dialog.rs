@@ -17,21 +17,60 @@ use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft, face_target};
 /// The fixed width of the dialog's content, so it does not change with the type.
 pub(crate) const WIDTH: f32 = 440.0;
 
-/// PrePoMax's list of constraint types, with prepolix's spring connection added; `None` for
-/// those prepolix does not have yet.
-const TYPES: [(&str, Option<Type>); 5] = [
-    ("Point Spring", Some(Type::PointSpring)),
-    ("Surface Spring", Some(Type::SurfaceSpring)),
-    ("Compression Only", Some(Type::CompressionOnly)),
-    ("Rigid Body", Some(Type::RigidBody)),
+/// PrePoMax's list of constraint types, with prepolix's spring connection added.
+const TYPES: [(&str, Choice); 6] = [
+    ("Point Spring", Choice::Constraint(Type::PointSpring)),
+    ("Surface Spring", Choice::Constraint(Type::SurfaceSpring)),
+    (
+        "Compression Only",
+        Choice::Constraint(Type::CompressionOnly),
+    ),
+    ("Rigid Body", Choice::Constraint(Type::RigidBody)),
+    ("Tie", Choice::Tie),
     (
         "Surface To Surface Spring",
-        Some(Type::SurfaceToSurfaceSpring),
+        Choice::Constraint(Type::SurfaceToSurfaceSpring),
     ),
 ];
 
+/// An entry of the type list: ties are kept apart from the other constraints in the model
+/// (`FeModel::ties`) and have their own draft, but are created from the same dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Type {
+pub(crate) enum Choice {
+    Tie,
+    Constraint(Type),
+}
+
+/// PrePoMax's list of constraint types; returns the type clicked other than `current`.
+/// The type cannot be changed when editing.
+pub(crate) fn type_list(ui: &mut Ui, current: Choice, creating: bool) -> Option<Choice> {
+    let mut picked = None;
+    ui.label("Type");
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(200.0);
+        ui.vertical(|ui| {
+            for (label, kind) in TYPES {
+                let selected = kind == current;
+                let response = ui.add_enabled(creating, egui::Button::selectable(selected, label));
+                let response = if selected {
+                    response
+                } else {
+                    response.on_disabled_hover_text(
+                        "The type of a constraint cannot be changed when editing.",
+                    )
+                };
+                if response.clicked() && !selected {
+                    picked = Some(kind);
+                }
+            }
+        });
+    });
+    ui.end_row();
+    picked
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Type {
     PointSpring,
     SurfaceSpring,
     CompressionOnly,
@@ -142,6 +181,16 @@ pub(crate) struct ConstraintDraft {
 }
 
 impl ConstraintDraft {
+    /// A new constraint of the type picked in the list of a tie's dialog; `taken` are the
+    /// names it must not repeat.
+    pub(crate) fn of_type(fe: &FeModel, kind: Type, taken: &[&str]) -> Self {
+        let mut draft = Self::new(fe);
+        if kind != draft.kind() {
+            draft.switch(kind, taken);
+        }
+        draft
+    }
+
     pub(crate) fn new(fe: &FeModel) -> Self {
         let kind = Type::PointSpring;
         let faces = face_target(fe);
@@ -256,39 +305,19 @@ impl ConstraintDraft {
         constraint
     }
 
-    pub(crate) fn form(&mut self, ui: &mut Ui, model: &Model, taken: &[&str], creating: bool) {
-        let current = self.kind();
-        ui.label("Type");
-        egui::Frame::group(ui.style()).show(ui, |ui| {
-            ui.set_width(200.0);
-            ui.vertical(|ui| {
-                for (label, kind) in TYPES {
-                    let selected = kind == Some(current);
-                    let enabled = creating && kind.is_some();
-                    let response =
-                        ui.add_enabled(enabled, egui::Button::selectable(selected, label));
-                    let response = match kind {
-                        None => response.on_disabled_hover_text("Not available yet"),
-                        Some(_) if !selected => response.on_disabled_hover_text(
-                            "The type of a constraint cannot be changed when editing.",
-                        ),
-                        Some(_) => response,
-                    };
-                    if let Some(kind) = kind
-                        && response.clicked()
-                        && !selected
-                    {
-                        self.switch(kind, taken);
-                    }
-                }
-            });
-        });
-        ui.end_row();
-        hint(
-            ui,
-            "Ties are not constraints: create them with Interaction > Create Tie, they are \
-             listed under Contact Pairs.",
-        );
+    /// Returns whether a tie was picked in the type list; the caller then replaces the draft.
+    pub(crate) fn form(
+        &mut self,
+        ui: &mut Ui,
+        model: &Model,
+        taken: &[&str],
+        creating: bool,
+    ) -> bool {
+        match type_list(ui, Choice::Constraint(self.kind()), creating) {
+            Some(Choice::Tie) => return true,
+            Some(Choice::Constraint(kind)) => self.switch(kind, taken),
+            None => {}
+        }
         name_row(ui, &mut self.constraint);
         let units = model.fe.properties.units;
         match &mut self.constraint {
@@ -359,6 +388,7 @@ impl ConstraintDraft {
                 );
             }
         }
+        false
     }
 
     /// Another type was picked in the list: its defaults, keeping a name the user chose.

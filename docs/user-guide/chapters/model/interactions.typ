@@ -14,6 +14,7 @@ Create them with #menu("Interaction", "Create Constraint ...") or with #ui("Crea
     Written as `SPRING1` elements.],
   [Surface Spring], [Springs on a face region. The stiffness is given #ui("Total") or
     #ui("Per area") and distributed over the nodes by area.],
+  [Tie], [Glues a slave surface to a master surface (`*TIE`), see @ties.],
   [Compression Only], [A support that only takes pressure, like a part resting on a rigid floor.
     #ui("Clearance") is the initial gap, #ui("Spring stiffness") and #ui("Tensile force")
     are optional. With #ui("Nonlinear") the contact is solved nonlinearly, otherwise it is
@@ -44,6 +45,28 @@ with the project. Hiding changes only the view, not the analysis; #ui("Deactivat
 constraint out of the input file.
 
 #screenshot("constraint-hide.png", [Hidden point spring and the context menu of Constraints])
+
+=== Ties <ties>
+
+A #ui("Tie") glues a slave surface to a master surface (`*TIE`), the usual way to join parts that
+are meshed separately. Pick #ui("Tie") in the type list of the constraint dialog. Ties are
+listed under #ui("Constraints"), also those the contact search (@contacts) creates.
+
+#screenshot("tie-constraint.png", [Tie in the constraint dialog, listed under Constraints])
+
+#fields(
+  [Position tolerance], [The largest distance at which slave nodes are tied.],
+  [Adjust], [#ui("Move slave nodes onto master (Adjust)") projects the slave nodes onto the
+    master surface.],
+  [Master / Slave], [The two surfaces, picked with their #ui("...") buttons, also edges of
+    shells as for contact pairs. Choose the finer mesh as slave, and an edge of a shell as slave
+    of the face it stands on.],
+  [Cyclic symmetry], [Ties the two cut faces of a sector of a rotationally repeating part, see
+    @cyclic-symmetry.],
+)
+
+A tie is not the same as a contact pair with #ui("Tied") surface behavior (@contacts): the tie
+couples the nodes kinematically, the tied contact is a penalty contact.
 
 #limitation[User-defined equations are not available yet.]
 
@@ -138,24 +161,6 @@ the shell (S3 and up). For a contact on a shell edge use #ui("Surface to surface
 Hover over a method in the list to see a short description. The Search Contact Pairs window shows
 the same texts.
 
-=== Ties <ties>
-
-#menu("Interaction", "Create Tie ...") or #ui("Create Tie ...") in the context menu of
-#ui("Contact Pairs") glues a slave surface to a master surface (`*TIE`). Ties are listed under
-#ui("Contact Pairs"), with the contact pairs and node ties; projects that kept them under
-#ui("Constraints") open with them moved there.
-
-#fields(
-  [Position tolerance], [The largest distance at which slave nodes are tied.],
-  [Adjust], [#ui("Move slave nodes onto master (Adjust)") projects the slave nodes onto the
-    master surface.],
-  [Master / Slave], [The two surfaces, picked with their #ui("...") buttons, also edges of
-    shells as for contact pairs. Choose the finer mesh as slave, and an edge of a shell as slave
-    of the face it stands on.],
-  [Cyclic symmetry], [Ties the two cut faces of a sector of a rotationally repeating part, see
-    @cyclic-symmetry.],
-)
-
 === Node ties
 
 #ui("Create Node Tie ...") in the context menu of #ui("Contact Pairs") makes all nodes of a region
@@ -190,8 +195,8 @@ creates ties or contact pairs for them.
 several rows to edit them together. The context menu of a row has #ui("Swap Master/Slave") and
 #ui("Merge by Master/Slave"). PrePoLix chooses the coarser mesh as master, then the stiffer
 material, then the larger surface; an edge of a shell is always the slave of a face. A shell
-touches with the side facing the other part: CalculiX ties its top (S2) or bottom (S1). #ui("OK") creates the checked pairs, all under
-#ui("Contact Pairs"); line ends become node ties. Surfaces that are whole CAD faces or edges are stored by geometry and
+touches with the side facing the other part: CalculiX ties its top (S2) or bottom (S1). #ui("OK") creates the checked pairs: ties under
+#ui("Constraints"), contact pairs under #ui("Contact Pairs"); line ends become node ties. Surfaces that are whole CAD faces or edges are stored by geometry and
 survive remeshing.
 
 #screenshot("contact-search-shell-edge.png", [A tie found by the search between the bottom of a

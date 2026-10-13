@@ -23,7 +23,7 @@ use plx_model::{
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
-use crate::constraint_dialog::ConstraintDraft;
+use crate::constraint_dialog::{Choice, ConstraintDraft, type_list};
 use crate::contacts::{self, MasterSlave};
 use crate::icons::{self, Icon};
 use crate::model::{Highlight, Hit, Model};
@@ -48,12 +48,10 @@ pub enum NewItem {
     HistoryOutput(usize),
     /// A defined temperature of a step.
     DefinedField(usize),
-    /// A spring, support or rigid body, chosen in the dialog.
+    /// A spring, support, rigid body or tie, chosen in the dialog.
     Constraint,
     SurfaceInteraction,
     ContactPair,
-    /// Surfaces glued to each other; listed with the contact pairs.
-    Tie,
     /// Nodes tied to each other, the ends of beams; listed with the contact pairs.
     NodeTie,
     /// A time curve for boundary conditions and loads.
@@ -1487,10 +1485,6 @@ impl Editor {
                     MasterSlave::new(contact_target(fe)),
                 )
             }
-            NewItem::Tie => {
-                let name = next_name("Tie", names(&fe.ties, |t| &t.name));
-                Draft::Tie(Tie::new(name), MasterSlave::new(contact_target(fe)))
-            }
             NewItem::NodeTie => {
                 let name = next_name("Node_Tie", names(&fe.node_ties, |t| &t.name));
                 Draft::NodeTie(
@@ -1798,7 +1792,7 @@ impl Editor {
             .open(&mut open)
             .collapsible(false)
             .resizable(false);
-        if matches!(self.draft, Draft::Constraint(_)) {
+        if matches!(self.draft, Draft::Constraint(_) | Draft::Tie(..)) {
             // The types differ in how much room their rows need; without a fixed width the
             // window would jump between them, and egui never shrinks it again.
             window = window
@@ -1853,6 +1847,9 @@ impl Editor {
         let space = model.fe.properties.space;
         let (two_d, axisymmetric) = (space.is_2d(), space == ModelSpace::Axisymmetric);
         let units = model.fe.properties.units;
+        // Another entry of the constraint dialog's type list: a tie and the other
+        // constraints have different drafts.
+        let mut switch = None;
         match &mut self.draft {
             Draft::Material(material) => material_form(ui, material, units),
             Draft::Section(section, region) => {
@@ -2507,7 +2504,11 @@ impl Editor {
             Draft::HistoryOutput(_, output, region) => {
                 history_output_form(ui, model, output, region, &taken);
             }
-            Draft::Constraint(c) => c.form(ui, model, &taken, self.index.is_none()),
+            Draft::Constraint(c) => {
+                if c.form(ui, model, &taken, self.index.is_none()) {
+                    switch = Some(Choice::Tie);
+                }
+            }
             // Laid out by their own dialogs, see show.
             Draft::SurfaceInteraction(..) | Draft::Amplitude(..) => {}
             Draft::ContactPair(pair, regions) => {
@@ -2515,6 +2516,7 @@ impl Editor {
                 contacts::contact_pair_form(ui, model, pair, regions);
             }
             Draft::Tie(tie, regions) => {
+                switch = type_list(ui, Choice::Tie, self.index.is_none());
                 name_row(ui, &mut tie.name);
                 contacts::tie_form(ui, model, tie, regions);
             }
@@ -2523,6 +2525,19 @@ impl Editor {
                 region.ui(ui, model);
             }
         }
+        match switch {
+            Some(Choice::Tie) => {
+                let name = next_name("Tie", taken.iter().copied());
+                let regions = MasterSlave::new(contact_target(&model.fe));
+                self.draft = Draft::Tie(Tie::new(name), regions);
+            }
+            Some(Choice::Constraint(kind)) => {
+                let draft = ConstraintDraft::of_type(&model.fe, kind, &taken);
+                self.draft = Draft::Constraint(draft);
+            }
+            None => return,
+        }
+        self.error = None;
     }
 
     /// Names of the other items of the same kind, which the draft's name must not repeat.
@@ -2539,16 +2554,23 @@ impl Editor {
             Draft::FieldOutput(step, _) => names(&fe.steps[*step].field_outputs, |f| &f.name),
             Draft::HistoryOutput(step, ..) => names(&fe.steps[*step].history_outputs, |h| &h.name),
             Draft::DefinedField(step, ..) => names(&fe.steps[*step].defined_fields, |f| &f.name),
-            Draft::Constraint(_) => fe.constraints.iter().map(Constraint::name).collect(),
+            // Ties are listed and linked with the other constraints.
+            Draft::Constraint(_) | Draft::Tie(..) => (fe.constraints.iter().map(Constraint::name))
+                .chain(fe.ties.iter().map(|t| t.name.as_str()))
+                .collect(),
             Draft::SurfaceInteraction(..) => names(&fe.surface_interactions, |s| &s.name),
             Draft::ContactPair(..) => names(&fe.contact_pairs, |c| &c.name),
-            Draft::Tie(..) => names(&fe.ties, |t| &t.name),
             Draft::NodeTie(..) => names(&fe.node_ties, |t| &t.name),
             Draft::Amplitude(..) => names(&fe.amplitudes, |a| &a.name),
             // Against the mesh's sets, see validate_set.
             Draft::MeshSet(..) => Vec::new(),
         };
-        if let Some(index) = self.index.filter(|&i| i < siblings.len()) {
+        // Ties follow the other constraints in the list.
+        let offset = match self.draft {
+            Draft::Tie(..) => fe.constraints.len(),
+            _ => 0,
+        };
+        if let Some(index) = (self.index.map(|i| i + offset)).filter(|&i| i < siblings.len()) {
             siblings.remove(index);
         }
         siblings

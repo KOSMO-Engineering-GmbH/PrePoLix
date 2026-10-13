@@ -597,11 +597,13 @@ pub fn entries(fe: &FeModel, category: &str) -> Vec<String> {
         ),
         "Materials" => names(&mut fe.materials.iter().map(|m| m.name.as_str())),
         "Sections" => names(&mut fe.sections.iter().map(|s| s.name.as_str())),
-        "Constraints" => names(&mut fe.constraints.iter().map(|c| c.name())),
+        "Constraints" => names(
+            &mut (fe.constraints.iter().map(|c| c.name()))
+                .chain(fe.ties.iter().map(|t| t.name.as_str())),
+        ),
         "Contacts" => names(
             &mut (fe.surface_interactions.iter().map(|s| s.name.as_str()))
                 .chain(fe.contact_pairs.iter().map(|c| c.name.as_str()))
-                .chain(fe.ties.iter().map(|t| t.name.as_str()))
                 .chain(fe.node_ties.iter().map(|t| t.name.as_str())),
         ),
         "Amplitudes" => names(&mut fe.amplitudes.iter().map(|a| a.name.as_str())),
@@ -686,11 +688,13 @@ fn category_fingerprint(hash: &mut Fnv, fe: &FeModel, category: &str, name: Opti
         }
         "Materials" => add(hash, &fe.materials, |m| &m.name, name),
         "Sections" => add(hash, &fe.sections, |s| &s.name, name),
-        "Constraints" => add(hash, &fe.constraints, |c| c.name(), name),
+        "Constraints" => {
+            add(hash, &fe.constraints, |c| c.name(), name);
+            add(hash, &fe.ties, |t| &t.name, name);
+        }
         "Contacts" => {
             add(hash, &fe.surface_interactions, |s| &s.name, name);
             add(hash, &fe.contact_pairs, |c| &c.name, name);
-            add(hash, &fe.ties, |t| &t.name, name);
             add(hash, &fe.node_ties, |t| &t.name, name);
         }
         "Amplitudes" => add(hash, &fe.amplitudes, |a| &a.name, name),
@@ -801,12 +805,15 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
         }
         "Materials" => copy(&mut target.materials, &source.materials, |m| &m.name, name),
         "Sections" => copy(&mut target.sections, &source.sections, |s| &s.name, name),
-        "Constraints" => copy(
-            &mut target.constraints,
-            &source.constraints,
-            |c| c.name(),
-            name,
-        ),
+        "Constraints" => {
+            copy(
+                &mut target.constraints,
+                &source.constraints,
+                |c| c.name(),
+                name,
+            );
+            copy(&mut target.ties, &source.ties, |t| &t.name, name);
+        }
         "Contacts" => {
             copy(
                 &mut target.surface_interactions,
@@ -820,7 +827,6 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
                 |c| &c.name,
                 name,
             );
-            copy(&mut target.ties, &source.ties, |t| &t.name, name);
             copy(&mut target.node_ties, &source.node_ties, |t| &t.name, name);
         }
         "Amplitudes" => copy(
@@ -1054,11 +1060,18 @@ fn category_items(fe: &FeModel, category: &str, name: Option<&str>) -> Vec<TreeI
                 .filter(|(_, s)| wanted(&s.name))
                 .map(|(i, _)| TreeItem::Section(i)),
         ),
-        "Constraints" => items.extend(
-            (fe.constraints.iter().enumerate())
-                .filter(|(_, c)| wanted(c.name()))
-                .map(|(i, _)| TreeItem::Constraint(i)),
-        ),
+        "Constraints" => {
+            items.extend(
+                (fe.constraints.iter().enumerate())
+                    .filter(|(_, c)| wanted(c.name()))
+                    .map(|(i, _)| TreeItem::Constraint(i)),
+            );
+            items.extend(
+                (fe.ties.iter().enumerate())
+                    .filter(|(_, t)| wanted(&t.name))
+                    .map(|(i, _)| TreeItem::Tie(i)),
+            );
+        }
         "Contacts" => {
             items.extend(
                 (fe.surface_interactions.iter().enumerate())
@@ -1069,11 +1082,6 @@ fn category_items(fe: &FeModel, category: &str, name: Option<&str>) -> Vec<TreeI
                 (fe.contact_pairs.iter().enumerate())
                     .filter(|(_, c)| wanted(&c.name))
                     .map(|(i, _)| TreeItem::ContactPair(i)),
-            );
-            items.extend(
-                (fe.ties.iter().enumerate())
-                    .filter(|(_, t)| wanted(&t.name))
-                    .map(|(i, _)| TreeItem::Tie(i)),
             );
             items.extend(
                 (fe.node_ties.iter().enumerate())
@@ -1138,7 +1146,7 @@ pub fn path_of(fe: &FeModel, item: &TreeItem) -> Option<Vec<String>> {
             entry("Contacts", &fe.surface_interactions.get(*i)?.name)
         }
         TreeItem::ContactPair(i) => entry("Contacts", &fe.contact_pairs.get(*i)?.name),
-        TreeItem::Tie(i) => entry("Contacts", &fe.ties.get(*i)?.name),
+        TreeItem::Tie(i) => entry("Constraints", &fe.ties.get(*i)?.name),
         TreeItem::NodeTie(i) => entry("Contacts", &fe.node_ties.get(*i)?.name),
         TreeItem::Amplitude(i) => entry("Amplitudes", &fe.amplitudes.get(*i)?.name),
         TreeItem::InitialCondition(i) => {
@@ -1177,6 +1185,21 @@ mod tests {
 
     fn path(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|p| p.to_string()).collect()
+    }
+
+    #[test]
+    fn ties_are_linked_with_the_constraints() {
+        let mut source = FeModel::default();
+        source.ties.push(plx_model::Tie::new("Tie-1"));
+        assert_eq!(entries(&source, "Constraints"), ["Tie-1"]);
+        assert!(entries(&source, "Contacts").is_empty());
+        assert_eq!(
+            path_of(&source, &TreeItem::Tie(0)),
+            Some(path(&["Setup", "Constraints", "Tie-1"]))
+        );
+        let mut target = FeModel::default();
+        apply_setup(&mut target, &source, &path(&["Setup", "Constraints"]));
+        assert_eq!(target.ties.len(), 1);
     }
 
     fn fp(fe: &FeModel, path: &[String]) -> u64 {

@@ -573,16 +573,17 @@ impl Problem {
             }
             Problem::ContactIgnored => {
                 "Tick Perturbation in the Frequency step (after a static step), or join \
-                 bonded parts with a Tie constraint instead of a tied contact pair (Interaction > Create Tie)."
+                 bonded parts with a Tie constraint instead of a tied contact pair \
+                 (Interaction > Create Constraint > Tie)."
             }
             Problem::InvalidTiedContact => {
                 "Edit the surface interaction and add Friction, and set the method of the \
                  contact pairs to Surface to surface. To bond parts, a Tie (Interaction > \
-                 Create Tie) works with every method."
+                 Create Constraint > Tie) works with every method."
             }
             Problem::ContactWithCoriolis => {
-                "Join bonded parts with a Tie constraint (Interaction > Create Tie) instead \
-                 of a contact pair with tied surface behavior."
+                "Join bonded parts with a Tie constraint (Interaction > Create Constraint > \
+                 Tie) instead of a contact pair with tied surface behavior."
             }
             Problem::NoConvergence => {
                 "Check the contacts (stiffness of the Surface Interaction, Adjust, \

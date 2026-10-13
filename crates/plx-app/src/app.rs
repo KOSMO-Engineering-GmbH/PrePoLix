@@ -3132,7 +3132,6 @@ impl Workbench {
             (NewItem::Constraint, "Create Constraint …"),
             (NewItem::SurfaceInteraction, "Create Surface Interaction …"),
             (NewItem::ContactPair, "Create Contact Pair …"),
-            (NewItem::Tie, "Create Tie …"),
         ] {
             if ui.button(label).clicked() {
                 kind = Some(item);
@@ -6873,7 +6872,7 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
         | NewItem::HistoryOutput(s)
         | NewItem::DefinedField(s) => TreeItem::Step(*s),
         NewItem::Constraint => TreeItem::Group("Constraints"),
-        NewItem::SurfaceInteraction | NewItem::ContactPair | NewItem::Tie | NewItem::NodeTie => {
+        NewItem::SurfaceInteraction | NewItem::ContactPair | NewItem::NodeTie => {
             TreeItem::Group("Contacts")
         }
         NewItem::Amplitude => TreeItem::Group("Amplitudes"),

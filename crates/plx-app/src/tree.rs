@@ -364,11 +364,7 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
         ),
         ModelItem::Tie(i) => (
             TreeItem::Tie(i),
-            vec![
-                TreeItem::Group("Contact Pairs"),
-                TreeItem::Group("Contacts"),
-                TreeItem::Model,
-            ],
+            vec![TreeItem::Group("Constraints"), TreeItem::Model],
         ),
         ModelItem::NodeTie(i) => (
             TreeItem::NodeTie(i),
@@ -880,15 +876,11 @@ impl Tree<'_> {
                         self.response.generate_mesh = true;
                     }
                 }
-                // Ties and node ties live with the contact pairs; the search creates most
-                // of them.
-                if item == TreeItem::Group("Contact Pairs") {
-                    if ui.button("Create Tie …").clicked() {
-                        self.response.create = Some(NewItem::Tie);
-                    }
-                    if ui.button("Create Node Tie …").clicked() {
-                        self.response.create = Some(NewItem::NodeTie);
-                    }
+                // Node ties live with the contact pairs; the search creates most of them.
+                if item == TreeItem::Group("Contact Pairs")
+                    && ui.button("Create Node Tie …").clicked()
+                {
+                    self.response.create = Some(NewItem::NodeTie);
                 }
                 // PrePoMax offers the search on constraints and contact pairs.
                 let members: Vec<TreeItem> = (self.symbols.keys())
@@ -1480,14 +1472,15 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
         for (i, _) in (fe.node_ties.iter().enumerate()).filter(|(_, t)| !t.active) {
             tree.inactive.insert(TreeItem::NodeTie(i));
         }
+        // Ties are *TIE constraints, as in PrePoMax; the contact search creates most of them.
         let constraints = (fe.constraints.iter().enumerate())
             .map(|(i, c)| (TreeItem::Constraint(i), c.name()))
+            .chain((fe.ties.iter().enumerate()).map(|(i, t)| (TreeItem::Tie(i), t.name.as_str())))
             .collect();
         tree.container(ui, "Constraints", constraints);
         let contacts = TreeItem::Group("Contacts");
         let open = !fe.surface_interactions.is_empty()
             || !fe.contact_pairs.is_empty()
-            || !fe.ties.is_empty()
             || !fe.node_ties.is_empty();
         tree.branch(ui, contacts, "Contacts", open, |tree, ui| {
             let interactions = (fe.surface_interactions.iter().enumerate())
@@ -1496,9 +1489,6 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             tree.container(ui, "Surface Interactions", interactions);
             let pairs = (fe.contact_pairs.iter().enumerate())
                 .map(|(i, c)| (TreeItem::ContactPair(i), c.name.as_str()))
-                .chain(
-                    (fe.ties.iter().enumerate()).map(|(i, t)| (TreeItem::Tie(i), t.name.as_str())),
-                )
                 .chain(
                     (fe.node_ties.iter().enumerate())
                         .map(|(i, t)| (TreeItem::NodeTie(i), t.name.as_str())),
