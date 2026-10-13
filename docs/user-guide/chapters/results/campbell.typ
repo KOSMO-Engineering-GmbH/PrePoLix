@@ -40,7 +40,16 @@ keeps adding speeds where the curves bend most: between the two speeds whose cur
 from a straight line, weighted with the width of the gap, so that a resolved curve lets the
 speeds spread over the rest of the range. The diagram grows with every speed. The sweep ends at
 #ui("Maximum runs"), at #ui("Stop"), which cancels the running speeds and keeps the finished ones,
-or when no gap is wider than a five-hundredth of the range. Gaps next to a speed CalculiX could
+or when no gap is wider than a five-hundredth of the range. #ui("Pause") lets the running speeds
+finish and starts no new ones; #ui("Continue") goes on from there. #ui("Continue") also goes on
+with a finished or stopped sweep: another #ui("Maximum runs") runs that refine between its speeds,
+as long as the model has not changed since; after a change, #ui("Start sweep") begins anew.
+
+To look closer at part of the diagram, hold #key("Shift") and drag across it: the marked speed
+range is shaded and named #ui("Refine range"), and new speeds go only there, down to a
+five-hundredth of the marked range. Mark a range while the sweep runs or is paused, or after it
+finished, and press #ui("Continue"); the sweep again picks the speeds where the curves bend most
+within the range. #ui("Clear range") under the diagram lets new speeds go anywhere again. Gaps next to a speed CalculiX could
 not solve are not refined further. The progress and the messages of the runs appear below the
 diagram. When fewer than two speeds give complex frequencies, the window says so in place of the
 diagram; the messages below name the CalculiX error of each failed speed.
@@ -61,8 +70,9 @@ drag along an axis to zoom only that axis, and double-click to fit the view to t
 A click on a legend entry hides or shows that mode or order line. Hovering a point shows its
 curve, speed and frequency.
 
-#screenshot("campbell.png", [Campbell diagram of a spinning cantilever after an adaptive sweep;
-Mode 7 is hidden by a click on its legend entry])
+#screenshot("campbell.png", [Campbell diagram of a spinning cantilever: an adaptive sweep, then a
+marked range around the zero crossing of Mode 1 refined with Continue; Mode 7 is hidden by a
+click on its legend entry])
 
 Where a mode crosses an order line, the rotor is
 excited at one of its eigenfrequencies: these crossings are listed under #ui("Critical speeds")

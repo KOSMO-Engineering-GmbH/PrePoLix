@@ -439,8 +439,10 @@ fn bends(tracks: &Tracks) -> Vec<(f64, f64)> {
     bends
 }
 
-/// The next speed to run: the middle of the gap between neighbouring speeds where the curves
-/// bend most, weighted with the width of the gap. Gaps next to a failed or running speed and
+/// The next speed to run within `min_speed..=max_speed`, the whole sweep or a range the user
+/// marked: the middle of the gap between neighbouring speeds where the curves bend most,
+/// weighted with the width of the gap. The resolution is relative to the range, so a marked
+/// range is sampled finer. Gaps next to a failed or running speed and
 /// gaps narrower than twice the resolution are left alone, so the sweep does not chase
 /// a speed CalculiX cannot solve. `None` when no gap is left to split.
 pub fn next_speed(
@@ -474,17 +476,31 @@ pub fn next_speed(
     let mut best: Option<(f64, f64)> = None;
     for pair in taken.windows(2) {
         let ((a, a_ok), (b, b_ok)) = (pair[0], pair[1]);
-        let width = (b - a) / range;
+        // Only the part of the gap within the range counts, so that a narrow range between
+        // two speeds is refined on its own.
+        let (low, high) = (a.max(min_speed), b.min(max_speed));
+        let width = (high - low) / range;
         if !(a_ok && b_ok) || width < 2.0 * MIN_GAP {
             continue;
         }
         let bend = bend_at(a).max(bend_at(b)) / scale;
         let score = bend + WIDTH_WEIGHT * width;
         if best.is_none_or(|(s, _)| score > s) {
-            best = Some((score, 0.5 * (a + b)));
+            best = Some((score, 0.5 * (low + high)));
         }
     }
     best.map(|(_, speed)| speed)
+}
+
+/// A range marked with the mouse, rounded to a power of ten of at most a hundredth of its
+/// width.
+pub fn round_range(low: f64, high: f64) -> [f64; 2] {
+    let width = high - low;
+    if !(width.is_finite() && width > 0.0) {
+        return [low, high];
+    }
+    let step = 10f64.powf((width / 1000.0).log10().ceil());
+    [(low / step).round() * step, (high / step).round() * step]
 }
 
 /// What the diagram draws, in rpm over Hz.
@@ -598,6 +614,8 @@ struct Sweep {
     max_speed: f64,
     /// Stop was pressed: running speeds are cancelled, no new ones start.
     stopping: bool,
+    /// Pause was pressed: running speeds finish, no new ones start until Continue.
+    paused: bool,
 }
 
 /// What the sweep threads work on.
@@ -718,6 +736,15 @@ pub struct CampbellWindow {
     plot_generation: u32,
     /// The frequency axis limit the plot was last shown with.
     shown_max_frequency: f64,
+    /// Speed range in radians per time the user marked in the diagram for refinement.
+    focus: Option<[f64; 2]>,
+    /// The range being marked by dragging, in rpm: where the drag started and is now.
+    marking: Option<[f64; 2]>,
+    /// Fingerprint of the model the points were computed with, so that a sweep continues
+    /// only on the same model.
+    fingerprint: Option<u64>,
+    /// Number of the next CalculiX job, counted over continued sweeps.
+    next_index: u32,
 }
 
 impl CampbellWindow {
@@ -741,20 +768,60 @@ impl CampbellWindow {
             swept: false,
             plot_generation: 0,
             shown_max_frequency: 0.0,
+            focus: None,
+            marking: None,
+            fingerprint: None,
+            next_index: 0,
         }
+    }
+
+    /// Whether the sweep is paused: no new speeds start until it continues.
+    pub fn is_paused(&self) -> bool {
+        self.sweep.as_ref().is_some_and(|s| s.paused)
+    }
+
+    /// Pauses the sweep: the running speeds finish, no new ones start.
+    pub fn pause(&mut self) {
+        if let Some(sweep) = &mut self.sweep {
+            sweep.paused = true;
+            self.log
+                .push("Sweep paused; the running speeds finish.".into());
+        }
+    }
+
+    /// Whether a finished or stopped sweep can go on with more runs.
+    fn can_continue(&self) -> bool {
+        self.is_paused() || (self.sweep.is_none() && self.points.len() >= 2)
     }
 
     pub fn is_running(&self) -> bool {
         self.sweep.is_some()
     }
 
-    /// Starts the sweep on the model; steps at the default solver use `default_solver`.
+    /// Starts the sweep on the model; steps at the default solver use `default_solver`. With
+    /// `keep` it continues the last sweep instead: a paused one goes on, a finished one starts
+    /// another `max_runs` runs that refine between the speeds it has, as long as the model is
+    /// the same.
     pub fn start(
         &mut self,
         solver: &crate::settings::Solver,
         model: &Model,
         default_solver: EquationSolver,
+        keep: bool,
     ) -> Result<(), String> {
+        if keep && let Some(sweep) = &mut self.sweep {
+            sweep.paused = false;
+            self.log.push("Sweep continued.".into());
+            self.poll();
+            return Ok(());
+        }
+        let fingerprint = plx_model::fingerprint::solve_input(&model.mesh, &model.fe);
+        if keep && self.fingerprint != Some(fingerprint) {
+            return Err(
+                "The model changed since the sweep; start a new sweep for the changed model."
+                    .into(),
+            );
+        }
         let Some(step) = complex_step(&model.fe) else {
             return Err("The model has no active Complex Frequency step.".into());
         };
@@ -786,21 +853,30 @@ impl CampbellWindow {
             GRID.min(max_runs as usize).max(2)
         };
         let (sender, receiver) = channel();
-        self.orders = self.setup.order_values();
-        self.points.clear();
-        self.swept = true;
-        self.swept_speed = max_speed;
-        self.plot_generation += 1;
         let runs = match max_runs {
             0 => "until stopped".to_string(),
             n => format!("up to {n} runs"),
         };
-        self.log = vec![format!(
-            "Sweep started: {} to {} rpm, {runs}, in {}",
-            numeric::format_physical(rpm(min_speed)),
-            numeric::format_physical(rpm(max_speed)),
-            work_dir.display()
-        )];
+        // A continued sweep refines between its speeds and needs no grid.
+        let grid = if keep {
+            self.log.push(format!("Sweep continued: {runs}."));
+            VecDeque::new()
+        } else {
+            self.orders = self.setup.order_values();
+            self.points.clear();
+            self.swept = true;
+            self.swept_speed = max_speed;
+            self.plot_generation += 1;
+            self.focus = None;
+            self.fingerprint = Some(fingerprint);
+            self.log = vec![format!(
+                "Sweep started: {} to {} rpm, {runs}, in {}",
+                numeric::format_physical(rpm(min_speed)),
+                numeric::format_physical(rpm(max_speed)),
+                work_dir.display()
+            )];
+            grid(min_speed, max_speed, grid_count).into()
+        };
         self.sweep = Some(Sweep {
             input: Arc::new(SweepInput {
                 solver: job_solver,
@@ -812,7 +888,7 @@ impl CampbellWindow {
             sender,
             receiver,
             cancel: Arc::new(AtomicBool::new(false)),
-            grid: grid(min_speed, max_speed, grid_count).into(),
+            grid,
             running: Vec::new(),
             failed: Vec::new(),
             started: 0,
@@ -821,6 +897,7 @@ impl CampbellWindow {
             min_speed,
             max_speed,
             stopping: false,
+            paused: false,
         });
         self.poll();
         Ok(())
@@ -862,30 +939,29 @@ impl CampbellWindow {
                 }
             }
         }
+        // A marked range takes the refinement, within the speed range of the sweep.
+        let (low, high) = match self.focus {
+            Some([a, b]) => (a.max(sweep.min_speed), b.min(sweep.max_speed)),
+            None => (sweep.min_speed, sweep.max_speed),
+        };
         let mut exhausted = false;
         while !sweep.stopping
+            && !sweep.paused
             && sweep.running.len() < sweep.parallel
             && (sweep.max_runs == 0 || sweep.started < sweep.max_runs)
         {
             let next = sweep.grid.pop_front().or_else(|| {
                 // Refinement needs the coarse grid's curves.
                 (self.points.len() + sweep.failed.len() >= 3)
-                    .then(|| {
-                        next_speed(
-                            &self.points,
-                            &sweep.failed,
-                            &sweep.running,
-                            sweep.min_speed,
-                            sweep.max_speed,
-                        )
-                    })
+                    .then(|| next_speed(&self.points, &sweep.failed, &sweep.running, low, high))
                     .flatten()
             });
             let Some(speed) = next else {
                 exhausted = true;
                 break;
             };
-            let index = sweep.started;
+            let index = self.next_index;
+            self.next_index += 1;
             sweep.started += 1;
             let spawned = spawn_speed(
                 Arc::clone(&sweep.input),
@@ -903,11 +979,13 @@ impl CampbellWindow {
             }
         }
         let limit = sweep.max_runs != 0 && sweep.started >= sweep.max_runs;
-        if sweep.running.is_empty() && (sweep.stopping || limit || exhausted) {
+        if sweep.running.is_empty() && (sweep.stopping || (!sweep.paused && (limit || exhausted))) {
             self.log.push(if sweep.stopping {
                 format!("Sweep stopped after {} speeds.", self.points.len())
             } else if limit {
                 format!("Sweep finished: all {} runs done.", sweep.max_runs)
+            } else if self.focus.is_some() {
+                "Sweep finished: the marked range is as fine as the sweep resolves.".into()
             } else {
                 "Sweep finished: the speeds are as close as the sweep resolves.".into()
             });
@@ -921,7 +999,7 @@ impl CampbellWindow {
         &mut self,
         ctx: &egui::Context,
         can_start: bool,
-        mut start: impl FnMut(&mut Self) -> Result<(), String>,
+        mut start: impl FnMut(&mut Self, bool) -> Result<(), String>,
     ) -> bool {
         self.poll();
         let mut open = true;
@@ -939,8 +1017,34 @@ impl CampbellWindow {
                 ui.horizontal(|ui| {
                     if ui
                         .add_enabled(can_start && !running, egui::Button::new("Start sweep"))
+                        .on_hover_text("Starts a new sweep; the speeds of the last one go.")
                         .clicked()
-                        && let Err(error) = start(self)
+                        && let Err(error) = start(self, false)
+                    {
+                        self.log.push(error);
+                    }
+                    if ui
+                        .add_enabled(running && !self.is_paused(), egui::Button::new("Pause"))
+                        .on_hover_text(
+                            "The running speeds finish, no new ones start. Mark a range in \
+                             the diagram meanwhile and continue.",
+                        )
+                        .clicked()
+                    {
+                        self.pause();
+                    }
+                    if ui
+                        .add_enabled(
+                            can_start && self.can_continue(),
+                            egui::Button::new("Continue"),
+                        )
+                        .on_hover_text(
+                            "Goes on with the sweep: a paused one where it stopped, a finished \
+                             one with another Maximum runs between its speeds, within the \
+                             marked range if there is one.",
+                        )
+                        .clicked()
+                        && let Err(error) = start(self, true)
                     {
                         self.log.push(error);
                     }
@@ -952,7 +1056,11 @@ impl CampbellWindow {
                         self.cancel();
                     }
                     if let Some(sweep) = &self.sweep {
-                        ui.spinner();
+                        if sweep.paused && sweep.running.is_empty() {
+                            ui.label("Paused,");
+                        } else {
+                            ui.spinner();
+                        }
                         let total = match sweep.max_runs {
                             0 => String::new(),
                             n => format!(" of {n}"),
@@ -1127,7 +1235,7 @@ impl CampbellWindow {
         } else {
             (critical.len().min(6) as f32 + 1.5) * 20.0
         };
-        let plot_height = (ui.available_height() - table_height - 110.0).max(220.0);
+        let plot_height = (ui.available_height() - table_height - 136.0).max(220.0);
         self.plot(ui, &data, plot_height);
         ui.add_space(4.0);
         if critical.is_empty() {
@@ -1169,7 +1277,7 @@ impl CampbellWindow {
     /// The diagram as an interactive plot: drag to pan, scroll or drag along an axis to
     /// zoom, double-click to fit, click a legend entry to hide or show it.
     fn plot(&mut self, ui: &mut Ui, data: &Diagram, height: f32) {
-        use egui_plot::{Legend, Line, LineStyle, MarkerShape, Plot, Points};
+        use egui_plot::{Legend, Line, LineStyle, MarkerShape, Plot, Points, Span};
         let max_frequency = self.setup.max_frequency;
         let mut plot = Plot::new(("campbell plot", self.plot_generation))
             .height(height)
@@ -1200,9 +1308,29 @@ impl CampbellWindow {
             plot = plot.reset();
             self.shown_max_frequency = max_frequency;
         }
+        // Shift and drag marks a speed range instead of moving the view.
+        let shift = ui.input(|i| i.modifiers.shift);
+        if shift || self.marking.is_some() {
+            plot = plot.allow_drag(false);
+        }
         let guide = crate::style::adapt(Color32::from_gray(110));
-        let markers = data.curves.iter().map(|(_, p)| p.len()).max().unwrap_or(0) <= 80;
-        plot.show(ui, |plot_ui| {
+        // Every speed is a marker, so the adaptive sampling shows; smaller when many.
+        let many = data.curves.iter().map(|(_, p)| p.len()).max().unwrap_or(0) > 80;
+        let radius = if many { 1.8 } else { 2.5 };
+        let marked = match (self.marking, self.focus) {
+            (Some([a, b]), _) => Some([a.min(b), a.max(b)]),
+            (None, Some([a, b])) => Some([rpm(a), rpm(b)]),
+            (None, None) => None,
+        };
+        let response = plot.show(ui, |plot_ui| {
+            if let Some([a, b]) = marked {
+                let color = crate::style::adapt(Color32::from_rgb(40, 110, 200));
+                plot_ui.span(
+                    Span::new("Refine range", a..=b)
+                        .fill(color.gamma_multiply(0.12))
+                        .border_color(color),
+                );
+            }
             for (name, points) in &data.guides {
                 plot_ui.line(
                     Line::new(name.as_str(), points.clone())
@@ -1218,13 +1346,11 @@ impl CampbellWindow {
                         .color(color)
                         .width(2.0),
                 );
-                if markers {
-                    plot_ui.points(
-                        Points::new(name.as_str(), points.clone())
-                            .color(color)
-                            .radius(2.5),
-                    );
-                }
+                plot_ui.points(
+                    Points::new(name.as_str(), points.clone())
+                        .color(color)
+                        .radius(radius),
+                );
             }
             if !data.unmatched.is_empty() {
                 plot_ui.points(
@@ -1241,6 +1367,42 @@ impl CampbellWindow {
                         .shape(MarkerShape::Diamond)
                         .radius(4.0),
                 );
+            }
+            plot_ui.pointer_coordinate().map(|p| p.x)
+        });
+        let (pointer, response) = (response.inner, response.response);
+        if let Some(x) = pointer {
+            if shift && response.drag_started_by(egui::PointerButton::Primary) {
+                self.marking = Some([x, x]);
+            } else if let Some(marking) = &mut self.marking {
+                marking[1] = x;
+            }
+        }
+        if response.drag_stopped()
+            && let Some([a, b]) = self.marking.take()
+        {
+            let [low, high] = round_range(a.min(b).max(0.0), a.max(b));
+            if high > low {
+                self.focus = Some([from_rpm(low), from_rpm(high)]);
+            }
+        }
+        ui.horizontal(|ui| match self.focus {
+            Some([a, b]) => {
+                ui.label(format!(
+                    "Refine range: {} to {} rpm",
+                    numeric::format_physical(rpm(a)),
+                    numeric::format_physical(rpm(b))
+                ));
+                if ui
+                    .button("Clear range")
+                    .on_hover_text("New speeds go anywhere in the speed range again.")
+                    .clicked()
+                {
+                    self.focus = None;
+                }
+            }
+            None => {
+                ui.weak("Shift and drag in the diagram to mark a speed range to refine.");
             }
         });
         ui.weak(
@@ -1442,6 +1604,19 @@ mod tests {
             .map(|s| point(s, &[(s, Whirl::Forward)]))
             .collect();
         assert_eq!(next_speed(&straight, &[], &[], 0.0, 100.0), Some(40.0));
+        assert_eq!(round_range(19815.49, 34924.93), [19800.0, 34900.0]);
+        // A marked range is refined on its own, also inside a single gap, and finer.
+        let next = next_speed(&straight, &[], &[], 25.0, 30.0).unwrap();
+        assert_eq!(next, 27.5);
+        let mut fine = straight.clone();
+        for _ in 0..20 {
+            let Some(next) = next_speed(&fine, &[], &[], 25.0, 30.0) else {
+                break;
+            };
+            assert!((25.0..=30.0).contains(&next), "{next}");
+            fine.push(point(next, &[(next, Whirl::Forward)]));
+        }
+        assert_eq!(fine.len(), 24);
         // No gap wider than the resolution is left.
         let dense: Vec<SpeedPoint> = [10.0, 10.1, 10.2]
             .into_iter()
