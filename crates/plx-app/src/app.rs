@@ -92,8 +92,8 @@ struct Workbench {
     /// What the analysis takes from other analyses of the project; the window shows it but
     /// does not change it.
     incoming: crate::links::Incoming,
-    /// Analyses whose results this one needs as global model and that have none yet.
-    upstream_missing: Vec<String>,
+    /// What the analysis takes from other blocks that is not ready yet.
+    upstream: crate::status::Upstream,
     /// A linked item was double-clicked: where it comes from, with its path.
     linked_prompt: Option<(Vec<String>, String)>,
     /// The state of the analysis' cells and when it was found; finding it takes the
@@ -256,7 +256,7 @@ impl AnalysisWindow {
                 solve_after_meshing: false,
                 requests: Vec::new(),
                 incoming: Default::default(),
-                upstream_missing: Vec::new(),
+                upstream: Default::default(),
                 linked_prompt: None,
                 status: None,
                 model_dialog: None,
@@ -340,11 +340,20 @@ impl AnalysisWindow {
         self.import_when_loaded = paths;
     }
 
-    /// Tells the window what the analysis takes from other analyses, and which of those it
-    /// needs results of that are not there yet.
-    pub fn set_links(&mut self, incoming: crate::links::Incoming, upstream_missing: Vec<String>) {
-        self.workbench.incoming = incoming;
-        self.workbench.upstream_missing = upstream_missing;
+    /// Tells the window what the analysis takes from other blocks, and what of that is not
+    /// ready yet.
+    pub fn set_links(
+        &mut self,
+        incoming: crate::links::Incoming,
+        upstream: crate::status::Upstream,
+    ) {
+        let workbench = &mut self.workbench;
+        if workbench.upstream != upstream {
+            // The cells follow at once, not when the cached state is found again.
+            workbench.status = None;
+        }
+        workbench.incoming = incoming;
+        workbench.upstream = upstream;
     }
 
     /// Takes over what `path` names of the setup of another analysis, see
@@ -984,7 +993,7 @@ impl AnalysisWindow {
         let meshing = workbench.meshing.is_some();
         let can_solve = workbench.model.is_some() && !running && !meshing && self.loading.is_none();
         if icons::button(ui, Icon::Solve, SOLVE_TIP, can_solve, false).clicked() {
-            workbench.solve(ui.ctx());
+            workbench.solve(ui.ctx(), false);
         }
         let stoppable = running || workbench.solve_after_meshing;
         if icons::button(ui, Icon::Stop, "Stop the analysis", stoppable, false).clicked() {
@@ -1348,7 +1357,7 @@ impl AnalysisWindow {
                 self.workbench.pinned_view = (bound && view != TreeView::Results).then_some(view);
             }
             if std::mem::take(&mut self.solve_when_loaded) {
-                self.workbench.solve(&ctx);
+                self.workbench.solve(&ctx, true);
             }
         }
         // Under the System theme, the operating system may switch between light and dark.
@@ -3072,7 +3081,7 @@ impl Workbench {
                     self.view_command = Some(ViewCommand::Fit);
                 }
                 if solve {
-                    self.solve(ctx);
+                    self.solve(ctx, false);
                 }
             }
             Err(error) => {
@@ -3259,7 +3268,7 @@ impl Workbench {
             .on_hover_text(SOLVE_TIP)
             .clicked()
         {
-            self.solve(ui.ctx());
+            self.solve(ui.ctx(), false);
         }
         if ui
             .add_enabled(can_start, egui::Button::new("Solve Again"))
@@ -3535,6 +3544,7 @@ impl Workbench {
             &model.fe,
             &model.mesh_inputs,
             model.bound_results.as_ref(),
+            &self.upstream.stale_meshes,
             self.analysis.as_ref().is_some_and(Analysis::is_running),
         ))
     }
@@ -3553,23 +3563,53 @@ impl Workbench {
 
     /// Ansys Workbench's Update: meshes the parts whose mesh is out of date, then solves if
     /// the results are missing or out of date, and keeps the new results. What is up to
-    /// date stays as it is.
-    fn solve(&mut self, ctx: &egui::Context) {
+    /// date stays as it is. `by_project` when Update Project started it, after it brought
+    /// what the analysis takes from other blocks up to date.
+    fn solve(&mut self, ctx: &egui::Context, by_project: bool) {
         if self.meshing.is_some() || self.analysis.as_ref().is_some_and(Analysis::is_running) {
-            return;
-        }
-        // A submodel needs the results of its global model; the project solves that first.
-        if !self.upstream_missing.is_empty() {
-            self.output.push(format!(
-                "{} has no results yet: it is solved first.",
-                self.upstream_missing.join(", ")
-            ));
-            self.requests.push(Request::SolveChain);
             return;
         }
         let Some(status) = self.status() else {
             return;
         };
+        // A submodel needs the results of its global model, a mesh taken from a mesh block
+        // the block's current mesh: the project makes them first, then solves this one.
+        let upstream = &self.upstream;
+        if !upstream.missing_results.is_empty() || !status.stale_sources.is_empty() {
+            let mut why = Vec::new();
+            if !upstream.missing_results.is_empty() {
+                why.push(format!(
+                    "{} has no results yet",
+                    upstream.missing_results.join(", ")
+                ));
+            }
+            if !status.stale_sources.is_empty() {
+                why.push(format!(
+                    "the mesh of {} is out of date",
+                    status.stale_sources.join(", ")
+                ));
+            }
+            if by_project {
+                // The project could not make them: solving now would solve the old mesh or
+                // fail on the missing results.
+                self.output.push(format!(
+                    "{} not solved: {}.",
+                    self.analysis_name,
+                    why.join("; ")
+                ));
+            } else {
+                let why = why.join("; ");
+                let mut chars = why.chars();
+                let why: String = (chars.next().into_iter())
+                    .flat_map(char::to_uppercase)
+                    .chain(chars)
+                    .collect();
+                self.output
+                    .push(format!("{why}: the project makes it first."));
+                self.requests.push(Request::SolveChain);
+            }
+            return;
+        }
         let has_geometry = (self.model.as_ref()).is_some_and(|m| m.geometry.is_some());
         let remesh = match status.mesh {
             crate::status::CellState::Missing if has_geometry => Some(None),
@@ -3672,7 +3712,7 @@ impl Workbench {
     /// Polls the running analysis and shows its monitor.
     fn run_analysis(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
-            self.solve(ctx);
+            self.solve(ctx, false);
         }
         let Some(analysis) = &mut self.analysis else {
             return;
