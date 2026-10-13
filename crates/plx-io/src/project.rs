@@ -21,17 +21,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     pub format: u32,
-    /// Model space and unit system of every analysis of a project of format 2, whose values
-    /// are in that unit system; since format 3 each analysis has its own, and all values are
-    /// stored in SI units ([`plx_model::STORED`]).
-    #[serde(default, skip_serializing)]
-    pub space: plx_model::ModelSpace,
-    #[serde(default, skip_serializing)]
-    pub units: plx_model::UnitSystem,
-    /// The analyses of a project of format 4 or older, which [`read_project`] turns into
-    /// [`Project::nodes`].
-    #[serde(default, skip_serializing)]
-    pub analyses: Vec<ProjectAnalysis>,
     /// The blocks of the project schematic: analyses and the sources of data they take.
     #[serde(default)]
     pub nodes: Vec<ProjectNode>,
@@ -44,9 +33,6 @@ impl Default for Project {
     fn default() -> Self {
         Self {
             format: PROJECT_FORMAT,
-            space: Default::default(),
-            units: Default::default(),
-            analyses: Vec::new(),
             nodes: Vec::new(),
             links: Vec::new(),
         }
@@ -182,8 +168,8 @@ pub struct Link {
     /// category of the setup such as `["Setup", "Materials"]`, or one item of it such as
     /// `["Setup", "Materials", "Steel"]`; `["Results", step]` is the results of a step.
     pub item: Vec<String>,
-    /// Where the target takes it, when that is not the same place: the step of a submodel
-    /// that takes the results of a global step, `["Results", step]`.
+    /// Where the target takes it, when that is not the same place: the input of a step that
+    /// takes the results of a step, such as `["Setup", "Steps", step, "Temperatures"]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slot: Vec<String>,
     /// A state link (`["State", step]`): the steps of the source up to that step the target
@@ -252,8 +238,8 @@ pub enum ProjectError {
     #[error("{path} comes from a newer PrePoLix version (format {format})")]
     Newer { path: PathBuf, format: u32 },
     #[error(
-        "{path} comes from an older PrePoLix version (format {format}) with a single model, \
-         which cannot be opened: import its input file into a new analysis instead"
+        "{path} comes from an older PrePoLix version (format {format}), which cannot be \
+         opened: build the project anew, or import the input files of its analyses"
     )]
     Older { path: PathBuf, format: u32 },
 }
@@ -273,8 +259,9 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
     std::fs::rename(&temporary, path).map_err(io)
 }
 
-/// The first format of projects with several analyses, which can still be opened.
-pub const FIRST_PROJECT_FORMAT: u32 = 2;
+/// The oldest format that can still be opened. While PrePoLix is being designed, a new
+/// format is not converted: older projects are refused.
+pub const FIRST_PROJECT_FORMAT: u32 = 6;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
@@ -298,8 +285,6 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
             format: header.format,
         });
     }
-    // Format 2 stored the values in the project's unit system; the project window converts
-    // them into SI units, which needs Gmsh for the geometry.
     if header.format < FIRST_PROJECT_FORMAT {
         return Err(ProjectError::Older {
             path: path.to_owned(),
@@ -307,14 +292,6 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
         });
     }
     let mut project: Project = ron::from_str(&text).map_err(format_error)?;
-    // Format 4 and older held analyses only.
-    let analyses = std::mem::take(&mut project.analyses);
-    (project.nodes).splice(
-        0..0,
-        analyses
-            .into_iter()
-            .map(|a| ProjectNode::Analysis(Box::new(a))),
-    );
     for analysis in project.analyses_mut() {
         analysis.model.migrate();
     }
@@ -613,7 +590,9 @@ mod tests {
             source: 1,
             target: 2,
             item: vec!["Results".into(), "Step-1".into()],
-            slot: vec!["Results".into(), "Step-2".into()],
+            slot: ["Setup", "Steps", "Step-2", "Global results"]
+                .map(Into::into)
+                .to_vec(),
             ..Default::default()
         });
         saved.links.push(Link {
@@ -661,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn source_blocks_read_back_and_older_projects_become_nodes() {
+    fn source_blocks_read_back_and_older_projects_are_refused() {
         let dir = std::env::temp_dir().join(format!("plx-nodes-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("nodes.plx");
@@ -723,24 +702,13 @@ mod tests {
         }
         assert_eq!(project.links, saved.links);
 
-        // A project of format 4 lists its analyses; they become the blocks, losslessly.
-        let analysis = ProjectAnalysis {
-            id: 7,
-            name: "Old".into(),
-            position: [1.0, 2.0],
-            ..Default::default()
-        };
-        let older = format!(
-            "(format:4,analyses:[{}],links:[])",
-            ron::to_string(&analysis).unwrap()
-        );
+        // A project of an older format is refused, not converted.
+        let older = "(format:5,nodes:[],links:[])";
         std::fs::write(&path, older).unwrap();
-        let project = read_project(&path).unwrap();
-        assert!(project.analyses.is_empty());
-        let read: Vec<&ProjectAnalysis> = project.analyses().collect();
-        assert_eq!(read.len(), 1);
-        assert_eq!((read[0].id, read[0].name.as_str()), (7, "Old"));
-        assert_eq!(read[0].position, [1.0, 2.0]);
+        assert!(matches!(
+            read_project(&path),
+            Err(ProjectError::Older { format: 5, .. })
+        ));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
