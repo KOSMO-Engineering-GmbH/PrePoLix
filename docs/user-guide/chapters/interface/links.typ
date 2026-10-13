@@ -3,22 +3,40 @@
 == Linking analyses <links>
 
 Analyses of a project share data through *links* in the project schematic: drag from a pin on
-the right of a row to the pin on the left of the matching row of another analysis. Three kinds
-of links exist, told apart by the colour of their wire:
+the right of a row to the pin on the left of a row of another analysis. Links are of two kinds:
+
+- A *reference* makes a row of the target the same as the row of the same name in the source:
+  the mesh is the mesh, the material is the material. It goes from like to like, and the
+  target cannot change what it takes.
+- An *operation* hands on what a step of the source produced: its results go into a
+  calculation of the target. It starts at a row below #ui("Results"), which only gives, and
+  ends where the target uses it: an input of one of its steps under #ui("Setup") >
+  #ui("Steps"), its initial conditions, or its #ui("State").
+
+The colour of a wire tells its kind, the row tells where it acts:
 
 #table(
   columns: (30%, 1fr),
   stroke: (x, y) => if y == 0 { (bottom: 0.7pt) } else { (bottom: 0.3pt + luma(200)) },
   inset: (x: 5pt, y: 4pt),
   table.header([*Link*], [*Meaning*]),
-  [Data (blue)], [The target uses the geometry, the mesh, a category of the setup or a single
-    item of the source, for example one material (@data-links).],
+  [Reference (blue)], [The target uses the geometry, the mesh, a category of the setup or a
+    single item of the source, for example one material (@data-links).],
   [Results (orange)], [A step of the target takes the results of a step of the source: the
     temperatures of a thermal step, the eigenmodes of a frequency step, or the displacements of
-    the global model of a submodel (@results-links).],
+    the global model of a submodel (@results-links). A Measure block takes the results of a
+    step the same way, to compute a key figure of them (@measure-block).],
   [State (green)], [The target continues the source from the state after one of its steps, as
     further steps of the same CalculiX run (@state-links).],
+  [Value (violet)], [A number of the target, such as the edge length of a mesh block, takes
+    the value of a parameter (@parameters-block). Like a reference, it is then the same
+    number. The value of an optimizer goes back to the blocks before it as a dashed wire, the
+    feedback of its loop (@optimization-loops).],
 )
+
+A block thus reads from top to bottom: where it starts (#ui("State")), what it is (the blue
+rows of the definition), what it uses (the orange inputs of its steps in the setup) and what it
+produces (#ui("Results"), with pins on the right only).
 
 The output pane of the project window says what each link does ("Axial-load takes Mesh from
 Cantilever") and why a link cannot be made:
@@ -27,7 +45,8 @@ Cantilever") and why a link cannot be made:
   different unit system is fine);
 - the link would go back to an analysis that already comes before the source, and form a
   cycle;
-- the item does not fit the slot, for example a material dropped on the mesh;
+- the item does not fit the slot, for example a material dropped on the mesh, or results
+  dropped on the results of another analysis;
 - the target continues another analysis and takes its whole model from there (@state-links).
 
 Right-click a pin to remove its links, or use #ui("Unlink") in the analysis window. The target
@@ -108,33 +127,41 @@ single value: it takes all categories of the source in place of the target's.
 
 === Taking results of a step <results-links>
 
-The rows below #ui("Results") of a block are its steps. Drag the pin of a step to a row of
-another analysis; what the results are used for depends on where they are dropped:
+The rows below #ui("Results") of a block are its steps: what each step produces. They have a pin
+on the right only. What a step of another analysis uses is an *input* of that step: open
+#ui("Setup") > #ui("Steps") of the target and then the step with the arrow in front of it, and
+its inputs are listed below it, each with an orange pin:
 
 #table(
-  columns: (1fr, 1fr, 1.4fr),
+  columns: (22%, 1fr, 1fr),
   stroke: (x, y) => if y == 0 { (bottom: 0.7pt) } else { (bottom: 0.3pt + luma(200)) },
   inset: (x: 5pt, y: 4pt),
-  table.header([*Results of*], [*Dropped on*], [*Used as*]),
+  table.header([*Input*], [*Takes the results of*], [*Used as*]),
+  [#ui("Temperatures") (every step that takes defined fields)],
   [a heat transfer, coupled or uncoupled temperature-displacement step],
-  [a step of another analysis],
   [the temperatures of that step: a defined field named #ui("Linked Temperatures")
     (`*TEMPERATURE, FILE=..., BSTEP=n`), see @defined-fields],
-  [the same],
-  [#ui("Initial Conditions") under #ui("Setup") of another analysis],
-  [the temperatures the analysis starts at (`*INITIAL CONDITIONS, TYPE=TEMPERATURE` on every
-    node)],
+  [#ui("Eigenmodes") (modal dynamics and steady state dynamics steps)],
   [a frequency step with #ui("Storage") on],
-  [a modal dynamics or steady state dynamics step],
   [the eigenmodes these steps work on: the `.eig` file of the other run (@modal-dynamics)],
-  [any other step],
-  [a step of another analysis],
+  [#ui("Global results") (every step)],
+  [any step of the global model],
   [the displacements on the cut boundary of a submodel (@submodel)],
 )
 
+Results dropped on the row of the step itself, while it is closed, go to the input that fits: eigenmodes to #ui("Eigenmodes"), temperatures to #ui("Temperatures"), anything
+else to #ui("Global results"). Once the step is opened, the wire is seen to end at that input.
+Results dropped on an input they do not fit are refused, and the output pane says why
+("Heat is no frequency step").
+
+The temperatures of a thermal step can also be dropped on #ui("Initial Conditions") under
+#ui("Setup"): the analysis then starts at them (`*INITIAL CONDITIONS, TYPE=TEMPERATURE` on every
+node).
+
 #screenshot("temperature-links.png", [A heat transfer analysis giving its temperatures to a
   structural analysis: one link to its initial conditions ("starts at the temperatures of
-  ..."), one to its step ("takes the temperatures of ... in Step-1")])
+  ..."), one to the #ui("Temperatures") input of its step ("takes the temperatures of ... in
+  Step-1")])
 
 - Temperatures and eigenmodes are transferred node by node, so both analyses need the same mesh:
   link the mesh, or continue from a state (@state-links). Otherwise the output pane says why

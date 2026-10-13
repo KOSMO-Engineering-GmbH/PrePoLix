@@ -7,7 +7,7 @@ use egui::{Color32, Pos2, Rect, Stroke, Ui, pos2, vec2};
 use crate::results::format_value;
 
 /// Data of a diagram: x values and the y values of each named curve, row by row.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct XyData {
     pub title: String,
     pub x_label: String,
@@ -23,7 +23,7 @@ pub struct XyData {
 const GUIDE: Color32 = Color32::from_gray(60);
 
 /// Distinct colours for the curves, in the order of the columns.
-const COLORS: [Color32; 8] = [
+const COLORS: [Color32; 10] = [
     Color32::from_rgb(31, 119, 180),
     Color32::from_rgb(214, 39, 40),
     Color32::from_rgb(44, 160, 44),
@@ -32,6 +32,8 @@ const COLORS: [Color32; 8] = [
     Color32::from_rgb(140, 86, 75),
     Color32::from_rgb(227, 119, 194),
     Color32::from_rgb(23, 190, 207),
+    Color32::from_rgb(188, 189, 34),
+    Color32::from_rgb(127, 127, 127),
 ];
 
 pub fn color(index: usize) -> Color32 {

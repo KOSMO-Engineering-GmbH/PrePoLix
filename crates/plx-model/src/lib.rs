@@ -18,8 +18,11 @@ pub mod fingerprint;
 mod geometry;
 mod history;
 pub mod library;
+mod measure;
 mod mesh_set;
 mod moving_load;
+mod optimizer;
+mod parameter;
 mod primitive;
 mod properties;
 mod region;
@@ -50,8 +53,11 @@ pub use geometry::{
 };
 pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use library::MaterialLibrary;
+pub use measure::{Extreme, MeasureKind, MeasureRegion};
 pub use mesh_set::{MeshSet, SetKind};
 pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel, load_stations};
+pub use optimizer::{Iteration, Next, OptimizerKind, Outcome};
+pub use parameter::{Parameter, ValueKind};
 pub use primitive::{MAX_PRIMITIVE_ELEMENTS, MeshPrimitive, Param, ParamSlot, ParamValue};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
@@ -73,8 +79,9 @@ use serde::{Deserialize, Serialize};
 /// Format 3 stores all values in SI units ([`STORED`]) and gives each analysis its own model
 /// space and unit system. Format 4 adds state links: an analysis that continues the steps of
 /// another one. Format 5 holds blocks of several kinds, the analyses among them, in place of
-/// the analyses alone.
-pub const PROJECT_FORMAT: u32 = 5;
+/// the analyses alone. Format 6 lets the results of a step go to an input of a step of the
+/// setup (`["Setup", "Steps", step, "Temperatures"]`) in place of a step of the results.
+pub const PROJECT_FORMAT: u32 = 6;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

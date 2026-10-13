@@ -1217,6 +1217,15 @@ pub fn field_unit(field: &str, component: &str, units: UnitSystem) -> Option<Str
     }
 }
 
+/// A value of a component of a field CalculiX wrote, in the stored SI units, in `units`;
+/// unchanged for values without a unit.
+pub fn shown_field_value(value: f64, field: &str, component: &str, units: UnitSystem) -> f64 {
+    match field_measure(field, component) {
+        Some(measure) => shown_value(value, measure, units),
+        None => value,
+    }
+}
+
 /// Converts a value CalculiX wrote, in the stored SI units ([`plx_model::STORED`]), into
 /// `units`.
 fn shown_value(value: f64, measure: Measure, units: UnitSystem) -> f64 {

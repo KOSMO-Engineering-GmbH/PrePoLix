@@ -21,17 +21,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
     pub format: u32,
-    /// Model space and unit system of every analysis of a project of format 2, whose values
-    /// are in that unit system; since format 3 each analysis has its own, and all values are
-    /// stored in SI units ([`plx_model::STORED`]).
-    #[serde(default, skip_serializing)]
-    pub space: plx_model::ModelSpace,
-    #[serde(default, skip_serializing)]
-    pub units: plx_model::UnitSystem,
-    /// The analyses of a project of format 4 or older, which [`read_project`] turns into
-    /// [`Project::nodes`].
-    #[serde(default, skip_serializing)]
-    pub analyses: Vec<ProjectAnalysis>,
     /// The blocks of the project schematic: analyses and the sources of data they take.
     #[serde(default)]
     pub nodes: Vec<ProjectNode>,
@@ -44,9 +33,6 @@ impl Default for Project {
     fn default() -> Self {
         Self {
             format: PROJECT_FORMAT,
-            space: Default::default(),
-            units: Default::default(),
-            analyses: Vec::new(),
             nodes: Vec::new(),
             links: Vec::new(),
         }
@@ -79,6 +65,12 @@ pub enum ProjectNode {
     Materials(MaterialSet),
     /// A mesh made from a few parameters, such as a box.
     Mesh(Box<MeshBlock>),
+    /// Named numbers that value links give to other blocks.
+    Parameters(ParameterSet),
+    /// A key figure computed from the results of a step.
+    Measure(MeasureBlock),
+    /// A loop that gives values to a parameter until a measure says it is done.
+    Optimizer(OptimizerBlock),
     /// A sink that writes the mesh it takes to a file.
     MeshExport(MeshExport),
 }
@@ -90,6 +82,9 @@ impl ProjectNode {
             Self::Analysis(a) => a.id,
             Self::Materials(m) => m.id,
             Self::Mesh(m) => m.id,
+            Self::Parameters(p) => p.id,
+            Self::Measure(m) => m.id,
+            Self::Optimizer(o) => o.id,
             Self::MeshExport(e) => e.id,
         }
     }
@@ -99,6 +94,9 @@ impl ProjectNode {
             Self::Analysis(a) => &a.name,
             Self::Materials(m) => &m.name,
             Self::Mesh(m) => &m.name,
+            Self::Parameters(p) => &p.name,
+            Self::Measure(m) => &m.name,
+            Self::Optimizer(o) => &o.name,
             Self::MeshExport(e) => &e.name,
         }
     }
@@ -109,6 +107,9 @@ impl ProjectNode {
             Self::Analysis(a) => a.position,
             Self::Materials(m) => m.position,
             Self::Mesh(m) => m.position,
+            Self::Parameters(p) => p.position,
+            Self::Measure(m) => m.position,
+            Self::Optimizer(o) => o.position,
             Self::MeshExport(e) => e.position,
         }
     }
@@ -135,6 +136,76 @@ pub struct MeshBlock {
     /// [`plx_model::MeshPrimitive::fingerprint`]; the mesh is out of date once it differs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated: Option<u64>,
+    /// Factor on the elements along each edge, see [`plx_model::MeshPrimitive::refined`];
+    /// an optimizer refines the mesh through it.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub refinement: f64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+fn is_one(value: &f64) -> bool {
+    *value == 1.0
+}
+
+/// A block that computes a key figure from the results of a step another block links to it,
+/// such as the largest von Mises stress.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MeasureBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The unit system its value is shown in; it is stored in SI units.
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    pub kind: plx_model::MeasureKind,
+    /// The value as last computed, and the fingerprint of the results and the definition it
+    /// was computed from: out of date once that differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evaluated: Option<u64>,
+}
+
+/// A block that runs a loop: it gives a value to a parameter of the blocks before a measure,
+/// has them solved and reads the measure, until it is done.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct OptimizerBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    pub kind: plx_model::OptimizerKind,
+    /// The value it gives now, stored in SI units.
+    pub value: f64,
+    /// The iterations of its last run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<plx_model::Iteration>,
+    /// How its last run ended, and the fingerprint of the measure it ended on: up to date
+    /// while the measure is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done: Option<u64>,
+}
+
+/// A block of named numbers, which value links give to other blocks: the size of a mesh
+/// block, for example, so that several blocks share one value.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ParameterSet {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The unit system its lengths are shown in; they are stored in SI units.
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    pub parameters: Vec<plx_model::Parameter>,
 }
 
 /// A block that writes the mesh linked to it to a file when the project is updated. It keeps
@@ -205,8 +276,8 @@ pub struct Link {
     /// category of the setup such as `["Setup", "Materials"]`, or one item of it such as
     /// `["Setup", "Materials", "Steel"]`; `["Results", step]` is the results of a step.
     pub item: Vec<String>,
-    /// Where the target takes it, when that is not the same place: the step of a submodel
-    /// that takes the results of a global step, `["Results", step]`.
+    /// Where the target takes it, when that is not the same place: the input of a step that
+    /// takes the results of a step, such as `["Setup", "Steps", step, "Temperatures"]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slot: Vec<String>,
     /// A state link (`["State", step]`): the steps of the source up to that step the target
@@ -275,8 +346,8 @@ pub enum ProjectError {
     #[error("{path} comes from a newer PrePoLix version (format {format})")]
     Newer { path: PathBuf, format: u32 },
     #[error(
-        "{path} comes from an older PrePoLix version (format {format}) with a single model, \
-         which cannot be opened: import its input file into a new analysis instead"
+        "{path} comes from an older PrePoLix version (format {format}), which cannot be \
+         opened: build the project anew, or import the input files of its analyses"
     )]
     Older { path: PathBuf, format: u32 },
 }
@@ -296,8 +367,9 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
     std::fs::rename(&temporary, path).map_err(io)
 }
 
-/// The first format of projects with several analyses, which can still be opened.
-pub const FIRST_PROJECT_FORMAT: u32 = 2;
+/// The oldest format that can still be opened. While PrePoLix is being designed, a new
+/// format is not converted: older projects are refused.
+pub const FIRST_PROJECT_FORMAT: u32 = 6;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
@@ -321,8 +393,6 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
             format: header.format,
         });
     }
-    // Format 2 stored the values in the project's unit system; the project window converts
-    // them into SI units, which needs Gmsh for the geometry.
     if header.format < FIRST_PROJECT_FORMAT {
         return Err(ProjectError::Older {
             path: path.to_owned(),
@@ -330,14 +400,6 @@ pub fn read_project(path: &Path) -> Result<Project, ProjectError> {
         });
     }
     let mut project: Project = ron::from_str(&text).map_err(format_error)?;
-    // Format 4 and older held analyses only.
-    let analyses = std::mem::take(&mut project.analyses);
-    (project.nodes).splice(
-        0..0,
-        analyses
-            .into_iter()
-            .map(|a| ProjectNode::Analysis(Box::new(a))),
-    );
     for analysis in project.analyses_mut() {
         analysis.model.migrate();
     }
@@ -636,7 +698,9 @@ mod tests {
             source: 1,
             target: 2,
             item: vec!["Results".into(), "Step-1".into()],
-            slot: vec!["Results".into(), "Step-2".into()],
+            slot: ["Setup", "Steps", "Step-2", "Global results"]
+                .map(Into::into)
+                .to_vec(),
             ..Default::default()
         });
         saved.links.push(Link {
@@ -684,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    fn source_blocks_read_back_and_older_projects_become_nodes() {
+    fn source_blocks_read_back_and_older_projects_are_refused() {
         let dir = std::env::temp_dir().join(format!("plx-nodes-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("nodes.plx");
@@ -712,7 +776,29 @@ mod tests {
             mesh: primitive.generate(space, "Box"),
             generated: Some(primitive.fingerprint(space)),
             primitive: primitive.clone(),
+            refinement: 1.5,
         })));
+        let parameters = ParameterSet {
+            id: 6,
+            name: "Parameters".into(),
+            position: [0.0, 300.0],
+            units: plx_model::UnitSystem::MmTonSC,
+            parameters: vec![plx_model::Parameter::new(
+                "length",
+                plx_model::ValueKind::Length,
+                0.25,
+            )],
+        };
+        saved
+            .nodes
+            .push(ProjectNode::Parameters(parameters.clone()));
+        saved.links.push(Link {
+            source: 6,
+            target: 5,
+            item: vec!["Value".into(), "length".into()],
+            slot: vec!["Parameters".into(), "lx".into()],
+            ..Default::default()
+        });
         let export = MeshExport {
             id: 7,
             name: "Mesh Export".into(),
@@ -734,10 +820,19 @@ mod tests {
         assert!(text.contains(&format!("format:{PROJECT_FORMAT}")));
         assert!(!text.contains("analyses:"), "{text}");
         let project = read_project(&path).unwrap();
-        assert_eq!(project.nodes.len(), 4);
+        assert_eq!(project.nodes.len(), 5);
+        match &project.nodes[4] {
+            ProjectNode::MeshExport(read) => assert_eq!(read, &export),
+            other => panic!("{other:?}"),
+        }
+        match &project.nodes[3] {
+            ProjectNode::Parameters(read) => assert_eq!(read, &parameters),
+            other => panic!("{other:?}"),
+        }
         match &project.nodes[2] {
             ProjectNode::Mesh(block) => {
                 assert_eq!(block.primitive, primitive);
+                assert_eq!(block.refinement, 1.5);
                 assert_eq!(block.generated, Some(primitive.fingerprint(space)));
                 assert_eq!(block.mesh.element_count(), 40);
                 assert_eq!(block.mesh.surfaces.len(), 6);
@@ -752,30 +847,15 @@ mod tests {
             ProjectNode::Materials(read) => assert_eq!(read, &set),
             other => panic!("{other:?}"),
         }
-        match &project.nodes[3] {
-            ProjectNode::MeshExport(read) => assert_eq!(read, &export),
-            other => panic!("{other:?}"),
-        }
         assert_eq!(project.links, saved.links);
 
-        // A project of format 4 lists its analyses; they become the blocks, losslessly.
-        let analysis = ProjectAnalysis {
-            id: 7,
-            name: "Old".into(),
-            position: [1.0, 2.0],
-            ..Default::default()
-        };
-        let older = format!(
-            "(format:4,analyses:[{}],links:[])",
-            ron::to_string(&analysis).unwrap()
-        );
+        // A project of an older format is refused, not converted.
+        let older = "(format:5,nodes:[],links:[])";
         std::fs::write(&path, older).unwrap();
-        let project = read_project(&path).unwrap();
-        assert!(project.analyses.is_empty());
-        let read: Vec<&ProjectAnalysis> = project.analyses().collect();
-        assert_eq!(read.len(), 1);
-        assert_eq!((read[0].id, read[0].name.as_str()), (7, "Old"));
-        assert_eq!(read[0].position, [1.0, 2.0]);
+        assert!(matches!(
+            read_project(&path),
+            Err(ProjectError::Older { format: 5, .. })
+        ));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

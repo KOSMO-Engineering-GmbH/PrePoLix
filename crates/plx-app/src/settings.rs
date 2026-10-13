@@ -676,7 +676,7 @@ impl SettingsWindow {
                         ui.end_row();
                         ui.label("Parallel analyses");
                         ui.add(numeric::drag_value(&mut solver.parallel_runs).range(1..=64))
-                            .on_hover_text("Update Project solves up to this many independent analyses at the same time, each with the threads above.");
+                            .on_hover_text("Update Project solves up to this many independent analyses at the same time, each with the threads above; the Campbell sweep runs as many speeds at a time.");
                         ui.end_row();
                         ui.label("Equation solvers");
                         ui.label(solvers_text(solver.solvers()))

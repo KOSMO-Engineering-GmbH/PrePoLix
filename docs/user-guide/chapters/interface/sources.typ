@@ -4,7 +4,8 @@
 
 Besides analyses, the project schematic holds *source blocks*: blocks that only give data to
 analyses through links. They have no steps and are not solved, and #ui("Update Project")
-passes them by; the export blocks at the end of this section take data instead of giving it. Add one from #menu("Project") or by right-clicking the background of the schematic;
+passes them by; the mesh export block at the end of this section takes data instead of giving
+it. Add one from #menu("Project") or by right-clicking the background of the schematic;
 its header has its own tint, so that it stands apart from the analyses. Its context menu has
 #ui("Edit ..."), #ui("Rename ..."), #ui("Duplicate") and #ui("Delete ..."); a double-click
 opens its editor in the project window. Deleting a source block removes its links; the
@@ -60,9 +61,12 @@ space; several analyses can share one mesh block.
 Its parameters are rows of the block under #ui("Mesh"), like the inputs of a Blender node:
 #ui("X"), #ui("Y"), #ui("Z") of the corner it starts at and the edge lengths #ui("Lx"),
 #ui("Ly"), #ui("Lz") in the block's units, the numbers of elements #ui("nx"), #ui("ny"),
-#ui("nz") as whole numbers, and the #ui("Element") type. Click a field to type a value, or
-drag it; a rectangle has no Z rows. Once a parameter changes, the #ui("Mesh") row shows the
-mesh out of date.
+#ui("nz") as whole numbers, #ui("Refine") and the #ui("Element") type. Click a field to type a
+value, or drag it; a rectangle has no Z rows. Once a parameter changes, the #ui("Mesh") row
+shows the mesh out of date. #ui("Refine") is a factor on the numbers of elements along every
+edge, rounded: 2 doubles them, 1 meshes them as they are. An optimizer refines a mesh through
+it. The violet pins on the left of the numbers take a value from a Parameters block
+(@parameters-block).
 
 Its sides are node sets and surfaces at once, named after the axis and the side they lie on:
 #ui("X-") at the smallest X, #ui("X+") at the largest, then #ui("Y-"), #ui("Y+") and, for a
@@ -97,6 +101,81 @@ parameters, and the #ui("Mesh") row of the block shows that its mesh is out of d
 and their solutions are out of date.
 
 #screenshot("mesh-block-result.png", [The box held at X- and pressed on Z+, solved])
+
+=== Parameters <parameters-block>
+
+A Parameters block holds named numbers that other blocks take through *value links*, so that
+one number drives several places: the length of two meshes, or a size that is changed in one
+spot. Add it with #menu("Project", "Add Parameters"); it starts with one length.
+
+#screenshot("value-links.png", [The length of a Parameters block gives the edge length Lx of a
+  box: the row of the box is read-only, in violet, and follows the parameter])
+
+Each parameter is a row with its value, typed or dragged in place, and a violet pin on the
+right. Drag the pin to the pin on the left of a number of a mesh block (#ui("X") to #ui("nz"),
+#ui("Refine")). The number then takes the value of the parameter: it is shown in violet and
+read-only, and when the parameter changes the mesh is out of date, so #ui("Update Project")
+meshes and solves again. A value link joins like with like: a length goes to a length, a count
+to a number of elements, a factor to #ui("Refine"); otherwise the output pane says why it was
+refused. Right-click the pin to remove the link; the number keeps its last value.
+
+A double-click on the block opens its editor:
+
+#fields(
+  [Lengths in], [The unit system lengths are shown and typed in; they are stored in SI units.],
+  [Name], [The name of the parameter, unique in the block. Renaming it keeps its links.],
+  [Kind], [#ui("Length"), #ui("Count") (a whole number of at least one) or #ui("Factor") (a
+    number without unit).],
+  [Value], [The number.],
+  [Remove], [Removes the parameter and its links.],
+  [Add Parameter], [Adds a length.],
+)
+
+=== Measure <measure-block>
+
+A Measure block computes one key figure from the results of a step: the largest von Mises
+stress, the displacement of a node, a total force or an eigenfrequency. It is the number an
+optimizer reads, and a quick way to see the figure that matters without opening the results.
+Add it with #menu("Project", "Add Measure"); it starts with the largest von Mises stress.
+
+#screenshot("measure-blocks.png", [Two Measure blocks: the lowest temperature of the thermal
+  step Heat and the largest von Mises stress of the step Load that uses those temperatures])
+
+Drag the pin of a step under #ui("Results") of an analysis to the #ui("Results") row of the
+block, with an orange wire like every link of results. A Measure block measures one step;
+another wire to it takes the place of the first. The block shows what it measures and, in its
+last row, the value in its units with the state of the value:
+
+- a green tick when it was computed from the results as they are and those are up to date;
+- the orange arrows when the results are out of date, after a change of the analysis or of a
+  block it links to; #ui("Update Project") solves the analysis again and the value follows;
+- a dash while there are no results, or when the results lack what it measures. The output
+  pane then says why, for example "step 1 has no field STRESS in the results".
+
+The value is computed anew in the background whenever the results or its definition change,
+and the output pane prints it ("Max stress: Maximum of STRESS MISES = 8.6 MPa"). The project
+file keeps the value, so a reopened project shows it at once. The pin on the right of the
+value row gives it to an optimizer (@optimization-loops).
+
+#screenshot("measure-editor.png", [The editor of a Measure block])
+
+A double-click on the block opens its editor:
+
+#fields(
+  [Measure], [What it computes: #ui("Field extreme"), #ui("Value at a node"),
+    #ui("History output") or #ui("Eigenfrequency").],
+  [Shown in], [The unit system of the value; it is stored in SI units.],
+  [Field, Component], [The field and its component as the Results workspace names them:
+    STRESS MISES, DISP ALL, NDTEMP T, TOTAL_FORCE RF3 for a history output. The value is
+    that of the last increment of the step.],
+  [Take], [For a field extreme: #ui("Maximum"), #ui("Minimum") or #ui("Largest magnitude"),
+    which keeps the sign.],
+  [Region], [For a field extreme: all nodes, or a node set of the mesh of the analysis whose
+    results are linked.],
+  [Node], [For a value at a node: its number.],
+  [Set], [For a history output: the set of the history output, as written to the `.dat` file.],
+  [Mode], [For an eigenfrequency: the mode, counted from 1, of a frequency step.],
+)
 
 === Mesh Export <mesh-export>
 

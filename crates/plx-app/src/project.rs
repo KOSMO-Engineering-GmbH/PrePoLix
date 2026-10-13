@@ -11,20 +11,25 @@ use crate::node_picker::{self, NodePicker};
 use egui_snarl::ui::{AnyPins, PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
 use plx_io::project::{
-    Link, MaterialSet, MeshBlock, MeshExport, Project, ProjectAnalysis, ProjectNode,
+    Link, MaterialSet, MeasureBlock, MeshBlock, MeshExport, OptimizerBlock, ParameterSet, Project,
+    ProjectAnalysis, ProjectNode,
 };
 use plx_model::{
-    MeshPrimitive, ModelProperties, ModelSpace, Param, ParamSlot, Quantity, UnitSystem,
+    Iteration, MeasureKind, MeshPrimitive, ModelProperties, ModelSpace, Next, OptimizerKind,
+    Outcome as LoopOutcome, Param, ParamSlot, Parameter, Quantity, UnitSystem, ValueKind,
 };
 
 use crate::app::{AnalysisWindow, Request, Show};
 use crate::icons::{self, Icon};
 use crate::links;
 use crate::material_set::{MaterialSetEditor, MaterialSetResult};
+use crate::measure::{MeasureEditor, MeasureEditorResult};
 use crate::mesh_block::{MeshBlockEditor, MeshBlockResult};
 use crate::model::PROJECT_EXTENSION;
 use crate::model_properties::{DialogResult, ModelPropertiesDialog};
 use crate::node_icons::{self, NodeIcon};
+use crate::optimizer::{OptimizerEditor, OptimizerEditorResult};
+use crate::parameter_set::{ParameterSetEditor, ParameterSetResult};
 use crate::settings::{self, Settings, SettingsWindow, WindowResult};
 use crate::solution_monitor::{BackgroundSolve, Outcome};
 use crate::status::{self, AnalysisStatus, CellState};
@@ -43,6 +48,12 @@ enum Kind {
     Materials,
     /// A structured mesh made from a few parameters, held in the mesh of its data.
     Mesh,
+    /// Named numbers that value links give to other blocks.
+    Parameters,
+    /// A key figure computed from the results of a step linked to it.
+    Measure,
+    /// A loop that gives values to the blocks before a measure until it is done.
+    Optimizer,
     /// A sink that writes the mesh linked to it to a file, held in the mesh of its data.
     MeshExport,
 }
@@ -59,6 +70,9 @@ impl Kind {
             Self::Analysis => "analysis",
             Self::Materials => "materials block",
             Self::Mesh => "mesh block",
+            Self::Parameters => "parameters block",
+            Self::Measure => "measure block",
+            Self::Optimizer => "optimizer",
             Self::MeshExport => "mesh export block",
         }
     }
@@ -85,13 +99,21 @@ struct Node {
     /// What a mesh block meshes, and the fingerprint of what its mesh was made from.
     primitive: Option<MeshPrimitive>,
     generated: Option<u64>,
+    /// Factor on the divisions of a mesh block, see [`MeshPrimitive::refined`].
+    refinement: f64,
+    /// The numbers of a parameters block.
+    parameters: Vec<Parameter>,
+    /// What a measure block computes and what it computed.
+    measure: Option<MeasureState>,
+    /// What an optimizer varies and its last run.
+    optimizer: Option<OptimizerState>,
+    /// Solved in the background, its window closed.
+    solving: bool,
     /// What a mesh export block writes to, the fingerprint of the mesh and path it last
     /// wrote, and why its last write failed.
     export_path: String,
     written: Option<u64>,
     export_error: Option<String>,
-    /// Solved in the background, its window closed.
-    solving: bool,
     /// Mesh blocks before it whose mesh is out of date, see
     /// [`crate::status::Upstream::stale_meshes`]; found by [`ProjectApp::sync_links`].
     stale_meshes: Vec<String>,
@@ -121,6 +143,10 @@ impl Node {
             space,
             primitive: None,
             generated: None,
+            refinement: 1.0,
+            parameters: Vec::new(),
+            measure: None,
+            optimizer: None,
             export_path: String::new(),
             written: None,
             export_error: None,
@@ -210,7 +236,7 @@ impl Node {
             .data
             .as_ref()
             .is_some_and(|d| d.mesh.element_count() > 0);
-        match &self.primitive {
+        match self.meshed() {
             _ if !made => CellState::Missing,
             Some(primitive) if Some(primitive.fingerprint(self.space)) == self.generated => {
                 CellState::UpToDate
@@ -219,10 +245,15 @@ impl Node {
         }
     }
 
+    /// What a mesh block meshes: its primitive with the divisions refined.
+    fn meshed(&self) -> Option<MeshPrimitive> {
+        (self.primitive.as_ref()).map(|p| p.refined(self.refinement))
+    }
+
     /// Makes a mesh block's mesh from its parameters; returns the number of elements, or
     /// why it cannot be made.
     fn generate(&mut self) -> Result<usize, String> {
-        let primitive = self.primitive.as_ref().ok_or("not a mesh block")?;
+        let primitive = self.meshed().ok_or("not a mesh block")?;
         if let Some(problem) = primitive.problem(self.space) {
             return Err(problem);
         }
@@ -263,7 +294,57 @@ impl Node {
                 };
                 data.model.properties.space = block.space;
                 data.model.properties.units = block.units;
-                Self::mesh_block(block.id, block.name, data, block.primitive, block.generated)
+                let mut node =
+                    Self::mesh_block(block.id, block.name, data, block.primitive, block.generated);
+                node.refinement = block.refinement;
+                node
+            }
+            ProjectNode::Parameters(set) => {
+                let mut data = ProjectAnalysis {
+                    id: set.id,
+                    name: set.name.clone(),
+                    position: set.position,
+                    ..Default::default()
+                };
+                data.model.properties.units = set.units;
+                let mut node = Self::of_kind(Kind::Parameters, set.id, set.name, data);
+                node.parameters = set.parameters;
+                node
+            }
+            ProjectNode::Measure(block) => {
+                let mut data = ProjectAnalysis {
+                    id: block.id,
+                    name: block.name.clone(),
+                    position: block.position,
+                    ..Default::default()
+                };
+                data.model.properties.units = block.units;
+                let mut node = Self::of_kind(Kind::Measure, block.id, block.name, data);
+                node.measure = Some(MeasureState {
+                    kind: block.kind,
+                    value: block.value,
+                    evaluated: block.evaluated,
+                    error: None,
+                });
+                node
+            }
+            ProjectNode::Optimizer(block) => {
+                let mut data = ProjectAnalysis {
+                    id: block.id,
+                    name: block.name.clone(),
+                    position: block.position,
+                    ..Default::default()
+                };
+                data.model.properties.units = block.units;
+                let mut node = Self::of_kind(Kind::Optimizer, block.id, block.name, data);
+                node.optimizer = Some(OptimizerState {
+                    kind: block.kind,
+                    value: block.value,
+                    history: block.history,
+                    report: block.report,
+                    done: block.done,
+                });
+                node
             }
             ProjectNode::MeshExport(e) => Self::mesh_export(e.id, e.name, e.path, e.written),
         }
@@ -305,7 +386,41 @@ impl Node {
                 primitive: self.primitive.clone()?,
                 mesh: data.mesh,
                 generated: self.generated,
+                refinement: self.refinement,
             })),
+            Kind::Parameters => ProjectNode::Parameters(ParameterSet {
+                id: data.id,
+                name: data.name,
+                position,
+                units: data.model.properties.units,
+                parameters: self.parameters.clone(),
+            }),
+            Kind::Measure => {
+                let measure = self.measure.as_ref()?;
+                ProjectNode::Measure(MeasureBlock {
+                    id: data.id,
+                    name: data.name,
+                    position,
+                    units: data.model.properties.units,
+                    kind: measure.kind.clone(),
+                    value: measure.value,
+                    evaluated: measure.evaluated,
+                })
+            }
+            Kind::Optimizer => {
+                let optimizer = self.optimizer.as_ref()?;
+                ProjectNode::Optimizer(OptimizerBlock {
+                    id: data.id,
+                    name: data.name,
+                    position,
+                    units: data.model.properties.units,
+                    kind: optimizer.kind.clone(),
+                    value: optimizer.value,
+                    history: optimizer.history.clone(),
+                    report: optimizer.report.clone(),
+                    done: optimizer.done,
+                })
+            }
         })
     }
 
@@ -364,6 +479,35 @@ impl Node {
     }
 }
 
+/// What a measure block computes, and the value it last computed with the fingerprint of the
+/// results and the definition it was computed from, see [`ProjectApp::measure_key`].
+struct MeasureState {
+    kind: MeasureKind,
+    value: Option<f64>,
+    evaluated: Option<u64>,
+    /// Why the last evaluation gave no value.
+    error: Option<String>,
+}
+
+/// What an optimizer varies, the value it gives now and its last run: the iterations, how
+/// it ended and the fingerprint of the measure it ended on, see [`ProjectApp::measure_key`].
+struct OptimizerState {
+    kind: OptimizerKind,
+    value: f64,
+    history: Vec<Iteration>,
+    report: Option<String>,
+    done: Option<u64>,
+}
+
+/// The loop of an optimizer under way: the values of the round left to solve, the one being
+/// solved with when it started, and whether Update Project was asked for it.
+struct LoopRun {
+    id: u64,
+    batch: Vec<f64>,
+    current: Option<(f64, Instant)>,
+    updating: bool,
+}
+
 /// What a link copies into its target.
 enum Payload {
     Setup(Box<plx_model::FeModel>),
@@ -403,6 +547,19 @@ enum Action {
     ExportNow(u64),
     /// Parameters of a mesh block changed in its block.
     SetPrimitive(u64, MeshPrimitive),
+    /// A new parameters block at the position.
+    AddParameters(egui::Pos2),
+    /// A new measure block at the position.
+    AddMeasure(egui::Pos2),
+    /// A new optimizer at the position.
+    AddOptimizer(egui::Pos2),
+    /// Run the loop of an optimizer, or forget its iterations.
+    RunLoop(u64),
+    ResetLoop(u64),
+    /// The value of a parameter of a parameters block, by its index, changed in its block.
+    SetParameter(u64, usize, f64),
+    /// The refinement of a mesh block changed in its block.
+    SetRefinement(u64, f64),
     /// Make the mesh of a mesh block anew.
     Generate(u64),
     /// Open the analysis' window, in the workspace of a cell if given.
@@ -463,6 +620,18 @@ pub struct ProjectApp {
     material_set: Option<MaterialSetEditor>,
     /// The editor of a mesh block.
     mesh_block: Option<MeshBlockEditor>,
+    /// The editor of a parameters block.
+    parameter_set: Option<ParameterSetEditor>,
+    /// The editor of a measure block.
+    measure_editor: Option<MeasureEditor>,
+    /// Measures being computed on worker threads, by block, with the fingerprint they are
+    /// computed for.
+    measuring: HashMap<u64, (u64, Receiver<Result<f64, String>>)>,
+    /// The editor of an optimizer.
+    optimizer_editor: Option<OptimizerEditor>,
+    /// The loop being run, and the optimizers Update Project runs after it.
+    looping: Option<LoopRun>,
+    loops_due: VecDeque<u64>,
     /// Update Project made meshes anew and goes on once links took them.
     update_after_sync: bool,
     /// The overview of blocks to add, open after a double-click into the schematic.
@@ -539,6 +708,12 @@ impl ProjectApp {
             confirm_delete: None,
             material_set: None,
             mesh_block: None,
+            parameter_set: None,
+            measure_editor: None,
+            measuring: HashMap::new(),
+            optimizer_editor: None,
+            looping: None,
+            loops_due: VecDeque::new(),
             update_after_sync: false,
             picker: None,
             show_all: false,
@@ -681,6 +856,910 @@ impl ProjectApp {
         id
     }
 
+    /// Adds a parameters block with one length; returns its id.
+    fn add_parameters(&mut self, position: egui::Pos2) -> u64 {
+        let id = self.next_id();
+        let name = self.unique_name("Parameters");
+        let mut data = ProjectAnalysis {
+            id,
+            name: name.clone(),
+            ..Default::default()
+        };
+        data.model.properties.units = self.settings.new_model.units;
+        let mut node = Node::of_kind(Kind::Parameters, id, name.clone(), data);
+        node.parameters = vec![Parameter::new("Length", ValueKind::Length, 0.1)];
+        self.nodes.push(node);
+        self.graph.insert_node(position, id);
+        self.output.push(format!(
+            "{name} created: drag the pin of a parameter to a parameter of a mesh block; \
+             double-click it to add, rename or remove parameters."
+        ));
+        id
+    }
+
+    /// Opens the editor of a parameters block.
+    fn edit_parameters(&mut self, id: u64) {
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            return;
+        };
+        let units = node
+            .data
+            .as_ref()
+            .map_or(UnitSystem::default(), |d| d.model.properties.units);
+        self.parameter_set = Some(ParameterSetEditor::new(
+            id,
+            &node.name,
+            &node.parameters,
+            units,
+        ));
+    }
+
+    fn parameter_set_window(&mut self, ctx: &egui::Context) {
+        let Some(editor) = &mut self.parameter_set else {
+            return;
+        };
+        let id = editor.id;
+        match editor.show(ctx) {
+            ParameterSetResult::Open => {}
+            ParameterSetResult::Cancel => self.parameter_set = None,
+            ParameterSetResult::Ok(rows, units) => {
+                self.parameter_set = None;
+                // Links follow a renamed parameter; those of a removed one go.
+                let kept: Vec<(String, String)> = (rows.iter())
+                    .filter_map(|(old, p)| Some((old.clone()?, p.name.clone())))
+                    .collect();
+                self.links.retain_mut(|link| {
+                    if link.source != id || !links::is_value(link) {
+                        return true;
+                    }
+                    let Some(name) = link.item.get(1) else {
+                        return false;
+                    };
+                    match kept.iter().find(|(old, _)| old == name) {
+                        Some((_, new)) => {
+                            link.item[1] = new.clone();
+                            true
+                        }
+                        None => false,
+                    }
+                });
+                if let Some(node) = self.node(id) {
+                    node.parameters = rows.into_iter().map(|(_, p)| p).collect();
+                    if let Some(data) = &mut node.data {
+                        data.model.properties.units = units;
+                    }
+                }
+                self.sync_due = true;
+            }
+        }
+    }
+
+    /// Adds a measure block of the largest von Mises stress; returns its id.
+    fn add_measure(&mut self, position: egui::Pos2) -> u64 {
+        let id = self.next_id();
+        let name = self.unique_name("Measure");
+        let mut data = ProjectAnalysis {
+            id,
+            name: name.clone(),
+            ..Default::default()
+        };
+        data.model.properties.units = self.settings.new_model.units;
+        let mut node = Node::of_kind(Kind::Measure, id, name.clone(), data);
+        node.measure = Some(MeasureState {
+            kind: MeasureKind::default(),
+            value: None,
+            evaluated: None,
+            error: None,
+        });
+        self.nodes.push(node);
+        self.graph.insert_node(position, id);
+        self.output.push(format!(
+            "{name} created: drag the results of a step to its Results row; double-click it \
+             to choose what it measures."
+        ));
+        id
+    }
+
+    /// Opens the editor of a measure block, with the node sets of the mesh it measures on.
+    fn edit_measure(&mut self, id: u64) {
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            return;
+        };
+        let Some(measure) = &node.measure else {
+            return;
+        };
+        let units =
+            (node.data.as_ref()).map_or(UnitSystem::default(), |d| d.model.properties.units);
+        let node_sets = (self.links.iter().find(|l| l.target == id))
+            .and_then(|l| self.nodes.iter().find(|n| n.id == l.source))
+            .and_then(Node::link_data)
+            .map(|d| d.mesh.node_sets.keys().cloned().collect())
+            .unwrap_or_default();
+        self.measure_editor = Some(MeasureEditor::new(
+            id,
+            &node.name,
+            measure.kind.clone(),
+            units,
+            node_sets,
+        ));
+    }
+
+    fn measure_window(&mut self, ctx: &egui::Context) {
+        let Some(editor) = &mut self.measure_editor else {
+            return;
+        };
+        let id = editor.id;
+        match editor.show(ctx) {
+            MeasureEditorResult::Open => {}
+            MeasureEditorResult::Cancel => self.measure_editor = None,
+            MeasureEditorResult::Ok(kind, units) => {
+                self.measure_editor = None;
+                if let Some(node) = self.node(id) {
+                    if let Some(measure) = &mut node.measure {
+                        measure.kind = kind;
+                    }
+                    if let Some(data) = &mut node.data {
+                        data.model.properties.units = units;
+                    }
+                }
+                self.sync_due = true;
+            }
+        }
+    }
+
+    /// The results a measure block measures: the analysis, the step's number for CalculiX
+    /// and the results it keeps; `None` without a link or results.
+    fn measured(&self, id: u64) -> Option<(&Node, u32, &plx_io::project::BoundResults)> {
+        let link = self.links.iter().find(|l| l.target == id)?;
+        let source = self.nodes.iter().find(|n| n.id == link.source)?;
+        let step = links::global_step_number(source.link_data()?.fe, link.item.get(1)?)?;
+        Some((source, step, source.bound_results()?))
+    }
+
+    /// The fingerprint of what a measure block computes its value from: the results it
+    /// measures and its definition; `None` while it has no results to measure.
+    fn measure_key(&self, id: u64) -> Option<u64> {
+        let node = self.nodes.iter().find(|n| n.id == id)?;
+        let kind = &node.measure.as_ref()?.kind;
+        let (_, step, bound) = self.measured(id)?;
+        let mut print = plx_mesh::Fnv::new();
+        print.add(&bound.input.unwrap_or_default().to_le_bytes());
+        for file in &bound.files {
+            print.add(file.name.as_bytes());
+            print.add(&file.size.to_le_bytes());
+        }
+        print.add(&step.to_le_bytes());
+        print.add(format!("{kind:?}").as_bytes());
+        Some(print.finish())
+    }
+
+    /// The state of the value of a measure block: up to date once computed from the results
+    /// as they are, and those are up to date.
+    fn measure_state(&self, id: u64) -> CellState {
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            return CellState::Missing;
+        };
+        let Some(measure) = &node.measure else {
+            return CellState::Missing;
+        };
+        let Some(key) = self.measure_key(id) else {
+            return CellState::Missing;
+        };
+        let fresh = (self.measured(id))
+            .and_then(|(source, _, _)| source.status.as_ref())
+            .is_some_and(|s| s.results == CellState::UpToDate);
+        match measure.value {
+            _ if measure.evaluated != Some(key) => CellState::OutOfDate,
+            None => CellState::Missing,
+            Some(_) if fresh => CellState::UpToDate,
+            Some(_) => CellState::OutOfDate,
+        }
+    }
+
+    /// Computes the values of measure blocks whose results or definition changed, on worker
+    /// threads, and takes the values computed.
+    fn evaluate_measures(&mut self) {
+        let done: Vec<(u64, u64, Result<f64, String>)> = (self.measuring.iter())
+            .filter_map(|(&id, (key, receiver))| match receiver.try_recv() {
+                Ok(result) => Some((id, *key, result)),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some((id, *key, Err("the computation stopped".into())))
+                }
+            })
+            .collect();
+        for (id, key, result) in done {
+            self.measuring.remove(&id);
+            let Some(node) = self.node(id) else {
+                continue;
+            };
+            let units =
+                (node.data.as_ref()).map_or(UnitSystem::default(), |d| d.model.properties.units);
+            let name = node.name.clone();
+            let Some(measure) = &mut node.measure else {
+                continue;
+            };
+            measure.evaluated = Some(key);
+            let line = match result {
+                Ok(value) => {
+                    measure.value = Some(value);
+                    measure.error = None;
+                    format!(
+                        "{name}: {} = {}",
+                        measure.kind.describe(),
+                        crate::measure::shown(&measure.kind, value, units)
+                    )
+                }
+                Err(why) => {
+                    measure.value = None;
+                    let line = format!("{name} has no value: {why}.");
+                    measure.error = Some(why);
+                    line
+                }
+            };
+            self.output.push(line);
+        }
+        let measures: Vec<u64> = (self.nodes.iter())
+            .filter(|n| n.kind == Kind::Measure)
+            .map(|n| n.id)
+            .collect();
+        for id in measures {
+            let Some(key) = self.measure_key(id) else {
+                continue;
+            };
+            let evaluated = (self.nodes.iter().find(|n| n.id == id))
+                .and_then(|n| n.measure.as_ref())
+                .and_then(|m| m.evaluated);
+            if evaluated == Some(key) || self.measuring.get(&id).is_some_and(|(k, _)| *k == key) {
+                continue;
+            }
+            let Some((source, step, bound)) = self.measured(id) else {
+                continue;
+            };
+            let Some(kind) = (self.nodes.iter().find(|n| n.id == id))
+                .and_then(|n| n.measure.as_ref())
+                .map(|m| m.kind.clone())
+            else {
+                continue;
+            };
+            let node_sets = (source.link_data())
+                .map(|d| d.mesh.node_sets.clone())
+                .unwrap_or_default();
+            let dir = (self.settings.solver.work_dir())
+                .join(crate::analysis::job_name(&self.project_name()))
+                .join(crate::analysis::job_name(&self.name_of(id)))
+                .join(format!(
+                    "{}-{:016x}",
+                    crate::analysis::job_name(&source.name),
+                    bound.input.unwrap_or_default()
+                ));
+            let job = crate::measure::Job {
+                kind,
+                step,
+                results: bound.clone(),
+                node_sets,
+                dir,
+            };
+            self.measuring.insert(id, (key, crate::measure::start(job)));
+        }
+    }
+
+    /// Adds an optimizer of the mesh convergence; returns its id.
+    fn add_optimizer(&mut self, position: egui::Pos2) -> u64 {
+        let id = self.next_id();
+        let name = self.unique_name("Optimizer");
+        let mut data = ProjectAnalysis {
+            id,
+            name: name.clone(),
+            ..Default::default()
+        };
+        data.model.properties.units = self.settings.new_model.units;
+        let mut node = Node::of_kind(Kind::Optimizer, id, name.clone(), data);
+        let kind = OptimizerKind::default();
+        node.optimizer = Some(OptimizerState {
+            value: kind.start(),
+            kind,
+            history: Vec::new(),
+            report: None,
+            done: None,
+        });
+        self.nodes.push(node);
+        self.graph.insert_node(position, id);
+        self.output.push(format!(
+            "{name} created: drag its value to Refine of a mesh block and the value of a Measure \
+             block to its Measure row; Update Project then runs the loop."
+        ));
+        id
+    }
+
+    fn edit_optimizer(&mut self, id: u64) {
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            return;
+        };
+        let Some(optimizer) = &node.optimizer else {
+            return;
+        };
+        let units =
+            (node.data.as_ref()).map_or(UnitSystem::default(), |d| d.model.properties.units);
+        self.optimizer_editor = Some(OptimizerEditor::new(
+            id,
+            &node.name,
+            optimizer.kind.clone(),
+            units,
+        ));
+    }
+
+    fn optimizer_window(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.optimizer_editor.as_ref().map(|e| e.id) else {
+            return;
+        };
+        let history = self.optimizer_history(id);
+        let Some(editor) = &mut self.optimizer_editor else {
+            return;
+        };
+        let result = editor.show(ctx, &history);
+        let settle = |app: &mut Self, kind: OptimizerKind, units: UnitSystem| {
+            if let Some(node) = app.node(id) {
+                if let Some(data) = &mut node.data {
+                    data.model.properties.units = units;
+                }
+                if let Some(optimizer) = &mut node.optimizer
+                    && optimizer.kind != kind
+                {
+                    // Other settings: the last run is no longer what it would give.
+                    if optimizer.kind.value_kind() != kind.value_kind() {
+                        optimizer.value = kind.start();
+                    }
+                    optimizer.kind = kind;
+                    optimizer.done = None;
+                }
+            }
+            app.sync_due = true;
+        };
+        match result {
+            OptimizerEditorResult::Open => {}
+            OptimizerEditorResult::Cancel => self.optimizer_editor = None,
+            OptimizerEditorResult::Ok(kind, units) => {
+                self.optimizer_editor = None;
+                settle(self, kind, units);
+            }
+            OptimizerEditorResult::Run(kind, units) => {
+                settle(self, kind, units);
+                self.start_loop(id);
+            }
+            OptimizerEditorResult::Reset => self.reset_loop(id),
+        }
+    }
+
+    /// The Measure block an optimizer reads.
+    fn objective_of(&self, id: u64) -> Option<u64> {
+        (self.links.iter())
+            .find(|l| {
+                l.target == id
+                    && links::slot(l)
+                        .first()
+                        .is_some_and(|c| c == links::OBJECTIVE)
+            })
+            .map(|l| l.source)
+    }
+
+    /// The feedback links of an optimizer: where its value goes.
+    fn feedback_of(&self, id: u64) -> Vec<&Link> {
+        (self.links.iter())
+            .filter(|l| l.source == id && links::is_feedback(l))
+            .collect()
+    }
+
+    /// The measure of an optimizer as text, in the units of its Measure block.
+    fn shown_measure(&self, id: u64, value: f64) -> String {
+        let measure = (self.objective_of(id))
+            .and_then(|m| self.nodes.iter().find(|n| n.id == m))
+            .and_then(|n| Some((n.measure.as_ref()?, n.data.as_ref()?)));
+        match measure {
+            Some((measure, data)) => {
+                crate::measure::shown(&measure.kind, value, data.model.properties.units)
+            }
+            None => crate::results::format_value(value as f32),
+        }
+    }
+
+    /// The value of an optimizer as text.
+    fn shown_loop_value(&self, id: u64, value: f64) -> String {
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            return String::new();
+        };
+        let units =
+            (node.data.as_ref()).map_or(UnitSystem::default(), |d| d.model.properties.units);
+        let kind = (node.optimizer.as_ref()).map_or(ValueKind::Factor, |o| o.kind.value_kind());
+        crate::optimizer::shown(kind, value, units)
+    }
+
+    /// How many elements the mesh blocks an optimizer varies would have at `value`; `None`
+    /// when it varies no mesh block.
+    fn elements_at(&self, id: u64, value: f64) -> Option<u64> {
+        (self.feedback_of(id).into_iter())
+            .filter_map(|link| {
+                let node = self.nodes.iter().find(|n| n.id == link.target)?;
+                let key = links::parameter_key(link)?;
+                let (mut primitive, mut refinement) = (node.primitive.clone()?, node.refinement);
+                if key == REFINEMENT {
+                    refinement = value;
+                } else {
+                    primitive.set_value(key, value);
+                }
+                Some(primitive.refined(refinement).element_count())
+            })
+            .max()
+    }
+
+    /// The elements of the meshes an optimizer varies, as they are now.
+    fn loop_elements(&self, id: u64) -> Option<u64> {
+        (self.feedback_of(id).into_iter())
+            .filter_map(|link| self.nodes.iter().find(|n| n.id == link.target))
+            .filter_map(|n| n.data.as_ref())
+            .map(|d| d.mesh.element_count() as u64)
+            .max()
+    }
+
+    /// The state of an optimizer: up to date while its measure is what its last run ended on.
+    fn optimizer_state(&self, id: u64) -> CellState {
+        let Some(optimizer) =
+            (self.nodes.iter().find(|n| n.id == id)).and_then(|n| n.optimizer.as_ref())
+        else {
+            return CellState::Missing;
+        };
+        if self.looping.as_ref().is_some_and(|run| run.id == id) {
+            return CellState::OutOfDate;
+        }
+        let measure = self.objective_of(id);
+        let current = measure.and_then(|m| {
+            (self.measure_state(m) == CellState::UpToDate).then(|| self.measure_key(m))?
+        });
+        match optimizer.done {
+            Some(done) if Some(done) == current => CellState::UpToDate,
+            _ if optimizer.history.is_empty() => CellState::Missing,
+            _ => CellState::OutOfDate,
+        }
+    }
+
+    /// The iterations of an optimizer for its editor.
+    fn optimizer_history(&self, id: u64) -> crate::optimizer::History {
+        let mut history = crate::optimizer::History::default();
+        let Some(optimizer) =
+            (self.nodes.iter().find(|n| n.id == id)).and_then(|n| n.optimizer.as_ref())
+        else {
+            return history;
+        };
+        let study = matches!(optimizer.kind, OptimizerKind::ParameterStudy { .. });
+        let measure_of = |value: f64| {
+            let (measure, units) = (self.objective_of(id))
+                .and_then(|m| self.nodes.iter().find(|n| n.id == m))
+                .and_then(|n| {
+                    Some((n.measure.as_ref()?, n.data.as_ref()?.model.properties.units))
+                })?;
+            let (field, component) = measure.kind.field();
+            Some(if field == "FREQ" {
+                units.shown(value, Quantity::Frequency)
+            } else {
+                crate::results::shown_field_value(value, field, component, units)
+            })
+        };
+        for (index, iteration) in optimizer.history.iter().enumerate() {
+            history.rows.push([
+                self.shown_loop_value(id, iteration.value),
+                (iteration.measure).map_or("failed".into(), |m| self.shown_measure(id, m)),
+                iteration.elements.map_or(String::new(), |e| e.to_string()),
+                format!("{:.1} s", iteration.seconds),
+            ]);
+            if let Some(y) = iteration.measure.and_then(measure_of) {
+                let x = match iteration.elements {
+                    _ if study => iteration.value,
+                    Some(elements) => elements as f64,
+                    None => (index + 1) as f64,
+                };
+                history.plot.x.push(x);
+                if history.plot.curves.is_empty() {
+                    history.plot.curves.push(("Measure".into(), Vec::new()));
+                }
+                history.plot.curves[0].1.push(y);
+            }
+        }
+        history.plot.x_label = if study {
+            "Value".into()
+        } else {
+            "Elements".into()
+        };
+        history.running = self.looping.as_ref().is_some_and(|run| run.id == id);
+        history.report = if history.running {
+            format!(
+                "Running iteration {} of at most {} …",
+                optimizer.history.len() + 1,
+                optimizer.kind.planned()
+            )
+        } else {
+            optimizer
+                .report
+                .clone()
+                .unwrap_or_else(|| "Not run yet.".into())
+        };
+        history
+    }
+
+    /// The rows of an optimizer: the measure it reads, what it does, how far it got and the
+    /// value it gives.
+    fn optimizer_rows(
+        &self,
+        node: &Node,
+        incoming: &HashMap<u64, Vec<(Vec<String>, String)>>,
+    ) -> Vec<Row> {
+        let Some(optimizer) = &node.optimizer else {
+            return Vec::new();
+        };
+        let row = |path: &[&str], text: String, icon, tip: &str| Row {
+            path: path.iter().map(|p| p.to_string()).collect(),
+            text,
+            depth: 0,
+            icon,
+            state: None,
+            expander: None,
+            input: false,
+            output: false,
+            linked_from: None,
+            collection: false,
+            partial: false,
+            widget: None,
+            tip: tip.to_owned(),
+        };
+        let linked_from = (incoming.get(&node.id).into_iter().flatten())
+            .find(|(slot, _)| slot.len() == 1 && slot[0] == links::OBJECTIVE)
+            .map(|(_, source)| source.clone());
+        let measure = Row {
+            input: true,
+            linked_from,
+            ..row(
+                &[links::OBJECTIVE],
+                "Measure".into(),
+                NodeIcon::Results,
+                "The measure it reads: drag the value of a Measure block here.",
+            )
+        };
+        let what = row(
+            &[],
+            optimizer.kind.label().into(),
+            NodeIcon::Setup,
+            "What it does; double-click the block to set it up and see its iterations.",
+        );
+        let running = self.looping.as_ref().is_some_and(|run| run.id == node.id);
+        let progress = match optimizer.history.last() {
+            _ if running => format!("Iteration {} …", optimizer.history.len() + 1),
+            None => "Not run yet".to_owned(),
+            Some(last) => format!(
+                "{} it., {}",
+                optimizer.history.len(),
+                last.measure
+                    .map_or("failed".into(), |m| self.shown_measure(node.id, m))
+            ),
+        };
+        let report = optimizer.report.clone().unwrap_or_default();
+        let progress = row(&[], progress, NodeIcon::Solution, &report);
+        let value = Row {
+            output: true,
+            state: Some(self.optimizer_state(node.id)),
+            ..row(
+                &[links::LOOP, "Value"],
+                format!("Value {}", self.shown_loop_value(node.id, optimizer.value)),
+                NodeIcon::Setup,
+                "The value it gives: drag it to Refine or another number of a mesh block. The \
+                 wire is dashed, as it closes the loop.",
+            )
+        };
+        vec![measure, what, progress, value]
+    }
+
+    /// Update Project: runs the loops of optimizers that are not up to date, each of which
+    /// updates the project at every iteration, or else updates the project.
+    fn update_all(&mut self) {
+        self.loops_due = (self.nodes.iter())
+            .filter(|n| n.kind == Kind::Optimizer)
+            .map(|n| n.id)
+            .filter(|&id| {
+                self.optimizer_state(id) != CellState::UpToDate
+                    && self.objective_of(id).is_some()
+                    && !self.feedback_of(id).is_empty()
+            })
+            .collect();
+        match self.loops_due.pop_front() {
+            Some(id) => self.start_loop(id),
+            None => self.update_project(),
+        }
+    }
+
+    /// Starts the loop of an optimizer from the beginning.
+    fn start_loop(&mut self, id: u64) {
+        if self.looping.is_some() {
+            return;
+        }
+        let name = self.name_of(id);
+        if self.objective_of(id).is_none() || self.feedback_of(id).is_empty() {
+            self.output.push(format!(
+                "{name} cannot run: link its value to a parameter of a mesh block and the value \
+                 of a Measure block to its Measure row."
+            ));
+            return;
+        }
+        if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+            optimizer.history.clear();
+            optimizer.report = None;
+            optimizer.done = None;
+        }
+        self.output.push(format!("{name}: loop started"));
+        self.looping = Some(LoopRun {
+            id,
+            batch: Vec::new(),
+            current: None,
+            updating: false,
+        });
+    }
+
+    /// Forgets the iterations of an optimizer and gives its start value.
+    fn reset_loop(&mut self, id: u64) {
+        if self.looping.as_ref().is_some_and(|run| run.id == id) {
+            return;
+        }
+        if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+            optimizer.history.clear();
+            optimizer.report = None;
+            optimizer.done = None;
+            optimizer.value = optimizer.kind.start();
+        }
+        self.sync_due = true;
+    }
+
+    /// Works through the loop of an optimizer: gives the next value, has the project updated,
+    /// reads the measure once all is done, and asks the optimizer for the next values.
+    fn run_loop(&mut self) {
+        let Some(run) = &self.looping else {
+            return;
+        };
+        let id = run.id;
+        match run.current {
+            None => self.next_iteration(id),
+            Some(_) if !run.updating => {
+                // The value went to its parameters; then the update.
+                if !self.sync_due {
+                    if let Some(run) = &mut self.looping {
+                        run.updating = true;
+                    }
+                    self.update_project();
+                }
+            }
+            Some((value, started)) => {
+                let idle = !self.update_after_sync
+                    && !self.sync_due
+                    && self.update_queue.is_empty()
+                    && self.updating.is_empty()
+                    && self.measuring.is_empty()
+                    && !self.restoring.values().any(Option::is_some);
+                if !idle {
+                    return;
+                }
+                let measure = (self.objective_of(id)).and_then(|m| {
+                    let node = self.nodes.iter().find(|n| n.id == m)?;
+                    (self.measure_state(m) == CellState::UpToDate)
+                        .then(|| node.measure.as_ref()?.value)?
+                });
+                let iteration = Iteration {
+                    value,
+                    measure,
+                    elements: self.loop_elements(id),
+                    seconds: started.elapsed().as_secs_f64(),
+                };
+                let line = format!(
+                    "{}: iteration {}, value {}: {}",
+                    self.name_of(id),
+                    (self.nodes.iter().find(|n| n.id == id))
+                        .and_then(|n| n.optimizer.as_ref())
+                        .map_or(0, |o| o.history.len())
+                        + 1,
+                    self.shown_loop_value(id, value),
+                    measure.map_or("no measure".into(), |m| self.shown_measure(id, m))
+                );
+                self.output.push(line);
+                if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+                    optimizer.history.push(iteration);
+                }
+                if let Some(run) = &mut self.looping {
+                    run.current = None;
+                    run.updating = false;
+                }
+            }
+        }
+    }
+
+    /// Gives the next value of the loop, or ends it.
+    fn next_iteration(&mut self, id: u64) {
+        let Some(optimizer) =
+            (self.nodes.iter().find(|n| n.id == id)).and_then(|n| n.optimizer.as_ref())
+        else {
+            self.looping = None;
+            return;
+        };
+        let batch = self
+            .looping
+            .as_ref()
+            .map(|run| run.batch.clone())
+            .unwrap_or_default();
+        let batch = if batch.is_empty() {
+            match optimizer
+                .kind
+                .next_values(&optimizer.history, |value| self.elements_at(id, value))
+            {
+                Next::Run(values) => values,
+                Next::Finished { value, outcome } => return self.finish_loop(id, value, outcome),
+            }
+        } else {
+            batch
+        };
+        let Some((&value, rest)) = batch.split_first() else {
+            return self.finish_loop(id, None, LoopOutcome::StudyDone);
+        };
+        if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+            optimizer.value = value;
+        }
+        self.looping = Some(LoopRun {
+            id,
+            batch: rest.to_vec(),
+            current: Some((value, Instant::now())),
+            updating: false,
+        });
+        self.sync_due = true;
+    }
+
+    /// Ends the loop of an optimizer: leaves its value, says why it is done and goes on with
+    /// the next optimizer of Update Project.
+    fn finish_loop(&mut self, id: u64, value: Option<f64>, outcome: LoopOutcome) {
+        self.looping = None;
+        let name = self.name_of(id);
+        let Some(optimizer) =
+            (self.nodes.iter().find(|n| n.id == id)).and_then(|n| n.optimizer.as_ref())
+        else {
+            return;
+        };
+        let count = optimizer.history.len();
+        let last = optimizer.history.last().cloned();
+        let measure = |iteration: &Option<Iteration>| {
+            (iteration.as_ref())
+                .and_then(|i| i.measure)
+                .map_or_else(String::new, |m| self.shown_measure(id, m))
+        };
+        let elements = (last.as_ref())
+            .and_then(|i| i.elements)
+            .map_or_else(String::new, |e| format!(" at {e} elements"));
+        let report = match &outcome {
+            LoopOutcome::Converged { change } => format!(
+                "Converged after {count} iterations: {}{elements} (change {:.2} %).",
+                measure(&last),
+                change * 100.0
+            ),
+            LoopOutcome::NotConverged { change } => format!(
+                "Not converged after {count} iterations: {}{elements}{}.",
+                measure(&last),
+                change.map_or_else(String::new, |c| format!(", last change {:.2} %", c * 100.0))
+            ),
+            LoopOutcome::ElementLimit { elements: next } => format!(
+                "Stopped after {count} iterations: the next mesh would have {next} elements, \
+                 more than allowed. Last: {}{elements}.",
+                measure(&last)
+            ),
+            LoopOutcome::Failed { iteration } => format!(
+                "Iteration {iteration} gave no measure; the solution monitor and the output \
+                 tell why."
+            ),
+            LoopOutcome::StudyDone => format!("Study done: {count} values solved."),
+        };
+        // A stress at a corner or a point load grows with every refinement and never
+        // converges.
+        let measures: Vec<f64> = (optimizer.history.iter())
+            .filter_map(|i| i.measure)
+            .collect();
+        let growing = measures.len() > 2 && measures.windows(2).all(|w| w[1].abs() > w[0].abs());
+        let report = match outcome {
+            LoopOutcome::NotConverged { .. } | LoopOutcome::ElementLimit { .. } if growing => {
+                format!(
+                    "{report} The measure grew with every refinement, as at a singularity such \
+                     as a sharp corner or a point load; measure a displacement, or a region \
+                     away from it."
+                )
+            }
+            _ => report,
+        };
+        self.output.push(format!("{name}: {report}"));
+        let done = (self.objective_of(id))
+            .filter(|&m| value.is_none() && self.measure_state(m) == CellState::UpToDate)
+            .and_then(|m| self.measure_key(m));
+        if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+            if let Some(value) = value {
+                optimizer.value = value;
+            }
+            optimizer.report = Some(report);
+            optimizer.done = done;
+        }
+        self.sync_due = true;
+        if let Some(next) = self.loops_due.pop_front() {
+            self.start_loop(next);
+        } else {
+            // What the loop made goes to the files of the export blocks.
+            self.queue_exports(false);
+        }
+    }
+
+    /// Gives the numbers of value links to the parameters they go to; a mesh block whose
+    /// parameters change is out of date and made anew by Update Project.
+    fn apply_values(&mut self) {
+        let values: Vec<(u64, String, f64)> = (self.links.iter())
+            .filter(|l| links::is_value(l))
+            .filter_map(|link| {
+                let key = links::parameter_key(link)?;
+                let value = self.value_of(link.source, &link.item)?;
+                Some((link.target, key.to_owned(), value))
+            })
+            .collect();
+        for (target, key, value) in values {
+            let Some(node) = self.node(target) else {
+                continue;
+            };
+            if key == REFINEMENT {
+                if value.is_finite() && value > 0.0 {
+                    node.refinement = value;
+                }
+            } else if let Some(primitive) = &mut node.primitive {
+                primitive.set_value(&key, value);
+            }
+        }
+    }
+
+    /// The number a block gives at `item`, `["Value", name]`.
+    fn value_of(&self, id: u64, item: &[String]) -> Option<f64> {
+        let node = self.nodes.iter().find(|n| n.id == id)?;
+        let [cell, name] = item else {
+            return None;
+        };
+        if cell == links::LOOP {
+            return node.optimizer.as_ref().map(|o| o.value);
+        }
+        (node.parameters.iter())
+            .find(|p| &p.name == name)
+            .map(|p| p.value)
+    }
+
+    /// The label of the parameter row `slot`, `["Parameters", key]`, of a block.
+    fn parameter_label(&self, id: u64, slot: &[String]) -> String {
+        let key = slot.get(1).map_or("", String::as_str);
+        if key == REFINEMENT {
+            return "Refine".into();
+        }
+        (self.nodes.iter().find(|n| n.id == id))
+            .and_then(|n| n.primitive.as_ref())
+            .and_then(|p| p.params().iter().find(|param| param.key == key))
+            .map_or_else(|| key.to_owned(), |param| param.label.to_owned())
+    }
+
+    /// What kind of number a block gives at `item` or takes at `slot`.
+    fn value_kind(&self, id: u64, path: &[String]) -> Option<ValueKind> {
+        let node = self.nodes.iter().find(|n| n.id == id)?;
+        match path {
+            [cell, name] if cell == links::VALUE => (node.parameters.iter())
+                .find(|p| &p.name == name)
+                .map(|p| p.kind),
+            [cell, _] if cell == links::LOOP => Some(node.optimizer.as_ref()?.kind.value_kind()),
+            [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => {
+                Some(ValueKind::Factor)
+            }
+            [cell, key] if cell == links::PARAMETERS => node.primitive.as_ref()?.value_kind(key),
+            _ => None,
+        }
+    }
+
     /// Adds a mesh export block with no file yet; returns its id.
     fn add_mesh_export(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
@@ -726,12 +1805,35 @@ impl ProjectApp {
         ok
     }
 
+    /// Queues the mesh export blocks that have a file, for [`Self::run_exports`]; with
+    /// `changed_only` those whose file is up to date stay out, which is only known while no
+    /// analysis is to be solved before them.
+    fn queue_exports(&mut self, changed_only: bool) {
+        self.export_queue.clear();
+        self.update_failed = false;
+        let base = self.export_base();
+        let ids: Vec<u64> = self.nodes.iter().map(|n| n.id).collect();
+        for id in links::order(&ids, &self.links) {
+            let Some(node) = (self.nodes.iter()).find(|n| n.id == id && n.kind == Kind::MeshExport)
+            else {
+                continue;
+            };
+            if node.export_path.trim().is_empty() {
+                self.output
+                    .push(format!("{} skipped: no file is chosen.", node.name));
+            } else if !changed_only || node.export_state(base.as_deref()) != CellState::UpToDate {
+                self.export_queue.push(id);
+            }
+        }
+    }
+
     /// Writes the files of the mesh export blocks Update Project queued, once the analyses
     /// before them are done and their links have brought the meshes.
     fn run_exports(&mut self) {
         if self.export_queue.is_empty()
             || !self.updating.is_empty()
             || !self.update_queue.is_empty()
+            || self.looping.is_some()
             || self.sync_due
             || self.update_after_sync
             || self.restoring.values().any(Option::is_some)
@@ -923,6 +2025,9 @@ impl ProjectApp {
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 return self.edit_mesh(id);
             }
+            Some(Kind::Parameters) => return self.edit_parameters(id),
+            Some(Kind::Measure) => return self.edit_measure(id),
+            Some(Kind::Optimizer) => return self.edit_optimizer(id),
             Some(Kind::MeshExport) => {
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 return self.choose_export_file(id);
@@ -1210,18 +2315,37 @@ impl ProjectApp {
         };
         let name = format!("Copy of {}", node.name);
         let (kind, primitive, generated) = (node.kind, node.primitive.clone(), node.generated);
+        let (refinement, parameters) = (node.refinement, node.parameters.clone());
+        let optimizer = (node.optimizer.as_ref()).map(|o| OptimizerState {
+            kind: o.kind.clone(),
+            value: o.kind.start(),
+            history: Vec::new(),
+            report: None,
+            done: None,
+        });
+        let measure = (node.measure.as_ref()).map(|m| MeasureState {
+            kind: m.kind.clone(),
+            value: None,
+            evaluated: None,
+            error: None,
+        });
         let new_id = self.next_id();
         let name = self.unique_name(&name);
         data.id = new_id;
         data.name = name.clone();
         let path = (self.nodes.iter().find(|n| n.id == id)).map(|n| n.export_path.clone());
-        self.nodes.push(match primitive {
+        let mut copy = match primitive {
             Some(primitive) => Node::mesh_block(new_id, name.clone(), data, primitive, generated),
             None if kind == Kind::MeshExport => {
                 Node::mesh_export(new_id, name.clone(), path.unwrap_or_default(), None)
             }
             None => Node::of_kind(kind, new_id, name.clone(), data),
-        });
+        };
+        copy.refinement = refinement;
+        copy.parameters = parameters;
+        copy.measure = measure;
+        copy.optimizer = optimizer;
+        self.nodes.push(copy);
         self.graph.insert_node(position, new_id);
         self.output.push(format!("{name} created"));
     }
@@ -1250,6 +2374,20 @@ impl ProjectApp {
         if self.mesh_block.as_ref().is_some_and(|e| e.id == id) {
             self.mesh_block = None;
         }
+        if self.parameter_set.as_ref().is_some_and(|e| e.id == id) {
+            self.parameter_set = None;
+        }
+        if self.measure_editor.as_ref().is_some_and(|e| e.id == id) {
+            self.measure_editor = None;
+        }
+        self.measuring.remove(&id);
+        if self.optimizer_editor.as_ref().is_some_and(|e| e.id == id) {
+            self.optimizer_editor = None;
+        }
+        if self.looping.as_ref().is_some_and(|run| run.id == id) {
+            self.looping = None;
+        }
+        self.loops_due.retain(|&due| due != id);
         self.update_queue.retain(|&queued| queued != id);
     }
 
@@ -1286,23 +2424,10 @@ impl ProjectApp {
                 "{name} skipped: it has no mesh or geometry, or no step yet."
             ));
         }
-        // The files of the mesh export blocks come after everything they may depend on.
-        self.export_queue.clear();
-        self.update_failed = false;
-        let base = self.export_base();
-        for &id in &links::order(&ids, &self.links) {
-            let Some(node) = (self.nodes.iter()).find(|n| n.id == id && n.kind == Kind::MeshExport)
-            else {
-                continue;
-            };
-            if node.export_path.trim().is_empty() {
-                self.output
-                    .push(format!("{} skipped: no file is chosen.", node.name));
-            } else if !self.update_queue.is_empty()
-                || node.export_state(base.as_deref()) != CellState::UpToDate
-            {
-                self.export_queue.push(id);
-            }
+        // The files of the mesh export blocks come after everything they may depend on, and
+        // after the loop of an optimizer: a loop updates the project at every iteration.
+        if self.looping.is_none() && self.loops_due.is_empty() {
+            self.queue_exports(self.update_queue.is_empty());
         }
         if self.update_queue.is_empty() && self.export_queue.is_empty() {
             self.output.push("Nothing to update.".into());
@@ -1501,6 +2626,16 @@ impl ProjectApp {
 
     /// Stops Update Project: nothing more is started, and what runs is stopped.
     fn stop_update(&mut self) {
+        if let Some(run) = self.looping.take() {
+            self.loops_due.clear();
+            let name = self.name_of(run.id);
+            if let Some(optimizer) = self.node(run.id).and_then(|n| n.optimizer.as_mut()) {
+                let line = format!("Stopped after {} iterations.", optimizer.history.len());
+                optimizer.report = Some(line.clone());
+                optimizer.done = None;
+                self.output.push(format!("{name}: {line}"));
+            }
+        }
         self.update_queue.clear();
         self.export_queue.clear();
         self.update_failed = false;
@@ -1768,10 +2903,17 @@ impl ProjectApp {
 
     /// F5, as Solve in an analysis window: Update Project, unless it is under way.
     fn solve_shortcut(&mut self) {
-        if self.updating.is_empty() && self.update_queue.is_empty() && self.export_queue.is_empty()
-        {
-            self.update_project();
+        if !self.busy() {
+            self.update_all();
         }
+    }
+
+    /// Whether Update Project is under way, or the loop of an optimizer.
+    fn busy(&self) -> bool {
+        !self.updating.is_empty()
+            || !self.update_queue.is_empty()
+            || !self.export_queue.is_empty()
+            || self.looping.is_some()
     }
 
     fn toggle_monitor(&mut self) {
@@ -1789,7 +2931,8 @@ impl ProjectApp {
         let mut found = Vec::new();
         let mut queue = vec![id];
         while let Some(source) = queue.pop() {
-            for link in self.links.iter().filter(|l| l.source == source) {
+            for link in (self.links.iter()).filter(|l| l.source == source && !links::is_feedback(l))
+            {
                 if !found.contains(&link.target) && link.target != id {
                     found.push(link.target);
                     queue.push(link.target);
@@ -1843,8 +2986,8 @@ impl ProjectApp {
                 }
                 ui.separator();
                 let update = egui::Button::new("Update Project").shortcut_text("F5");
-                if ui.add(update).on_hover_text(UPDATE_TIP).clicked() {
-                    self.update_project();
+                if ui.add(update).on_hover_text(UPDATE_TIP).clicked() && !self.busy() {
+                    self.update_all();
                 }
                 if ui
                     .button("Solution Monitor")
@@ -1900,12 +3043,12 @@ impl ProjectApp {
                 self.save(false);
             }
             ui.separator();
-            let updating = !self.updating.is_empty() || !self.update_queue.is_empty();
+            let updating = self.busy();
             let update = icons::button(ui, Icon::Solve, UPDATE_TIP, !updating, false).clicked();
             let text = egui::Button::new("Update Project").frame(false);
             let text = ui.add_enabled(!updating, text).on_hover_text(UPDATE_TIP);
             if update || text.clicked() {
-                self.update_project();
+                self.update_all();
             }
             ui.add_space(4.0);
             if icons::button(ui, Icon::Stop, "Stop Update Project", updating, false).clicked() {
@@ -1963,11 +3106,21 @@ impl ProjectApp {
                     (Kind::Materials, _) => fe
                         .map(|fe| material_rows(fe, &n.expanded))
                         .unwrap_or_default(),
-                    (Kind::Mesh, _) => mesh_rows(n),
+                    (Kind::Mesh, _) => {
+                        mesh_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
+                    }
                     (Kind::MeshExport, _) => export_rows(
                         n,
                         base.as_deref(),
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                    ),
+                    (Kind::Parameters, _) => parameter_rows(n),
+                    (Kind::Optimizer, _) => self.optimizer_rows(n, &incoming),
+                    (Kind::Measure, _) => measure_rows(
+                        n,
+                        incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
+                        self.measure_state(n.id),
+                        self.measuring.contains_key(&n.id),
                     ),
                     (Kind::Analysis, Some(status)) => block_rows(
                         status,
@@ -1985,6 +3138,7 @@ impl ProjectApp {
                 BlockView {
                     id: n.id,
                     name: n.name.clone(),
+                    export_path: n.export_path.clone(),
                     kind: n.kind,
                     space: n.space,
                     steps: (fe.into_iter().flat_map(|fe| &fe.steps))
@@ -1995,7 +3149,8 @@ impl ProjectApp {
                     loading: n.window.as_ref().is_some_and(|w| w.model().is_none()),
                     open: n.window.is_some(),
                     primitive: n.primitive.clone(),
-                    export_path: n.export_path.clone(),
+                    refinement: n.refinement,
+                    parameters: n.parameters.clone(),
                     units: (n.data.as_ref())
                         .map_or(UnitSystem::default(), |d| d.model.properties.units),
                 }
@@ -2007,11 +3162,18 @@ impl ProjectApp {
             actions: Vec::new(),
             to_global: Default::default(),
             show_all: std::mem::take(&mut self.show_all).then(|| ui.max_rect()),
+            feedback: (self.links.iter())
+                .filter(|l| links::is_feedback(l))
+                .map(|l| (l.source, l.target, l.slot.clone()))
+                .collect(),
+            bottom: f32::MIN,
         };
         let response = SnarlWidget::new()
             .id_salt(("project schematic", self.graph_generation))
             .style(schematic_style())
             .show(&mut self.graph, &mut viewer, ui);
+        let clip = viewer.to_global.inverse() * ui.clip_rect();
+        draw_feedback(ui.ctx(), &viewer.feedback, viewer.bottom, clip);
         // A double-click into empty space shows the blocks to add there, as in Blender.
         // The response lies on the zoomed and panned layer of the schematic, so its pointer
         // position is in the schematic; the picker needs the one on the screen.
@@ -2120,7 +3282,17 @@ impl ProjectApp {
         // Materials have no model space.
         let space = |id: u64| {
             (self.nodes.iter())
-                .find(|n| n.id == id && !matches!(n.kind, Kind::Materials | Kind::MeshExport))
+                .find(|n| {
+                    n.id == id
+                        && !matches!(
+                            n.kind,
+                            Kind::Materials
+                                | Kind::Parameters
+                                | Kind::Measure
+                                | Kind::Optimizer
+                                | Kind::MeshExport
+                        )
+                })
                 .map(|n| n.space)
         };
         if let (Some(a), Some(b)) = (space(source), space(target))
@@ -2134,10 +3306,15 @@ impl ProjectApp {
             ));
             return;
         }
-        if links::makes_cycle(&self.links, source, target) {
+        let feedback = item.first().is_some_and(|c| c == links::LOOP);
+        if !feedback && links::makes_cycle(&self.links, source, target) {
             self.output.push(format!(
                 "Not linked: {to} comes before {from} already, and a link cannot go back."
             ));
+            return;
+        }
+        if slot.first().is_some_and(|c| c == links::MEASURE) {
+            self.link_measure(source, item, target);
             return;
         }
         let state = slot.first().is_some_and(|c| c == links::STATE);
@@ -2153,6 +3330,33 @@ impl ProjectApp {
         if state {
             self.link_state(source, item, target);
             return;
+        }
+        let value = item.first().is_some_and(|c| c == links::VALUE) || feedback;
+        let objective = slot.first().is_some_and(|c| c == links::OBJECTIVE);
+        if objective {
+            let measure = (self.nodes.iter()).any(|n| n.id == source && n.kind == Kind::Measure);
+            if !measure {
+                self.output.push(format!(
+                    "Not linked: {to} reads the value of a Measure block, and {from} is none."
+                ));
+                return;
+            }
+        } else if value {
+            let (given, taken) = (
+                self.value_kind(source, &item),
+                self.value_kind(target, &slot),
+            );
+            if given.is_none() || given != taken {
+                let kind = |k: Option<ValueKind>| k.map_or("no number", ValueKind::label);
+                self.output.push(format!(
+                    "Not linked: {} of {from} is a {} and {} of {to} a {}.",
+                    item.get(1).map_or("", String::as_str),
+                    kind(given).to_lowercase(),
+                    self.parameter_label(target, &slot),
+                    kind(taken).to_lowercase()
+                ));
+                return;
+            }
         }
         let results = item.first().is_some_and(|c| c == links::RESULTS);
         // A category or item links into the same place of the target; a step's results go
@@ -2184,6 +3388,8 @@ impl ProjectApp {
                     return;
                 }
             }
+        } else if value {
+            slot
         } else {
             item.clone()
         };
@@ -2298,7 +3504,7 @@ impl ProjectApp {
                 ));
             }
         }
-        let (what, step) = (links::label(&item), slot.get(1).map_or("", String::as_str));
+        let (what, step) = (links::label(&item), slot.get(2).map_or("", String::as_str));
         let text = match new_usage {
             Some(links::ResultsUse::Submodel) => {
                 format!("{to} takes the displacements of {what} of {from} in {step} (submodel).")
@@ -2313,6 +3519,16 @@ impl ProjectApp {
             Some(links::ResultsUse::InitialTemperatures) => {
                 format!("{to} starts at the temperatures of {what} of {from}.")
             }
+            None if objective => format!("{to} reads the value of {from}."),
+            None if feedback => format!(
+                "{} of {to} takes the value of {from}: the loop of {from} varies it.",
+                self.parameter_label(target, &slot)
+            ),
+            None if value => format!(
+                "{} of {to} takes the value of {} of {from}.",
+                self.parameter_label(target, &slot),
+                item.get(1).map_or("", String::as_str)
+            ),
             None => format!("{to} takes {} from {from}.", links::label(&item)),
         };
         self.output.push(text);
@@ -2320,8 +3536,36 @@ impl ProjectApp {
         self.links.push(Link {
             source,
             target,
-            slot: if results { slot } else { Vec::new() },
+            slot: if results || value { slot } else { Vec::new() },
             item,
+            ..Default::default()
+        });
+        self.sync_due = true;
+    }
+
+    /// Makes the measure block `target` measure the results of a step of `source`, in place
+    /// of those it measured.
+    fn link_measure(&mut self, source: u64, item: Vec<String>, target: u64) {
+        let (from, to) = (self.name_of(source), self.name_of(target));
+        let replaced: Vec<Link> = (self.links.iter())
+            .filter(|l| l.target == target)
+            .cloned()
+            .collect();
+        self.links.retain(|l| l.target != target);
+        for link in replaced {
+            self.output.push(format!(
+                "{to} no longer measures {} of {}.",
+                links::label(&link.item),
+                self.name_of(link.source)
+            ));
+        }
+        self.output
+            .push(format!("{to} measures {} of {from}.", links::label(&item)));
+        self.links.push(Link {
+            source,
+            target,
+            item,
+            slot: vec![links::MEASURE.to_owned()],
             ..Default::default()
         });
         self.sync_due = true;
@@ -2582,6 +3826,8 @@ impl ProjectApp {
         }
         self.sync_due = false;
         self.last_sync = Some(Instant::now());
+        self.apply_values();
+        self.evaluate_measures();
         let ids: Vec<u64> = self.nodes.iter().map(|n| n.id).collect();
         for target in links::order(&ids, &self.links) {
             let to_target: Vec<Link> = (self.links.iter())
@@ -3031,6 +4277,28 @@ impl ProjectApp {
             Action::AddMesh(pos, primitive) => {
                 self.add_mesh(pos, primitive);
             }
+            Action::AddParameters(pos) => {
+                self.add_parameters(pos);
+            }
+            Action::AddMeasure(pos) => {
+                self.add_measure(pos);
+            }
+            Action::AddOptimizer(pos) => {
+                self.add_optimizer(pos);
+            }
+            Action::RunLoop(id) => self.start_loop(id),
+            Action::ResetLoop(id) => self.reset_loop(id),
+            Action::SetParameter(id, index, value) => {
+                if let Some(parameter) = self.node(id).and_then(|n| n.parameters.get_mut(index)) {
+                    parameter.value = parameter.kind.clean(value);
+                }
+                self.sync_due = true;
+            }
+            Action::SetRefinement(id, value) => {
+                if let Some(node) = self.node(id) {
+                    node.refinement = value;
+                }
+            }
             Action::AddMeshExport(pos) => {
                 self.add_mesh_export(pos);
             }
@@ -3156,6 +4424,15 @@ impl ProjectApp {
             if let Some(editor) = self.mesh_block.as_mut().filter(|e| e.id == id) {
                 editor.rename(&name);
             }
+            if let Some(editor) = self.parameter_set.as_mut().filter(|e| e.id == id) {
+                editor.rename(&name);
+            }
+            if let Some(editor) = self.measure_editor.as_mut().filter(|e| e.id == id) {
+                editor.rename(&name);
+            }
+            if let Some(editor) = self.optimizer_editor.as_mut().filter(|e| e.id == id) {
+                editor.rename(&name);
+            }
         } else if open {
             self.rename = Some((id, name));
         }
@@ -3174,6 +4451,9 @@ impl ProjectApp {
             Kind::Analysis => "with its model and results",
             Kind::Materials => "with its materials",
             Kind::Mesh => "with its mesh",
+            Kind::Parameters => "with its parameters",
+            Kind::Measure => "with its value",
+            Kind::Optimizer => "with its iterations",
             Kind::MeshExport => "(the file it wrote stays)",
         };
         let users = (self.links.iter())
@@ -3361,28 +4641,10 @@ impl ProjectApp {
     }
 }
 
-/// Reads a project file for the project window, converting older formats.
+/// Reads a project file for the project window.
 fn read_opened(file: &Path) -> Opened {
-    let mut project = plx_io::project::read_project(file).map_err(|e| e.to_string())?;
-    // Format 2 kept the values in the project's unit system.
-    let mut notes = Vec::new();
-    if project.format < 3 {
-        let (space, units) = (project.space, project.units);
-        for analysis in project.analyses_mut() {
-            analysis.model.properties.space = space;
-            analysis.model.properties.units = units;
-            notes.extend(crate::model::migrate_to_si(analysis));
-        }
-        notes.push(
-            "The project was converted for this version; once saved, it no longer opens in \
-             older versions."
-                .into(),
-        );
-    }
-    // Format 3 differs only by what it lacks: state links; format 4 by what it lacks too:
-    // blocks besides analyses.
-    project.format = plx_model::PROJECT_FORMAT;
-    Ok((project, notes))
+    let project = plx_io::project::read_project(file).map_err(|e| e.to_string())?;
+    Ok((project, Vec::new()))
 }
 
 /// What the thread reading a project sent, once it is done; a thread that ended without
@@ -3412,6 +4674,11 @@ fn workspace_of(path: &[String]) -> Option<Show> {
     let show = |view| Some(Show { view, step: None });
     match path.first().map(String::as_str) {
         Some(links::GEOMETRY | links::MESH) => show(TreeView::Geometry),
+        // A step of the setup and its inputs select the step.
+        Some(links::SETUP) if path.len() > 2 && path[1] == links::STEPS => Some(Show {
+            view: TreeView::FeModel,
+            step: Some(path[2].clone()),
+        }),
         Some(links::SETUP) => show(TreeView::FeModel),
         // The rows of the steps stand for the steps of the setup.
         Some(links::RESULTS) if path.len() > 1 => Some(Show {
@@ -3509,6 +4776,9 @@ impl eframe::App for ProjectApp {
         self.confirm_delete_window(&ctx);
         self.material_set_window(&ctx);
         self.mesh_block_window(&ctx);
+        self.parameter_set_window(&ctx);
+        self.measure_window(&ctx);
+        self.optimizer_window(&ctx);
         self.new_analysis_window(&ctx);
         self.settings_window(&ctx);
         self.updater.show(&ctx, &mut self.output);
@@ -3519,6 +4789,7 @@ impl eframe::App for ProjectApp {
         }
         self.poll_solves(&ctx);
         self.run_update(&ctx);
+        self.run_loop();
         self.run_exports();
         self.monitor_window(&ctx);
         self.analysis_windows(&ctx);
@@ -3557,6 +4828,10 @@ enum RowWidget {
     Param(Param),
     /// The element type of a mesh block.
     Element,
+    /// The refinement of a mesh block.
+    Refinement,
+    /// A number of a parameters block, by its index.
+    Value(usize),
     /// The file a mesh export block writes to.
     ExportPath,
 }
@@ -3594,6 +4869,9 @@ struct BlockView {
     open: bool,
     /// What a mesh block meshes, and the units its parameters are shown in.
     primitive: Option<MeshPrimitive>,
+    refinement: f64,
+    /// The numbers of a parameters block.
+    parameters: Vec<Parameter>,
     units: UnitSystem,
     /// What a mesh export block writes to.
     export_path: String,
@@ -3724,21 +5002,58 @@ fn block_rows(
                 for name in entries {
                     let mut path = path.clone();
                     path.push(name.clone());
+                    // A step has inputs for the results of other analyses below it.
+                    let step = (category == links::STEPS)
+                        .then(|| fe.and_then(|fe| fe.steps.iter().find(|s| s.name == name)))
+                        .flatten();
+                    let inputs = step.map(links::step_inputs).unwrap_or_default();
+                    let step_open = expanded.contains(&path);
+                    let tip = if step.is_some() {
+                        format!(
+                            "{name}: drag to another analysis to link its definition. Open \
+                             it for its inputs, or drop the results of a step of another \
+                             analysis here: they go to the input that fits."
+                        )
+                    } else {
+                        format!("{name}: drag to another analysis to link it")
+                    };
                     rows.push(Row {
-                        tip: format!("{name}: drag to another analysis to link it"),
-                        text: name,
+                        tip,
+                        text: name.clone(),
                         depth: 2,
-                        icon: category_icon(category),
+                        icon: match step {
+                            Some(step) => NodeIcon::StepType(StepGlyph::from(&step.kind)),
+                            None => category_icon(category),
+                        },
                         state: None,
-                        expander: None,
+                        expander: (!inputs.is_empty()).then_some(step_open),
                         input: true,
                         output: true,
                         linked_from: from(&path),
                         collection: false,
                         partial: false,
                         widget: None,
-                        path,
+                        path: path.clone(),
                     });
+                    for input in inputs.into_iter().filter(|_| step_open) {
+                        let mut path = path.clone();
+                        path.push(input.to_owned());
+                        rows.push(Row {
+                            tip: step_input_tip(&name, input),
+                            text: input.to_owned(),
+                            depth: 3,
+                            icon: NodeIcon::Results,
+                            state: None,
+                            expander: None,
+                            input: true,
+                            output: false,
+                            linked_from: from(&path),
+                            collection: false,
+                            partial: false,
+                            widget: None,
+                            path,
+                        });
+                    }
                 }
             }
         }
@@ -3802,11 +5117,10 @@ fn block_rows(
         let path = vec![links::RESULTS.to_owned(), step.name.clone()];
         let tip = if step.active {
             format!(
-                "Results of {}: drag them to a step of another analysis, which takes the \
-                 temperatures of a thermal step, the eigenmodes of a frequency step for modal \
-                 or steady state dynamics, or else the displacements as a submodel; to the \
-                 State row of another analysis, which continues from them; or to empty space \
-                 to continue in a new analysis",
+                "Results of {}, what it produces: drag them to an input of a step under \
+                 Setup > Steps of another analysis (its Temperatures, Eigenmodes or Global \
+                 results), to the State row of another analysis, which continues from them, \
+                 or to empty space to continue in a new analysis",
                 step.name
             )
         } else {
@@ -3818,7 +5132,8 @@ fn block_rows(
             icon: NodeIcon::StepType(StepGlyph::from(&step.kind)),
             state: None,
             expander: None,
-            input: true,
+            // Results only give; what a step takes is an input of it under Setup.
+            input: false,
             output: step.active,
             linked_from: from(&path),
             collection: false,
@@ -3908,8 +5223,9 @@ fn stale_meshes(nodes: &[Node], links: &[Link], id: u64) -> Vec<String> {
         .collect()
 }
 
-/// The row of a mesh block: its mesh, to link to analyses, with its state.
-fn mesh_rows(node: &Node) -> Vec<Row> {
+/// The row of a mesh block: its mesh, to link to analyses, with its state, and its
+/// parameters, which value links fill as `incoming` says.
+fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     let state = node.mesh_state();
     let mesh = node.data.as_ref().map(|d| &d.mesh);
     let count = mesh.map_or(0, plx_mesh::FeMesh::element_count);
@@ -3949,25 +5265,39 @@ fn mesh_rows(node: &Node) -> Vec<Row> {
     let Some(primitive) = &node.primitive else {
         return rows;
     };
-    let row = |key: &str, text: &str, widget: RowWidget, tip: String| Row {
-        path: vec![PARAMETERS.to_owned(), key.to_owned()],
-        text: text.to_owned(),
-        depth: 0,
-        icon: NodeIcon::Mesh,
-        state: None,
-        expander: None,
-        input: false,
-        output: false,
-        linked_from: None,
-        collection: false,
-        partial: false,
-        widget: Some(widget),
-        tip,
+    let row = |key: &str, text: &str, widget: RowWidget, tip: String| {
+        let path = vec![PARAMETERS.to_owned(), key.to_owned()];
+        Row {
+            text: text.to_owned(),
+            depth: 0,
+            icon: NodeIcon::Mesh,
+            state: None,
+            expander: None,
+            // A number of another block can give it its value.
+            input: !matches!(widget, RowWidget::Element),
+            output: false,
+            linked_from: (incoming.iter())
+                .find(|(slot, _)| *slot == path)
+                .map(|(_, source)| source.clone()),
+            collection: false,
+            partial: false,
+            widget: Some(widget),
+            tip,
+            path,
+        }
     };
     for param in primitive.params() {
-        let tip = format!("{}; the mesh is out of date once it changes.", param.tip);
+        let tip = format!(
+            "{}; the mesh is out of date once it changes. Drop a parameter of a Parameters \
+             block on its pin to give it that value.",
+            param.tip
+        );
         rows.push(row(param.key, param.label, RowWidget::Param(*param), tip));
     }
+    let tip = "Refine: a factor on the elements along each edge, rounded. An optimizer \
+               refines the mesh through it; 1 meshes the divisions as they are."
+        .to_owned();
+    rows.push(row(REFINEMENT, "Refine", RowWidget::Refinement, tip));
     let tip = match primitive {
         MeshPrimitive::Box { .. } => "Element type of the hexahedra".to_owned(),
         MeshPrimitive::Rectangle { .. } => format!(
@@ -4058,7 +5388,104 @@ fn export_rows(node: &Node, base: Option<&Path>, incoming: &[(Vec<String>, Strin
 }
 
 /// The first part of the path of a parameter row of a mesh block.
-const PARAMETERS: &str = "Parameters";
+const PARAMETERS: &str = links::PARAMETERS;
+
+/// The key of the refinement of a mesh block, a parameter beside those of its primitive.
+const REFINEMENT: &str = "refinement";
+
+/// The rows of a parameters block: a number each, edited in place, with a pin to give it.
+fn parameter_rows(node: &Node) -> Vec<Row> {
+    (node.parameters.iter().enumerate())
+        .map(|(index, parameter)| Row {
+            path: vec![links::VALUE.to_owned(), parameter.name.clone()],
+            text: parameter.name.clone(),
+            depth: 0,
+            icon: NodeIcon::Setup,
+            state: None,
+            expander: None,
+            input: false,
+            output: true,
+            linked_from: None,
+            collection: false,
+            partial: false,
+            widget: Some(RowWidget::Value(index)),
+            tip: format!(
+                "{}, a {}: drag its pin to a parameter of another block, such as a length of \
+                 a mesh block, which then takes this value.",
+                parameter.name,
+                parameter.kind.label().to_lowercase()
+            ),
+        })
+        .collect()
+}
+
+/// The rows of a measure block: the results it takes, what it measures and the value it
+/// gives.
+fn measure_rows(
+    node: &Node,
+    incoming: &[(Vec<String>, String)],
+    state: CellState,
+    busy: bool,
+) -> Vec<Row> {
+    let Some(measure) = &node.measure else {
+        return Vec::new();
+    };
+    let units = (node.data.as_ref()).map_or(UnitSystem::default(), |d| d.model.properties.units);
+    let row = |path: &[&str], text: String, icon, tip: String| Row {
+        path: path.iter().map(|p| p.to_string()).collect(),
+        text,
+        depth: 0,
+        icon,
+        state: None,
+        expander: None,
+        input: false,
+        output: false,
+        linked_from: None,
+        collection: false,
+        partial: false,
+        widget: None,
+        tip,
+    };
+    let path = [links::MEASURE.to_owned()];
+    let linked_from = (incoming.iter())
+        .find(|(slot, _)| slot.as_slice() == path)
+        .map(|(_, source)| source.clone());
+    let results = Row {
+        input: true,
+        linked_from,
+        ..row(
+            &[links::MEASURE],
+            "Results".into(),
+            NodeIcon::Results,
+            "The results of a step to measure: drag the pin of a step under Results of an \
+             analysis here."
+                .into(),
+        )
+    };
+    let what = row(
+        &[],
+        measure.kind.describe(),
+        NodeIcon::Setup,
+        "What the block measures; double-click the block to change it.".into(),
+    );
+    let text = match (measure.value, busy) {
+        (_, true) => "Computing …".to_owned(),
+        (Some(value), false) => crate::measure::shown(&measure.kind, value, units),
+        (None, false) => "No value".to_owned(),
+    };
+    let mut tip = "The value, in the units of the block: drag its pin to an optimizer, which \
+                   reads it. It is computed anew whenever the results or the definition change."
+        .to_owned();
+    if let Some(why) = &measure.error {
+        tip.push_str(&format!("\nNo value: {why}."));
+    }
+    let value = Row {
+        output: true,
+        state: Some(state),
+        ..row(&[links::VALUE, "Result"], text, NodeIcon::Results, tip)
+    };
+    vec![results, what, value]
+}
 
 /// Tooltip of an Add Mesh entry.
 /// A kind of block the schematic adds: the menus and the picker list these, in this order.
@@ -4066,6 +5493,9 @@ enum BlockKind {
     Analysis,
     Materials,
     Mesh(MeshPrimitive),
+    Parameters,
+    Measure,
+    Optimizer,
     MeshExport,
 }
 
@@ -4075,6 +5505,9 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::Materials,
         BlockKind::Mesh(MeshPrimitive::default_box()),
         BlockKind::Mesh(MeshPrimitive::default_rectangle()),
+        BlockKind::Parameters,
+        BlockKind::Measure,
+        BlockKind::Optimizer,
         BlockKind::MeshExport,
     ]
 }
@@ -4101,12 +5534,30 @@ impl BlockKind {
                 };
                 ("Mesh", primitive.label(), keywords, mesh_tip(primitive))
             }
+            Self::Parameters => (
+                "Parameters",
+                "Parameters",
+                "number value variable length count factor",
+                PARAMETERS_TIP,
+            ),
+            Self::Measure => (
+                "Measure",
+                "Measure",
+                "result value maximum stress displacement eigenfrequency key figure objective",
+                MEASURE_TIP,
+            ),
+            Self::Optimizer => (
+                "Optimizer",
+                "Optimizer",
+                "loop iterate mesh convergence refine parameter study sweep",
+                OPTIMIZER_TIP,
+            ),
             Self::MeshExport => (
                 "Export",
                 "Mesh Export",
                 "write save file inp calculix output sink",
                 "Adds a block that writes the mesh linked to it to a CalculiX input file when \
-                 the project is updated, after the analyses and blocks before it.",
+                 the project is updated, after the analyses, optimizers and blocks before it.",
             ),
         };
         node_picker::Entry {
@@ -4123,6 +5574,9 @@ impl BlockKind {
             Self::Analysis => "New Analysis …",
             Self::Materials => "Add Materials",
             Self::Mesh(primitive) => primitive.label(),
+            Self::Parameters => "Add Parameters",
+            Self::Measure => "Add Measure",
+            Self::Optimizer => "Add Optimizer",
             Self::MeshExport => "Add Mesh Export",
         }
     }
@@ -4133,6 +5587,9 @@ impl BlockKind {
             Self::Analysis => Action::New(pos),
             Self::Materials => Action::AddMaterials(pos),
             Self::Mesh(primitive) => Action::AddMesh(pos, primitive.clone()),
+            Self::Parameters => Action::AddParameters(pos),
+            Self::Measure => Action::AddMeasure(pos),
+            Self::Optimizer => Action::AddOptimizer(pos),
             Self::MeshExport => Action::AddMeshExport(pos),
         }
     }
@@ -4231,11 +5688,39 @@ fn category_icon(category: &str) -> NodeIcon {
     }
 }
 
-/// Colour of the wires of a link: data in blue, results in orange, states in green.
+/// What an input of a step under Setup takes, for its tooltip.
+fn step_input_tip(step: &str, input: &str) -> String {
+    let what = match input {
+        links::TEMPERATURES => format!(
+            "the temperatures of a thermal step of another analysis, as a defined field of \
+             {step}"
+        ),
+        links::EIGENMODES => format!(
+            "the eigenmodes of a frequency step of another analysis (with Storage on), which \
+             the modal or steady state dynamics of {step} use"
+        ),
+        _ => format!(
+            "the results of a step of another analysis, the global model: {step} reads the \
+             displacements on the cut boundary from them, as a submodel"
+        ),
+    };
+    format!("{input}: takes {what}. Drop the results of a step here.")
+}
+
+/// Colour of the wires of a link: references in blue, results in orange, states in green,
+/// numbers in violet.
 fn wire_color(path: &[String]) -> egui::Color32 {
-    if path.first().is_some_and(|c| c == links::STATE) {
+    if path.first().is_some_and(|c| {
+        c == links::VALUE || c == links::PARAMETERS || c == links::LOOP || c == links::OBJECTIVE
+    }) {
+        crate::style::adapt(egui::Color32::from_rgb(140, 80, 200))
+    } else if path.first().is_some_and(|c| c == links::STATE) {
         crate::style::adapt(egui::Color32::from_rgb(40, 150, 60))
-    } else if path.first().is_some_and(|c| c == links::RESULTS) {
+    } else if path
+        .first()
+        .is_some_and(|c| c == links::RESULTS || c == links::MEASURE)
+        || links::is_step_input(path)
+    {
         crate::style::adapt(egui::Color32::from_rgb(230, 130, 20))
     } else {
         crate::style::adapt(egui::Color32::from_rgb(40, 110, 200))
@@ -4249,6 +5734,10 @@ struct Viewer {
     to_global: egui::emath::TSTransform,
     /// Where the schematic is shown, when its view is to fit all blocks.
     show_all: Option<egui::Rect>,
+    /// The feedback wires of loops: optimizer, target and slot.
+    feedback: Vec<(u64, u64, Vec<String>)>,
+    /// The lowest edge of the blocks, which feedback wires go around below.
+    bottom: f32,
 }
 
 impl Viewer {
@@ -4268,8 +5757,8 @@ impl Viewer {
         }
     }
 
-    /// A row that edits a parameter of a mesh block in place: its label, and the field at
-    /// the right.
+    /// A row that edits a number of a block in place: its label, and the field at the
+    /// right; read-only, in the link colour, while a value link gives it.
     fn edit_row(&mut self, ui: &mut egui::Ui, id: u64, row: &Row, widget: RowWidget) {
         let Some(block) = self.block(id) else {
             return;
@@ -4306,22 +5795,29 @@ impl Viewer {
             }
             return;
         }
-        let (Some(mut primitive), units, space) =
-            (block.primitive.clone(), block.units, block.space)
-        else {
-            return;
-        };
-        let before = primitive.clone();
+        let (units, space, refinement) = (block.units, block.space, block.refinement);
+        let parameters = block.parameters.clone();
         let (rect, label) =
             ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::hover());
+        let link_color = wire_color(&[links::VALUE.to_owned()]);
         ui.painter().text(
             egui::pos2(rect.left() + 30.0, rect.center().y),
             egui::Align2::LEFT_CENTER,
             &row.text,
             egui::TextStyle::Body.resolve(ui.style()),
-            ui.visuals().text_color(),
+            if row.linked_from.is_some() {
+                link_color
+            } else {
+                ui.visuals().text_color()
+            },
         );
-        label.on_hover_text(&row.tip);
+        let mut tip = row.tip.clone();
+        if let Some(source) = &row.linked_from {
+            tip.push_str(&format!(
+                "\nIts value comes from {source}; change it there."
+            ));
+        }
+        label.on_hover_text(&tip);
         let field = egui::Rect::from_min_max(
             egui::pos2(rect.right() - 122.0, rect.top() + 1.0),
             egui::pos2(rect.right() - 4.0, rect.bottom() - 1.0),
@@ -4332,6 +5828,50 @@ impl Viewer {
                 .id_salt((id, &row.path)),
         );
         ui.spacing_mut().interact_size.y = field.height();
+        match widget {
+            RowWidget::Value(index) => {
+                let Some(mut parameter) = parameters.get(index).cloned() else {
+                    return;
+                };
+                let before = parameter.value;
+                let response = ui.add_sized(
+                    field.size(),
+                    crate::parameter_set::field(&mut parameter.value, parameter.kind, units),
+                );
+                response.on_hover_text(&tip);
+                if parameter.value != before {
+                    self.actions
+                        .push(Action::SetParameter(id, index, parameter.value));
+                }
+                return;
+            }
+            RowWidget::Refinement => {
+                let mut value = refinement;
+                if row.linked_from.is_some() {
+                    ui.disable();
+                }
+                let response = ui.add_sized(
+                    field.size(),
+                    egui::DragValue::new(&mut value)
+                        .range(0.05..=20.0)
+                        .speed(0.01)
+                        .max_decimals(3),
+                );
+                response.on_hover_text(&tip);
+                if value != refinement {
+                    self.actions.push(Action::SetRefinement(id, value));
+                }
+                return;
+            }
+            RowWidget::Param(_) | RowWidget::Element | RowWidget::ExportPath => {}
+        }
+        let Some(mut primitive) = block.primitive.clone() else {
+            return;
+        };
+        let before = primitive.clone();
+        if row.linked_from.is_some() {
+            ui.disable();
+        }
         let response = match widget {
             RowWidget::ExportPath => return,
             RowWidget::Param(param) => match primitive.slot(param.key) {
@@ -4387,8 +5927,9 @@ impl Viewer {
                         .response
                 }
             },
+            RowWidget::Refinement | RowWidget::Value(_) => return,
         };
-        response.on_hover_text(&row.tip);
+        response.on_hover_text(&tip);
         if primitive != before {
             self.actions.push(Action::SetPrimitive(id, primitive));
         }
@@ -4433,6 +5974,21 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Materials, ink);
                 icon.on_hover_text("Materials for analyses to link");
             }
+            Kind::Parameters => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Setup, ink);
+                icon.on_hover_text("Numbers for other blocks to link");
+            }
+            Kind::Measure => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Results, ink);
+                icon.on_hover_text("A key figure of the results of a step");
+            }
+            Kind::Optimizer => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Solution, ink);
+                icon.on_hover_text("A loop that solves until it is done");
+            }
             Kind::MeshExport => {
                 let ink = ui.visuals().text_color();
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Export, ink);
@@ -4460,6 +6016,9 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Materials => "Double-click edits the materials.",
             Kind::Mesh => "Double-click edits the size and division of the mesh.",
             Kind::MeshExport => "Double-click chooses the file to write.",
+            Kind::Parameters => "Double-click adds, renames or removes parameters.",
+            Kind::Measure => "Double-click chooses what it measures.",
+            Kind::Optimizer => "Double-click sets what it varies and shows its iterations.",
         };
         // The name takes the clicks of the header, so it opens the block's menu too.
         label.on_hover_text(tip).context_menu(|ui| {
@@ -4490,8 +6049,20 @@ impl SnarlViewer<u64> for Viewer {
         let row = row.clone();
         if let Some(widget) = row.widget {
             self.edit_row(ui, id, &row, widget);
-            // A numeric input will link to the parameter's pin.
-            return BlockPin::single(hidden_pin());
+            if !row.input {
+                return BlockPin::single(hidden_pin());
+            }
+            // A number of another block can give it its value.
+            let color = wire_color(&row.path);
+            let info = PinInfo::circle().with_fill(color).with_wire_color(color);
+            if self
+                .feedback
+                .iter()
+                .any(|(_, target, slot)| *target == id && *slot == row.path)
+            {
+                return BlockPin::anchored(info, feedback_end(id, &row.path));
+            }
+            return BlockPin::single(info);
         }
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::click());
@@ -4590,6 +6161,7 @@ impl SnarlViewer<u64> for Viewer {
                 info,
                 collection: row.collection,
                 partial: row.partial,
+                anchor: None,
             }
         } else {
             BlockPin::single(hidden_pin())
@@ -4608,6 +6180,15 @@ impl SnarlViewer<u64> for Viewer {
     ) -> impl egui_snarl::ui::SnarlPin + 'static {
         ui.allocate_exact_size(egui::vec2(0.0, ROW_HEIGHT), egui::Sense::hover());
         match self.row(snarl, pin.id.node, pin.id.output) {
+            Some((id, row)) if row.output && row.path.first().is_some_and(|c| c == links::LOOP) => {
+                let color = wire_color(&row.path);
+                let info = PinInfo::circle().with_fill(color).with_wire_color(color);
+                if pin.remotes.is_empty() {
+                    BlockPin::single(info)
+                } else {
+                    BlockPin::anchored(info, feedback_start(id))
+                }
+            }
             Some((_, row)) if row.output => {
                 let color = wire_color(&row.path);
                 // A wire takes the mixed colour of its two pins, so the results pin of a step
@@ -4619,14 +6200,24 @@ impl SnarlViewer<u64> for Viewer {
                             .is_some_and(|(_, row)| row.path == state)
                     });
                 let wire = if continues { wire_color(&state) } else { color };
-                PinInfo::circle().with_fill(color).with_wire_color(wire)
+                BlockPin::single(PinInfo::circle().with_fill(color).with_wire_color(wire))
             }
-            _ => hidden_pin(),
+            _ => BlockPin::single(hidden_pin()),
         }
     }
 
     fn has_body(&mut self, _node: &u64) -> bool {
         false
+    }
+
+    fn final_node_rect(
+        &mut self,
+        _node: NodeId,
+        rect: egui::Rect,
+        _ui: &mut egui::Ui,
+        _snarl: &mut Snarl<u64>,
+    ) {
+        self.bottom = self.bottom.max(rect.bottom());
     }
 
     /// A grid of dots behind the blocks, like the background of a node editor.
@@ -4748,6 +6339,9 @@ impl SnarlViewer<u64> for Viewer {
         {
             Some(Kind::Materials) => default.fill(crate::style::materials_header()),
             Some(Kind::Mesh) => default.fill(crate::style::mesh_header()),
+            Some(Kind::Parameters) => default.fill(crate::style::parameters_header()),
+            Some(Kind::Measure) => default.fill(crate::style::measure_header()),
+            Some(Kind::Optimizer) => default.fill(crate::style::optimizer_header()),
             Some(Kind::MeshExport) => default.fill(crate::style::export_header()),
             _ => default,
         }
@@ -4885,6 +6479,9 @@ struct BlockPin {
     collection: bool,
     /// A category link to the collection leaves out items: drawn lighter.
     partial: bool,
+    /// Where the pin is drawn is kept under this id, for a wire drawn by the project window:
+    /// the dashed feedback of a loop. The wire of the schematic is then not drawn.
+    anchor: Option<egui::Id>,
 }
 
 impl BlockPin {
@@ -4893,6 +6490,15 @@ impl BlockPin {
             info,
             collection: false,
             partial: false,
+            anchor: None,
+        }
+    }
+
+    /// A pin of a feedback wire, whose position is kept under `anchor`.
+    fn anchored(info: PinInfo, anchor: egui::Id) -> Self {
+        Self {
+            anchor: Some(anchor),
+            ..Self::single(info)
         }
     }
 }
@@ -4914,6 +6520,14 @@ impl egui_snarl::ui::SnarlPin for BlockPin {
         rect: egui::Rect,
         painter: &egui::Painter,
     ) -> egui_snarl::ui::PinWireInfo {
+        if let Some(anchor) = self.anchor {
+            let pass = painter.ctx().cumulative_pass_nr();
+            let at = (painter.layer_id(), rect.center(), pass);
+            painter.ctx().data_mut(|d| d.insert_temp(anchor, at));
+            let mut info = self.info.draw(snarl_style, style, rect, painter);
+            info.color = egui::Color32::TRANSPARENT;
+            return info;
+        }
         if !self.collection {
             return self.info.draw(snarl_style, style, rect, painter);
         }
@@ -4941,6 +6555,86 @@ impl egui_snarl::ui::SnarlPin for BlockPin {
             style: (self.info.wire_style).unwrap_or(egui_snarl::ui::WireStyle::Bezier5),
         }
     }
+}
+
+/// Where the value pin of an optimizer is kept, see [`BlockPin::anchor`].
+fn feedback_start(optimizer: u64) -> egui::Id {
+    egui::Id::new(("loop value pin", optimizer))
+}
+
+/// Where the pin of a parameter a loop varies is kept.
+fn feedback_end(target: u64, slot: &[String]) -> egui::Id {
+    egui::Id::new(("loop parameter pin", target, slot))
+}
+
+/// Draws the feedback wires of loops dashed, between the pins drawn in this pass: from the
+/// value of the optimizer out to the right, below the blocks back to the left and into the
+/// parameter, so that the loop reads as one.
+fn draw_feedback(
+    ctx: &egui::Context,
+    feedback: &[(u64, u64, Vec<String>)],
+    bottom: f32,
+    clip: egui::Rect,
+) {
+    let pass = ctx.cumulative_pass_nr();
+    let at = |id: egui::Id| {
+        ctx.data(|d| d.get_temp::<(egui::LayerId, egui::Pos2, u64)>(id))
+            .filter(|(_, _, drawn)| *drawn == pass)
+    };
+    let color = wire_color(&[links::LOOP.to_owned()]);
+    for (index, (optimizer, target, slot)) in feedback.iter().enumerate() {
+        let (Some((layer, from, _)), Some((_, to, _))) = (
+            at(feedback_start(*optimizer)),
+            at(feedback_end(*target, slot)),
+        ) else {
+            continue;
+        };
+        // Several loops run below one another.
+        let below = bottom.max(from.y).max(to.y) + 30.0 + 14.0 * index as f32;
+        let (out, back) = (from.x + 24.0, to.x - 24.0);
+        let corners = [
+            from,
+            egui::pos2(out, from.y),
+            egui::pos2(out, below),
+            egui::pos2(back, below),
+            egui::pos2(back, to.y),
+            to,
+        ];
+        // The painter of the layer clips to the screen as if it were not zoomed or panned.
+        let mut painter = ctx.layer_painter(layer);
+        painter.set_clip_rect(clip);
+        painter.extend(egui::Shape::dashed_line(
+            &rounded(&corners, 10.0),
+            egui::Stroke::new(2.0, color),
+            8.0,
+            5.0,
+        ));
+    }
+}
+
+/// A path through `corners` with each inner corner rounded by up to `radius`.
+fn rounded(corners: &[egui::Pos2], radius: f32) -> Vec<egui::Pos2> {
+    let mut points = Vec::new();
+    for (i, &corner) in corners.iter().enumerate() {
+        let (Some(&before), Some(&after)) = (corners.get(i.wrapping_sub(1)), corners.get(i + 1))
+        else {
+            points.push(corner);
+            continue;
+        };
+        let into = before - corner;
+        let out = after - corner;
+        let r = radius.min(into.length() * 0.5).min(out.length() * 0.5);
+        let (a, b) = (
+            corner + into.normalized() * r,
+            corner + out.normalized() * r,
+        );
+        for step in 0..=6 {
+            let t = step as f32 / 6.0;
+            // A quadratic curve through the corner.
+            points.push(a.lerp(corner, t).lerp(corner.lerp(b, t), t));
+        }
+    }
+    points
 }
 
 /// The pin of a row that takes or gives no link: there, but not to be seen.
@@ -4975,6 +6669,10 @@ fn node_menu(
         }
         if kind == Kind::Mesh {
             entry(ui, "Generate Mesh", Action::Generate(id));
+        }
+        if kind == Kind::Optimizer {
+            entry(ui, "Run", Action::RunLoop(id));
+            entry(ui, "Reset", Action::ResetLoop(id));
         }
         ui.separator();
         entry(ui, "Rename …", Action::Rename(id));
@@ -5065,6 +6763,15 @@ fn schematic_style() -> SnarlStyle {
 const ANALYSIS_TIP: &str = "Adds an analysis: a model of its own with geometry, mesh, setup \
      and steps, solved with CalculiX. Double-click its block to open it in its own window.";
 
+const PARAMETERS_TIP: &str = "Adds a block of named numbers: drag the pin of one to a \
+                              parameter of another block, such as a length of a mesh block, \
+                              which then takes its value.";
+const MEASURE_TIP: &str = "Adds a block that computes a key figure from the results of a \
+                           step linked to it, such as the largest von Mises stress, the \
+                           displacement of a node or an eigenfrequency.";
+const OPTIMIZER_TIP: &str = "Adds a loop: it gives values to a parameter of a mesh block, has \
+                             the analyses solved and reads a Measure block, until the mesh \
+                             has converged or every value of a study is solved.";
 const MATERIALS_TIP: &str = "Adds a block of materials kept in the project: analyses link \
      them one by one or all at once, so that they are defined in one place.";
 
@@ -5143,6 +6850,13 @@ mod tests {
             Some(Show {
                 view: TreeView::FeModel,
                 step: Some("Step-1".into())
+            })
+        );
+        assert_eq!(
+            workspace_of(&path(&["Setup", "Steps", "Step-2", "Temperatures"])),
+            Some(Show {
+                view: TreeView::FeModel,
+                step: Some("Step-2".into())
             })
         );
         assert_eq!(workspace_of(&path(&["State"])), None);
@@ -5241,6 +6955,7 @@ mod tests {
             primitive: MeshPrimitive::default_box(),
             mesh: Default::default(),
             generated: None,
+            refinement: 1.0,
         };
         let mut node = Node::read(ProjectNode::Mesh(Box::new(block)));
         assert_eq!(node.kind, Kind::Mesh);
@@ -5251,18 +6966,29 @@ mod tests {
         let mesh = vec![links::MESH.to_owned()];
         assert!(links::exists(data, &mesh));
         assert_eq!(links::MeshCopy::of(data).mesh.node_sets.len(), 6);
-        let rows = mesh_rows(&node);
+        let rows = mesh_rows(&node, &[]);
         assert!(rows[0].output && !rows[0].input);
-        // Its parameters are rows below the mesh, the element type last; none has a pin yet.
+        // Its parameters are rows below the mesh, the element type last; the numbers take
+        // value links, the element type does not.
         let params: Vec<String> = (rows[1..].iter()).map(|row| row.path.join("/")).collect();
         assert_eq!(params[0], "Parameters/x");
         assert_eq!(params[6], "Parameters/nx");
+        assert_eq!(params[9], "Parameters/refinement");
         assert_eq!(params.last().unwrap(), "Parameters/element");
+        let (numbers, element) = rows[1..].split_at(rows.len() - 2);
         assert!(
-            rows[1..]
+            numbers
                 .iter()
-                .all(|r| r.widget.is_some() && !r.input && !r.output)
+                .all(|r| r.widget.is_some() && r.input && !r.output)
         );
+        assert!(!element[0].input && !element[0].output);
+        // A refinement of 1.5 makes 15 x 3 x 3 elements.
+        node.refinement = 1.5;
+        assert_eq!(node.mesh_state(), CellState::OutOfDate);
+        assert_eq!(node.generate(), Ok(135));
+        node.refinement = 1.0;
+        assert_eq!(node.mesh_state(), CellState::OutOfDate);
+        assert_eq!(node.generate(), Ok(40));
         // What the rows edit: the count of elements along X and the element type.
         let primitive = node.primitive.as_mut().unwrap();
         assert!(primitive.set("nx", plx_model::ParamValue::Count(20)));
@@ -5270,7 +6996,7 @@ mod tests {
             *element = "C3D8I".into();
         }
         assert_eq!(node.mesh_state(), CellState::OutOfDate);
-        assert!(mesh_rows(&node)[0].tip.contains("out of date"));
+        assert!(mesh_rows(&node, &[])[0].tip.contains("out of date"));
         match node.written([1.0, 2.0]) {
             Some(ProjectNode::Mesh(written)) => {
                 assert_eq!(written.mesh.element_count(), 40);
@@ -5281,6 +7007,130 @@ mod tests {
         }
         assert_eq!(node.generate(), Ok(80));
         assert_eq!(node.mesh_state(), CellState::UpToDate);
+    }
+
+    #[test]
+    fn a_parameters_block_reads_back_and_gives_its_values() {
+        let set = ParameterSet {
+            id: 4,
+            name: "Parameters".into(),
+            position: [3.0, 4.0],
+            units: plx_model::UnitSystem::MmTonSC,
+            parameters: vec![
+                Parameter::new("Length", ValueKind::Length, 0.3),
+                Parameter::new("Cells", ValueKind::Count, 12.0),
+            ],
+        };
+        let node = Node::read(ProjectNode::Parameters(set.clone()));
+        assert_eq!(node.kind, Kind::Parameters);
+        let rows = parameter_rows(&node);
+        assert_eq!(rows[1].path, ["Value", "Cells"]);
+        assert!(rows.iter().all(|r| r.output && !r.input));
+        let mut node = node;
+        match node.written([3.0, 4.0]) {
+            Some(ProjectNode::Parameters(written)) => assert_eq!(written, set),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_measure_block_reads_back_and_takes_results() {
+        let block = MeasureBlock {
+            id: 5,
+            name: "Measure".into(),
+            position: [5.0, 6.0],
+            units: plx_model::UnitSystem::MmTonSC,
+            kind: MeasureKind::Eigenfrequency { mode: 2 },
+            value: Some(12.5),
+            evaluated: Some(7),
+        };
+        let mut node = Node::read(ProjectNode::Measure(block.clone()));
+        assert_eq!(node.kind, Kind::Measure);
+        let incoming = vec![(vec!["Measure".to_owned()], "Modal".to_owned())];
+        let rows = measure_rows(&node, &incoming, CellState::UpToDate, false);
+        assert_eq!(rows[0].path, ["Measure"]);
+        assert!(rows[0].input && !rows[0].output);
+        assert_eq!(rows[0].linked_from.as_deref(), Some("Modal"));
+        assert_eq!(rows[2].path, ["Value", "Result"]);
+        assert!(rows[2].output && !rows[2].input);
+        assert_eq!(rows[2].text, "12.5 Hz");
+        // The results of a step go to its Results row; nothing else does.
+        let results = vec!["Results".to_owned(), "Step-1".to_owned()];
+        assert!(links::compatible(&results, &rows[0].path));
+        assert!(!links::compatible(&["Mesh".to_owned()], &rows[0].path));
+        match node.written([5.0, 6.0]) {
+            Some(ProjectNode::Measure(written)) => assert_eq!(written, block),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn analyses_taking_the_mesh_of_a_changed_block_are_out_of_date() {
+        let block = MeshBlock {
+            id: 2,
+            name: "Box".into(),
+            position: [0.0; 2],
+            space: ModelSpace::ThreeD,
+            units: plx_model::UnitSystem::MmTonSC,
+            primitive: MeshPrimitive::default_box(),
+            mesh: Default::default(),
+            generated: None,
+            refinement: 1.0,
+        };
+        let mut nodes = vec![
+            Node::read(ProjectNode::Mesh(Box::new(block))),
+            Node::new(1, "Analysis-1".into(), ProjectAnalysis::default()),
+            Node::new(3, "Analysis-2".into(), ProjectAnalysis::default()),
+        ];
+        let link = |source, target| Link {
+            source,
+            target,
+            item: vec![links::MESH.to_owned()],
+            ..Default::default()
+        };
+        // Analysis-2 takes the mesh of Analysis-1, which takes that of the block.
+        let links = [link(2, 1), link(1, 3)];
+        assert_eq!(stale_meshes(&nodes, &links, 3), ["Box"]);
+        assert!(generate_stale_meshes(&mut nodes).0);
+        assert!(stale_meshes(&nodes, &links, 3).is_empty());
+        // New divisions: the analyses hold the old mesh until the block makes the new one.
+        let primitive = nodes[0].primitive.as_mut().unwrap();
+        assert!(primitive.set("nx", plx_model::ParamValue::Count(20)));
+        assert_eq!(stale_meshes(&nodes, &links, 1), ["Box"]);
+        assert_eq!(stale_meshes(&nodes, &links, 3), ["Box"]);
+        // A mesh that cannot be made leaves the block out of date and is not reported as
+        // made, so that Update Project does not try again and again.
+        nodes[0].primitive = Some(MeshPrimitive::default_rectangle());
+        let (made, lines) = generate_stale_meshes(&mut nodes);
+        assert!(!made);
+        assert!(lines[0].contains("no mesh made"), "{lines:?}");
+        assert_eq!(stale_meshes(&nodes, &links, 3), ["Box"]);
+    }
+
+    #[test]
+    fn an_optimizer_reads_back_with_its_iterations() {
+        let block = OptimizerBlock {
+            id: 7,
+            name: "Optimizer".into(),
+            position: [7.0, 8.0],
+            units: plx_model::UnitSystem::MmTonSC,
+            kind: OptimizerKind::default(),
+            value: 2.25,
+            history: vec![Iteration {
+                value: 1.0,
+                measure: Some(3.0),
+                elements: Some(40),
+                seconds: 0.5,
+            }],
+            report: Some("Converged".into()),
+            done: Some(9),
+        };
+        let mut node = Node::read(ProjectNode::Optimizer(block.clone()));
+        assert_eq!(node.kind, Kind::Optimizer);
+        match node.written([7.0, 8.0]) {
+            Some(ProjectNode::Optimizer(written)) => assert_eq!(written, block),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// A mesh block with its mesh made, and a mesh export block that took it over.
@@ -5294,6 +7144,7 @@ mod tests {
             primitive: MeshPrimitive::default_box(),
             mesh: Default::default(),
             generated: None,
+            refinement: 1.0,
         };
         let mut source = Node::read(ProjectNode::Mesh(Box::new(block)));
         source.generate().unwrap();
@@ -5381,48 +7232,6 @@ mod tests {
         assert!(empty.write_export(None).unwrap_err().contains("no mesh"));
         let rows = export_rows(&empty, None, &[]);
         assert!(rows[0].input && !rows[0].output && rows[1].widget.is_some());
-    }
-
-    #[test]
-    fn analyses_taking_the_mesh_of_a_changed_block_are_out_of_date() {
-        let block = MeshBlock {
-            id: 2,
-            name: "Box".into(),
-            position: [0.0; 2],
-            space: ModelSpace::ThreeD,
-            units: plx_model::UnitSystem::MmTonSC,
-            primitive: MeshPrimitive::default_box(),
-            mesh: Default::default(),
-            generated: None,
-        };
-        let mut nodes = vec![
-            Node::read(ProjectNode::Mesh(Box::new(block))),
-            Node::new(1, "Analysis-1".into(), ProjectAnalysis::default()),
-            Node::new(3, "Analysis-2".into(), ProjectAnalysis::default()),
-        ];
-        let link = |source, target| Link {
-            source,
-            target,
-            item: vec![links::MESH.to_owned()],
-            ..Default::default()
-        };
-        // Analysis-2 takes the mesh of Analysis-1, which takes that of the block.
-        let links = [link(2, 1), link(1, 3)];
-        assert_eq!(stale_meshes(&nodes, &links, 3), ["Box"]);
-        assert!(generate_stale_meshes(&mut nodes).0);
-        assert!(stale_meshes(&nodes, &links, 3).is_empty());
-        // New divisions: the analyses hold the old mesh until the block makes the new one.
-        let primitive = nodes[0].primitive.as_mut().unwrap();
-        assert!(primitive.set("nx", plx_model::ParamValue::Count(20)));
-        assert_eq!(stale_meshes(&nodes, &links, 1), ["Box"]);
-        assert_eq!(stale_meshes(&nodes, &links, 3), ["Box"]);
-        // A mesh that cannot be made leaves the block out of date and is not reported as
-        // made, so that Update Project does not try again and again.
-        nodes[0].primitive = Some(MeshPrimitive::default_rectangle());
-        let (made, lines) = generate_stale_meshes(&mut nodes);
-        assert!(!made);
-        assert!(lines[0].contains("no mesh made"), "{lines:?}");
-        assert_eq!(stale_meshes(&nodes, &links, 3), ["Box"]);
     }
 
     #[test]
