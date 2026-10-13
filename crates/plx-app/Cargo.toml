@@ -17,6 +17,7 @@ eframe.workspace = true
 egui.workspace = true
 egui-snarl.workspace = true
 egui-wgpu.workspace = true
+egui_plot.workspace = true
 env_logger.workspace = true
 gif.workspace = true
 nucleo-matcher.workspace = true

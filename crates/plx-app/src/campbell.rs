@@ -5,25 +5,50 @@
 //! reads the complex frequencies and the turning direction of every mode from the `.dat`
 //! file and plots them over the speed, with the engine order lines (1x, 2x, ...) whose
 //! crossings with the modes are the critical speeds.
+//!
+//! The sweep is adaptive: after a coarse grid over the speed range it keeps adding speeds
+//! where the curves bend most, until it is stopped or reaches its number of runs. The modes
+//! are followed from speed to speed by their course, not by their rank, so a spurious root
+//! CalculiX finds at one speed does not shift every curve above it.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
-use egui::Ui;
+use egui::{Color32, Ui};
 use plx_job::{Job, JobStatus};
 use plx_model::{EquationSolver, FeModel, LoadKind, StepKind};
 
 use crate::model::Model;
 use crate::numeric;
-use crate::xy_plot::{self, XyData};
+use crate::xy_plot;
 
 /// Folder under the work directory the sweep runs in.
 const FOLDER: &str = "Campbell";
 
-/// Default number of speeds between standstill and the full speed.
-const DEFAULT_STEPS: u32 = 10;
+/// Speeds of the coarse grid the sweep starts with.
+const GRID: usize = 8;
+
+/// Default number of CalculiX runs of a sweep.
+const DEFAULT_RUNS: u32 = 40;
+
+/// Smallest gap between two speeds, as a fraction of the speed range. It also bounds the runs
+/// spent on a jump of a curve, which no refinement smooths.
+const MIN_GAP: f64 = 2e-3;
+
+/// Weight of the gap width in the refinement score: once the curves bend less than about a
+/// hundredth of the frequency axis over a gap, the speeds spread over the whole range.
+const WIDTH_WEIGHT: f64 = 0.01;
+
+/// Fewest speeds a mode must be found at to count as a curve; shorter runs are drawn as
+/// unmatched points.
+const MIN_TRACK: usize = 3;
+
+/// Speeds in a row a curve may be missing at, as when a spurious root takes its place among
+/// the modes CalculiX computes, before it counts as ended.
+const MAX_MISSED: usize = 2;
 
 /// Whirl of a mode as CalculiX reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +74,9 @@ pub struct Mode {
     /// Real part of the frequency in cycles per time.
     pub frequency: f64,
     pub whirl: Whirl,
+    /// The eigenvalue has an imaginary part of weight: the mode grows instead of
+    /// oscillating, as beyond a stability limit.
+    pub unstable: bool,
 }
 
 /// The modes CalculiX found at one speed.
@@ -73,10 +101,12 @@ pub struct CriticalSpeed {
 /// Settings of the sweep.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Setup {
+    /// Lowest speed of the sweep in radians per time; standstill itself is left out.
+    pub min_speed: f64,
     /// Highest speed of the sweep in radians per time.
     pub max_speed: f64,
-    /// Number of speed steps from standstill to the highest speed.
-    pub steps: u32,
+    /// CalculiX runs before the sweep stops by itself; 0 runs until it is stopped.
+    pub max_runs: u32,
     /// Engine orders drawn as lines, e.g. "1, 2".
     pub orders: String,
     /// Upper end of the frequency axis in Hz; 0 fits the axis to the modes.
@@ -142,6 +172,13 @@ pub fn with_speed(fe: &FeModel, speed: f64) -> FeModel {
     fe
 }
 
+/// Whether an eigenvalue with real part `real` and imaginary part `imaginary` (both in
+/// radians per time) belongs to a growing mode. Stable modes have an imaginary part of
+/// rounding noise only.
+fn is_unstable(real: f64, imaginary: f64) -> bool {
+    imaginary.abs() > 1e-4 * real.abs().max(1.0)
+}
+
 /// The complex frequencies and whirls of step `step` in the text of a `.dat` file.
 pub fn modes_of(dat: &str, step: u32) -> Vec<Mode> {
     let import = plx_io::dat::parse_dat(dat);
@@ -161,6 +198,8 @@ pub fn modes_of(dat: &str, step: u32) -> Vec<Mode> {
     };
     let frequencies = values("FREQUENCY");
     let whirls = values("TURNING_DIRECTION");
+    let omegas = values("OMEGA");
+    let imaginary = values("OMEGA_IM");
     (frequencies.iter().enumerate())
         .map(|(i, &frequency)| Mode {
             frequency,
@@ -168,6 +207,10 @@ pub fn modes_of(dat: &str, step: u32) -> Vec<Mode> {
                 Some(w) if *w > 0.0 => Whirl::Forward,
                 Some(w) if *w < 0.0 => Whirl::Backward,
                 _ => Whirl::Unknown,
+            },
+            unstable: match (omegas.get(i), imaginary.get(i)) {
+                (Some(&real), Some(&imaginary)) => is_unstable(real, imaginary),
+                _ => false,
             },
         })
         .collect()
@@ -186,17 +229,26 @@ pub fn modes_of_frd(frd: &plx_io::frd::FrdImport, step: u32) -> Vec<Mode> {
         .map(|(_, frequency)| Mode {
             frequency,
             whirl: Whirl::Unknown,
+            unstable: false,
         })
         .collect()
 }
 
-/// The speeds of a sweep: `steps` equal steps up to `max_speed`. Standstill is left out:
+/// The coarse grid a sweep starts with: `count` speeds spread evenly over the range, both
+/// ends included. A range from standstill starts at a fiftieth of the highest speed instead:
 /// without rotation CalculiX merges the coinciding modes of a pair into one, which would
 /// shift every curve of the diagram at its start.
-pub fn speeds(max_speed: f64, steps: u32) -> Vec<f64> {
-    let steps = steps.max(1);
-    (1..=steps)
-        .map(|i| max_speed * f64::from(i) / f64::from(steps))
+pub fn grid(min_speed: f64, max_speed: f64, count: usize) -> Vec<f64> {
+    let low = if min_speed > 0.0 {
+        min_speed
+    } else {
+        max_speed / 50.0
+    };
+    if count <= 1 {
+        return vec![max_speed];
+    }
+    (0..count)
+        .map(|i| low + (max_speed - low) * i as f64 / (count - 1) as f64)
         .collect()
 }
 
@@ -210,88 +262,154 @@ pub fn from_rpm(rpm: f64) -> f64 {
     rpm * std::f64::consts::TAU / 60.0
 }
 
-/// The diagram: one curve per mode over the speed in rpm, and the engine order lines from
-/// standstill as dashed guides. Modes are matched between speeds by their order of frequency;
-/// curves of modes that cross swap at the crossing. `max_frequency` limits the frequency
-/// axis, 0 fits it to the modes.
-pub fn diagram(points: &[SpeedPoint], orders: &[f64], max_frequency: f64) -> XyData {
-    // The sweep leaves out standstill; the axis and the order lines still start there.
-    let standstill = points.first().is_some_and(|p| p.speed > 0.0);
-    let speeds: Vec<f64> = (standstill.then_some(0.0).into_iter())
-        .chain(points.iter().map(|p| p.speed))
-        .collect();
-    let x: Vec<f64> = speeds.iter().map(|&s| rpm(s)).collect();
-    let count = points.iter().map(|p| p.modes.len()).max().unwrap_or(0);
-    let mut curves = Vec::new();
-    for mode in 0..count {
-        let values: Vec<f64> = (standstill.then_some(f64::NAN).into_iter())
-            .chain(
-                points
-                    .iter()
-                    .map(|p| p.modes.get(mode).map_or(f64::NAN, |m| m.frequency)),
-            )
-            .collect();
-        let whirls: Vec<Whirl> = points
-            .iter()
-            .filter_map(|p| p.modes.get(mode).map(|m| m.whirl))
-            .collect();
-        let name = match whirls.first() {
-            Some(&first) if first != Whirl::Unknown && whirls.iter().all(|w| *w == first) => {
-                format!("Mode {} ({})", mode + 1, first.letter())
-            }
-            _ => format!("Mode {}", mode + 1),
-        };
-        curves.push((name, values));
-    }
-    let guides = orders
-        .iter()
-        .map(|&order| {
-            let values = speeds
-                .iter()
-                .map(|&s| order * s / std::f64::consts::TAU)
-                .collect();
-            (format!("{}x", numeric::format_physical(order)), values)
-        })
-        .collect();
-    XyData {
-        title: "Campbell diagram".into(),
-        x_label: "Speed [rpm]".into(),
-        x,
-        curves,
-        guides,
-        y_max: (max_frequency > 0.0).then_some(max_frequency),
+/// One mode followed over the speed: its speeds in increasing order with the mode there.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Track {
+    pub name: String,
+    pub points: Vec<(f64, Mode)>,
+}
+
+impl Track {
+    /// The whirl if it is the same at every speed and known.
+    fn whirl(&self) -> Whirl {
+        let mut whirls = self.points.iter().map(|(_, m)| m.whirl);
+        match whirls.next() {
+            Some(first) if whirls.all(|w| w == first) => first,
+            _ => Whirl::Unknown,
+        }
     }
 }
 
-/// The crossings of the modes with the engine order lines, by linear interpolation between
-/// the speeds of the sweep.
-pub fn critical_speeds(points: &[SpeedPoint], orders: &[f64]) -> Vec<CriticalSpeed> {
+/// The modes of a sweep sorted into curves.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Tracks {
+    /// The curves, named "Mode 1", "Mode 2", ... by their frequency where they start.
+    pub modes: Vec<Track>,
+    /// Roots found at too few neighbouring speeds to form a curve: (speed, frequency).
+    pub unmatched: Vec<(f64, f64)>,
+    /// Growing modes: (speed, frequency).
+    pub unstable: Vec<(f64, f64)>,
+}
+
+/// Where a curve is heading at `speed`: the line through its last two points, or its last
+/// value when it has one point.
+fn predict(points: &[(f64, Mode)], speed: f64) -> f64 {
+    match points {
+        [.., (s0, m0), (s1, m1)] if s1 > s0 => {
+            m1.frequency + (m1.frequency - m0.frequency) / (s1 - s0) * (speed - s1)
+        }
+        [.., (_, m)] => m.frequency,
+        [] => f64::NAN,
+    }
+}
+
+/// Sorts the modes of the speeds into curves. Going up in speed, each mode joins the curve
+/// whose course it continues best, the closest pairs first; a mode that continues none starts
+/// a new curve. Curves found at fewer than three speeds and growing modes are kept apart, so
+/// a spurious root does not tear the curves.
+pub fn track(points: &[SpeedPoint]) -> Tracks {
+    let mut order: Vec<&SpeedPoint> = points.iter().collect();
+    order.sort_by(|a, b| a.speed.total_cmp(&b.speed));
+    let mut tracks: Vec<Vec<(f64, Mode)>> = Vec::new();
+    // Index into `order` of the last speed each curve was found at.
+    let mut last_seen: Vec<usize> = Vec::new();
+    let mut unstable = Vec::new();
+    for (index, point) in order.into_iter().enumerate() {
+        let (growing, modes): (Vec<&Mode>, Vec<&Mode>) =
+            point.modes.iter().partition(|m| m.unstable);
+        unstable.extend(growing.iter().map(|m| (point.speed, m.frequency)));
+        let scale = modes.iter().map(|m| m.frequency.abs()).fold(0.0, f64::max);
+        let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+        for (t, track) in tracks.iter().enumerate() {
+            // A curve missing at more than two speeds in a row has ended.
+            if index - last_seen[t] > MAX_MISSED + 1 {
+                continue;
+            }
+            let expected = predict(track, point.speed);
+            // A curve takes a mode within a fifth of its value or a few percent of the
+            // spectrum, so curves near zero still find their continuation.
+            let tolerance = (0.2 * expected.abs()).max(0.05 * scale);
+            for (m, mode) in modes.iter().enumerate() {
+                // CalculiX gives the size of a frequency: a curve heading below zero
+                // comes back up mirrored.
+                let distance = (mode.frequency.abs() - expected.abs()).abs();
+                if distance <= tolerance {
+                    pairs.push((distance, t, m));
+                }
+            }
+        }
+        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut track_taken = vec![false; tracks.len()];
+        let mut mode_taken = vec![false; modes.len()];
+        for (_, t, m) in pairs {
+            if track_taken[t] || mode_taken[m] {
+                continue;
+            }
+            track_taken[t] = true;
+            mode_taken[m] = true;
+            tracks[t].push((point.speed, modes[m].clone()));
+            last_seen[t] = index;
+        }
+        for (m, mode) in modes.iter().enumerate() {
+            if !mode_taken[m] {
+                tracks.push(vec![(point.speed, (*mode).clone())]);
+                last_seen.push(index);
+            }
+        }
+    }
+    let needed = MIN_TRACK.min(points.len());
+    let (long, short): (Vec<_>, Vec<_>) = tracks.into_iter().partition(|t| t.len() >= needed);
+    // Named by where they start: the lowest speed first, then the lowest frequency.
+    let mut long: Vec<Vec<(f64, Mode)>> = long;
+    long.sort_by(|a, b| {
+        (a[0].0.total_cmp(&b[0].0)).then(a[0].1.frequency.total_cmp(&b[0].1.frequency))
+    });
+    let modes = (long.into_iter().enumerate())
+        .map(|(i, points)| {
+            let mut track = Track {
+                name: String::new(),
+                points,
+            };
+            track.name = match track.whirl() {
+                Whirl::Unknown => format!("Mode {}", i + 1),
+                whirl => format!("Mode {} ({})", i + 1, whirl.letter()),
+            };
+            track
+        })
+        .collect();
+    let unmatched = (short.iter().flatten())
+        .map(|(s, m)| (*s, m.frequency))
+        .collect();
+    Tracks {
+        modes,
+        unmatched,
+        unstable,
+    }
+}
+
+/// The crossings of the curves with the engine order lines, by linear interpolation between
+/// neighbouring speeds of a curve.
+pub fn critical_speeds(tracks: &Tracks, orders: &[f64]) -> Vec<CriticalSpeed> {
     let mut found = Vec::new();
-    let count = points.iter().map(|p| p.modes.len()).max().unwrap_or(0);
     for &order in orders {
-        for mode in 0..count {
-            for pair in points.windows(2) {
-                let (Some(a), Some(b)) = (pair[0].modes.get(mode), pair[1].modes.get(mode)) else {
-                    continue;
-                };
+        for (index, track) in tracks.modes.iter().enumerate() {
+            for pair in track.points.windows(2) {
+                let ((sa, a), (sb, b)) = (&pair[0], &pair[1]);
                 let line = |speed: f64| order * speed / std::f64::consts::TAU;
-                let (da, db) = (
-                    a.frequency - line(pair[0].speed),
-                    b.frequency - line(pair[1].speed),
-                );
+                let (da, db) = (a.frequency - line(*sa), b.frequency - line(*sb));
                 // A crossing has the mode above the line at one end and below at the other;
                 // standstill itself (speed 0, line 0) is no critical speed.
-                if da == db || da * db > 0.0 || (pair[0].speed == 0.0 && da == 0.0) {
+                if da == db || da * db > 0.0 || (*sa == 0.0 && da == 0.0) {
                     continue;
                 }
                 let t = da / (da - db);
-                let speed = pair[0].speed + t * (pair[1].speed - pair[0].speed);
+                let speed = sa + t * (sb - sa);
                 if speed <= 0.0 {
                     continue;
                 }
                 found.push(CriticalSpeed {
                     order,
-                    mode: mode + 1,
+                    mode: index + 1,
                     speed,
                     whirl: if t < 0.5 { a.whirl } else { b.whirl },
                 });
@@ -302,15 +420,122 @@ pub fn critical_speeds(points: &[SpeedPoint], orders: &[f64]) -> Vec<CriticalSpe
     found
 }
 
-/// The sweep as a table for a spreadsheet, its cells separated by `separator`: the speed,
-/// the frequency and whirl of each mode and the frequency of each engine order line.
-pub fn table_text(points: &[SpeedPoint], orders: &[f64], separator: char) -> String {
-    let count = points.iter().map(|p| p.modes.len()).max().unwrap_or(0);
-    let mut cells = vec!["Speed [rad/s]".to_string(), "Speed [rpm]".to_string()];
-    for mode in 1..=count {
-        cells.push(format!("Mode {mode} [Hz]"));
-        cells.push(format!("Whirl {mode}"));
+/// How far each point of the curves lies off the straight line between its neighbours on
+/// the curve, as (speed, deviation in Hz): the larger, the more the curve bends there.
+fn bends(tracks: &Tracks) -> Vec<(f64, f64)> {
+    let mut bends = Vec::new();
+    for track in &tracks.modes {
+        for window in track.points.windows(3) {
+            let [(sa, a), (sb, b), (sc, c)] = window else {
+                continue;
+            };
+            if sc <= sa {
+                continue;
+            }
+            let chord = a.frequency + (c.frequency - a.frequency) * (sb - sa) / (sc - sa);
+            bends.push((*sb, (b.frequency - chord).abs()));
+        }
     }
+    bends
+}
+
+/// The next speed to run: the middle of the gap between neighbouring speeds where the curves
+/// bend most, weighted with the width of the gap. Gaps next to a failed or running speed and
+/// gaps narrower than twice the resolution are left alone, so the sweep does not chase
+/// a speed CalculiX cannot solve. `None` when no gap is left to split.
+pub fn next_speed(
+    points: &[SpeedPoint],
+    failed: &[f64],
+    running: &[f64],
+    min_speed: f64,
+    max_speed: f64,
+) -> Option<f64> {
+    let range = max_speed - min_speed;
+    if range.is_nan() || range <= 0.0 {
+        return None;
+    }
+    let tracks = track(points);
+    let bends = bends(&tracks);
+    let scale = (tracks.modes.iter().flat_map(|t| &t.points))
+        .map(|(_, m)| m.frequency.abs())
+        .fold(0.0, f64::max)
+        .max(1e-30);
+    // Every speed taken, with whether it gave modes.
+    let mut taken: Vec<(f64, bool)> = (points.iter().map(|p| (p.speed, true)))
+        .chain(failed.iter().chain(running).map(|&s| (s, false)))
+        .collect();
+    taken.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let bend_at = |speed: f64| {
+        (bends.iter())
+            .filter(|(s, _)| *s == speed)
+            .map(|(_, d)| *d)
+            .fold(0.0, f64::max)
+    };
+    let mut best: Option<(f64, f64)> = None;
+    for pair in taken.windows(2) {
+        let ((a, a_ok), (b, b_ok)) = (pair[0], pair[1]);
+        let width = (b - a) / range;
+        if !(a_ok && b_ok) || width < 2.0 * MIN_GAP {
+            continue;
+        }
+        let bend = bend_at(a).max(bend_at(b)) / scale;
+        let score = bend + WIDTH_WEIGHT * width;
+        if best.is_none_or(|(s, _)| score > s) {
+            best = Some((score, 0.5 * (a + b)));
+        }
+    }
+    best.map(|(_, speed)| speed)
+}
+
+/// What the diagram draws, in rpm over Hz.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Diagram {
+    pub curves: Vec<(String, Vec<[f64; 2]>)>,
+    pub unmatched: Vec<[f64; 2]>,
+    pub unstable: Vec<[f64; 2]>,
+    /// Engine order lines from standstill to the highest speed.
+    pub guides: Vec<(String, Vec<[f64; 2]>)>,
+}
+
+/// The diagram of the curves, with the engine order lines from standstill to `max_speed`.
+pub fn diagram(tracks: &Tracks, orders: &[f64], max_speed: f64) -> Diagram {
+    let to_plot = |&(s, f): &(f64, f64)| [rpm(s), f];
+    Diagram {
+        curves: (tracks.modes.iter())
+            .map(|t| {
+                let points = t.points.iter().map(|(s, m)| [rpm(*s), m.frequency]);
+                (t.name.clone(), points.collect())
+            })
+            .collect(),
+        unmatched: tracks.unmatched.iter().map(to_plot).collect(),
+        unstable: tracks.unstable.iter().map(to_plot).collect(),
+        guides: (orders.iter())
+            .map(|&order| {
+                let end = [rpm(max_speed), order * max_speed / std::f64::consts::TAU];
+                (
+                    format!("{}x", numeric::format_physical(order)),
+                    vec![[0.0, 0.0], end],
+                )
+            })
+            .collect(),
+    }
+}
+
+/// The sweep as a table for a spreadsheet, its cells separated by `separator`: the speed,
+/// the frequency and whirl of each curve, the other roots CalculiX found at that speed and
+/// the frequency of each engine order line.
+pub fn table_text(points: &[SpeedPoint], orders: &[f64], separator: char) -> String {
+    let tracks = track(points);
+    let mut speeds: Vec<f64> = points.iter().map(|p| p.speed).collect();
+    speeds.sort_by(f64::total_cmp);
+    speeds.dedup();
+    let mut cells = vec!["Speed [rad/s]".to_string(), "Speed [rpm]".to_string()];
+    for track in &tracks.modes {
+        let number = track.name.split(' ').nth(1).unwrap_or_default();
+        cells.push(format!("Mode {number} [Hz]"));
+        cells.push(format!("Whirl {number}"));
+    }
+    cells.push("Other roots [Hz]".into());
     for &order in orders {
         cells.push(format!("{}x [Hz]", numeric::format_physical(order)));
     }
@@ -321,21 +546,26 @@ pub fn table_text(points: &[SpeedPoint], orders: &[f64], separator: char) -> Str
         cells.clear();
     };
     row(&mut cells);
-    for point in points {
-        cells.push(numeric::format_physical(point.speed));
-        cells.push(numeric::format_physical(rpm(point.speed)));
-        for mode in 0..count {
-            match point.modes.get(mode) {
-                Some(m) => {
+    for speed in speeds {
+        cells.push(numeric::format_physical(speed));
+        cells.push(numeric::format_physical(rpm(speed)));
+        for track in &tracks.modes {
+            match track.points.iter().find(|(s, _)| *s == speed) {
+                Some((_, m)) => {
                     cells.push(numeric::format_physical(m.frequency));
                     cells.push(m.whirl.letter().to_string());
                 }
                 None => cells.extend([String::new(), String::new()]),
             }
         }
+        let others: Vec<String> = (tracks.unmatched.iter().chain(&tracks.unstable))
+            .filter(|(s, _)| *s == speed)
+            .map(|(_, f)| numeric::format_physical(*f))
+            .collect();
+        cells.push(others.join(" "));
         for &order in orders {
             cells.push(numeric::format_physical(
-                order * point.speed / std::f64::consts::TAU,
+                order * speed / std::f64::consts::TAU,
             ));
         }
         row(&mut cells);
@@ -343,25 +573,34 @@ pub fn table_text(points: &[SpeedPoint], orders: &[f64], separator: char) -> Str
     text
 }
 
-enum Message {
-    /// A speed is done, with its modes or the reason it failed.
-    Done(Result<SpeedPoint, String>),
-    Finished,
+/// A speed is done, with its modes or the reason it failed.
+struct Done {
+    speed: f64,
+    result: Result<SpeedPoint, String>,
 }
 
-/// The running sweep: CalculiX runs in a thread, one speed after the other.
+/// The running sweep: CalculiX runs in threads, as many speeds at a time as the solver
+/// settings allow.
 struct Sweep {
-    receiver: Receiver<Message>,
+    input: Arc<SweepInput>,
+    sender: Sender<Done>,
+    receiver: Receiver<Done>,
     cancel: Arc<AtomicBool>,
-    total: usize,
-    points: Vec<SpeedPoint>,
-    /// Speeds run so far, the failed ones included.
-    done: usize,
-    log: Vec<String>,
-    finished: bool,
+    /// Speeds of the coarse grid not started yet.
+    grid: VecDeque<f64>,
+    running: Vec<f64>,
+    failed: Vec<f64>,
+    /// Runs started so far.
+    started: u32,
+    parallel: usize,
+    max_runs: u32,
+    min_speed: f64,
+    max_speed: f64,
+    /// Stop was pressed: running speeds are cancelled, no new ones start.
+    stopping: bool,
 }
 
-/// What the sweep thread works on.
+/// What the sweep threads work on.
 struct SweepInput {
     solver: plx_job::Solver,
     work_dir: std::path::PathBuf,
@@ -370,28 +609,51 @@ struct SweepInput {
     fe: FeModel,
     /// Number of the complex frequency step in the `.dat` file.
     step: u32,
-    speeds: Vec<f64>,
 }
 
-/// Runs CalculiX for every speed and sends the modes back; stops when `cancel` is set.
-fn run_sweep(input: SweepInput, sender: Sender<Message>, cancel: Arc<AtomicBool>) {
-    for (i, &speed) in input.speeds.iter().enumerate() {
-        if cancel.load(Ordering::Relaxed) {
-            break;
-        }
-        let result = run_speed(&input, speed, i, &cancel);
-        if sender.send(Message::Done(result)).is_err() {
-            return;
+/// Runs CalculiX at one speed in a thread of its own and sends the modes back. The files of a
+/// successful run are removed, those of a failed one stay for a look.
+fn spawn_speed(
+    input: Arc<SweepInput>,
+    speed: f64,
+    index: u32,
+    sender: Sender<Done>,
+    cancel: Arc<AtomicBool>,
+) -> std::io::Result<()> {
+    std::thread::Builder::new()
+        .name(format!("campbell {index}"))
+        .spawn(move || {
+            let result = run_speed(&input, speed, index, &cancel);
+            if result.is_ok() {
+                remove_job_files(&input.work_dir, &job_name(index));
+            }
+            let _ = sender.send(Done { speed, result });
+        })
+        .map(|_| ())
+}
+
+fn job_name(index: u32) -> String {
+    format!("Campbell-{index}")
+}
+
+/// Removes the files `name.*` CalculiX wrote in `dir`.
+fn remove_job_files(dir: &std::path::Path, name: &str) {
+    let prefix = format!("{name}.");
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
-    let _ = sender.send(Message::Finished);
 }
 
 /// One run of CalculiX at `speed`, as job `Campbell-<index>` in the work directory.
 fn run_speed(
     input: &SweepInput,
     speed: f64,
-    index: usize,
+    index: u32,
     cancel: &AtomicBool,
 ) -> Result<SpeedPoint, String> {
     let label = format!("{} rpm", numeric::format_physical(rpm(speed)));
@@ -399,7 +661,7 @@ fn run_speed(
     let heading = format!("PrePoLix Campbell sweep: {label}");
     let text = plx_io::inp::write_inp(&input.mesh, &fe, &heading)
         .map_err(|e| format!("{label}: input file not written: {e}"))?;
-    let name = format!("Campbell-{index}");
+    let name = job_name(index);
     let mut job = Job::start(&input.solver, &input.work_dir, &name, &text)
         .map_err(|e| format!("{label}: CalculiX not started: {e}"))?;
     let status = loop {
@@ -448,17 +710,25 @@ pub struct CampbellWindow {
     log: Vec<String>,
     /// Orders the shown diagram was made with.
     orders: Vec<f64>,
+    /// Highest speed of the shown sweep, where the order lines end.
+    swept_speed: f64,
     /// A sweep was started, so an empty diagram is a failure rather than nothing yet.
     swept: bool,
+    /// Counts sweeps, so each starts with a fresh view of the plot.
+    plot_generation: u32,
+    /// The frequency axis limit the plot was last shown with.
+    shown_max_frequency: f64,
 }
 
 impl CampbellWindow {
     /// A window for the model: the sweep runs up to the speed of its centrifugal load.
     pub fn new(fe: &FeModel) -> Self {
+        let speed = rotor_speed(fe).unwrap_or(0.0);
         Self {
             setup: Setup {
-                max_speed: rotor_speed(fe).unwrap_or(0.0),
-                steps: DEFAULT_STEPS,
+                min_speed: 0.0,
+                max_speed: speed,
+                max_runs: DEFAULT_RUNS,
                 orders: "1".into(),
                 max_frequency: 0.0,
             },
@@ -467,12 +737,15 @@ impl CampbellWindow {
             points: Vec::new(),
             log: Vec::new(),
             orders: vec![1.0],
+            swept_speed: speed,
             swept: false,
+            plot_generation: 0,
+            shown_max_frequency: 0.0,
         }
     }
 
     pub fn is_running(&self) -> bool {
-        self.sweep.as_ref().is_some_and(|s| !s.finished)
+        self.sweep.is_some()
     }
 
     /// Starts the sweep on the model; steps at the default solver use `default_solver`.
@@ -488,8 +761,17 @@ impl CampbellWindow {
         if rotor_speed(&model.fe).is_none_or(|s| s <= 0.0) {
             return Err("The model has no active Centrifugal load.".into());
         }
-        if self.setup.max_speed <= 0.0 {
+        let Setup {
+            min_speed,
+            max_speed,
+            max_runs,
+            ..
+        } = self.setup;
+        if max_speed <= 0.0 {
             return Err("The highest speed must be greater than zero.".into());
+        }
+        if min_speed >= max_speed {
+            return Err("The lowest speed must be below the highest.".into());
         }
         let job_solver = solver.job_solver();
         if let Some(message) = crate::settings::missing_executable(&job_solver.executable) {
@@ -497,61 +779,71 @@ impl CampbellWindow {
         }
         let mut fe = model.fe.clone();
         fe.resolve_default_solver(default_solver);
-        let speeds = speeds(self.setup.max_speed, self.setup.steps);
-        let (sender, receiver) = channel();
-        let cancel = Arc::new(AtomicBool::new(false));
         let work_dir = solver.work_dir().join(FOLDER);
-        let mesh = Arc::new(model.mesh.clone());
-        let total = speeds.len();
-        let thread_cancel = Arc::clone(&cancel);
-        let input = SweepInput {
-            solver: job_solver,
-            work_dir,
-            mesh,
-            fe,
-            step,
-            speeds,
+        let grid_count = if max_runs == 0 {
+            GRID
+        } else {
+            GRID.min(max_runs as usize).max(2)
         };
-        std::thread::Builder::new()
-            .name("campbell sweep".into())
-            .spawn(move || run_sweep(input, sender, thread_cancel))
-            .map_err(|e| format!("Sweep not started: {e}"))?;
+        let (sender, receiver) = channel();
         self.orders = self.setup.order_values();
         self.points.clear();
         self.swept = true;
+        self.swept_speed = max_speed;
+        self.plot_generation += 1;
+        let runs = match max_runs {
+            0 => "until stopped".to_string(),
+            n => format!("up to {n} runs"),
+        };
         self.log = vec![format!(
-            "Sweep started: {total} speeds up to {} rpm in {}",
-            numeric::format_physical(rpm(self.setup.max_speed)),
-            solver.work_dir().join(FOLDER).display()
+            "Sweep started: {} to {} rpm, {runs}, in {}",
+            numeric::format_physical(rpm(min_speed)),
+            numeric::format_physical(rpm(max_speed)),
+            work_dir.display()
         )];
         self.sweep = Some(Sweep {
+            input: Arc::new(SweepInput {
+                solver: job_solver,
+                work_dir,
+                mesh: Arc::new(model.mesh.clone()),
+                fe,
+                step,
+            }),
+            sender,
             receiver,
-            cancel,
-            total,
-            points: Vec::new(),
-            done: 0,
-            log: Vec::new(),
-            finished: false,
+            cancel: Arc::new(AtomicBool::new(false)),
+            grid: grid(min_speed, max_speed, grid_count).into(),
+            running: Vec::new(),
+            failed: Vec::new(),
+            started: 0,
+            parallel: solver.parallel_runs.max(1) as usize,
+            max_runs,
+            min_speed,
+            max_speed,
+            stopping: false,
         });
+        self.poll();
         Ok(())
     }
 
+    /// Stops the sweep: the running speeds are cancelled, the finished ones stay.
     pub fn cancel(&mut self) {
-        if let Some(sweep) = &self.sweep {
+        if let Some(sweep) = &mut self.sweep {
+            sweep.stopping = true;
             sweep.cancel.store(true, Ordering::Relaxed);
         }
     }
 
-    /// Takes what the sweep thread has sent.
+    /// Takes the finished speeds and starts new ones while there is room.
     fn poll(&mut self) {
         let Some(sweep) = &mut self.sweep else {
             return;
         };
-        while let Ok(message) = sweep.receiver.try_recv() {
-            match message {
-                Message::Done(Ok(point)) => {
-                    sweep.done += 1;
-                    sweep.log.push(format!(
+        while let Ok(Done { speed, result }) = sweep.receiver.try_recv() {
+            sweep.running.retain(|&s| s != speed);
+            match result {
+                Ok(point) => {
+                    self.log.push(format!(
                         "{} rpm: {} modes, first {} Hz",
                         numeric::format_physical(rpm(point.speed)),
                         point.modes.len(),
@@ -560,21 +852,65 @@ impl CampbellWindow {
                             |m| numeric::format_physical(m.frequency)
                         )
                     ));
-                    sweep.points.push(point);
+                    self.points.push(point);
                 }
-                Message::Done(Err(error)) => {
-                    sweep.done += 1;
-                    sweep.log.push(error);
+                Err(error) => {
+                    if !sweep.stopping {
+                        self.log.push(error);
+                    }
+                    sweep.failed.push(speed);
                 }
-                Message::Finished => sweep.finished = true,
             }
         }
-        self.points = sweep.points.clone();
-        if !sweep.log.is_empty() {
-            self.log.append(&mut sweep.log);
+        let mut exhausted = false;
+        while !sweep.stopping
+            && sweep.running.len() < sweep.parallel
+            && (sweep.max_runs == 0 || sweep.started < sweep.max_runs)
+        {
+            let next = sweep.grid.pop_front().or_else(|| {
+                // Refinement needs the coarse grid's curves.
+                (self.points.len() + sweep.failed.len() >= 3)
+                    .then(|| {
+                        next_speed(
+                            &self.points,
+                            &sweep.failed,
+                            &sweep.running,
+                            sweep.min_speed,
+                            sweep.max_speed,
+                        )
+                    })
+                    .flatten()
+            });
+            let Some(speed) = next else {
+                exhausted = true;
+                break;
+            };
+            let index = sweep.started;
+            sweep.started += 1;
+            let spawned = spawn_speed(
+                Arc::clone(&sweep.input),
+                speed,
+                index,
+                sweep.sender.clone(),
+                Arc::clone(&sweep.cancel),
+            );
+            match spawned {
+                Ok(()) => sweep.running.push(speed),
+                Err(e) => {
+                    self.log.push(format!("Speed not started: {e}"));
+                    sweep.stopping = true;
+                }
+            }
         }
-        if sweep.finished {
-            self.log.push("Sweep finished.".into());
+        let limit = sweep.max_runs != 0 && sweep.started >= sweep.max_runs;
+        if sweep.running.is_empty() && (sweep.stopping || limit || exhausted) {
+            self.log.push(if sweep.stopping {
+                format!("Sweep stopped after {} speeds.", self.points.len())
+            } else if limit {
+                format!("Sweep finished: all {} runs done.", sweep.max_runs)
+            } else {
+                "Sweep finished: the speeds are as close as the sweep resolves.".into()
+            });
             self.sweep = None;
         }
     }
@@ -594,7 +930,7 @@ impl CampbellWindow {
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
-            .default_size([760.0, 560.0])
+            .default_size([820.0, 600.0])
             .min_size([480.0, 360.0])
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
@@ -609,16 +945,23 @@ impl CampbellWindow {
                         self.log.push(error);
                     }
                     if ui
-                        .add_enabled(running, egui::Button::new("Cancel"))
+                        .add_enabled(running, egui::Button::new("Stop"))
+                        .on_hover_text("Stops the sweep; the speeds done so far stay.")
                         .clicked()
                     {
                         self.cancel();
                     }
-                    if running {
+                    if let Some(sweep) = &self.sweep {
                         ui.spinner();
-                        let (done, total) =
-                            self.sweep.as_ref().map_or((0, 0), |s| (s.done, s.total));
-                        ui.label(format!("{done} of {total} speeds done"));
+                        let total = match sweep.max_runs {
+                            0 => String::new(),
+                            n => format!(" of {n}"),
+                        };
+                        ui.label(format!(
+                            "{} speeds done{total}, {} running",
+                            self.points.len() + sweep.failed.len(),
+                            sweep.running.len()
+                        ));
                     }
                     if ui
                         .add_enabled(!self.points.is_empty(), egui::Button::new("Copy table"))
@@ -651,10 +994,13 @@ impl CampbellWindow {
                     ui.weak(
                         "The sweep runs the analysis once per speed, with the centrifugal \
                          load scaled to it, and plots the complex frequencies of the last \
-                         Complex Frequency step over the speed. The crossings with the engine \
-                         order lines are the critical speeds. CalculiX computes the Coriolis \
-                         modes in the rotating frame of reference; the frequencies and the \
-                         whirl directions (F forward, B backward) are CalculiX's.",
+                         Complex Frequency step over the speed. It starts with a coarse grid \
+                         over the speed range and then adds speeds where the curves bend \
+                         most, until it is stopped or has done its runs. The crossings with \
+                         the engine order lines are the critical speeds. CalculiX computes \
+                         the Coriolis modes in the rotating frame of reference; the \
+                         frequencies and the whirl directions (F forward, B backward) are \
+                         CalculiX's.",
                     );
                 }
                 ui.separator();
@@ -679,30 +1025,46 @@ impl CampbellWindow {
             .num_columns(3)
             .spacing([12.0, 4.0])
             .show(ui, |ui| {
-                ui.label("Highest speed [rpm]");
-                let mut max_rpm = rpm(self.setup.max_speed);
-                if ui
-                    .add_enabled(
-                        !running,
-                        numeric::drag_value(&mut max_rpm)
-                            .range(0.0..=f64::MAX)
-                            .speed(10.0),
-                    )
-                    .changed()
-                {
-                    self.setup.max_speed = from_rpm(max_rpm);
-                }
+                ui.label("Speed range [rpm]");
+                ui.horizontal(|ui| {
+                    let mut low = rpm(self.setup.min_speed);
+                    let mut high = rpm(self.setup.max_speed);
+                    if ui
+                        .add_enabled(
+                            !running,
+                            numeric::drag_value(&mut low)
+                                .range(0.0..=f64::MAX)
+                                .speed(10.0),
+                        )
+                        .changed()
+                    {
+                        self.setup.min_speed = from_rpm(low);
+                    }
+                    ui.label("to");
+                    if ui
+                        .add_enabled(
+                            !running,
+                            numeric::drag_value(&mut high)
+                                .range(0.0..=f64::MAX)
+                                .speed(10.0),
+                        )
+                        .changed()
+                    {
+                        self.setup.max_speed = from_rpm(high);
+                    }
+                });
                 ui.label(format!(
-                    "= {} rad/s",
+                    "= {} to {} rad/s",
+                    numeric::format_physical(self.setup.min_speed),
                     numeric::format_physical(self.setup.max_speed)
                 ));
                 ui.end_row();
-                ui.label("Speed steps");
+                ui.label("Maximum runs");
                 ui.add_enabled(
                     !running,
-                    numeric::drag_value(&mut self.setup.steps).range(2..=200),
+                    numeric::drag_value(&mut self.setup.max_runs).range(0..=10_000),
                 );
-                ui.weak("CalculiX runs once per speed.");
+                ui.weak("CalculiX runs once per speed; 0 runs until Stop.");
                 ui.end_row();
                 ui.label("Engine orders");
                 ui.add_enabled(
@@ -757,17 +1119,16 @@ impl CampbellWindow {
 
     fn diagram_and_table(&mut self, ui: &mut Ui) {
         let orders = self.shown_orders();
-        let data = diagram(&self.points, &orders, self.setup.max_frequency);
-        let critical = critical_speeds(&self.points, &orders);
+        let tracks = track(&self.points);
+        let data = diagram(&tracks, &orders, self.swept_speed);
+        let critical = critical_speeds(&tracks, &orders);
         let table_height = if critical.is_empty() {
             24.0
         } else {
             (critical.len().min(6) as f32 + 1.5) * 20.0
         };
         let plot_height = (ui.available_height() - table_height - 110.0).max(220.0);
-        ui.allocate_ui(egui::vec2(ui.available_width(), plot_height), |ui| {
-            xy_plot::show(ui, &data);
-        });
+        self.plot(ui, &data, plot_height);
         ui.add_space(4.0);
         if critical.is_empty() {
             ui.weak("No crossing of a mode with an engine order line in the sweep.");
@@ -804,6 +1165,89 @@ impl CampbellWindow {
                     });
             });
     }
+
+    /// The diagram as an interactive plot: drag to pan, scroll or drag along an axis to
+    /// zoom, double-click to fit, click a legend entry to hide or show it.
+    fn plot(&mut self, ui: &mut Ui, data: &Diagram, height: f32) {
+        use egui_plot::{Legend, Line, LineStyle, MarkerShape, Plot, Points};
+        let max_frequency = self.setup.max_frequency;
+        let mut plot = Plot::new(("campbell plot", self.plot_generation))
+            .height(height)
+            .legend(Legend::default().follow_insertion_order(true))
+            .x_axis_label("Speed [rpm]")
+            .y_axis_label("Frequency [Hz]")
+            .allow_axis_zoom_drag(true)
+            .grid_color(crate::style::plot_grid())
+            .include_x(0.0)
+            .include_y(0.0)
+            .label_formatter(|hover| match hover {
+                egui_plot::HoverPosition::NearDataPoint {
+                    plot_name,
+                    position,
+                    ..
+                } => Some(format!(
+                    "{plot_name}\n{} rpm\n{} Hz",
+                    numeric::format_physical(position.x),
+                    numeric::format_physical(position.y)
+                )),
+                _ => None,
+            });
+        if max_frequency > 0.0 {
+            plot = plot.default_y_bounds(0.0, max_frequency);
+        }
+        if max_frequency != self.shown_max_frequency {
+            // A new axis limit applies at once, as a reset of the view.
+            plot = plot.reset();
+            self.shown_max_frequency = max_frequency;
+        }
+        let guide = crate::style::adapt(Color32::from_gray(110));
+        let markers = data.curves.iter().map(|(_, p)| p.len()).max().unwrap_or(0) <= 80;
+        plot.show(ui, |plot_ui| {
+            for (name, points) in &data.guides {
+                plot_ui.line(
+                    Line::new(name.as_str(), points.clone())
+                        .color(guide)
+                        .style(LineStyle::dashed_loose())
+                        .allow_hover(false),
+                );
+            }
+            for (index, (name, points)) in data.curves.iter().enumerate() {
+                let color = xy_plot::color(index);
+                plot_ui.line(
+                    Line::new(name.as_str(), points.clone())
+                        .color(color)
+                        .width(2.0),
+                );
+                if markers {
+                    plot_ui.points(
+                        Points::new(name.as_str(), points.clone())
+                            .color(color)
+                            .radius(2.5),
+                    );
+                }
+            }
+            if !data.unmatched.is_empty() {
+                plot_ui.points(
+                    Points::new("Unmatched roots", data.unmatched.clone())
+                        .color(crate::style::adapt(Color32::from_gray(120)))
+                        .shape(MarkerShape::Cross)
+                        .radius(4.0),
+                );
+            }
+            if !data.unstable.is_empty() {
+                plot_ui.points(
+                    Points::new("Unstable", data.unstable.clone())
+                        .color(Color32::from_rgb(200, 30, 30))
+                        .shape(MarkerShape::Diamond)
+                        .radius(4.0),
+                );
+            }
+        });
+        ui.weak(
+            "Drag to pan, scroll or drag along an axis to zoom, double-click to fit. Click a \
+             legend entry to hide or show it.",
+        );
+    }
 }
 
 #[cfg(test)]
@@ -815,7 +1259,11 @@ mod tests {
             speed,
             modes: frequencies
                 .iter()
-                .map(|&(frequency, whirl)| Mode { frequency, whirl })
+                .map(|&(frequency, whirl)| Mode {
+                    frequency,
+                    whirl,
+                    unstable: false,
+                })
                 .collect(),
         }
     }
@@ -836,68 +1284,191 @@ mod tests {
                 )
             })
             .collect();
-        let critical = critical_speeds(&points, &[1.0]);
+        let critical = critical_speeds(&track(&points), &[1.0]);
         assert_eq!(critical.len(), 1, "{critical:?}");
         let c = &critical[0];
         assert_eq!((c.order, c.mode, c.whirl), (1.0, 1, Whirl::Backward));
         let t = 100.0 / (10.0 + 60.0 / std::f64::consts::TAU);
         assert!((c.speed - 60.0 * t).abs() < 1e-9, "{}", c.speed);
         // With the 20x line both modes are crossed.
-        assert_eq!(critical_speeds(&points, &[20.0]).len(), 2);
+        assert_eq!(critical_speeds(&track(&points), &[20.0]).len(), 2);
         // Standstill, where every order line starts at zero, is no critical speed.
         let still = vec![
             point(0.0, &[(0.0, Whirl::Unknown)]),
             point(60.0, &[(5.0, Whirl::Forward)]),
         ];
-        assert!(critical_speeds(&still, &[1.0]).is_empty());
+        assert!(critical_speeds(&track(&still), &[1.0]).is_empty());
     }
 
     #[test]
     fn the_diagram_names_modes_by_their_whirl_and_adds_order_lines() {
+        let tau = std::f64::consts::TAU;
         let points = vec![
-            point(0.0, &[(100.0, Whirl::Unknown), (100.0, Whirl::Unknown)]),
+            point(tau, &[(90.0, Whirl::Backward), (110.0, Whirl::Forward)]),
             point(
-                std::f64::consts::TAU,
-                &[(90.0, Whirl::Backward), (110.0, Whirl::Forward)],
-            ),
-            point(
-                2.0 * std::f64::consts::TAU,
+                2.0 * tau,
                 &[(80.0, Whirl::Backward), (120.0, Whirl::Forward)],
             ),
+            point(
+                3.0 * tau,
+                &[(70.0, Whirl::Backward), (130.0, Whirl::Unknown)],
+            ),
         ];
-        let data = diagram(&points, &[1.0, 2.0], 0.0);
-        for (x, expected) in data.x.iter().zip([0.0, 60.0, 120.0]) {
-            assert!((x - expected).abs() < 1e-9, "{:?}", data.x);
-        }
+        let data = diagram(&track(&points), &[1.0, 2.0], 3.0 * tau);
         let names: Vec<&str> = data.curves.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["Mode 1", "Mode 2"]);
+        assert_eq!(names, ["Mode 1 (B)", "Mode 2"]);
+        let [x, y] = data.curves[0].1[0];
+        assert!((x - 60.0).abs() < 1e-9 && y == 90.0, "{x} {y}");
         let guides: Vec<&str> = data.guides.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(guides, ["1x", "2x"]);
-        assert_eq!(data.guides[0].1, [0.0, 1.0, 2.0]);
-        assert_eq!(data.guides[1].1, [0.0, 2.0, 4.0]);
-        assert_eq!(data.y_max, None);
-        // A sweep without standstill still starts the axis and the order lines at 0 rpm.
-        let steady = vec![
-            point(std::f64::consts::TAU, &[(10.0, Whirl::Forward)]),
-            point(2.0 * std::f64::consts::TAU, &[(11.0, Whirl::Forward)]),
-        ];
-        let data = diagram(&steady, &[1.0], 5.0);
-        assert_eq!(data.curves[0].0, "Mode 1 (F)");
-        assert_eq!(data.x[0], 0.0);
-        assert!(data.curves[0].1[0].is_nan());
-        assert_eq!(data.curves[0].1[1..], [10.0, 11.0]);
-        assert_eq!(data.guides[0].1, [0.0, 1.0, 2.0]);
-        assert_eq!(data.y_max, Some(5.0));
+        // The order lines start at standstill, though the sweep leaves it out.
+        assert_eq!(data.guides[0].1[0], [0.0, 0.0]);
+        assert!((data.guides[1].1[1][0] - 180.0).abs() < 1e-9);
+        assert!((data.guides[1].1[1][1] - 6.0).abs() < 1e-9);
+    }
+
+    /// The curves of a pair of modes with a lower one falling to zero and rising again, as
+    /// in the rotating frame, with spurious roots at some speeds.
+    fn sweep_with_spurious_roots() -> Vec<SpeedPoint> {
+        (1..=20)
+            .map(|i| {
+                let s = f64::from(i) * 100.0;
+                let mut modes = vec![
+                    ((150.0 - 0.1 * s).abs(), Whirl::Forward),
+                    (350.0 + 0.02 * s, Whirl::Backward),
+                    (1000.0 + 0.05 * s, Whirl::Forward),
+                    (2000.0, Whirl::Backward),
+                ];
+                // CalculiX finds a root near zero at two speeds, which pushes the top mode
+                // out of the requested number of modes.
+                if i == 9 || i == 14 {
+                    modes.insert(0, (-3.0, Whirl::Unknown));
+                    modes.pop();
+                }
+                modes.sort_by(|a, b| a.0.total_cmp(&b.0));
+                point(s, &modes)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn modes_are_followed_by_their_course_not_their_rank() {
+        let points = sweep_with_spurious_roots();
+        let tracks = track(&points);
+        assert_eq!(tracks.modes.len(), 4, "{:?}", tracks.modes);
+        assert_eq!(tracks.unmatched, [(900.0, -3.0), (1400.0, -3.0)]);
+        // Mode 2 stays on its line at the spurious speeds instead of dropping to mode 1.
+        let second = &tracks.modes[1];
+        assert_eq!(second.points.len(), 20);
+        for (s, m) in &second.points {
+            assert!(
+                (m.frequency - (350.0 + 0.02 * s)).abs() < 1e-9,
+                "{s}: {m:?}"
+            );
+        }
+        // The lowest mode passes through zero and rises again as one curve.
+        assert_eq!(tracks.modes[0].points.len(), 20);
+        // The top mode just misses the two speeds.
+        assert_eq!(tracks.modes[3].points.len(), 18);
+        // Growing modes are kept apart.
+        let mut points = points;
+        points[4].modes.push(Mode {
+            frequency: 0.0,
+            whirl: Whirl::Unknown,
+            unstable: true,
+        });
+        let tracks = track(&points);
+        assert_eq!(tracks.unstable, [(500.0, 0.0)]);
+        assert_eq!(tracks.modes.len(), 4);
+    }
+
+    #[test]
+    fn crossing_modes_keep_their_curves() {
+        let points: Vec<SpeedPoint> = (1..=10)
+            .map(|i| {
+                let s = f64::from(i);
+                let mut modes = [
+                    (100.0 + 10.0 * s, Whirl::Forward),
+                    (200.0 - 10.0 * s, Whirl::Backward),
+                ];
+                modes.sort_by(|a, b| a.0.total_cmp(&b.0));
+                point(s, &modes)
+            })
+            .collect();
+        let tracks = track(&points);
+        assert_eq!(tracks.modes.len(), 2);
+        assert!(
+            tracks.modes.iter().all(|t| t.whirl() != Whirl::Unknown),
+            "{tracks:?}"
+        );
+    }
+
+    #[test]
+    fn refinement_goes_where_the_curves_bend() {
+        // A mode with a kink at speed 50 of the range 0..100.
+        let curve = |s: f64| {
+            if s < 50.0 {
+                100.0
+            } else {
+                100.0 + 4.0 * (s - 50.0)
+            }
+        };
+        let mut points: Vec<SpeedPoint> = grid(0.0, 100.0, 8)
+            .into_iter()
+            .map(|s| point(s, &[(curve(s), Whirl::Forward), (1000.0, Whirl::Forward)]))
+            .collect();
+        for _ in 0..6 {
+            let next = next_speed(&points, &[], &[], 0.0, 100.0).unwrap();
+            assert!((30.0..=72.0).contains(&next), "{next}");
+            points.push(point(
+                next,
+                &[(curve(next), Whirl::Forward), (1000.0, Whirl::Forward)],
+            ));
+        }
+        // A running speed takes its gap out of the refinement.
+        let running = next_speed(&points, &[], &[], 0.0, 100.0).unwrap();
+        let mut taken: Vec<f64> = points.iter().map(|p| p.speed).collect();
+        taken.sort_by(f64::total_cmp);
+        let after = taken.iter().position(|&s| s > running).unwrap();
+        let (before, after) = (taken[after - 1], taken[after]);
+        let next = next_speed(&points, &[], &[running], 0.0, 100.0).unwrap();
+        assert!(
+            next <= before || next >= after,
+            "{next} in {before}..{after}"
+        );
+        // Straight curves spread the speeds evenly: the widest gap first.
+        let straight: Vec<SpeedPoint> = [10.0, 20.0, 60.0, 70.0]
+            .into_iter()
+            .map(|s| point(s, &[(s, Whirl::Forward)]))
+            .collect();
+        assert_eq!(next_speed(&straight, &[], &[], 0.0, 100.0), Some(40.0));
+        // No gap wider than the resolution is left.
+        let dense: Vec<SpeedPoint> = [10.0, 10.1, 10.2]
+            .into_iter()
+            .map(|s| point(s, &[(s, Whirl::Forward)]))
+            .collect();
+        assert_eq!(next_speed(&dense, &[], &[], 0.0, 100.0), None);
+    }
+
+    #[test]
+    fn refinement_does_not_chase_spurious_roots() {
+        let points = sweep_with_spurious_roots();
+        // The spurious roots are no curve, so the straight curves only spread the speeds;
+        // the bend of the lowest mode at its zero (speed 1500) draws the first new speed.
+        let next = next_speed(&points, &[], &[], 0.0, 2000.0).unwrap();
+        assert!((1400.0..=1600.0).contains(&next), "{next}");
     }
 
     #[test]
     fn the_table_lists_speeds_modes_and_order_lines() {
+        let tau = std::f64::consts::TAU;
         let points = vec![
+            point(tau, &[(90.0, Whirl::Backward), (110.0, Whirl::Forward)]),
             point(
-                std::f64::consts::TAU,
-                &[(90.0, Whirl::Backward), (110.0, Whirl::Forward)],
+                2.0 * tau,
+                &[(80.0, Whirl::Backward), (120.0, Whirl::Forward)],
             ),
-            point(2.0 * std::f64::consts::TAU, &[(80.0, Whirl::Backward)]),
+            point(3.0 * tau, &[(70.0, Whirl::Backward), (5.0, Whirl::Unknown)]),
         ];
         let csv = table_text(&points, &[1.0, 2.0], ',');
         let rows: Vec<Vec<&str>> = csv.lines().map(|l| l.split(',').collect()).collect();
@@ -908,27 +1479,28 @@ mod tests {
                 "Speed [rpm]",
                 "Mode 1 [Hz]",
                 "Whirl 1",
-                "Mode 2 [Hz]",
-                "Whirl 2",
+                "Other roots [Hz]",
                 "1x [Hz]",
                 "2x [Hz]"
             ]
         );
-        assert_eq!(rows[1][1..], ["60", "90", "B", "110", "F", "1", "2"]);
-        assert_eq!(rows[2][1..], ["120", "80", "B", "", "", "2", "4"]);
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1][1..], ["60", "90", "B", "110", "1", "2"]);
+        assert_eq!(rows[3][1..], ["180", "70", "B", "5", "3", "6"]);
+        assert_eq!(rows.len(), 4);
     }
 
     #[test]
-    fn orders_are_parsed_and_speeds_spread_evenly() {
+    fn orders_are_parsed_and_the_grid_spreads_evenly() {
         let setup = Setup {
+            min_speed: 0.0,
             max_speed: 100.0,
-            steps: 4,
+            max_runs: 0,
             orders: "2, 1; 1 x".into(),
             max_frequency: 0.0,
         };
         assert_eq!(setup.order_values(), [1.0, 2.0]);
-        assert_eq!(speeds(100.0, 4), [25.0, 50.0, 75.0, 100.0]);
+        assert_eq!(grid(0.0, 100.0, 3), [2.0, 51.0, 100.0]);
+        assert_eq!(grid(40.0, 100.0, 4), [40.0, 60.0, 80.0, 100.0]);
         assert!((rpm(from_rpm(3000.0)) - 3000.0).abs() < 1e-9);
     }
 
@@ -1016,11 +1588,10 @@ mod tests {
             mesh: Arc::new(mesh),
             fe,
             step: 3,
-            speeds: speeds(200.0, 3),
         };
         let cancel = AtomicBool::new(false);
-        let points: Vec<SpeedPoint> = (input.speeds.iter().enumerate())
-            .map(|(i, &speed)| run_speed(&input, speed, i, &cancel).unwrap())
+        let points: Vec<SpeedPoint> = (grid(50.0, 200.0, 3).into_iter().enumerate())
+            .map(|(i, speed)| run_speed(&input, speed, i as u32, &cancel).unwrap())
             .collect();
         // The .frd file has the same frequencies, for CalculiX versions whose .dat differs.
         let frd = plx_io::frd::read_frd(&work_dir.join("Campbell-2.frd")).unwrap();
@@ -1040,17 +1611,18 @@ mod tests {
             );
         }
         // In the rotating frame the pair splits by twice the speed: 2 x 200 rad/s = 63.7 Hz
-        // at the top speed, a third of it at the first.
+        // at the top speed, a quarter of it at the first.
         let split = |p: &SpeedPoint| p.modes[1].frequency - p.modes[0].frequency;
-        assert!((18.0..25.0).contains(&split(&points[0])), "{:?}", points[0]);
+        assert!((13.0..19.0).contains(&split(&points[0])), "{:?}", points[0]);
         assert!((55.0..72.0).contains(&split(&points[2])), "{points:?}");
         // CalculiX computes in the rotating frame of reference, where the forward whirl
         // appears below the backward one; both directions occur in the pair.
         let whirls = [points[2].modes[0].whirl, points[2].modes[1].whirl];
         assert!(whirls.contains(&Whirl::Forward) && whirls.contains(&Whirl::Backward));
-        let critical = critical_speeds(&points, &[1.0]);
+        let tracks = track(&points);
+        let critical = critical_speeds(&tracks, &[1.0]);
         assert!(critical.is_empty(), "{critical:?}");
-        assert_eq!(diagram(&points, &[1.0], 0.0).curves.len(), 4);
+        assert_eq!(diagram(&tracks, &[1.0], 200.0).curves.len(), 4);
         assert!(table_text(&points, &[1.0], ',').lines().count() == 4);
     }
 
@@ -1083,11 +1655,13 @@ mod tests {
             [
                 Mode {
                     frequency: 732.5508,
-                    whirl: Whirl::Forward
+                    whirl: Whirl::Forward,
+                    unstable: false,
                 },
                 Mode {
                     frequency: 1049.649,
-                    whirl: Whirl::Backward
+                    whirl: Whirl::Backward,
+                    unstable: false,
                 }
             ]
         );
