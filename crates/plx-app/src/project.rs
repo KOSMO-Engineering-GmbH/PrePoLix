@@ -1825,17 +1825,23 @@ impl ProjectApp {
 
     /// Adds a Campbell block; returns its id.
     fn add_campbell(&mut self, position: egui::Pos2) -> u64 {
-        let id = self.next_id();
-        let name = self.unique_name("Campbell");
         let window = CampbellWindow::new(&plx_model::FeModel::default());
-        self.nodes
-            .push(Node::campbell_block(id, name.clone(), window));
-        self.graph.insert_node(position, id);
+        let id = self.insert_campbell(position, window);
+        let name = self.name_of(id);
         self.output.push(format!(
             "{name} created: drag the Setup of an analysis with a Centrifugal load and a \
              Complex Frequency step to its Analysis row; Update Project or its diagram then \
              sweeps it."
         ));
+        id
+    }
+
+    /// Inserts a Campbell block with `window`; returns its id.
+    fn insert_campbell(&mut self, position: egui::Pos2, window: CampbellWindow) -> u64 {
+        let id = self.next_id();
+        let name = self.unique_name("Campbell");
+        self.nodes.push(Node::campbell_block(id, name, window));
+        self.graph.insert_node(position, id);
         id
     }
 
@@ -1851,14 +1857,12 @@ impl ProjectApp {
                 let position = (self.graph_node(analysis))
                     .and_then(|g| self.graph.get_node_info(g))
                     .map_or_else(|| self.free_position(), |i| i.pos + egui::vec2(300.0, 0.0));
-                let id = self.add_campbell(position);
                 // The sweep goes up to the speed of the analysis at first.
-                let window = (self.nodes.iter().find(|n| n.id == analysis))
+                let fe = (self.nodes.iter().find(|n| n.id == analysis))
                     .and_then(Node::link_data)
-                    .map(|d| CampbellWindow::new(d.fe));
-                if let (Some(window), Some(node)) = (window, self.node(id)) {
-                    node.campbell = Some(Box::new(window));
-                }
+                    .map(|d| d.fe.clone())
+                    .unwrap_or_default();
+                let id = self.insert_campbell(position, CampbellWindow::new(&fe));
                 self.link(
                     analysis,
                     vec![links::SETUP.to_owned()],

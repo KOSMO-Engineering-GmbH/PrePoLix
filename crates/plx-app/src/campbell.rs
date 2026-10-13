@@ -1146,7 +1146,7 @@ impl CampbellWindow {
                 } else {
                     ui.weak(
                         "The sweep runs the analysis once per speed, with the centrifugal \
-                         load scaled to it, and plots the complex frequencies of the last \
+                         load set to it, and plots the complex frequencies of the last \
                          Complex Frequency step over the speed. It starts with a coarse grid \
                          over the speed range and then adds speeds where the curves bend \
                          most, until it is stopped or has done its runs. The crossings with \
