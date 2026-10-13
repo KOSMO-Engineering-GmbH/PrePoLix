@@ -429,9 +429,9 @@ impl Model {
             planes: self.fe.planes.clone(),
             result_paths: self.fe.result_paths.clone(),
             result_planes: self.fe.result_planes.clone(),
-            plain_parts: (self.parts.iter().enumerate())
-                .filter(|(_, part)| !part.contours)
-                .map(|(index, _)| index)
+            plain_part_names: (self.parts.iter())
+                .filter(|part| !part.contours)
+                .map(|part| part.name.clone())
                 .collect(),
             mesh: Some(self.mesh.fingerprint()),
             ..view.settings()
@@ -470,7 +470,17 @@ impl Model {
         self.path_plots = (view.path_plots.iter())
             .map(crate::path_plot::PathPlot::from_saved)
             .collect();
-        self.set_contours(&settings.plain_parts, false);
+        let plain: Vec<usize> = if settings.plain_part_names.is_empty()
+            && settings.mesh == Some(self.mesh.fingerprint())
+        {
+            settings.plain_parts.clone()
+        } else {
+            (self.parts.iter().enumerate())
+                .filter(|(_, part)| settings.plain_part_names.contains(&part.name))
+                .map(|(index, _)| index)
+                .collect()
+        };
+        self.set_contours(&plain, false);
         // History outputs of hot spots need their values first.
         let reports = crate::hot_spots::evaluate(self);
         match &mut self.results {
@@ -2208,7 +2218,7 @@ mod tests {
             hot_spots: vec![plx_results::hot_spot::HotSpot::new("Hot_Spot-1")],
             reference_points: vec![plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])],
             result_paths: vec![plx_model::ResultPath::new("Path-1")],
-            plain_parts: vec![0],
+            plain_part_names: vec![model.parts[0].name.clone()],
             mesh: Some(model.mesh.fingerprint()),
             increment: 0,
             shown: Some(("SCALED".into(), "VALUE".into())),
@@ -2258,6 +2268,18 @@ mod tests {
             (field.name.as_str(), component.name.as_str()),
             ("SCALED", "VALUE")
         );
-        assert_eq!(model.results_settings(), Some(settings));
+        assert_eq!(model.results_settings(), Some(settings.clone()));
+        // Projects saved before part names were kept name parts by index, which only fit
+        // results of the same mesh.
+        let mut legacy = settings;
+        legacy.plain_part_names.clear();
+        legacy.plain_parts = vec![0];
+        legacy.mesh = Some(model.mesh.fingerprint() ^ 1);
+        model.set_contours(&[0], true);
+        model.restore_results_settings(&legacy, Vec::new());
+        assert!(model.parts[0].contours);
+        legacy.mesh = Some(model.mesh.fingerprint());
+        model.restore_results_settings(&legacy, Vec::new());
+        assert!(!model.parts[0].contours);
     }
 }

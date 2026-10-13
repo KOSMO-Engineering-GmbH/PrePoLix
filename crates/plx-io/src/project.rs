@@ -379,6 +379,20 @@ pub fn restore_results(bound: &BoundResults, dir: &Path) -> Result<PathBuf, Proj
         source,
     };
     std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
+    // Files of results restored here before, which the results read next to their `.frd`:
+    // a history output (`.dat`) the bound results do not have would be taken for theirs.
+    for file in bound
+        .files
+        .iter()
+        .filter(|f| is_results_file(Path::new(&f.name)))
+    {
+        for extension in ["inp", "dat", "frd"] {
+            let old = dir.join(Path::new(&file.name).with_extension(extension));
+            if old.parent() == Some(dir) && old.is_file() {
+                std::fs::remove_file(&old).map_err(|e| io(&old, e))?;
+            }
+        }
+    }
     let mut results = None;
     for file in &bound.files {
         // Only a plain file name: a project cannot write elsewhere.
@@ -888,9 +902,13 @@ mod tests {
         let analysis = project.analyses().next().unwrap();
         assert_eq!(analysis.results.as_ref(), Some(&bound));
 
+        // History output restored there before belongs to other results.
+        std::fs::create_dir_all(dir.join("restored")).unwrap();
+        std::fs::write(dir.join("restored/Analysis-1.dat"), "old").unwrap();
         let restored = restore_results(&bound, &dir.join("restored")).unwrap();
         assert_eq!(restored, dir.join("restored/Analysis-1.frd"));
         assert_eq!(std::fs::read_to_string(&restored).unwrap(), text);
+        assert!(!dir.join("restored/Analysis-1.dat").exists());
 
         // Without bound results the project file has no trace of them.
         save_project(&path, &single(None, &mesh, &model, None)).unwrap();

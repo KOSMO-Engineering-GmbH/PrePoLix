@@ -92,8 +92,8 @@ struct Workbench {
     /// What the analysis takes from other analyses of the project; the window shows it but
     /// does not change it.
     incoming: crate::links::Incoming,
-    /// Analyses whose results this one needs as global model and that have none yet.
-    upstream_missing: Vec<String>,
+    /// What the analysis takes from other blocks that is not ready yet.
+    upstream: crate::status::Upstream,
     /// A linked item was double-clicked: where it comes from, with its path.
     linked_prompt: Option<(Vec<String>, String)>,
     /// The state of the analysis' cells and when it was found; finding it takes the
@@ -181,6 +181,8 @@ struct Workbench {
     findings_window: Option<Vec<plx_model::Finding>>,
     /// Results file the user asked to open; read by the app on a worker thread.
     open_results: Option<PathBuf>,
+    /// The results file asked for last; see [`is_latest_results`].
+    results_asked: Option<PathBuf>,
     screenshot: Screenshot,
     /// Animation export taking its frames from the 3D view.
     recording: Option<animation_export::Recording>,
@@ -256,7 +258,7 @@ impl AnalysisWindow {
                 solve_after_meshing: false,
                 requests: Vec::new(),
                 incoming: Default::default(),
-                upstream_missing: Vec::new(),
+                upstream: Default::default(),
                 linked_prompt: None,
                 status: None,
                 model_dialog: None,
@@ -301,6 +303,7 @@ impl AnalysisWindow {
                 solver_findings: Vec::new(),
                 findings_window: None,
                 open_results: None,
+                results_asked: None,
                 screenshot: Screenshot::default(),
                 recording: None,
                 animation_encoding: None,
@@ -340,11 +343,20 @@ impl AnalysisWindow {
         self.import_when_loaded = paths;
     }
 
-    /// Tells the window what the analysis takes from other analyses, and which of those it
-    /// needs results of that are not there yet.
-    pub fn set_links(&mut self, incoming: crate::links::Incoming, upstream_missing: Vec<String>) {
-        self.workbench.incoming = incoming;
-        self.workbench.upstream_missing = upstream_missing;
+    /// Tells the window what the analysis takes from other blocks, and what of that is not
+    /// ready yet.
+    pub fn set_links(
+        &mut self,
+        incoming: crate::links::Incoming,
+        upstream: crate::status::Upstream,
+    ) {
+        let workbench = &mut self.workbench;
+        if workbench.upstream != upstream {
+            // The cells follow at once, not when the cached state is found again.
+            workbench.status = None;
+        }
+        workbench.incoming = incoming;
+        workbench.upstream = upstream;
     }
 
     /// Takes over what `path` names of the setup of another analysis, see
@@ -984,7 +996,7 @@ impl AnalysisWindow {
         let meshing = workbench.meshing.is_some();
         let can_solve = workbench.model.is_some() && !running && !meshing && self.loading.is_none();
         if icons::button(ui, Icon::Solve, SOLVE_TIP, can_solve, false).clicked() {
-            workbench.solve(ui.ctx());
+            workbench.solve(ui.ctx(), false);
         }
         let stoppable = running || workbench.solve_after_meshing;
         if icons::button(ui, Icon::Stop, "Stop the analysis", stoppable, false).clicked() {
@@ -1348,7 +1360,7 @@ impl AnalysisWindow {
                 self.workbench.pinned_view = (bound && view != TreeView::Results).then_some(view);
             }
             if std::mem::take(&mut self.solve_when_loaded) {
-                self.workbench.solve(&ctx);
+                self.workbench.solve(&ctx, true);
             }
         }
         // Under the System theme, the operating system may switch between light and dark.
@@ -1523,6 +1535,7 @@ impl AnalysisWindow {
         self.workbench.poll_bound_results(&ctx);
         self.workbench.campbell_window(&ctx);
         if let Some(path) = self.workbench.open_results.take() {
+            self.workbench.results_asked = Some(path.clone());
             self.open_results(path, &ctx);
         }
         self.workbench.update_highlight();
@@ -1584,6 +1597,14 @@ fn take_over_empty_model(model: &mut Model, old: &Model) {
     model.path = old.path.clone();
 }
 
+/// Whether results read from `loaded` are the ones asked for last. Results are read on
+/// worker threads, so those of an earlier request, e.g. the results kept in the project
+/// being restored when a new run's results are opened, can arrive after newer ones and
+/// would replace them.
+fn is_latest_results(asked: Option<&std::path::Path>, loaded: &std::path::Path) -> bool {
+    asked.is_none_or(|asked| asked == loaded)
+}
+
 impl Workbench {
     fn model_loaded(&mut self, path: PathBuf, result: Result<Box<LoadedModel>, String>) {
         match result {
@@ -1593,6 +1614,15 @@ impl Workbench {
                     render_meshes,
                     geometry_view,
                 } = *loaded;
+                if model.results.is_some()
+                    && !is_latest_results(self.results_asked.as_deref(), &path)
+                {
+                    self.output.push(format!(
+                        "{} not shown: newer results were opened since.",
+                        path.display()
+                    ));
+                    return;
+                }
                 // Geometry imported into a model that has nothing yet, such as one just
                 // created with File > New, has to fit its model space.
                 let into_empty = (self.model.as_ref()).filter(|old| {
@@ -3072,7 +3102,7 @@ impl Workbench {
                     self.view_command = Some(ViewCommand::Fit);
                 }
                 if solve {
-                    self.solve(ctx);
+                    self.solve(ctx, false);
                 }
             }
             Err(error) => {
@@ -3259,7 +3289,7 @@ impl Workbench {
             .on_hover_text(SOLVE_TIP)
             .clicked()
         {
-            self.solve(ui.ctx());
+            self.solve(ui.ctx(), false);
         }
         if ui
             .add_enabled(can_start, egui::Button::new("Solve Again"))
@@ -3416,6 +3446,18 @@ impl Workbench {
         };
         // A result removed from the project is not bound again until the next run.
         analysis.bound = true;
+        // A killed run's results stop somewhere in it: they can be looked at, but are not
+        // kept as the solution of the model.
+        if !matches!(
+            analysis.status(),
+            plx_job::JobStatus::Completed | plx_job::JobStatus::FailedWithResults
+        ) {
+            self.output.push(format!(
+                "Results of {} not kept: the run did not finish.",
+                self.analysis_name
+            ));
+            return;
+        }
         let with_errors = analysis.status() == plx_job::JobStatus::FailedWithResults;
         let input = analysis.input;
         let Some(model) = &self.model else {
@@ -3535,6 +3577,7 @@ impl Workbench {
             &model.fe,
             &model.mesh_inputs,
             model.bound_results.as_ref(),
+            &self.upstream.stale_meshes,
             self.analysis.as_ref().is_some_and(Analysis::is_running),
         ))
     }
@@ -3553,23 +3596,53 @@ impl Workbench {
 
     /// Ansys Workbench's Update: meshes the parts whose mesh is out of date, then solves if
     /// the results are missing or out of date, and keeps the new results. What is up to
-    /// date stays as it is.
-    fn solve(&mut self, ctx: &egui::Context) {
+    /// date stays as it is. `by_project` when Update Project started it, after it brought
+    /// what the analysis takes from other blocks up to date.
+    fn solve(&mut self, ctx: &egui::Context, by_project: bool) {
         if self.meshing.is_some() || self.analysis.as_ref().is_some_and(Analysis::is_running) {
-            return;
-        }
-        // A submodel needs the results of its global model; the project solves that first.
-        if !self.upstream_missing.is_empty() {
-            self.output.push(format!(
-                "{} has no results yet: it is solved first.",
-                self.upstream_missing.join(", ")
-            ));
-            self.requests.push(Request::SolveChain);
             return;
         }
         let Some(status) = self.status() else {
             return;
         };
+        // A submodel needs the results of its global model, a mesh taken from a mesh block
+        // the block's current mesh: the project makes them first, then solves this one.
+        let upstream = &self.upstream;
+        if !upstream.missing_results.is_empty() || !status.stale_sources.is_empty() {
+            let mut why = Vec::new();
+            if !upstream.missing_results.is_empty() {
+                why.push(format!(
+                    "{} has no results yet",
+                    upstream.missing_results.join(", ")
+                ));
+            }
+            if !status.stale_sources.is_empty() {
+                why.push(format!(
+                    "the mesh of {} is out of date",
+                    status.stale_sources.join(", ")
+                ));
+            }
+            if by_project {
+                // The project could not make them: solving now would solve the old mesh or
+                // fail on the missing results.
+                self.output.push(format!(
+                    "{} not solved: {}.",
+                    self.analysis_name,
+                    why.join("; ")
+                ));
+            } else {
+                let why = why.join("; ");
+                let mut chars = why.chars();
+                let why: String = (chars.next().into_iter())
+                    .flat_map(char::to_uppercase)
+                    .chain(chars)
+                    .collect();
+                self.output
+                    .push(format!("{why}: the project makes it first."));
+                self.requests.push(Request::SolveChain);
+            }
+            return;
+        }
         let has_geometry = (self.model.as_ref()).is_some_and(|m| m.geometry.is_some());
         let remesh = match status.mesh {
             crate::status::CellState::Missing if has_geometry => Some(None),
@@ -3598,6 +3671,11 @@ impl Workbench {
         }
         if self.setup_model().is_none() {
             return;
+        }
+        // The run writes its results where those kept last may have been opened from: the
+        // kept ones are restored from the project from now on.
+        if let Some(model) = &mut self.model {
+            model.bound_results_file = None;
         }
         let default_solver = self.settings.solver.default_solver();
         let Some(model) = self.setup_model() else {
@@ -3672,7 +3750,7 @@ impl Workbench {
     /// Polls the running analysis and shows its monitor.
     fn run_analysis(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
-            self.solve(ctx);
+            self.solve(ctx, false);
         }
         let Some(analysis) = &mut self.analysis else {
             return;
@@ -6828,6 +6906,16 @@ mod tests {
         assert_eq!(results_workspace(&mut pinned), TreeView::Geometry);
         // Results opened later, e.g. by a solve, show the Results tab again.
         assert_eq!(results_workspace(&mut pinned), TreeView::Results);
+    }
+
+    #[test]
+    fn results_of_an_earlier_request_do_not_replace_newer_ones() {
+        let kept = std::path::Path::new("/tmp/Kept_Results/Analysis-1.frd");
+        let new = std::path::Path::new("/tmp/Analysis-1/Analysis-1.frd");
+        // The kept results were asked for first, the new run's after them.
+        assert!(is_latest_results(Some(new), new));
+        assert!(!is_latest_results(Some(new), kept));
+        assert!(is_latest_results(None, kept));
     }
 
     #[test]
