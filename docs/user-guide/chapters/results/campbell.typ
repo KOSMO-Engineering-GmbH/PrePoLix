@@ -6,16 +6,36 @@ A Campbell diagram shows the eigenfrequencies of a rotor over its speed of rotat
 computes the whirling modes for one speed per run, so PrePoLix runs the analysis once per speed
 and collects the results.
 
-#menu("Analysis", "Campbell diagram ...") is enabled when the model has an active
-#ui("Centrifugal") load and a #ui("Complex Frequency") step (@complex-frequency). The window
-runs the sweep and shows the diagram in the same window, not under #ui("Results"): the sweep
-does not run the analysis of the tree and adds nothing to its results. The diagram appears as
-soon as two speeds are done. Closing the window keeps the last sweep; the menu entry opens it
-again with its diagram until another model is opened.
+The sweep lives in a #ui("Campbell") block of the project schematic (@project-window), which
+takes the analysis to sweep and keeps the diagram. The analysis needs an active
+#ui("Centrifugal") load, whose axis and point tell how the rotor turns, and a
+#ui("Complex Frequency") step (@complex-frequency); the speed of the load does not matter, 0
+included, as the sweep sets it. #menu("Analysis", "Campbell diagram ...") in the window of such
+an analysis opens its Campbell block, and makes one next to the analysis and links it first if
+there is none. A block can also be added from the block picker or the context menu of the
+schematic (category #ui("Campbell")); then drag the #ui("Setup") pin of the analysis to the
+#ui("Analysis") row of the block.
+
+#screenshot("campbell-block.png", [A Campbell block linked to the analysis it sweeps, with the
+speeds of its sweep and the critical speeds of its diagram])
+
+The block shows the state of its diagram in its #ui("Analysis") row, how many speeds it has and
+up to five critical speeds. The speeds and the settings of the sweep are saved in the project
+file, so the diagram is there again when the project is opened. The diagram stays up to date
+while the analysis is unchanged, apart from the speed of its centrifugal loads; once the mesh or
+the model of the analysis changes, the block turns out of date. #ui("Update Project") starts the
+sweep of every Campbell block that is out of date or has not swept yet, beside the solves of the
+analyses; the sweep runs the model of its analysis by itself and needs no results of it.
+
+Double-clicking the block, or #ui("Open Diagram ...") in its context menu, opens the window with
+the settings of the sweep and the diagram. The sweep does not run the analysis itself and adds
+nothing to its results. The diagram appears as soon as two speeds are done. The window can be
+closed while the sweep runs: the block goes on and shows its progress.
 
 #fields(
   [Speed range \[rpm\]], [The lowest and the highest speed of the diagram, shown in rad/s
-    next to them. Default: from 0 to the speed of the centrifugal load. Standstill itself is not
+    next to them. Default: from 0 to the speed of the centrifugal load, or to 10000 rpm when the
+    analysis stands still. Standstill itself is not
     computed, as CalculiX merges the coinciding modes there; a range from 0 starts at a fiftieth
     of the highest speed.],
   [Maximum runs], [Number of CalculiX runs after which the sweep stops by itself (default 40);
@@ -27,8 +47,8 @@ again with its diagram until another model is opened.
     run close to the speed axis. It can be changed at any time, also during the sweep.],
 )
 
-#ui("Start sweep") scales the centrifugal loads of the model to every speed, runs CalculiX in
-the folder `Campbell` of the work directory (@settings) and reads the complex frequencies of the
+#ui("Start sweep") sets the centrifugal loads of the model to every speed, runs CalculiX in
+a folder named after the block in that of the project in the work directory (@settings) and reads the complex frequencies of the
 last Complex Frequency step and the whirl direction of every mode from the `.dat` file. When the
 `.dat` file of a CalculiX version has no readable complex frequencies, they come from the `.frd`
 file, without whirl directions. As many speeds run at the same time as #ui("Parallel analyses") of

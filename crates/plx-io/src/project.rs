@@ -73,6 +73,8 @@ pub enum ProjectNode {
     Optimizer(OptimizerBlock),
     /// A sink that writes the mesh it takes to a file.
     MeshExport(MeshExport),
+    /// A sweep of an analysis over the rotational speed, with its Campbell diagram.
+    Campbell(Box<CampbellBlock>),
 }
 
 impl ProjectNode {
@@ -86,6 +88,7 @@ impl ProjectNode {
             Self::Measure(m) => m.id,
             Self::Optimizer(o) => o.id,
             Self::MeshExport(e) => e.id,
+            Self::Campbell(c) => c.id,
         }
     }
 
@@ -98,6 +101,7 @@ impl ProjectNode {
             Self::Measure(m) => &m.name,
             Self::Optimizer(o) => &o.name,
             Self::MeshExport(e) => &e.name,
+            Self::Campbell(c) => &c.name,
         }
     }
 
@@ -111,6 +115,7 @@ impl ProjectNode {
             Self::Measure(m) => m.position,
             Self::Optimizer(o) => o.position,
             Self::MeshExport(e) => e.position,
+            Self::Campbell(c) => c.position,
         }
     }
 }
@@ -224,6 +229,29 @@ pub struct MeshExport {
     /// is the same.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub written: Option<u64>,
+}
+
+/// A block that sweeps the analysis linked to it over the rotational speed of its centrifugal
+/// loads and keeps the complex modes of each speed for the Campbell diagram, until the
+/// analysis changes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CampbellBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    #[serde(default)]
+    pub setup: plx_model::campbell::Setup,
+    /// The speeds of the last sweep with their modes, in the order they were computed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<plx_model::campbell::SpeedPoint>,
+    /// Speed range marked for refinement, in radians per time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<[f64; 2]>,
+    /// Fingerprint of the analysis the speeds were computed with, its speed left out: the
+    /// diagram is out of date once that differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<u64>,
 }
 
 /// A block that holds materials for analyses to link, item by item or all of them.
@@ -807,6 +835,28 @@ mod tests {
             written: Some(42),
         };
         saved.nodes.push(ProjectNode::MeshExport(export.clone()));
+        let campbell = CampbellBlock {
+            id: 8,
+            name: "Campbell".into(),
+            position: [400.0, 20.0],
+            setup: plx_model::campbell::Setup {
+                max_speed: 1000.0,
+                ..Default::default()
+            },
+            points: vec![plx_model::campbell::SpeedPoint {
+                speed: 500.0,
+                modes: vec![plx_model::campbell::Mode {
+                    frequency: 12.5,
+                    whirl: plx_model::campbell::Whirl::Backward,
+                    unstable: false,
+                }],
+            }],
+            focus: Some([100.0, 200.0]),
+            fingerprint: Some(7),
+        };
+        saved
+            .nodes
+            .push(ProjectNode::Campbell(Box::new(campbell.clone())));
         saved.links.push(Link {
             source: 3,
             target: 1,
@@ -820,9 +870,13 @@ mod tests {
         assert!(text.contains(&format!("format:{PROJECT_FORMAT}")));
         assert!(!text.contains("analyses:"), "{text}");
         let project = read_project(&path).unwrap();
-        assert_eq!(project.nodes.len(), 5);
+        assert_eq!(project.nodes.len(), 6);
         match &project.nodes[4] {
             ProjectNode::MeshExport(read) => assert_eq!(read, &export),
+            other => panic!("{other:?}"),
+        }
+        match &project.nodes[5] {
+            ProjectNode::Campbell(read) => assert_eq!(**read, campbell),
             other => panic!("{other:?}"),
         }
         match &project.nodes[3] {

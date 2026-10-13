@@ -52,6 +52,8 @@ pub const MEASURE: &str = "Measure";
 pub const LOOP: &str = "Loop";
 /// The row of an optimizer that takes the value of a measure.
 pub const OBJECTIVE: &str = "Objective";
+/// The row of a Campbell block that takes the setup of an analysis, whose model it sweeps.
+pub const ANALYSIS: &str = "Analysis";
 
 /// The categories of the setup in the order of the FE Model tree; each can be linked as a
 /// whole or item by item.
@@ -918,6 +920,7 @@ pub fn compatible(item: &[String], slot: &[String]) -> bool {
         Some(LOOP) => item.len() == 2 && matches!(slot, [cell, _] if cell == PARAMETERS),
         Some(STATE) | None => false,
         Some(_) => match (item, slot) {
+            ([a], [b]) if b == ANALYSIS => a == SETUP,
             ([a], [b]) => a == b && b != RESULTS && b != STATE,
             ([a, ..], [b, ..]) if a == SETUP && b == SETUP && slot.len() <= 3 => {
                 // A category or an item goes to the target's category, or into its setup.
@@ -1558,6 +1561,8 @@ mod tests {
     fn references_go_like_to_like_and_results_to_where_they_are_used() {
         assert!(compatible(&path(&["Mesh"]), &path(&["Mesh"])));
         assert!(!compatible(&path(&["Mesh"]), &path(&["Geometry"])));
+        assert!(compatible(&path(&["Setup"]), &path(&["Analysis"])));
+        assert!(!compatible(&path(&["Mesh"]), &path(&["Analysis"])));
         let steel = path(&["Setup", "Materials", "Steel"]);
         assert!(compatible(&steel, &path(&["Setup", "Materials"])));
         assert!(compatible(&steel, &path(&["Setup", "Materials", "Rubber"])));

@@ -19,20 +19,14 @@ use std::time::Duration;
 
 use egui::{Color32, Ui};
 use plx_job::{Job, JobStatus};
+pub use plx_model::campbell::{Mode, Setup, SpeedPoint, Whirl};
 use plx_model::{EquationSolver, FeModel, LoadKind, StepKind};
 
-use crate::model::Model;
 use crate::numeric;
 use crate::xy_plot;
 
-/// Folder under the work directory the sweep runs in.
-const FOLDER: &str = "Campbell";
-
 /// Speeds of the coarse grid the sweep starts with.
 const GRID: usize = 8;
-
-/// Default number of CalculiX runs of a sweep.
-const DEFAULT_RUNS: u32 = 40;
 
 /// Smallest gap between two speeds, as a fraction of the speed range. It also bounds the runs
 /// spent on a jump of a curve, which no refinement smooths.
@@ -50,43 +44,6 @@ const MIN_TRACK: usize = 3;
 /// the modes CalculiX computes, before it counts as ended.
 const MAX_MISSED: usize = 2;
 
-/// Whirl of a mode as CalculiX reports it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Whirl {
-    Forward,
-    Backward,
-    Unknown,
-}
-
-impl Whirl {
-    fn letter(self) -> &'static str {
-        match self {
-            Whirl::Forward => "F",
-            Whirl::Backward => "B",
-            Whirl::Unknown => "",
-        }
-    }
-}
-
-/// One complex mode at one speed.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Mode {
-    /// Real part of the frequency in cycles per time.
-    pub frequency: f64,
-    pub whirl: Whirl,
-    /// The eigenvalue has an imaginary part of weight: the mode grows instead of
-    /// oscillating, as beyond a stability limit.
-    pub unstable: bool,
-}
-
-/// The modes CalculiX found at one speed.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SpeedPoint {
-    /// Rotational speed in radians per time.
-    pub speed: f64,
-    pub modes: Vec<Mode>,
-}
-
 /// A crossing of a mode with an engine order line.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CriticalSpeed {
@@ -98,34 +55,16 @@ pub struct CriticalSpeed {
     pub whirl: Whirl,
 }
 
-/// Settings of the sweep.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Setup {
-    /// Lowest speed of the sweep in radians per time; standstill itself is left out.
-    pub min_speed: f64,
-    /// Highest speed of the sweep in radians per time.
-    pub max_speed: f64,
-    /// CalculiX runs before the sweep stops by itself; 0 runs until it is stopped.
-    pub max_runs: u32,
-    /// Engine orders drawn as lines, e.g. "1, 2".
-    pub orders: String,
-    /// Upper end of the frequency axis in Hz; 0 fits the axis to the modes.
-    pub max_frequency: f64,
-}
-
-impl Setup {
-    /// The engine orders as numbers, in order and without repeats.
-    pub fn order_values(&self) -> Vec<f64> {
-        let mut orders: Vec<f64> = self
-            .orders
-            .split([',', ';', ' '])
-            .filter_map(|t| numeric::parse_number(t.trim()))
-            .filter(|o| *o > 0.0 && o.is_finite())
-            .collect();
-        orders.sort_by(f64::total_cmp);
-        orders.dedup();
-        orders
-    }
+/// The engine orders of `orders`, e.g. "1, 2", as numbers, in order and without repeats.
+pub fn order_values(orders: &str) -> Vec<f64> {
+    let mut orders: Vec<f64> = orders
+        .split([',', ';', ' '])
+        .filter_map(|t| numeric::parse_number(t.trim()))
+        .filter(|o| *o > 0.0 && o.is_finite())
+        .collect();
+    orders.sort_by(f64::total_cmp);
+    orders.dedup();
+    orders
 }
 
 /// The rotational speed of the model: the fastest active centrifugal load of an active step,
@@ -157,19 +96,27 @@ pub fn applies(fe: &FeModel) -> bool {
     rotor_speed(fe).is_some() && complex_step(fe).is_some()
 }
 
-/// The model with every centrifugal load scaled from the model's speed to `speed`.
+/// The model with every centrifugal load scaled from the model's speed to `speed`; at
+/// standstill every centrifugal load turns at `speed`.
 pub fn with_speed(fe: &FeModel, speed: f64) -> FeModel {
     let mut fe = fe.clone();
-    let factor = match rotor_speed(&fe) {
-        Some(reference) if reference > 0.0 => speed / reference,
-        _ => return fe,
-    };
+    // A model at standstill has no speed to scale from: its loads take the speed itself.
+    let factor = rotor_speed(&fe).filter(|r| *r > 0.0).map(|r| speed / r);
     for load in fe.steps.iter_mut().flat_map(|s| &mut s.loads) {
-        if let LoadKind::Centrifugal { speed, .. } = &mut load.kind {
-            *speed *= factor;
+        if let LoadKind::Centrifugal { speed: own, .. } = &mut load.kind {
+            *own = match factor {
+                Some(factor) => *own * factor,
+                None => speed,
+            };
         }
     }
     fe
+}
+
+/// Fingerprint of what a sweep computes with: the mesh and the model but not the speed of
+/// its centrifugal loads, which the sweep sets itself.
+pub fn sweep_fingerprint(mesh: &plx_mesh::FeMesh, fe: &FeModel) -> u64 {
+    plx_model::fingerprint::solve_input(mesh, &with_speed(fe, 1.0))
 }
 
 /// Whether an eigenvalue with real part `real` and imaginary part `imaginary` (both in
@@ -618,6 +565,13 @@ struct Sweep {
     paused: bool,
 }
 
+impl Drop for Sweep {
+    /// A sweep dropped with its block or window leaves no CalculiX running.
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
 /// What the sweep threads work on.
 struct SweepInput {
     solver: plx_job::Solver,
@@ -745,33 +699,115 @@ pub struct CampbellWindow {
     fingerprint: Option<u64>,
     /// Number of the next CalculiX job, counted over continued sweeps.
     next_index: u32,
+    /// The critical speeds as last found, with the plot generation, the number of speeds and
+    /// the orders they were found for.
+    critical: std::cell::RefCell<Option<CriticalCache>>,
 }
 
+/// See [`CampbellWindow::critical`].
+type CriticalCache = ((u32, usize, Vec<f64>), Vec<CriticalSpeed>);
+
 impl CampbellWindow {
-    /// A window for the model: the sweep runs up to the speed of its centrifugal load.
+    /// A window for the model: the sweep runs up to the speed of its centrifugal load, or
+    /// up to 10000 rpm when the model stands still.
     pub fn new(fe: &FeModel) -> Self {
-        let speed = rotor_speed(fe).unwrap_or(0.0);
-        Self {
-            setup: Setup {
-                min_speed: 0.0,
+        let speed = rotor_speed(fe)
+            .filter(|s| *s > 0.0)
+            .unwrap_or(from_rpm(10_000.0));
+        Self::saved(
+            Setup {
                 max_speed: speed,
-                max_runs: DEFAULT_RUNS,
-                orders: "1".into(),
-                max_frequency: 0.0,
+                ..Setup::default()
             },
-            visible: true,
+            Vec::new(),
+            None,
+            None,
+        )
+    }
+
+    /// A window with what a Campbell block keeps: its settings, the speeds of its last sweep,
+    /// the range marked for refinement and the fingerprint of the model it swept.
+    pub fn saved(
+        setup: Setup,
+        points: Vec<SpeedPoint>,
+        focus: Option<[f64; 2]>,
+        fingerprint: Option<u64>,
+    ) -> Self {
+        let speed = setup.max_speed;
+        Self {
+            orders: order_values(&setup.orders),
+            swept: !points.is_empty(),
+            setup,
+            visible: false,
             sweep: None,
-            points: Vec::new(),
+            points,
             log: Vec::new(),
-            orders: vec![1.0],
             swept_speed: speed,
-            swept: false,
             plot_generation: 0,
             shown_max_frequency: 0.0,
-            focus: None,
+            focus,
             marking: None,
-            fingerprint: None,
+            fingerprint,
             next_index: 0,
+            critical: Default::default(),
+        }
+    }
+
+    pub fn setup(&self) -> &Setup {
+        &self.setup
+    }
+
+    /// The speeds of the last sweep, in the order they were computed.
+    pub fn points(&self) -> &[SpeedPoint] {
+        &self.points
+    }
+
+    pub fn focus(&self) -> Option<[f64; 2]> {
+        self.focus
+    }
+
+    /// Fingerprint of the model the speeds were computed with, see [`sweep_fingerprint`].
+    pub fn fingerprint(&self) -> Option<u64> {
+        self.fingerprint
+    }
+
+    /// The critical speeds of the diagram as shown, by order and speed.
+    pub fn critical_speeds(&self) -> Vec<CriticalSpeed> {
+        let key = (self.plot_generation, self.points.len(), self.shown_orders());
+        let mut cache = self.critical.borrow_mut();
+        if let Some((cached, speeds)) = &*cache
+            && *cached == key
+        {
+            return speeds.clone();
+        }
+        let speeds = critical_speeds(&track(&self.points), &key.2);
+        *cache = Some((key, speeds.clone()));
+        speeds
+    }
+
+    /// How far the sweep is, in a few words.
+    pub fn progress(&self) -> String {
+        let count = self.points.len();
+        let speeds = if count == 1 { "speed" } else { "speeds" };
+        match &self.sweep {
+            Some(sweep) if sweep.stopping => format!("Stopping at {count} {speeds}"),
+            Some(sweep) if sweep.paused => format!("Paused at {count} {speeds}"),
+            Some(sweep) => format!(
+                "Sweeping: {count} {speeds}, {} running",
+                sweep.running.len()
+            ),
+            None if count == 0 => "No sweep yet".into(),
+            None => {
+                let (low, high) = (self.points.iter().map(|p| p.speed))
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), s| {
+                        (a.min(s), b.max(s))
+                    });
+                format!(
+                    "{count} {speeds}, {} to {} rpm",
+                    numeric::format_physical(rpm(low).round()),
+                    numeric::format_physical(rpm(high).round())
+                )
+            }
         }
     }
 
@@ -798,15 +834,16 @@ impl CampbellWindow {
         self.sweep.is_some()
     }
 
-    /// Starts the sweep on the model; steps at the default solver use `default_solver`. With
-    /// `keep` it continues the last sweep instead: a paused one goes on, a finished one starts
-    /// another `max_runs` runs that refine between the speeds it has, as long as the model is
-    /// the same.
+    /// Starts the sweep on the model of `mesh` and `fe` in `work_dir`; steps at the default
+    /// solver use `default_solver`. With `keep` it continues the last sweep instead: a paused
+    /// one goes on, a finished one starts another `max_runs` runs that refine between the
+    /// speeds it has, as long as the model is the same.
     pub fn start(
         &mut self,
         solver: &crate::settings::Solver,
-        model: &Model,
+        (mesh, fe): (&plx_mesh::FeMesh, &FeModel),
         default_solver: EquationSolver,
+        work_dir: std::path::PathBuf,
         keep: bool,
     ) -> Result<(), String> {
         if keep && let Some(sweep) = &mut self.sweep {
@@ -815,18 +852,25 @@ impl CampbellWindow {
             self.poll();
             return Ok(());
         }
-        let fingerprint = plx_model::fingerprint::solve_input(&model.mesh, &model.fe);
+        let fingerprint = sweep_fingerprint(mesh, fe);
         if keep && self.fingerprint != Some(fingerprint) {
             return Err(
                 "The model changed since the sweep; start a new sweep for the changed model."
                     .into(),
             );
         }
-        let Some(step) = complex_step(&model.fe) else {
-            return Err("The model has no active Complex Frequency step.".into());
+        if mesh.element_count() == 0 {
+            return Err("The analysis has no mesh.".into());
+        }
+        let Some(step) = complex_step(fe) else {
+            return Err("The analysis has no active Complex Frequency step.".into());
         };
-        if rotor_speed(&model.fe).is_none_or(|s| s <= 0.0) {
-            return Err("The model has no active Centrifugal load.".into());
+        if rotor_speed(fe).is_none() {
+            return Err(
+                "The analysis has no active Centrifugal load in a step before the Complex \
+                 Frequency step; its axis tells how the rotor turns."
+                    .into(),
+            );
         }
         let Setup {
             min_speed,
@@ -844,9 +888,8 @@ impl CampbellWindow {
         if let Some(message) = crate::settings::missing_executable(&job_solver.executable) {
             return Err(format!("CalculiX not started: {message}"));
         }
-        let mut fe = model.fe.clone();
+        let mut fe = fe.clone();
         fe.resolve_default_solver(default_solver);
-        let work_dir = solver.work_dir().join(FOLDER);
         let grid_count = if max_runs == 0 {
             GRID
         } else {
@@ -862,7 +905,7 @@ impl CampbellWindow {
             self.log.push(format!("Sweep continued: {runs}."));
             VecDeque::new()
         } else {
-            self.orders = self.setup.order_values();
+            self.orders = order_values(&self.setup.orders);
             self.points.clear();
             self.swept = true;
             self.swept_speed = max_speed;
@@ -881,7 +924,7 @@ impl CampbellWindow {
             input: Arc::new(SweepInput {
                 solver: job_solver,
                 work_dir,
-                mesh: Arc::new(model.mesh.clone()),
+                mesh: Arc::new(mesh.clone()),
                 fe,
                 step,
             }),
@@ -912,7 +955,7 @@ impl CampbellWindow {
     }
 
     /// Takes the finished speeds and starts new ones while there is room.
-    fn poll(&mut self) {
+    pub fn poll(&mut self) {
         let Some(sweep) = &mut self.sweep else {
             return;
         };
@@ -998,13 +1041,15 @@ impl CampbellWindow {
     pub fn show(
         &mut self,
         ctx: &egui::Context,
+        (title, id): (&str, u64),
         can_start: bool,
         mut start: impl FnMut(&mut Self, bool) -> Result<(), String>,
     ) -> bool {
         self.poll();
         let mut open = true;
         let running = self.is_running();
-        egui::Window::new("Campbell diagram")
+        egui::Window::new(format!("Campbell diagram: {title}"))
+            .id(egui::Id::new(("campbell", id)))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -1199,7 +1244,7 @@ impl CampbellWindow {
         if self.is_running() {
             self.orders.clone()
         } else {
-            self.setup.order_values()
+            order_values(&self.setup.orders)
         }
     }
 
@@ -1673,7 +1718,7 @@ mod tests {
             orders: "2, 1; 1 x".into(),
             max_frequency: 0.0,
         };
-        assert_eq!(setup.order_values(), [1.0, 2.0]);
+        assert_eq!(order_values(&setup.orders), [1.0, 2.0]);
         assert_eq!(grid(0.0, 100.0, 3), [2.0, 51.0, 100.0]);
         assert_eq!(grid(40.0, 100.0, 4), [40.0, 60.0, 80.0, 100.0]);
         assert!((rpm(from_rpm(3000.0)) - 3000.0).abs() < 1e-9);
@@ -1753,6 +1798,22 @@ mod tests {
         assert_eq!(
             (rotor_speed(&fe), complex_step(&fe)),
             (Some(200.0), Some(3))
+        );
+        // A rotor at standstill sweeps all the same: its loads take the speed, and the
+        // fingerprint of the sweep leaves the speed out.
+        let mut still = fe.clone();
+        let speed_of = |fe: &FeModel| rotor_speed(fe).unwrap();
+        still.steps[0].loads[0].kind = LoadKind::Centrifugal {
+            point: [0.0, 5.0, 5.0],
+            axis: [1.0, 0.0, 0.0],
+            speed: 0.0,
+        };
+        assert!(applies(&still));
+        assert_eq!(speed_of(&with_speed(&still, 150.0)), 150.0);
+        assert_eq!(speed_of(&with_speed(&fe, 50.0)), 50.0);
+        assert_eq!(
+            sweep_fingerprint(&mesh, &still),
+            sweep_fingerprint(&mesh, &fe)
         );
         fe.resolve_default_solver(EquationSolver::Spooles);
 
