@@ -80,6 +80,10 @@ analyses that take it through another analysis: the analysis still holds the blo
 #ui("Solve") in the analysis window then has the project window make the block's mesh anew and
 take it over before CalculiX runs, so the results always belong to the block's current mesh.
 
+The same holds for results and states taken from another analysis: when the source analysis is
+out of date, so is the analysis that takes its results or continues from its state, and
+#ui("Solve") in its window solves the source again first instead of taking its old results.
+
 #screenshot("mesh-block-out-of-date.png", [After #ui("nx") of the box changed from 10 to 20, the
 mesh, solution and results of the analysis that takes the box's mesh are out of date])
 

@@ -3577,7 +3577,7 @@ impl Workbench {
             &model.fe,
             &model.mesh_inputs,
             model.bound_results.as_ref(),
-            &self.upstream.stale_meshes,
+            &self.upstream,
             self.analysis.as_ref().is_some_and(Analysis::is_running),
         ))
     }
@@ -3608,7 +3608,7 @@ impl Workbench {
         // A submodel needs the results of its global model, a mesh taken from a mesh block
         // the block's current mesh: the project makes them first, then solves this one.
         let upstream = &self.upstream;
-        if !upstream.missing_results.is_empty() || !status.stale_sources.is_empty() {
+        if !upstream.is_ready() {
             let mut why = Vec::new();
             if !upstream.missing_results.is_empty() {
                 why.push(format!(
@@ -3616,10 +3616,16 @@ impl Workbench {
                     upstream.missing_results.join(", ")
                 ));
             }
-            if !status.stale_sources.is_empty() {
+            if !upstream.stale_results.is_empty() {
+                why.push(format!(
+                    "the results of {} are out of date",
+                    upstream.stale_results.join(", ")
+                ));
+            }
+            if !upstream.stale_meshes.is_empty() {
                 why.push(format!(
                     "the mesh of {} is out of date",
-                    status.stale_sources.join(", ")
+                    upstream.stale_meshes.join(", ")
                 ));
             }
             if by_project {
