@@ -122,7 +122,7 @@ impl Job {
     pub fn poll(&mut self) -> JobStatus {
         if self.status == JobStatus::Running {
             match self.child.try_wait() {
-                Ok(Some(_)) => self.finish(),
+                Ok(Some(exit)) => self.finish(exit.success()),
                 Ok(None) => {}
                 Err(_) => self.status = JobStatus::Failed,
             }
@@ -134,7 +134,7 @@ impl Job {
     pub fn wait(&mut self) -> JobStatus {
         if self.status == JobStatus::Running {
             match self.child.wait() {
-                Ok(_) => self.finish(),
+                Ok(exit) => self.finish(exit.success()),
                 Err(_) => self.status = JobStatus::Failed,
             }
         }
@@ -176,15 +176,18 @@ impl Job {
         self.work_dir.join(format!("{}.{extension}", self.name))
     }
 
-    /// Status after the process ended, decided as in PrePoMax.
-    fn finish(&mut self) {
+    /// Status after the process ended, decided as in PrePoMax; a CalculiX that crashed or
+    /// ended with an error code (`exited` false) failed too, even without an error message:
+    /// its results stop somewhere in the run.
+    fn finish(&mut self, exited: bool) {
         self.join_readers();
-        let error = self
-            .output
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .any(|line| line.contains("*ERROR"));
+        let error = !exited
+            || self
+                .output
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|line| line.contains("*ERROR"));
         self.status = match (self.results().is_some(), error) {
             (false, _) => JobStatus::Failed,
             (true, true) => JobStatus::FailedWithResults,

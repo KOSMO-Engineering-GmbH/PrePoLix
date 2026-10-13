@@ -74,6 +74,14 @@ Changes that CalculiX does not see, such as result paths or planes, leave the so
 date. Within the solution, PrePoLix also remembers which steps are unchanged, so that CalculiX
 can start after them (@restart).
 
+A mesh taken from a mesh block is out of date as soon as the block's parameters change, also in
+analyses that take it through another analysis: the analysis still holds the block's old mesh.
+#ui("Solve") in the analysis window then has the project window make the block's mesh anew and
+take it over before CalculiX runs, so the results always belong to the block's current mesh.
+
+#screenshot("mesh-block-out-of-date.png", [After #ui("nx") of the box changed from 10 to 20, the
+mesh, solution and results of the analysis that takes the box's mesh are out of date])
+
 The pins on both sides of a row take and give links. Blue wires carry data (geometry, mesh,
 setup items), orange wires carry results and green wires carry the state after a step. A round
 pin on the left takes one wire, a tall one (the categories of the setup) takes any number, and
