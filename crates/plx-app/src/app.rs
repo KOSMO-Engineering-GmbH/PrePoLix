@@ -136,6 +136,9 @@ struct Workbench {
     /// still to open; they must not switch to the Results tab then.
     pinned_view: Option<TreeView>,
     output: Vec<String>,
+    /// The output pane shows the Analysis tab, with the output of the last CalculiX run,
+    /// instead of the messages.
+    analysis_tab: bool,
     view_command: Option<ViewCommand>,
     /// The result selection or deformation changed; the scene must be rebuilt.
     results_changed: bool,
@@ -280,6 +283,7 @@ impl AnalysisWindow {
                 tree_view: TreeView::FeModel,
                 pinned_view: None,
                 output: Vec::new(),
+                analysis_tab: false,
                 view_command: None,
                 results_changed: false,
                 frame_changed: false,
@@ -1016,13 +1020,10 @@ impl AnalysisWindow {
                 analysis.kill();
             }
         }
-        let monitor = workbench.analysis.as_ref().is_some_and(|a| a.monitor);
-        let tip = "Monitor: the output of CalculiX";
-        let has_run = workbench.analysis.is_some();
-        if icons::button(ui, Icon::Monitor, tip, has_run, monitor).clicked()
-            && let Some(analysis) = &mut workbench.analysis
-        {
-            analysis.monitor = !analysis.monitor;
+        let tip = "Monitor: the output of CalculiX in the Analysis tab below the 3D view";
+        let shown = workbench.analysis_tab;
+        if icons::button(ui, Icon::Monitor, tip, true, shown).clicked() {
+            workbench.analysis_tab = !shown;
         }
         ui.add_space(4.0);
         let Some(status) = workbench.cached_status() else {
@@ -1444,28 +1445,20 @@ impl AnalysisWindow {
             .frame(egui::Frame::new().fill(crate::style::control()))
             .show(ui, |ui| {
                 let selected_tab = self.workbench.tree_tabs(ui);
-                // Tabs sit flush on the pane: their bottom border is the pane's top border.
-                ui.add_space(-ui.spacing().item_spacing.y - 1.0);
                 pane.inner_margin(4).show(ui, |ui| {
                     ui.set_min_size(ui.available_size());
                     let view = self.workbench.tree_view;
                     self.workbench.model_tree(ui, view);
                 });
                 // The selected tab opens into the pane like a Windows tab control.
-                if let Some(tab) = selected_tab {
-                    ui.painter().hline(
-                        tab.x_range().shrink(1.0),
-                        tab.bottom() - 0.5,
-                        egui::Stroke::new(1.0, crate::style::window()),
-                    );
-                }
+                crate::style::open_tab(ui, selected_tab);
             });
         egui::Panel::bottom("output")
             .resizable(true)
-            .default_size(140.0)
-            .size_range(40.0..=600.0)
-            .frame(pane.inner_margin(4))
-            .show(ui, |ui| self.workbench.output(ui));
+            .default_size(170.0)
+            .size_range(70.0..=600.0)
+            .frame(egui::Frame::new().fill(crate::style::control()))
+            .show(ui, |ui| self.workbench.output(ui, pane));
         egui::CentralPanel::no_frame().show(ui, |ui| {
             self.workbench.viewport.selecting = self.workbench.picking()
                 || self.workbench.section_picks()
@@ -1908,62 +1901,46 @@ impl Workbench {
     /// Tab strip above the tree, like PrePoMax's Windows tab control.
     /// Returns the rect of the selected tab.
     fn tree_tabs(&mut self, ui: &mut egui::Ui) -> Option<egui::Rect> {
-        let mut selected_rect = None;
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.add_space(2.0);
-            for view in [TreeView::Geometry, TreeView::FeModel, TreeView::Results] {
-                let selected = self.tree_view == view;
-                let galley = ui.painter().layout_no_wrap(
-                    view.title().to_string(),
-                    egui::TextStyle::Body.resolve(ui.style()),
-                    crate::style::text(),
-                );
-                let size = galley.size() + egui::vec2(16.0, 8.0);
-                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-                let fill = if selected {
-                    crate::style::window()
-                } else if response.hovered() {
-                    crate::style::hover_fill()
-                } else {
-                    crate::style::control()
-                };
-                let rect = if selected {
-                    selected_rect = Some(rect);
-                    rect
-                } else {
-                    rect.shrink2(egui::vec2(0.0, 1.0))
-                        .translate(egui::vec2(0.0, 1.0))
-                };
-                ui.painter().rect(
-                    rect,
-                    0.0,
-                    fill,
-                    egui::Stroke::new(1.0, crate::style::border()),
-                    egui::StrokeKind::Inside,
-                );
-                ui.painter().galley(
-                    rect.center() - galley.size() * 0.5,
-                    galley,
-                    crate::style::text(),
-                );
-                if response.clicked() {
-                    self.pinned_view = None;
-                    self.set_tree_view(view);
-                }
-            }
-        });
+        let views = [TreeView::Geometry, TreeView::FeModel, TreeView::Results];
+        let titles = views.map(TreeView::title);
+        let selected = views.iter().position(|&v| v == self.tree_view).unwrap_or(0);
+        let (clicked, selected_rect) = crate::style::tabs(ui, &titles, selected);
+        if let Some(index) = clicked {
+            self.pinned_view = None;
+            self.set_tree_view(views[index]);
+        }
         selected_rect
     }
 
-    fn output(&self, ui: &mut egui::Ui) {
-        crate::virtual_table::lines(
-            ui,
-            egui::ScrollArea::both()
-                .auto_shrink([false, false])
-                .stick_to_bottom(true),
-            &self.output,
-        );
+    /// The pane below the 3D view: the messages, and in the Analysis tab the output of
+    /// CalculiX, so the results stay in view while it runs.
+    fn output(&mut self, ui: &mut egui::Ui, pane: egui::Frame) {
+        let (clicked, selected_tab) =
+            crate::style::tabs(ui, &["Output", "Analysis"], usize::from(self.analysis_tab));
+        if let Some(index) = clicked {
+            self.analysis_tab = index == 1;
+        }
+        let mut event = MonitorEvent::None;
+        pane.inner_margin(4).show(ui, |ui| {
+            ui.set_min_size(ui.available_size());
+            if !self.analysis_tab {
+                crate::virtual_table::lines(
+                    ui,
+                    egui::ScrollArea::both()
+                        .auto_shrink([false, false])
+                        .stick_to_bottom(true),
+                    &self.output,
+                );
+            } else if let Some(analysis) = &mut self.analysis {
+                event = analysis.monitor(ui);
+            } else {
+                ui.weak("No analysis run yet: Solve (F5) starts CalculiX; its output shows here.");
+            }
+        });
+        crate::style::open_tab(ui, selected_tab);
+        if let MonitorEvent::OpenResults = event {
+            self.open_analysis_results();
+        }
     }
 
     fn model_tree(&mut self, ui: &mut egui::Ui, view: TreeView) {
@@ -3321,12 +3298,8 @@ impl Workbench {
             analysis.kill();
             self.solve_after_meshing = false;
         }
-        if ui
-            .add_enabled(self.analysis.is_some(), egui::Button::new("Monitor"))
-            .clicked()
-            && let Some(analysis) = &mut self.analysis
-        {
-            analysis.monitor = true;
+        if ui.button("Monitor").clicked() {
+            self.analysis_tab = true;
         }
         let kept = (self.model.as_ref()).is_some_and(|m| m.bound_results.is_some());
         if ui
@@ -3759,12 +3732,14 @@ impl Workbench {
                     self.solver_findings.push(finding);
                 }
                 self.analysis = Some(analysis);
+                // The run's output shows below the 3D view, which stays free for results.
+                self.analysis_tab = true;
             }
             Err(error) => self.output.push(error),
         }
     }
 
-    /// Polls the running analysis and shows its monitor.
+    /// Polls the running analysis.
     fn run_analysis(&mut self, ctx: &egui::Context) {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
             self.solve(ctx, false);
@@ -3816,10 +3791,8 @@ impl Workbench {
             }
             return;
         }
-        if analysis.monitor
-            && let MonitorEvent::OpenResults = analysis.window(ctx)
-        {
-            self.open_analysis_results();
+        if analysis.is_running() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
     }
 

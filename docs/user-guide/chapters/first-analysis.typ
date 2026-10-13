@@ -22,9 +22,10 @@ end and pulled at the other. Each step links to the chapter with the details.
   face of the plate in the 3D view (@boundary-conditions, @selection).
 + *Load.* #menu("Model", "Create Load ..."), type #ui("Surface Traction") with `F1` = 20000 N on
   the opposite end face (@loads).
-+ *Solve.* #ui("Solve") in the toolbar or #key("F5"). The monitor shows the progress
-  (@analysis). If the tree shows warning signs, click them first (@model-check).
-+ *Look at the results.* Click #ui("Results") in the monitor. Select #ui("STRESS") >
++ *Solve.* #ui("Solve") in the toolbar or #key("F5"). The #ui("Analysis") tab below the 3D view shows
+  the output of CalculiX (@monitor). If the tree shows warning signs, click them first (@model-check).
++ *Look at the results.* The results open when the run is done; otherwise
+  #ui("Results") in the #ui("Analysis") tab opens them. Select #ui("STRESS") >
   #ui("MISES") in the tree to see the von Mises stress around the hole (@results).
 + *Save the project.* #menu("File", "Save Project") writes a `.plx` file with all analyses of
   the project: geometry, mesh, model and results. The project schematic now shows the analysis

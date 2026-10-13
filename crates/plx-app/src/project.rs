@@ -697,7 +697,7 @@ pub struct ProjectApp {
     /// Analyses solved in their open window, for the solution monitor.
     window_runs: Vec<u64>,
     /// The solution monitor, with the analysis whose output it shows and its filter.
-    monitor: Option<Monitor>,
+    monitor: Monitor,
     /// Files given on the command line, imported into the first analysis once it is open.
     startup_import: Vec<PathBuf>,
     /// Fingerprint of the geometry or mesh a link last copied into its target, by target and
@@ -768,7 +768,7 @@ impl ProjectApp {
             update_failed: false,
             solves: Vec::new(),
             window_runs: Vec::new(),
-            monitor: None,
+            monitor: Monitor::default(),
             startup_import: Vec::new(),
             applied: HashMap::new(),
             last_sync: None,
@@ -2610,7 +2610,7 @@ impl ProjectApp {
             self.solves.retain(|s| s.id != id);
             self.window_runs.retain(|&run| run != id);
             self.window_runs.push(id);
-            self.monitor.get_or_insert_default().selected = Some(id);
+            self.monitor.show(id);
             return true;
         }
         if !node.upstream.is_ready() {
@@ -2651,7 +2651,7 @@ impl ProjectApp {
         self.solves.retain(|s| s.id != id);
         self.window_runs.retain(|&run| run != id);
         self.solves.push(solve);
-        self.monitor.get_or_insert_default().selected = Some(id);
+        self.monitor.show(id);
         true
     }
 
@@ -2792,16 +2792,14 @@ impl ProjectApp {
         rows
     }
 
-    /// PrePoMax's monitor for the whole project: the analyses being solved, with their
-    /// state, and the output of the one picked.
-    fn monitor_window(&mut self, ctx: &egui::Context) {
-        let Some(monitor) = &self.monitor else {
-            return;
-        };
+    /// PrePoMax's monitor for the whole project, in the Analyses tab below the schematic:
+    /// the analyses being solved with their state on the left, the output of the one
+    /// picked on the right.
+    fn monitor_panel(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let rows = self.monitor_rows();
-        let selected = monitor.selected;
-        let mut filter = monitor.filter.clone();
-        let mut open = true;
+        let selected = self.monitor.selected;
+        let mut filter = self.monitor.filter.clone();
         let (mut pick, mut stop, mut stop_all, mut open_analysis, mut clear) =
             (None, None, false, None, false);
         let output: Vec<String> = match selected {
@@ -2814,19 +2812,62 @@ impl ProjectApp {
             },
             None => Vec::new(),
         };
-        egui::Window::new("Solution Monitor")
-            .open(&mut open)
-            .collapsible(false)
-            .default_size([760.0, 480.0])
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .show(ctx, |ui| {
-                let row_height = ui.spacing().interact_size.y + 6.0;
-                let list_height = ((rows.len().max(1) + 1) as f32 * row_height).min(200.0);
+        ui.horizontal(|ui| {
+            let row = rows.iter().find(|r| Some(r.id) == selected);
+            let active = row.is_some_and(|r| r.active);
+            if ui
+                .add_enabled(active, egui::Button::new("Stop"))
+                .on_hover_text("Stops the solve of the analysis picked in the list")
+                .clicked()
+            {
+                stop = selected;
+            }
+            let any = rows.iter().any(|r| r.active);
+            if ui
+                .add_enabled(any, egui::Button::new("Stop All"))
+                .on_hover_text("Stops Update Project and every solve")
+                .clicked()
+            {
+                stop_all = true;
+            }
+            let tip = "Opens the window of the analysis picked in the list, with its results";
+            if ui
+                .add_enabled(row.is_some(), egui::Button::new("Open Analysis"))
+                .on_hover_text(tip)
+                .clicked()
+            {
+                open_analysis = selected;
+            }
+            let finished = rows.iter().any(|r| !r.active);
+            if ui
+                .add_enabled(finished, egui::Button::new("Clear Finished"))
+                .clicked()
+            {
+                clear = true;
+            }
+            ui.separator();
+            ui.label("Filter:");
+            ui.add(
+                egui::TextEdit::singleline(&mut filter)
+                    .hint_text("Show only lines containing ...")
+                    .desired_width(180.0),
+            );
+            if ui
+                .add_enabled(!filter.is_empty(), egui::Button::new("Clear"))
+                .clicked()
+            {
+                filter.clear();
+            }
+        });
+        ui.horizontal_top(|ui| {
+            let height = ui.available_height();
+            ui.allocate_ui_with_layout(
+                egui::vec2(420.0, height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
                 egui::ScrollArea::vertical()
                     .id_salt("monitor list")
-                    .max_height(list_height)
-                    .auto_shrink([false, true])
+                    .auto_shrink([false, false])
                     .show(ui, |ui| {
                         egui::Grid::new("monitor rows")
                             .num_columns(5)
@@ -2840,10 +2881,7 @@ impl ProjectApp {
                                 ui.end_row();
                                 if rows.is_empty() {
                                     ui.label("");
-                                    ui.weak(
-                                        "Nothing solved yet: Update Project solves the \
-                                             analyses that are not up to date.",
-                                    );
+                                    ui.weak("Nothing solved yet: Update Project solves the analyses that are not up to date.");
                                     ui.end_row();
                                 }
                                 for row in &rows {
@@ -2871,25 +2909,13 @@ impl ProjectApp {
                                 }
                             });
                     });
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label("Filter:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut filter)
-                            .hint_text("Show only lines containing ...")
-                            .desired_width(240.0),
-                    );
-                    if ui
-                        .add_enabled(!filter.is_empty(), egui::Button::new("Clear"))
-                        .clicked()
-                    {
-                        filter.clear();
-                    }
-                });
-                let height = ui.available_height() - 36.0;
+                },
+            );
+            ui.separator();
+            // The lines go one below the other, not in the row of the list.
+            ui.vertical(|ui| {
                 let area = egui::ScrollArea::both()
                     .id_salt(("monitor output", selected))
-                    .max_height(height.max(80.0))
                     .auto_shrink([false, false])
                     .stick_to_bottom(true);
                 if filter.is_empty() {
@@ -2901,48 +2927,11 @@ impl ProjectApp {
                         .collect();
                     crate::virtual_table::lines(ui, area, &shown);
                 }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    let row = rows.iter().find(|r| Some(r.id) == selected);
-                    let active = row.is_some_and(|r| r.active);
-                    if ui
-                        .add_enabled(active, egui::Button::new("Stop"))
-                        .on_hover_text("Stops the solve of the analysis picked in the list")
-                        .clicked()
-                    {
-                        stop = selected;
-                    }
-                    let any = rows.iter().any(|r| r.active);
-                    if ui
-                        .add_enabled(any, egui::Button::new("Stop All"))
-                        .on_hover_text("Stops Update Project and every solve")
-                        .clicked()
-                    {
-                        stop_all = true;
-                    }
-                    let tip = "Opens the window of the analysis picked in the list, with its \
-                               results";
-                    if ui
-                        .add_enabled(row.is_some(), egui::Button::new("Open Analysis"))
-                        .on_hover_text(tip)
-                        .clicked()
-                    {
-                        open_analysis = selected;
-                    }
-                    let finished = rows.iter().any(|r| !r.active);
-                    if ui
-                        .add_enabled(finished, egui::Button::new("Clear Finished"))
-                        .clicked()
-                    {
-                        clear = true;
-                    }
-                });
             });
-        if let Some(monitor) = &mut self.monitor {
-            monitor.filter = filter;
-            if pick.is_some() {
-                monitor.selected = pick;
-            }
+        });
+        self.monitor.filter = filter;
+        if pick.is_some() {
+            self.monitor.selected = pick;
         }
         if let Some(id) = stop {
             self.stop_solve(id);
@@ -2957,16 +2946,13 @@ impl ProjectApp {
         }
         if let Some(id) = open_analysis {
             self.open_window(
-                ctx,
+                &ctx,
                 id,
                 Some(Show {
                     view: TreeView::Results,
                     step: None,
                 }),
             );
-        }
-        if !open {
-            self.monitor = None;
         }
     }
 
@@ -2997,13 +2983,10 @@ impl ProjectApp {
     }
 
     fn toggle_monitor(&mut self) {
-        self.monitor = match self.monitor.take() {
-            Some(_) => None,
-            None => Some(Monitor {
-                selected: self.updating.first().copied(),
-                ..Default::default()
-            }),
-        };
+        self.monitor.shown = !self.monitor.shown;
+        if self.monitor.shown && self.monitor.selected.is_none() {
+            self.monitor.selected = self.updating.first().copied();
+        }
     }
 
     /// The analyses that take data from `id`, directly or through others.
@@ -3135,7 +3118,7 @@ impl ProjectApp {
                 self.stop_update();
             }
             ui.add_space(4.0);
-            let shown = self.monitor.is_some();
+            let shown = self.monitor.shown;
             if icons::button(ui, Icon::Monitor, MONITOR_TIP, true, shown).clicked() {
                 self.toggle_monitor();
             }
@@ -4845,18 +4828,32 @@ impl eframe::App for ProjectApp {
             .stroke(egui::Stroke::new(1.0, crate::style::border()));
         egui::Panel::bottom("project output")
             .resizable(true)
-            .default_size(110.0)
-            .size_range(40.0..=400.0)
-            .frame(pane.inner_margin(4))
+            .default_size(170.0)
+            .size_range(70.0..=500.0)
+            .frame(egui::Frame::new().fill(crate::style::control()))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .stick_to_bottom(true)
-                    .show(ui, |ui| {
-                        for line in &self.output {
-                            ui.label(line);
-                        }
-                    });
+                let titles = ["Output", "Analyses"];
+                let selected = usize::from(self.monitor.shown);
+                let (clicked, tab) = crate::style::tabs(ui, &titles, selected);
+                if let Some(index) = clicked {
+                    self.monitor.shown = index == 1;
+                }
+                pane.inner_margin(4).show(ui, |ui| {
+                    ui.set_min_size(ui.available_size());
+                    if self.monitor.shown {
+                        self.monitor_panel(ui);
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                for line in &self.output {
+                                    ui.label(line);
+                                }
+                            });
+                    }
+                });
+                crate::style::open_tab(ui, tab);
             });
         let actions = egui::CentralPanel::no_frame()
             .show(ui, |ui| self.schematic(ui))
@@ -4883,7 +4880,6 @@ impl eframe::App for ProjectApp {
         self.run_update(&ctx);
         self.run_loop();
         self.run_exports();
-        self.monitor_window(&ctx);
         self.analysis_windows(&ctx);
     }
 }
@@ -6938,14 +6934,24 @@ const UPDATE_TIP: &str = "Update Project (F5): solves every analysis that is not
      one after the other, and keeps the new results.";
 
 const MONITOR_TIP: &str = "Solution Monitor: the analyses being solved, with the output of \
-     CalculiX";
+     CalculiX, in the Analyses tab below the schematic";
 
 /// The project window's solution monitor: which analysis' output it shows, and the text
 /// the output is filtered by.
 #[derive(Default)]
 struct Monitor {
+    /// The output pane shows the Analyses tab instead of the messages.
+    shown: bool,
     selected: Option<u64>,
     filter: String,
+}
+
+impl Monitor {
+    /// A solve of `id` starts: the monitor shows its output.
+    fn show(&mut self, id: u64) {
+        self.shown = true;
+        self.selected = Some(id);
+    }
 }
 
 /// A line of the solution monitor's list.
