@@ -1,8 +1,13 @@
 //! Structured meshes of simple shapes: a box of hexahedra and a rectangle of quadrilaterals,
 //! made by three nested loops without a mesher. Their sides are node sets and surfaces named
 //! after the axis and side they lie on (`X-`, `X+`, `Y-` ...), so that boundary conditions
-//! and loads need no selection.
+//! and loads need no selection. Their sides, edges and corners are also CAD faces, edges and
+//! vertices, see [`cad_map`], so that a selection by geometry survives the mesh being made
+//! anew with other divisions.
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::cad::{CadEntity, CadMap};
 use crate::element::ElementShape;
 use crate::mesh::{Element, FeMesh, NodeId, Part, SurfaceDefinition};
 
@@ -181,7 +186,118 @@ fn structured(
         name: part.to_uppercase(),
         elements,
     });
+    mesh.cad = cad_map(&mesh, &ids, &cells, points, dimensions, step);
     mesh
+}
+
+/// The shape's sides, edges and corners as CAD entities, numbered from its axes so that they
+/// stay the same for any division. A box has the faces X- 1, X+ 2, Y- 3, Y+ 4, Z- 5 and
+/// Z+ 6, its edges along X 1 to 4, along Y 5 to 8 and along Z 9 to 12, and its corners 1 to
+/// 8 (1 + X end + 2 Y end + 4 Z end). A rectangle is face 1 with the edges X- 1, X+ 2, Y- 3
+/// and Y+ 4 and the corners 1 to 4.
+fn cad_map(
+    mesh: &FeMesh,
+    ids: &[NodeId],
+    cells: &[Vec<usize>],
+    points: [usize; 3],
+    dimensions: usize,
+    step: usize,
+) -> CadMap {
+    let grid = |point: usize| {
+        [
+            point % points[0],
+            point / points[0] % points[1],
+            point / (points[0] * points[1]),
+        ]
+    };
+    // The sides a grid point lies on, as 2 * axis + end.
+    let sides = |point: usize| -> Vec<usize> {
+        let g = grid(point);
+        (0..dimensions)
+            .flat_map(|axis| {
+                let at_start = (g[axis] == 0).then_some(2 * axis);
+                let at_end = (g[axis] == points[axis] - 1).then_some(2 * axis + 1);
+                [at_start, at_end]
+            })
+            .flatten()
+            .collect()
+    };
+    let tag = |n: usize| n as i32 + 1;
+    // The edge on two sides of a box, and the axis it runs along.
+    let box_edge = |a: usize, b: usize| {
+        let along = 3 - a / 2 - b / 2;
+        (tag(4 * along + a % 2 + 2 * (b % 2)), along)
+    };
+    let corner = |sides: &[usize]| tag(sides.iter().map(|s| (s % 2) << (s / 2)).sum());
+    let mut map = CadMap::default();
+    let mut nodes: BTreeMap<CadEntity, BTreeSet<NodeId>> = BTreeMap::new();
+    // The points on each edge, and the axis it runs along, for its segments.
+    let mut edges: BTreeMap<i32, (usize, Vec<usize>)> = BTreeMap::new();
+    for (point, &id) in ids.iter().enumerate().filter(|(_, id)| **id != 0) {
+        let on = sides(point);
+        let mut entities = Vec::new();
+        if dimensions == 3 {
+            entities.extend(on.iter().map(|&s| CadEntity::Face(tag(s))));
+            for (i, &a) in on.iter().enumerate() {
+                for &b in &on[i + 1..] {
+                    let (edge, along) = box_edge(a, b);
+                    entities.push(CadEntity::Edge(edge));
+                    edges
+                        .entry(edge)
+                        .or_insert((along, Vec::new()))
+                        .1
+                        .push(point);
+                }
+            }
+        } else {
+            entities.push(CadEntity::Face(1));
+            for &s in &on {
+                entities.push(CadEntity::Edge(tag(s)));
+                edges
+                    .entry(tag(s))
+                    .or_insert((1 - s / 2, Vec::new()))
+                    .1
+                    .push(point);
+            }
+        }
+        if on.len() == dimensions {
+            entities.push(CadEntity::Vertex(corner(&on)));
+        }
+        for entity in entities {
+            nodes.entry(entity).or_default().insert(id);
+        }
+    }
+    map.nodes = (nodes.into_iter())
+        .map(|(entity, ids)| (entity, ids.into_iter().collect()))
+        .collect();
+    // Element faces on the faces: the solid faces on each side of a box, every element of a
+    // rectangle.
+    for (cell, element) in cells.iter().zip(mesh.elements()) {
+        if dimensions == 3 {
+            for (k, topology) in element.faces().iter().enumerate() {
+                let on: Vec<Vec<usize>> =
+                    topology.corners.iter().map(|&c| sides(cell[c])).collect();
+                for &side in &on[0] {
+                    if on.iter().all(|s| s.contains(&side)) {
+                        let faces = map.faces.entry(tag(side)).or_default();
+                        faces.push((element.id, k as u8 + 1));
+                    }
+                }
+            }
+        } else {
+            map.faces.entry(1).or_default().push((element.id, 1));
+        }
+    }
+    // Segments from corner to corner of the elements along each edge.
+    for (edge, (along, mut on_edge)) in edges {
+        on_edge.retain(|&p| grid(p)[along] % step == 0);
+        on_edge.sort_by_key(|&p| grid(p)[along]);
+        let segments = (on_edge.windows(2))
+            .map(|pair| [ids[pair[0]], ids[pair[1]]])
+            .collect();
+        map.segments.insert(edge, segments);
+    }
+    map
 }
 
 #[cfg(test)]
@@ -248,5 +364,50 @@ mod tests {
         // Edge faces of a plane element: S2 from corner 2 to 3.
         assert_eq!(faces, &[(3, 2), (6, 2)]);
         assert!(mesh.coords().iter().all(|c| c[2] == 0.0));
+    }
+
+    #[test]
+    fn the_sides_of_a_box_are_cad_faces_that_stay_when_it_is_divided_anew() {
+        let coarse = box_mesh([0.0; 3], [2.0, 1.0, 1.0], [2, 1, 1], "C3D8", false, "Box");
+        let fine = box_mesh([0.0; 3], [2.0, 1.0, 1.0], [4, 2, 2], "C3D20R", true, "Box");
+        for mesh in [&coarse, &fine] {
+            let cad = &mesh.cad;
+            assert_eq!(cad.faces.len(), 6);
+            assert_eq!(cad.segments.len(), 12);
+            let vertices = cad
+                .nodes
+                .keys()
+                .filter(|e| matches!(e, CadEntity::Vertex(_)));
+            assert_eq!(vertices.count(), 8);
+            // Face X+ is the surface X+, its nodes the node set.
+            let SurfaceDefinition::ElementFaces(faces) = &mesh.surfaces["X+"] else {
+                panic!()
+            };
+            assert_eq!(&cad.faces[&2], faces);
+            assert_eq!(cad.nodes[&CadEntity::Face(2)], mesh.node_sets["X+"]);
+            // The corner at the far end of X, Y and Z, and the edge along X at Y+ Z+.
+            let far = cad.nodes[&CadEntity::Vertex(8)][0];
+            assert_eq!(mesh.node(far), Some([2.0, 1.0, 1.0]));
+            let edge = &cad.nodes[&CadEntity::Edge(4)];
+            assert!(edge.iter().all(|&n| {
+                let [_, y, z] = mesh.node(n).unwrap();
+                y == 1.0 && z == 1.0
+            }));
+        }
+        assert_eq!(coarse.cad.segments[&4].len(), 2);
+        assert_eq!(fine.cad.segments[&4].len(), 4);
+    }
+
+    #[test]
+    fn a_rectangle_is_one_cad_face_with_its_sides_as_edges() {
+        let mesh = rectangle_mesh([0.0, 0.0], [3.0, 1.0], [3, 2], "CPS4", false, "Rectangle");
+        let cad = &mesh.cad;
+        assert_eq!(cad.faces[&1].len(), mesh.element_count());
+        assert_eq!(cad.nodes[&CadEntity::Face(1)].len(), mesh.node_count());
+        assert_eq!(cad.segments.len(), 4);
+        assert_eq!(cad.segments[&2].len(), 2);
+        assert_eq!(cad.nodes[&CadEntity::Edge(2)], mesh.node_sets["X+"]);
+        let corner = cad.nodes[&CadEntity::Vertex(4)][0];
+        assert_eq!(mesh.node(corner), Some([3.0, 1.0, 0.0]));
     }
 }

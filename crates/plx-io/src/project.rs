@@ -666,6 +666,7 @@ mod tests {
                 },
             ],
             part_names: vec!["SOLID-1".into()],
+            refinement: 1.0,
         };
         let mut saved = single(Some(&geometry), &mesh, &model, None);
         (saved.analyses_mut().next().unwrap())
