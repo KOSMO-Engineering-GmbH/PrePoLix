@@ -680,7 +680,11 @@ mod tests {
         let steps = [0.01, 0.02, last].into_iter().enumerate().map(|(i, u)| {
             let mut step = plx_model::Step::new_static(format!("Step-{}", i + 1));
             step.boundary_conditions = vec![
-                bc("Fix", vec![1, 2, 3, 4], BoundaryKind::Fixed),
+                bc(
+                    "Fix",
+                    vec![1, 2, 3, 4],
+                    BoundaryKind::Displacement([Some(0.0); 6]),
+                ),
                 bc("Pull", vec![13, 14, 15, 16], pull(u)),
             ];
             step
@@ -876,7 +880,11 @@ mod tests {
         if let plx_model::StepKind::Frequency(f) = &mut frequency.kind {
             f.storage = true;
         }
-        frequency.boundary_conditions = vec![bc("Fix", vec![1, 2, 3, 4], BoundaryKind::Fixed)];
+        frequency.boundary_conditions = vec![bc(
+            "Fix",
+            vec![1, 2, 3, 4],
+            BoundaryKind::Displacement([Some(0.0); 6]),
+        )];
         let mut modal = Step::new_modal_dynamics("Shake");
         modal.boundary_conditions = frequency.boundary_conditions.clone();
         modal.loads.push(Load {

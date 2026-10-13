@@ -18,7 +18,8 @@ end and pulled at the other. Each step links to the chapter with the details.
   210000 MPa and Poisson's ratio 0.3, or copy steel from the material library (@materials). Then
   #menu("Model", "Create Section ...") assigns it to the part (@sections).
 + *Step.* #menu("Model", "Create Step ...") with type #ui("Static") (@steps).
-+ *Support.* #menu("Model", "Create Boundary Condition ..."), type #ui("Fixed"); click the end
++ *Support.* #menu("Model", "Create Boundary Condition ..."), type #ui("Displacement/Rotation"), which
+  holds all components at zero; click the end
   face of the plate in the 3D view (@boundary-conditions, @selection).
 + *Load.* #menu("Model", "Create Load ..."), type #ui("Surface Traction") with `F1` = 20000 N on
   the opposite end face (@loads).

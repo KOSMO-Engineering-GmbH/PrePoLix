@@ -93,7 +93,10 @@ impl ReferencePoint {
 }
 
 /// Area-weighted centre of element faces, from their corners; of edges, length-weighted.
-fn face_centroid(mesh: &FeMesh, faces: &[(plx_mesh::ElementId, u8)]) -> Option<[f64; 3]> {
+pub(crate) fn face_centroid(
+    mesh: &FeMesh,
+    faces: &[(plx_mesh::ElementId, u8)],
+) -> Option<[f64; 3]> {
     let (mut weight, mut sum) = (0.0, [0.0; 3]);
     for &(element, face) in faces {
         let Some(element) = mesh.element(element) else {

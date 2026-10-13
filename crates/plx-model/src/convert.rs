@@ -160,10 +160,9 @@ impl FeModel {
             }
             for bc in &mut step.boundary_conditions {
                 match &mut bc.kind {
-                    BoundaryKind::Fixed
-                    | BoundaryKind::Submodel { .. }
-                    | BoundaryKind::Symmetry { .. } => {}
-                    BoundaryKind::Displacement(values) => {
+                    BoundaryKind::Submodel { .. } | BoundaryKind::Symmetry { .. } => {}
+                    BoundaryKind::Displacement(values)
+                    | BoundaryKind::RemoteDisplacement(values) => {
                         for (i, value) in values.iter_mut().enumerate() {
                             let quantity = if i < 3 {
                                 Quantity::Length

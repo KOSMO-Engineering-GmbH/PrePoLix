@@ -183,7 +183,7 @@ A double-click on the block opens its editor:
     which keeps the sign.],
   [Region], [For a field extreme: all nodes, or a region of the analysis whose results are
     linked: a node set of its mesh or model, or the region of a boundary condition or load,
-    such as #ui("Fixed (boundary condition)"). The region is found on the mesh the results
+    such as #ui("Displacement_Rotation-1 (boundary condition)"). The region is found on the mesh the results
     were solved on, so a region picked on geometry or on the sides of a mesh block follows
     every new mesh of an optimization loop.],
   [Node], [For a value at a node: its number.],

@@ -373,7 +373,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::NodeSet("FIX".into()),
-            kind: BoundaryKind::Fixed,
+            kind: BoundaryKind::Displacement([Some(0.0); 6]),
             amplitude: None,
         });
         FeModel {

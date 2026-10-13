@@ -1001,8 +1001,8 @@ fn names<'a, T: 'a>(items: &'a [T], name: impl Fn(&T) -> &str + 'a) -> Vec<&'a s
     items.iter().map(name).collect()
 }
 
-const FIXED: &str = "Fixed";
 const DISPLACEMENT: &str = "Displacement_Rotation";
+const REMOTE_DISPLACEMENT: &str = "Remote_Displacement";
 const TEMPERATURE: &str = "Temperature";
 const DEFINED_TEMPERATURE: &str = "Defined_Temperature";
 const INITIAL_VELOCITY: &str = "Initial_Velocity";
@@ -1036,11 +1036,16 @@ fn previews_motion(bc: &BoundaryCondition, fe: &FeModel) -> bool {
 /// The boundary condition kinds of the dialog: label, default name and the kind.
 fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 5] {
     [
-        ("Fixed", FIXED, BoundaryKind::Fixed),
+        // All degrees of freedom held, the most common support.
         (
             "Displacement/Rotation",
             DISPLACEMENT,
-            BoundaryKind::Displacement([Some(0.0), None, None, None, None, None]),
+            BoundaryKind::Displacement([Some(0.0); 6]),
+        ),
+        (
+            "Remote Displacement",
+            REMOTE_DISPLACEMENT,
+            BoundaryKind::RemoteDisplacement([Some(0.0); 6]),
         ),
         ("Temperature", TEMPERATURE, BoundaryKind::Temperature(0.0)),
         (
@@ -1061,8 +1066,8 @@ fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 5] {
 
 fn boundary_kind_name(kind: &BoundaryKind) -> &'static str {
     match kind {
-        BoundaryKind::Fixed => FIXED,
         BoundaryKind::Displacement(_) => DISPLACEMENT,
+        BoundaryKind::RemoteDisplacement(_) => REMOTE_DISPLACEMENT,
         BoundaryKind::Temperature(_) => TEMPERATURE,
         BoundaryKind::Submodel { .. } => SUBMODEL,
         BoundaryKind::Symmetry { .. } => SYMMETRY,
@@ -1993,12 +1998,41 @@ impl Editor {
                     ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0));
                     ui.end_row();
                 }
-                if let BoundaryKind::Displacement(values) = &mut bc.kind {
-                    // Nodes of 2D models only move in the x-y plane.
-                    let dofs = if two_d { 2 } else { 6 };
-                    for (i, (value, label)) in
-                        values.iter_mut().zip(DOF_LABELS).take(dofs).enumerate()
-                    {
+                if let BoundaryKind::RemoteDisplacement(_) = bc.kind {
+                    ui.label("Point");
+                    match region.region().centroid(&model.mesh) {
+                        Some(p) => {
+                            let [x, y, z] =
+                                p.map(|v| {
+                                    crate::results::format_value(
+                                        units.shown(v, Quantity::Length) as f32
+                                    )
+                                });
+                            let unit = units.unit(Quantity::Length);
+                            ui.label(format!("({x}, {y}, {z}) {unit}").trim_end().to_owned());
+                        }
+                        None => {
+                            ui.weak("Select faces, edges or nodes");
+                        }
+                    }
+                    ui.end_row();
+                    ui.label("");
+                    ui.weak("The selection moves rigidly with it.");
+                    ui.end_row();
+                }
+                let remote = matches!(bc.kind, BoundaryKind::RemoteDisplacement(_));
+                if let BoundaryKind::Displacement(values)
+                | BoundaryKind::RemoteDisplacement(values) = &mut bc.kind
+                {
+                    // Nodes of 2D models only move in the x-y plane; the point of a remote
+                    // displacement in a plane model also turns about z.
+                    let dofs: &[usize] = match (remote, two_d) {
+                        (true, _) => model.fe.properties.space.remote_dofs(),
+                        (false, true) => &[0, 1],
+                        (false, false) => &[0, 1, 2, 3, 4, 5],
+                    };
+                    for &i in dofs {
+                        let (value, label) = (&mut values[i], DOF_LABELS[i]);
                         let mut set = value.is_some();
                         ui.checkbox(&mut set, label);
                         let mut number = value.unwrap_or(0.0);
@@ -4531,11 +4565,16 @@ mod tests {
 
     #[test]
     fn default_names_follow_the_kind() {
-        let mut name = "Fixed-2".to_string();
-        rename_default(&mut name, FIXED, DISPLACEMENT, &["Fixed-1"]);
-        assert_eq!(name, "Displacement_Rotation-1");
+        let mut name = "Displacement_Rotation-2".to_string();
+        rename_default(
+            &mut name,
+            DISPLACEMENT,
+            REMOTE_DISPLACEMENT,
+            &["Displacement_Rotation-1"],
+        );
+        assert_eq!(name, "Remote_Displacement-1");
         let mut name = "Clamp".to_string();
-        rename_default(&mut name, FIXED, DISPLACEMENT, &[]);
+        rename_default(&mut name, DISPLACEMENT, REMOTE_DISPLACEMENT, &[]);
         assert_eq!(name, "Clamp");
     }
 
@@ -4557,9 +4596,9 @@ mod tests {
         let Draft::BoundaryCondition(_, bc, _) = &mut editor.draft else {
             unreachable!()
         };
-        assert_eq!(bc.name, "Fixed-1");
-        rename_default(&mut bc.name, FIXED, DISPLACEMENT, &taken);
         assert_eq!(bc.name, "Displacement_Rotation-2");
+        rename_default(&mut bc.name, DISPLACEMENT, REMOTE_DISPLACEMENT, &taken);
+        assert_eq!(bc.name, "Remote_Displacement-1");
         // An edited item does not block its own name.
         let mut editor = Editor::create(NewItem::BoundaryCondition(0), &fe).unwrap();
         editor.index = Some(0);
@@ -4608,7 +4647,7 @@ mod tests {
         let bc = &fe.steps[0].boundary_conditions[0];
         assert_eq!(
             (bc.name.as_str(), &bc.region),
-            ("Fixed-1", &Region::Nodes(vec![1, 4]))
+            ("Displacement_Rotation-1", &Region::Nodes(vec![1, 4]))
         );
         assert!(Editor::create(NewItem::Load(3), &fe).is_none());
     }
@@ -4653,7 +4692,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::NodeSet("FIX".into()),
-            kind: BoundaryKind::Fixed,
+            kind: BoundaryKind::Displacement([Some(0.0); 6]),
             amplitude: None,
         });
         fe.steps[0].loads.push(Load {
@@ -4731,7 +4770,7 @@ mod tests {
                 active: true,
                 visible: true,
                 region: Region::NodeSet("FIX".into()),
-                kind: BoundaryKind::Fixed,
+                kind: BoundaryKind::Displacement([Some(0.0); 6]),
                 amplitude: None,
             },
             BoundaryCondition {
@@ -4855,7 +4894,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::NodeSet("FIX".into()),
-            kind: BoundaryKind::Fixed,
+            kind: BoundaryKind::Displacement([Some(0.0); 6]),
             amplitude: None,
         });
         let bc = TreeItem::BoundaryCondition(0, 0);

@@ -342,13 +342,41 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     }
                 }
             }
+            // The supports at the remote point with lines to it from nodes spread over the
+            // region, like a rigid body's.
+            Kind::Boundary(BoundaryKind::RemoteDisplacement(values)) => {
+                let Some(centre) = item.region.centroid(&model.mesh).map(DVec3::from) else {
+                    continue;
+                };
+                for &axis in model.fe.properties.space.remote_dofs() {
+                    let shape = if axis < 3 {
+                        SymbolShape::Cone
+                    } else {
+                        SymbolShape::RotationLock
+                    };
+                    if values[axis].is_some() {
+                        add(centre, DVec3::AXES[axis % 3], shape);
+                    }
+                }
+                let to = (centre - model.origin()).as_vec3();
+                let points = node_points(model, &item.region, &visible);
+                for index in sample(&points, DIVISIONS / 2.0) {
+                    symbols.push(Symbol {
+                        position: (points[index] - model.origin()).as_vec3(),
+                        direction: Vec3::ZERO,
+                        shape: SymbolShape::LineTo(to),
+                        color,
+                    });
+                }
+            }
             Kind::Boundary(kind) => {
                 let held: [bool; 6] = match kind {
-                    BoundaryKind::Fixed => [true; 6],
                     BoundaryKind::Displacement(values) => values.map(|v| v.is_some()),
                     BoundaryKind::Temperature(_) => [false; 6],
                     BoundaryKind::Submodel { dofs, .. } => dofs,
-                    BoundaryKind::Symmetry { .. } => unreachable!("drawn above"),
+                    BoundaryKind::Symmetry { .. } | BoundaryKind::RemoteDisplacement(_) => {
+                        unreachable!("drawn above")
+                    }
                 };
                 if let Some(center) = region_center(model, &item.region, &visible) {
                     for (axis, &held) in held.iter().enumerate() {

@@ -7,12 +7,16 @@ or with #menu("Model", "Create Boundary Condition ...") for the last step. The d
 the types the step accepts. In the 3D view, supports are drawn as cones (translations) and
 plates (rotations).
 
-#screenshot("boundary-condition.png", [Fixed support on a face])
+#screenshot("boundary-condition.png", [Support holding a face in all directions])
 
 #fields(
-  [Fixed], [All degrees of freedom held at zero. In 2D only the two translations are fixed.],
   [Displacement/Rotation], [Prescribed values for the ticked components `U1`, `U2`, `U3`
-    (length) and `UR1`, `UR2`, `UR3` (angle in radians). Unticked components are free.],
+    (length) and `UR1`, `UR2`, `UR3` (angle in radians). Unticked components are free. A new
+    one holds all components at zero, a fixed support; in 2D only `U1` and `U2` are shown.
+    Rotations act on nodes of beams and shells only; solid nodes have none, so zero rotations
+    there change nothing.],
+  [Remote Displacement], [Moves the selection as a rigid body with a point at its centre
+    (@remote-displacement).],
   [Temperature], [Prescribed temperature (heat transfer, coupled and uncoupled steps).],
   [Submodel], [Displacements taken from the global model (static steps of a submodel,
     @submodel). #ui("Global step") selects the step of the global results, the check boxes the
@@ -22,6 +26,34 @@ plates (rotations).
 
 The region is a selection of faces, edges or nodes, a node set or a surface. Displacement and
 temperature boundary conditions can follow an #ui("Amplitude") (@amplitudes).
+
+=== Remote displacement <remote-displacement>
+
+A #ui("Remote Displacement") prescribes the displacements `U1` to `U3` and rotations `UR1` to
+`UR3` of a point at the centre of the selection, and the selection follows the point as a rigid
+body: a shaft end turned by an angle, or a bolt hole held in place while the part turns about it.
+The point is the area-weighted centre of the selected faces (of the edges in 2D), or the mean of
+the nodes when no faces are selected; the dialog shows it under #ui("Point"). Unticked
+components of the point are free. A new one holds all components at zero, which clamps the
+selection rigidly in place.
+
+#screenshot("remote-displacement.png", [Remote displacement on the bore of a plate, held in
+  place but free to turn about z like on a pin])
+
+You define no reference point or rigid body for it. When the input file is written, PrePoLix
+adds a reference node and a rotation node at the centre and a `*RIGID BODY` on the nodes of the
+selection, and writes the values on these two nodes. The centre is computed on the current mesh,
+so a selection of geometry faces keeps working after remeshing. In the 3D view the supports are
+drawn at the centre with lines to the selection.
+
+- In plane stress and plane strain models the point has `U1`, `U2` and `UR3` (rotation about
+  z); in axisymmetric models `U1` and `U2`.
+- Remote displacements of several steps on the same selection share one point. The rigid body
+  belongs to the whole model, so the selection stays rigid also in steps without the boundary
+  condition.
+- A node can belong to only one rigid body: do not let the selection overlap that of another
+  remote displacement or a rigid body constraint (@rigid-body). The model check (@model-check)
+  reports "Nodes in several rigid bodies" otherwise.
 
 === Motion preview <motion-preview>
 

@@ -45,13 +45,13 @@ check marks the boundary condition with a warning sign (@model-check):
 - *Axisymmetric*: in an axisymmetric model only a line of constant y (perpendicular to the axis)
   is a symmetry plane.
 - *Shared nodes*: CalculiX reads every boundary condition and point load at the nodes of a
-  skewed plane in its local system. Zero displacements in all directions, such as a #ui("Fixed")
+  skewed plane in its local system. Zero displacements in all directions, such as a fixed
   support at an edge of the plane, are the same in any system and give no warning.
 
 #screenshot("symmetry-warning.png", [Warning for a selection on two faces at right angles])
 
 #limitation[A node can only have one local system. Where two skewed symmetry planes meet, keep
-the line between them out of one of the selections and support it with a #ui("Fixed") or a
+the line between them out of one of the selections and support it with a
 #ui("Displacement/Rotation") boundary condition. Shells with a skewed plane are a little softer
 next to the plane than with a plane normal to an axis, because CalculiX couples the expanded
 shell nodes there (about 0.5 % in a plate one element wide).]

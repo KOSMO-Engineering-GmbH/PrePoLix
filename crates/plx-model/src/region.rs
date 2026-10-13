@@ -135,6 +135,24 @@ impl Region {
         }
     }
 
+    /// Area-weighted centre of the region's element faces, of its nodes when it has no
+    /// faces, e.g. picked edges or vertices; `None` without either.
+    pub fn centroid(&self, mesh: &FeMesh) -> Option<[f64; 3]> {
+        if let Some(centre) = crate::features::face_centroid(mesh, &self.faces(mesh)) {
+            return Some(centre);
+        }
+        let points: Vec<[f64; 3]> = (self.nodes(mesh).into_iter())
+            .filter_map(|id| mesh.node(id))
+            .collect();
+        let count = points.len() as f64;
+        (!points.is_empty()).then(|| {
+            let sum = points
+                .iter()
+                .fold([0.0; 3], |s, p| [0, 1, 2].map(|k| s[k] + p[k]));
+            sum.map(|v| v / count)
+        })
+    }
+
     /// The reference point the region stands for, if it is one.
     pub fn reference_point(&self) -> Option<&str> {
         match self {

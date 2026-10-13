@@ -109,6 +109,16 @@ impl ModelSpace {
         self != ModelSpace::ThreeD
     }
 
+    /// Degrees of freedom (0..6) of a remote displacement's point: a plane model's point
+    /// also turns about z, a body of revolution's point only moves.
+    pub fn remote_dofs(self) -> &'static [usize] {
+        match self {
+            ModelSpace::ThreeD => &[0, 1, 2, 3, 4, 5],
+            ModelSpace::PlaneStress | ModelSpace::PlaneStrain => &[0, 1, 5],
+            ModelSpace::Axisymmetric => &[0, 1],
+        }
+    }
+
     /// Name in the GUI.
     pub fn label(self) -> &'static str {
         match self {
