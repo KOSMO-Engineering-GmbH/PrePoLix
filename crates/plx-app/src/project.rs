@@ -7657,7 +7657,7 @@ mod tests {
             active: true,
             visible: true,
             region: plx_model::Region::Geometry(vec![plx_mesh::CadEntity::Face(2)]),
-            kind: plx_model::BoundaryKind::Fixed,
+            kind: plx_model::BoundaryKind::Displacement([Some(0.0); 6]),
             amplitude: None,
         });
         fe.steps.push(step);

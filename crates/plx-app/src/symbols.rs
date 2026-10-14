@@ -342,13 +342,44 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     }
                 }
             }
-            Kind::Boundary(kind) => {
-                let held: [bool; 6] = match kind {
-                    BoundaryKind::Fixed => [true; 6],
+            // The supports at the remote point with lines to it from nodes spread over the
+            // region, like a rigid body's.
+            Kind::Boundary(BoundaryKind::RemoteDisplacement(ref remote)) => {
+                let Ok(point) = remote.resolve(&model.fe, &model.mesh, &item.region) else {
+                    continue;
+                };
+                let centre = DVec3::from(point.position);
+                let axes = point.axes.map_or(DVec3::AXES, |a| a.map(DVec3::from));
+                let held = remote.held(model.fe.properties.space);
+                for (axis, value) in held.iter().enumerate() {
+                    let shape = if axis < 3 {
+                        SymbolShape::Cone
+                    } else {
+                        SymbolShape::RotationLock
+                    };
+                    if value.is_some() {
+                        add(centre, axes[axis % 3], shape);
+                    }
+                }
+                let to = (centre - model.origin()).as_vec3();
+                let points = node_points(model, &Region::Nodes(point.nodes), &visible);
+                for index in sample(&points, DIVISIONS / 2.0) {
+                    symbols.push(Symbol {
+                        position: (points[index] - model.origin()).as_vec3(),
+                        direction: Vec3::ZERO,
+                        shape: SymbolShape::LineTo(to),
+                        color,
+                    });
+                }
+            }
+            Kind::Boundary(ref kind) => {
+                let held: [bool; 6] = match *kind {
                     BoundaryKind::Displacement(values) => values.map(|v| v.is_some()),
                     BoundaryKind::Temperature(_) => [false; 6],
                     BoundaryKind::Submodel { dofs, .. } => dofs,
-                    BoundaryKind::Symmetry { .. } => unreachable!("drawn above"),
+                    BoundaryKind::Symmetry { .. } | BoundaryKind::RemoteDisplacement(_) => {
+                        unreachable!("drawn above")
+                    }
                 };
                 if let Some(center) = region_center(model, &item.region, &visible) {
                     for (axis, &held) in held.iter().enumerate() {

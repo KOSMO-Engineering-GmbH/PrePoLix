@@ -1870,7 +1870,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(fixed),
-            kind: BoundaryKind::Fixed,
+            kind: BoundaryKind::Displacement([Some(0.0); 6]),
             amplitude: None,
         });
         step.boundary_conditions.push(BoundaryCondition {
@@ -2022,7 +2022,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(rim),
-            kind: BoundaryKind::Fixed,
+            kind: BoundaryKind::Displacement([Some(0.0); 6]),
             amplitude: None,
         });
         step.loads.push(Load {
@@ -2128,7 +2128,11 @@ mod tests {
         }
         let mut step = Step::new_static("Step-1");
         for (name, nodes, kind) in [
-            ("Fix", vec![1, 2, 3, 4], BoundaryKind::Fixed),
+            (
+                "Fix",
+                vec![1, 2, 3, 4],
+                BoundaryKind::Displacement([Some(0.0); 6]),
+            ),
             (
                 "Pull",
                 vec![13, 14, 15, 16],

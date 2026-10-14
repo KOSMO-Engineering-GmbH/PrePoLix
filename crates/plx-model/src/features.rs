@@ -93,7 +93,10 @@ impl ReferencePoint {
 }
 
 /// Area-weighted centre of element faces, from their corners; of edges, length-weighted.
-fn face_centroid(mesh: &FeMesh, faces: &[(plx_mesh::ElementId, u8)]) -> Option<[f64; 3]> {
+pub(crate) fn face_centroid(
+    mesh: &FeMesh,
+    faces: &[(plx_mesh::ElementId, u8)],
+) -> Option<[f64; 3]> {
     let (mut weight, mut sum) = (0.0, [0.0; 3]);
     for &(element, face) in faces {
         let Some(element) = mesh.element(element) else {
@@ -533,6 +536,17 @@ impl FeModel {
                 && moving.system == old
             {
                 moving.system = new.to_string();
+            }
+        }
+        for bc in self
+            .steps
+            .iter_mut()
+            .flat_map(|s| &mut s.boundary_conditions)
+        {
+            if let crate::BoundaryKind::RemoteDisplacement(remote) = &mut bc.kind
+                && remote.system == old
+            {
+                remote.system = new.to_string();
             }
         }
     }

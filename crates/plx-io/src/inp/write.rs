@@ -15,10 +15,10 @@ use plx_model::{
     ContactMethod, ContactPair, DefinedFieldKind, DynamicStep, FeModel, FieldOutput, FrequencyStep,
     GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
-    ModelSpace, MovingFrame, NodeTie, OutputDimension, OutputKind, Region, Section, SectionKind,
-    SensitivityStep, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior,
-    SurfaceInteraction, Tie, Totals, UserKeyword, ViscoStep, line_tangent, symmetry_dofs,
-    symmetry_plane,
+    ModelSpace, MovingFrame, NodeTie, OutputDimension, OutputKind, Region, RemoteBehavior,
+    RemoteDof, Section, SectionKind, SensitivityStep, StaticStep, SteadyStateDynamicsStep, Step,
+    StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals, UserKeyword, ViscoStep,
+    line_tangent, symmetry_dofs, symmetry_plane,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -51,6 +51,10 @@ pub enum WriteError {
     /// A load without a direction, such as a gravity of zero.
     #[error("{item}: {reason}")]
     InvalidLoad { item: String, reason: String },
+    /// A remote displacement whose point cannot be placed, e.g. in a missing coordinate
+    /// system, or without nodes in its pinball region.
+    #[error("{item}: {reason}")]
+    InvalidBoundary { item: String, reason: String },
     /// A submodel boundary condition in a model that names no global results file.
     #[error(
         "{item}: the submodel has no global results file (Model > Model Properties: model \
@@ -703,6 +707,9 @@ struct Sets<'a> {
     /// Reference and rotation node of each reference point an active rigid body is driven
     /// by, and the node set holding the reference node once something refers to it.
     reference_nodes: BTreeMap<String, ReferenceNodes>,
+    /// Reference and rotation node of the point of each remote displacement, with its
+    /// region; boundary conditions with the same region and point share it.
+    remote_points: Vec<(Region, plx_model::RemoteDisplacement, [NodeId; 2])>,
     /// Local coordinate systems (`*Transform`, type R) of node sets whose symmetry plane is
     /// no coordinate plane: the set with the local x and y axes.
     transforms: Vec<(String, [f64; 3], [f64; 3])>,
@@ -734,6 +741,7 @@ impl<'a> Sets<'a> {
                 .collect(),
             surface_sets: BTreeMap::new(),
             reference_nodes: BTreeMap::new(),
+            remote_points: Vec::new(),
             pre_tension_nodes: BTreeMap::new(),
             cut_originals: BTreeMap::new(),
             submodel_sets: Vec::new(),
@@ -1320,6 +1328,66 @@ fn constraints(
             Constraint::Tie(t) => keywords.push(tie(sets, t)?),
         }
     }
+    // A remote displacement drives its region from a point, by default at the centre of the
+    // region; the point exists only in the input file. Its reference node takes the
+    // translations, its rotation node the rotations as displacements, both in the directions
+    // of the remote displacement's coordinate system.
+    for step in model.steps.iter().filter(|s| s.active) {
+        for bc in &step.boundary_conditions {
+            let BoundaryKind::RemoteDisplacement(remote) = &bc.kind else {
+                continue;
+            };
+            if !bc.active
+                || !step.kind.supports_boundary(&bc.kind)
+                || (sets.remote_points.iter())
+                    .any(|(r, p, _)| *r == bc.region && p.same_point(remote))
+            {
+                continue;
+            }
+            let point = (remote.resolve(model, sets.mesh, &bc.region)).map_err(|reason| {
+                WriteError::InvalidBoundary {
+                    item: bc.name.clone(),
+                    reason,
+                }
+            })?;
+            let (reference, rotation) = (next_node, next_node + 1);
+            next_node += 2;
+            generated.nodes.push((reference, point.position));
+            generated.nodes.push((rotation, point.position));
+            sets.remote_points
+                .push((bc.region.clone(), remote.clone(), [reference, rotation]));
+            if let Some([x, y, _]) = point.axes {
+                let set =
+                    sets.free_name("Internal_Selection", &format!("{}_Point", name(&bc.name)));
+                sets.node_sets
+                    .push((set.clone(), vec![reference, rotation]));
+                sets.transforms.push((set, x, y));
+            }
+            let mut text = format!("** Name: {}: Remote point\n", bc.name);
+            match remote.behavior {
+                RemoteBehavior::Rigid => {
+                    let region = if remote.pinball.is_some() {
+                        Region::Nodes(point.nodes.clone())
+                    } else {
+                        bc.region.clone()
+                    };
+                    let set = sets.node_set(&bc.name, &region)?;
+                    let _ = writeln!(
+                        text,
+                        "*Rigid body, Nset={set}, Ref node={reference}, Rot node={rotation}"
+                    );
+                }
+                RemoteBehavior::Deformable | RemoteBehavior::Coupled => {
+                    let space = model.properties.space;
+                    let held = remote.held(space);
+                    for equation in point.equations(sets.mesh, remote.behavior, &held, space) {
+                        remote_equation(&mut text, &equation, point.axes, [reference, rotation]);
+                    }
+                }
+            }
+            keywords.push(Keyword::generated(text));
+        }
+    }
     for t in &model.ties {
         if t.active {
             keywords.push(tie(sets, t)?);
@@ -1780,6 +1848,93 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
     Ok(Keyword::title(&step.name, blocks))
 }
 
+/// An `*Equation` of a remote point: its terms with the point's translations and rotations
+/// on the reference and rotation node, turned into the point's directions, which the
+/// `*Transform` of the two nodes makes theirs.
+fn remote_equation(
+    out: &mut String,
+    equation: &[(RemoteDof, f64)],
+    axes: Option<[[f64; 3]; 3]>,
+    [reference, rotation]: [NodeId; 2],
+) {
+    let mut terms: Vec<(NodeId, usize, f64)> = Vec::new();
+    let mut add = |node: NodeId, dof: usize, value: f64| match terms
+        .iter_mut()
+        .find(|(n, d, _)| *n == node && *d == dof)
+    {
+        Some(term) => term.2 += value,
+        None => terms.push((node, dof, value)),
+    };
+    for &(dof, value) in equation {
+        let (node, global) = match dof {
+            RemoteDof::Node(node, k) => {
+                add(node, k + 1, value);
+                continue;
+            }
+            RemoteDof::Translation(k) => (reference, k),
+            RemoteDof::Rotation(k) => (rotation, k),
+        };
+        match axes {
+            // The global direction k is sum_j axes[j][k] times the local direction j.
+            Some(axes) => {
+                for (j, axis) in axes.iter().enumerate() {
+                    if axis[global] != 0.0 {
+                        add(node, j + 1, value * axis[global]);
+                    }
+                }
+            }
+            None => add(node, global + 1, value),
+        }
+    }
+    terms.retain(|(_, _, v)| *v != 0.0);
+    let _ = writeln!(out, "*Equation\n{}", terms.len());
+    let terms: Vec<String> = (terms.iter())
+        .map(|(node, dof, value)| format!("{node}, {dof}, {}", number(*value)))
+        .collect();
+    // Four terms (twelve entries) per line, as PrePoMax writes them.
+    for chunk in terms.chunks(4) {
+        out.push_str(&chunk.join(", "));
+        out.push('\n');
+    }
+}
+
+/// The `*Boundary` lines of prescribed displacements and rotations of the first `dofs`
+/// degrees of freedom, a range for each run of equal values. The rotations go to the
+/// translations of `rotation`, the rotation node of a rigid body, if there is one.
+fn displacement_lines(
+    out: &mut String,
+    nodes: &str,
+    rotation: Option<&str>,
+    values: &[Option<f64>; 6],
+    dofs: usize,
+) {
+    // Each held degree of freedom as (target, its number there, value).
+    let held = (1..).zip(values).take(dofs).filter_map(|(dof, value)| {
+        let value = (*value)?;
+        Some(match rotation {
+            Some(rotation) if dof > 3 => (rotation, dof - 3, value),
+            _ => (nodes, dof, value),
+        })
+    });
+    let mut run: Option<(&str, usize, usize, f64)> = None;
+    for (target, dof, value) in held {
+        match &mut run {
+            Some((t, _, last, v)) if *t == target && *last + 1 == dof && *v == value => {
+                *last = dof;
+            }
+            _ => {
+                if let Some((t, first, last, v)) = run {
+                    let _ = writeln!(out, "{t}, {first}, {last}, {}", number(v));
+                }
+                run = Some((target, dof, dof, value));
+            }
+        }
+    }
+    if let Some((t, first, last, v)) = run {
+        let _ = writeln!(out, "{t}, {first}, {last}, {}", number(v));
+    }
+}
+
 /// The keyword of a moving load at one position: its nodal forces as `*Cload`.
 fn moving_load_text(
     load: &plx_model::Load,
@@ -1868,6 +2023,22 @@ fn step_block<'f>(
             boundaries.push(deactivated(&bc.name));
             continue;
         }
+        if let BoundaryKind::RemoteDisplacement(remote) = &bc.kind {
+            let Some(&(_, _, [reference, rotation])) = (sets.remote_points.iter())
+                .find(|(r, p, _)| *r == bc.region && p.same_point(remote))
+            else {
+                return Err(empty(&bc.name, "nodes"));
+            };
+            let amplitude = amplitude_parameter(amplitudes, &bc.name, "Amplitude", &bc.amplitude)?;
+            // The translations are those of the reference node, the rotations the
+            // displacements of the rotation node.
+            let mut out = format!("** Name: {}\n*Boundary{amplitude}\n", bc.name);
+            let (reference, rotation) = (reference.to_string(), rotation.to_string());
+            let held = remote.held(space);
+            displacement_lines(&mut out, &reference, Some(&rotation), &held, 6);
+            boundaries.push(Keyword::generated(out));
+            continue;
+        }
         // Truss nodes have no rotations either; CalculiX fails when they are fixed.
         let dofs = if dofs == 6 && lines.all_truss(&bc.region.nodes(sets.mesh)) {
             3
@@ -1890,7 +2061,7 @@ fn step_block<'f>(
             Some(point) => Some(sets.reference_nodes(&bc.name, point)?.rotation),
             None => None,
         };
-        // Fixed supports stay zero; an amplitude would not change them.
+        // Symmetry supports stay zero; an amplitude would not change them.
         let reference = bc.amplitude.as_ref().filter(|_| bc.kind.takes_amplitude());
         let amplitude =
             amplitude_parameter(amplitudes, &bc.name, "Amplitude", &reference.cloned())?;
@@ -1900,31 +2071,10 @@ fn step_block<'f>(
         };
         let mut out = format!("** Name: {}\n*Boundary{options}\n", bc.name);
         match bc.kind {
-            BoundaryKind::Fixed => match rotation_node {
-                Some(rotation) => {
-                    let _ = writeln!(out, "{set}, 1, {}, 0", dofs.min(3));
-                    if dofs > 3 {
-                        let _ = writeln!(out, "{rotation}, 1, {}, 0", dofs - 3);
-                    }
-                }
-                None => {
-                    let _ = writeln!(out, "{set}, 1, {dofs}, 0");
-                }
-            },
+            BoundaryKind::RemoteDisplacement(_) => unreachable!("written above"),
             BoundaryKind::Displacement(values) => {
-                for (dof, value) in (1..).zip(values).take(dofs) {
-                    if let Some(value) = value {
-                        match rotation_node {
-                            Some(rotation) if dof > 3 => {
-                                let d = dof - 3;
-                                let _ = writeln!(out, "{rotation}, {d}, {d}, {}", number(value));
-                            }
-                            _ => {
-                                let _ = writeln!(out, "{set}, {dof}, {dof}, {}", number(value));
-                            }
-                        }
-                    }
-                }
+                let rotation = rotation_node.map(|n| n.to_string());
+                displacement_lines(&mut out, &set, rotation.as_deref(), &values, dofs);
             }
             BoundaryKind::Temperature(t) => {
                 let _ = writeln!(out, "{set}, 11, 11, {}", number(t));

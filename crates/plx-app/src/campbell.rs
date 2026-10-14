@@ -1763,7 +1763,7 @@ mod tests {
             active: true,
             visible: true,
             region: plx_model::Region::NodeSet("FIX".into()),
-            kind: plx_model::BoundaryKind::Fixed,
+            kind: plx_model::BoundaryKind::Displacement([Some(0.0); 6]),
             amplitude: None,
         };
         let mut spin = plx_model::Step::new_static("Step-1");

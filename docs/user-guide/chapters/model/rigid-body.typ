@@ -4,7 +4,9 @@
 
 A #ui("Rigid Body") constraint makes the nodes of a region move as one rigid body, driven by a
 reference point: a bolt head, a bearing seat or a face a lever acts on. Create it with
-#menu("Interaction", "Create Constraint ...") and choose #ui("Rigid Body").
+#menu("Interaction", "Create Constraint ...") and choose #ui("Rigid Body"). To only hold or move
+a face as a rigid body about its centre, a #ui("Remote Displacement") boundary condition
+(@remote-displacement) needs no reference point.
 
 #screenshot("rigid-body.png", [Rigid body constraint])
 
@@ -30,8 +32,7 @@ Boundary conditions and loads can act on a reference point instead of on nodes: 
 #ui("Reference Point") as the region in their dialogs. The point must drive an active rigid
 body, otherwise the model check (@model-check) reports "Reference point without rigid body".
 
-- A #ui("Fixed") or #ui("Displacement/Rotation") boundary condition on the point holds or moves
-  the whole body; `UR1`, `UR2`, `UR3` turn it about the point.
+- A #ui("Displacement/Rotation") boundary condition on the point holds or moves the whole body; `UR1`, `UR2`, `UR3` turn it about the point.
 - A #ui("Concentrated Force") on the point pulls the whole body with the given force.
 - A #ui("Moment") load (`M1`, `M2`, `M3`, written as `*CLOAD` on the rotational degrees of
   freedom 4 to 6) turns the body about the point. Moments can also act on nodes of beams or

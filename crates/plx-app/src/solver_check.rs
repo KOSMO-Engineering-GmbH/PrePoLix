@@ -489,7 +489,7 @@ pub(crate) fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeMod
         active: true,
         visible: true,
         region: Region::Nodes(nodes_where(mesh, |p| p[0] == 0.0)),
-        kind: BoundaryKind::Fixed,
+        kind: BoundaryKind::Displacement([Some(0.0); 6]),
         amplitude: None,
     });
     step.loads.push(Load {

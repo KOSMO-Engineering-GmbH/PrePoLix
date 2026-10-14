@@ -5,8 +5,8 @@ use plx_mesh::CadEntity;
 use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, DefinedField, DefinedFieldKind,
     DynamicStep, Elastic, EquationSolver, Hardening, Load, Material, ModalDamping,
-    ModalDynamicsStep, NodeTie, Plastic, PlasticPoint, ReferencePoint, RigidBody, Section,
-    SectionKind, SteadyStateDynamicsStep, UserKeyword,
+    ModalDynamicsStep, NodeTie, Plastic, PlasticPoint, ReferencePoint, RemoteDisplacement,
+    RigidBody, Section, SectionKind, SteadyStateDynamicsStep, UserKeyword,
 };
 
 use super::*;
@@ -33,7 +33,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
         active: true,
         visible: true,
         region: Region::NodeSet("FIX".into()),
-        kind: BoundaryKind::Fixed,
+        kind: BoundaryKind::Displacement([Some(0.0); 6]),
         amplitude: None,
     });
     step.loads.push(load);
@@ -444,9 +444,7 @@ fn a_rigid_body_and_its_reference_point_are_written_like_prepomax_does() {
     );
     // Translations on the reference node, rotations on the rotation node.
     assert!(
-        text.contains(
-            "*Boundary\nInternal_Selection-1_RP-1, 1, 1, 0\nInternal_Selection-1_RP-1, 2, 2, 0\n101, 3, 3, 0.01\n"
-        ),
+        text.contains("*Boundary\nInternal_Selection-1_RP-1, 1, 2, 0\n101, 3, 3, 0.01\n"),
         "{text}"
     );
     assert!(text.contains("*Cload\n101, 3, 1000\n"), "{text}");
@@ -511,6 +509,258 @@ fn calculix_turns_the_rigid_tip_by_the_rotation_of_its_reference_point() {
         let u1 = node_value(&frd, "DISP", "U1", id);
         let expected = -angle * (y - 5.0);
         assert!((u1 - expected).abs() < 1e-7, "{u1} != {expected}");
+    }
+}
+
+fn remote(name: &str, values: [Option<f64>; 6]) -> BoundaryCondition {
+    BoundaryCondition {
+        name: name.into(),
+        active: true,
+        visible: true,
+        region: Region::Surface("TIP".into()),
+        kind: BoundaryKind::RemoteDisplacement(RemoteDisplacement::new(values)),
+        amplitude: None,
+    }
+}
+
+/// A remote displacement on the tip face, changed by `edit`.
+fn remote_with(
+    values: [Option<f64>; 6],
+    edit: impl FnOnce(&mut RemoteDisplacement),
+) -> BoundaryCondition {
+    let mut bc = remote("Remote-1", values);
+    if let BoundaryKind::RemoteDisplacement(r) = &mut bc.kind {
+        edit(r);
+    }
+    bc
+}
+
+/// The cantilever without its load, with the boundary condition at the tip.
+fn remote_cantilever(bc: BoundaryCondition) -> (FeMesh, FeModel) {
+    let (mesh, mut model) = cantilever(tip_force());
+    model.steps[0].loads.clear();
+    model.steps[0].boundary_conditions.push(bc);
+    (mesh, model)
+}
+
+/// A system turned by 90 degrees about z: its x axis is the global y axis.
+fn turned_system(model: &mut FeModel) {
+    let mut cs = plx_model::CoordinateSystem::new("Turned");
+    cs.point_x = [0.0, 1.0, 0.0];
+    cs.point_xy = [-1.0, 0.0, 0.0];
+    model.coordinate_systems.push(cs);
+}
+
+/// The weighted mean rotation of the nodes of a deformable remote point about axis k,
+/// J^-1 sum w r x u restricted to axis k when J is diagonal, as the equations define it.
+fn mean_rotation(mesh: &FeMesh, model: &FeModel, frd: &FrdImport, k: usize) -> f64 {
+    let bc = &model.steps[0].boundary_conditions[1];
+    let BoundaryKind::RemoteDisplacement(remote) = &bc.kind else {
+        unreachable!()
+    };
+    let point = remote.resolve(model, mesh, &bc.region).unwrap();
+    let total: f64 = point.weights.iter().sum();
+    let x: Vec<[f64; 3]> = point.nodes.iter().map(|&n| mesh.node(n).unwrap()).collect();
+    let c: [f64; 3] = std::array::from_fn(|i| {
+        (x.iter().zip(&point.weights))
+            .map(|(x, w)| w * x[i])
+            .sum::<f64>()
+            / total
+    });
+    let (a, b) = ((k + 1) % 3, (k + 2) % 3);
+    let (mut moment, mut inertia) = (0.0, 0.0);
+    for ((&node, x), w) in point.nodes.iter().zip(&x).zip(&point.weights) {
+        let u = ["U1", "U2", "U3"].map(|c| node_value(frd, "DISP", c, node));
+        let r: [f64; 3] = std::array::from_fn(|i| x[i] - c[i]);
+        moment += w * (r[a] * u[b] - r[b] * u[a]);
+        inertia += w * (r[a] * r[a] + r[b] * r[b]);
+    }
+    moment / inertia
+}
+
+#[test]
+fn calculix_turns_a_deformable_remote_point_with_the_mean_of_its_face() {
+    let angle = 0.01;
+    let values = [Some(0.0), Some(0.0), Some(0.0), None, None, Some(angle)];
+    let (mesh, model) = remote_cantilever(remote_with(values, |r| {
+        r.behavior = RemoteBehavior::Deformable;
+    }));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Rigid body"), "{text}");
+    assert_eq!(text.matches("*Equation").count(), 6, "{text}");
+    let Some(frd) = run_ccx("remote-deformable", &text) else {
+        return;
+    };
+    let turned = mean_rotation(&mesh, &model, &frd, 2);
+    assert!((turned - angle).abs() < 1e-6 * angle, "{turned} != {angle}");
+}
+
+#[test]
+fn calculix_couples_the_nodes_of_a_coupled_remote_point() {
+    let shift = 0.1;
+    let values = [None, Some(shift), None, None, None, Some(0.5)];
+    let (mesh, model) = remote_cantilever(remote_with(values, |r| {
+        r.behavior = RemoteBehavior::Coupled;
+    }));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // One equation per node in the held direction; the rotation does not count.
+    assert_eq!(text.matches("*Equation").count(), 9, "{text}");
+    assert!(
+        text.contains("** Name: Remote-1\n*Boundary\n100, 2, 2, 0.1\n**"),
+        "{text}"
+    );
+    let Some(frd) = run_ccx("remote-coupled", &text) else {
+        return;
+    };
+    for id in [11, 22, 33, 44, 55, 66, 77, 88, 99] {
+        let u2 = node_value(&frd, "DISP", "U2", id);
+        assert!((u2 - shift).abs() < 1e-6, "{id}: {u2}");
+    }
+}
+
+/// In a coordinate system turned about z, U1 is the global y direction and UR1 a rotation
+/// about the global y axis, for rigid and deformable points alike.
+#[test]
+fn calculix_moves_a_remote_point_in_its_coordinate_system() {
+    let (mesh, mut model) = remote_cantilever(remote_with(
+        [
+            Some(0.1),
+            Some(0.0),
+            Some(0.0),
+            Some(0.0),
+            Some(0.0),
+            Some(0.0),
+        ],
+        |r| r.system = "Turned".into(),
+    ));
+    turned_system(&mut model);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Transform, Nset=Internal_Selection-1_Remote-1_Point, Type=R\n"),
+        "{text}"
+    );
+    let Some(frd) = run_ccx("remote-system", &text) else {
+        return;
+    };
+    for id in [11, 55, 99] {
+        let u = ["U1", "U2", "U3"].map(|c| node_value(&frd, "DISP", c, id));
+        assert!(
+            u[0].abs() < 1e-6 && (u[1] - 0.1).abs() < 1e-6 && u[2].abs() < 1e-6,
+            "{u:?}"
+        );
+    }
+    let angle = 0.01;
+    let bc = &mut model.steps[0].boundary_conditions[1];
+    if let BoundaryKind::RemoteDisplacement(r) = &mut bc.kind {
+        r.behavior = RemoteBehavior::Deformable;
+        r.values = [
+            Some(0.0),
+            Some(0.0),
+            Some(0.0),
+            Some(angle),
+            Some(0.0),
+            Some(0.0),
+        ];
+    }
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let Some(frd) = run_ccx("remote-system-deformable", &text) else {
+        return;
+    };
+    let turned = mean_rotation(&mesh, &model, &frd, 1);
+    assert!((turned - angle).abs() < 1e-6 * angle, "{turned} != {angle}");
+}
+
+/// A point at the lower edge of the tip face: the pinball region takes the four nodes
+/// within 6 of it, three on the edge and the middle node of the face.
+#[test]
+fn a_remote_point_takes_its_location_and_pinball_region() {
+    let (mesh, model) = remote_cantilever(remote_with([Some(0.0); 6], |r| {
+        r.location = Some([100.0, 5.0, 0.0]);
+        r.pinball = Some(6.0);
+    }));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("100, 1.00000000E2, 5.00000000E0, 0.00000000E0\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("*Nset, Nset=Internal_Selection-1_Remote-1\n11, 22, 33, 55\n"),
+        "{text}"
+    );
+    // A pinball region without nodes cannot be written.
+    let (mesh, model) = remote_cantilever(remote_with([Some(0.0); 6], |r| {
+        r.location = Some([0.0; 3]);
+        r.pinball = Some(1.0);
+    }));
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidBoundary { .. })
+    ));
+}
+
+#[test]
+fn a_remote_displacement_drives_its_region_from_a_point_at_its_centre() {
+    let (mesh, mut model) = cantilever(tip_force());
+    model.steps[0].loads.clear();
+    let values = [Some(0.0), Some(0.0), None, None, None, Some(0.01)];
+    (model.steps[0].boundary_conditions).push(remote("Remote-1", values));
+    // A second step on the same region shares the point and its rigid body.
+    let mut second = model.steps[0].clone();
+    second.name = "Step-2".into();
+    second.boundary_conditions[1].name = "Remote-2".into();
+    model.steps.push(second);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // Reference and rotation node at the centre of the tip face.
+    assert!(
+        text.contains(
+            "100, 1.00000000E2, 5.00000000E0, 5.00000000E0
+101, 1.00000000E2, 5.00000000E0, 5.00000000E0
+"
+        ),
+        "{text}"
+    );
+    assert_eq!(text.matches("*Rigid body").count(), 1, "{text}");
+    assert!(
+        text.contains(
+            "** Name: Remote-1: Remote point\n*Rigid body, Nset=Internal-1_TIP, Ref node=100, Rot node=101\n"
+        ),
+        "{text}"
+    );
+    for name in ["Remote-1", "Remote-2"] {
+        let expected = format!("** Name: {name}\n*Boundary\n100, 1, 2, 0\n101, 3, 3, 0.01\n");
+        assert!(text.contains(&expected), "{expected}\n{text}");
+    }
+    // Without nodes there is no centre.
+    model.steps[0].boundary_conditions[1].region = Region::Nodes(Vec::new());
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidBoundary { .. })
+    ));
+}
+
+/// The region of a remote displacement moves rigidly with its point: turned about the
+/// centre of the tip face and shifted along y.
+#[test]
+fn calculix_moves_the_region_of_a_remote_displacement_rigidly() {
+    let (angle, shift) = (0.01, 0.1);
+    let (mesh, mut model) = cantilever(tip_force());
+    model.steps[0].loads.clear();
+    let values = [None, Some(shift), None, None, None, Some(angle)];
+    (model.steps[0].boundary_conditions).push(remote("Remote-1", values));
+    let Some(frd) = run_ccx("remote", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let tip: Vec<_> = (1..=99)
+        .filter(|&id| mesh.node(id).is_some_and(|c| c[0] == 100.0))
+        .collect();
+    assert_eq!(tip.len(), 9);
+    for id in tip {
+        let y = mesh.node(id).unwrap()[1];
+        let u1 = node_value(&frd, "DISP", "U1", id);
+        let u2 = node_value(&frd, "DISP", "U2", id);
+        let expected = -angle * (y - 5.0);
+        assert!((u1 - expected).abs() < 1e-7, "{u1} != {expected}");
+        assert!((u2 - shift).abs() < 1e-7, "{u2} != {shift}");
     }
 }
 
@@ -643,7 +893,7 @@ fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
         active: true,
         visible: true,
         region: Region::Surface("TIP".into()),
-        kind: BoundaryKind::Fixed,
+        kind: BoundaryKind::Displacement([Some(0.0); 6]),
         amplitude: None,
     });
     (mesh, model)
@@ -2088,7 +2338,7 @@ fn two_d_models_write_their_element_types_thickness_and_dofs() {
         LoadKind::ConcentratedForce([1.0, 2.0, 3.0]),
         Region::Nodes(vec![5]),
     );
-    model.steps[0].boundary_conditions[0].kind = BoundaryKind::Fixed;
+    model.steps[0].boundary_conditions[0].kind = BoundaryKind::Displacement([Some(0.0); 6]);
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
         "*Element, Type=CPS8, Elset=PLATE\n",
@@ -2298,7 +2548,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         active: true,
         visible: true,
         region: Region::Nodes(bottom),
-        kind: BoundaryKind::Fixed,
+        kind: BoundaryKind::Displacement([Some(0.0); 6]),
         amplitude: None,
     });
     step.loads.push(Load {
@@ -2743,7 +2993,7 @@ fn blocks_model(
         active: true,
         visible: true,
         region: Region::Faces(blocks.a_bottom.clone()),
-        kind: BoundaryKind::Fixed,
+        kind: BoundaryKind::Displacement([Some(0.0); 6]),
         amplitude: None,
     });
     step.loads.push(Load {
@@ -2942,7 +3192,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
         active: true,
         visible: true,
         region: Region::Nodes(vec![1]),
-        kind: BoundaryKind::Fixed,
+        kind: BoundaryKind::Displacement([Some(0.0); 6]),
         amplitude: None,
     });
     step.loads.push(Load {
@@ -3532,7 +3782,7 @@ fn writes_heat_transfer_keywords() {
                 active: true,
                 visible: true,
                 region: Region::NodeSet("FIX".into()),
-                kind: BoundaryKind::Fixed,
+                kind: BoundaryKind::Displacement([Some(0.0); 6]),
                 amplitude: None,
             },
         ],
@@ -4068,8 +4318,6 @@ fn writes_amplitudes_and_their_references() {
     model.amplitudes.push(ramp);
     model.amplitudes.push(amplitude("Half", vec![[0.0, 0.5]]));
     let step = &mut model.steps[0];
-    // Fixed supports stay zero; the amplitude is left out.
-    step.boundary_conditions[0].amplitude = Some("Half".into());
     step.boundary_conditions.push(BoundaryCondition {
         name: "Displacement-1".into(),
         active: true,
@@ -5707,8 +5955,11 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
         kind,
         amplitude: None,
     };
-    step.boundary_conditions
-        .push(bc("Fixed-1", (101..=103).collect(), BoundaryKind::Fixed));
+    step.boundary_conditions.push(bc(
+        "Fixed-1",
+        (101..=103).collect(),
+        BoundaryKind::Displacement([Some(0.0); 6]),
+    ));
     // A membrane holds the block in its plane only.
     let sideways = BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, None]);
     step.boundary_conditions
@@ -5852,7 +6103,7 @@ fn calculix_bends_a_rectangle_of_a_mesh_block_held_and_loaded_on_its_edges() {
         active: true,
         visible: true,
         region: Region::NodeSet("X-".into()),
-        kind: BoundaryKind::Fixed,
+        kind: BoundaryKind::Displacement([Some(0.0); 6]),
         amplitude: None,
     });
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -6085,4 +6336,128 @@ fn calculix_solves_a_continuation_with_the_keywords_of_its_own_step() {
         "{dat}"
     );
     assert!(dat.contains("total internal energy for set EALL"), "{dat}");
+}
+
+/// The point of a remote displacement in a plane model turns about z: the right end of a
+/// strip held at its left end turns about its centre.
+#[test]
+fn calculix_turns_the_remote_point_of_a_plane_model() {
+    let angle = 0.01;
+    let mesh = rectangle(0.0, 10.0, 2.0, 5, 2);
+    let mut model = plane_model(
+        ModelSpace::PlaneStress,
+        1.0,
+        vec![(nodes_at(&mesh, 0, 0.0), [Some(0.0); 6])],
+        LoadKind::ConcentratedForce([0.0, 0.0, 0.0]),
+        Region::Nodes(vec![1]),
+    );
+    model.steps[0].loads.clear();
+    let values = [
+        Some(0.0),
+        Some(0.0),
+        Some(1.0),
+        Some(1.0),
+        Some(1.0),
+        Some(angle),
+    ];
+    let mut bc = remote("Remote-1", values);
+    bc.region = Region::Nodes(nodes_at(&mesh, 0, 10.0));
+    model.steps[0].boundary_conditions.push(bc);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // U3, UR1 and UR2 do not exist in a plane model.
+    assert!(
+        text.contains("** Name: Remote-1\n*Boundary\n56, 1, 2, 0\n57, 3, 3, 0.01\n**"),
+        "{text}"
+    );
+    let Some(frd) = run_ccx("remote-2d", &text) else {
+        return;
+    };
+    for node in nodes_at(&mesh, 0, 10.0) {
+        let y = mesh.node(node).unwrap()[1];
+        let u1 = node_value(&frd, "DISP", "U1", node);
+        let u2 = node_value(&frd, "DISP", "U2", node);
+        let expected = -angle * (y - 1.0);
+        assert!((u1 - expected).abs() < 1e-7, "{u1} != {expected}");
+        assert!(u2.abs() < 1e-7, "{u2}");
+    }
+}
+
+/// A deformable point of a plane model turns the end of the strip by the mean of its nodes.
+#[test]
+fn calculix_turns_a_deformable_remote_point_of_a_plane_model() {
+    let angle = 0.01;
+    let mesh = rectangle(0.0, 10.0, 2.0, 5, 2);
+    let mut model = plane_model(
+        ModelSpace::PlaneStress,
+        1.0,
+        vec![(nodes_at(&mesh, 0, 0.0), [Some(0.0); 6])],
+        LoadKind::ConcentratedForce([0.0, 0.0, 0.0]),
+        Region::Nodes(vec![1]),
+    );
+    model.steps[0].loads.clear();
+    let mut remote = RemoteDisplacement::new([Some(0.0), Some(0.0), None, None, None, Some(angle)]);
+    remote.behavior = RemoteBehavior::Deformable;
+    let mut bc = self::remote("Remote-1", [None; 6]);
+    bc.kind = BoundaryKind::RemoteDisplacement(remote);
+    bc.region = Region::Nodes(nodes_at(&mesh, 0, 10.0));
+    model.steps[0].boundary_conditions.push(bc);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Rigid body"), "{text}");
+    let Some(frd) = run_ccx("remote-2d-deformable", &text) else {
+        return;
+    };
+    let nodes = nodes_at(&mesh, 0, 10.0);
+    let (mut moment, mut inertia) = (0.0, 0.0);
+    for &node in &nodes {
+        let y = mesh.node(node).unwrap()[1] - 1.0;
+        moment -= y * node_value(&frd, "DISP", "U1", node);
+        inertia += y * y;
+    }
+    let turned = moment / inertia;
+    assert!((turned - angle).abs() < 1e-5 * angle, "{turned} != {angle}");
+}
+
+/// Every behavior runs on the midside nodes of a quadratic mesh; the deformable point turns
+/// by the mean rotation of the end face.
+#[test]
+fn calculix_drives_a_quadratic_end_face_with_every_behavior() {
+    let angle = 0.01;
+    for behavior in RemoteBehavior::ALL {
+        let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
+        model.steps[0].loads.clear();
+        let mut bc = remote_with(
+            [Some(0.0), Some(0.0), Some(0.01), None, None, Some(angle)],
+            |r| r.behavior = behavior,
+        );
+        bc.region = Region::NodeSet("TIP".into());
+        model.steps[0].boundary_conditions.push(bc);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        let Some(frd) = run_ccx(&format!("remote-c3d20r-{}", behavior.label()), &text) else {
+            return;
+        };
+        // The shift along z: of every node, or of their weighted mean when deformable.
+        let bc = &model.steps[0].boundary_conditions[1];
+        let BoundaryKind::RemoteDisplacement(remote) = &bc.kind else {
+            unreachable!()
+        };
+        let point = remote.resolve(&model, &mesh, &bc.region).unwrap();
+        let u3: Vec<f64> = (point.nodes.iter())
+            .map(|&n| node_value(&frd, "DISP", "U3", n))
+            .collect();
+        let total: f64 = point.weights.iter().sum();
+        let mean = u3
+            .iter()
+            .zip(&point.weights)
+            .map(|(u, w)| u * w)
+            .sum::<f64>()
+            / total;
+        assert!((mean - 0.01).abs() < 1e-6, "{}: {mean}", behavior.label());
+        if behavior != RemoteBehavior::Deformable {
+            assert!(u3.iter().all(|u| (u - 0.01).abs() < 1e-6), "{u3:?}");
+        }
+        if behavior == RemoteBehavior::Deformable {
+            let turned = mean_rotation(&mesh, &model, &frd, 2);
+            assert!((turned - angle).abs() < 1e-5 * angle, "{turned} != {angle}");
+        }
+    }
 }

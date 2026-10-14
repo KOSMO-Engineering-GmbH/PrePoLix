@@ -27,6 +27,7 @@ mod parameter;
 mod primitive;
 mod properties;
 mod region;
+mod remote;
 mod section;
 mod symmetry;
 pub mod units;
@@ -62,6 +63,7 @@ pub use parameter::{Parameter, ValueKind};
 pub use primitive::{MAX_PRIMITIVE_ELEMENTS, MeshPrimitive, Param, ParamSlot, ParamValue};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
+pub use remote::{RemoteBehavior, RemoteDisplacement, RemoteDof, RemotePoint};
 pub use section::{
     BeamOrientation, BeamProfile, BeamSection, Section, SectionKind, line_tangent, membrane_type,
     unit_thickness,
@@ -82,7 +84,9 @@ use serde::{Deserialize, Serialize};
 /// another one. Format 5 holds blocks of several kinds, the analyses among them, in place of
 /// the analyses alone. Format 6 lets the results of a step go to an input of a step of the
 /// setup (`["Setup", "Steps", step, "Temperatures"]`) in place of a step of the results.
-pub const PROJECT_FORMAT: u32 = 6;
+/// Format 7 drops the fixed boundary condition, a displacement holding all degrees of freedom
+/// at zero takes its place.
+pub const PROJECT_FORMAT: u32 = 7;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1434,12 +1438,15 @@ pub struct BoundaryCondition {
     pub amplitude: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BoundaryKind {
-    /// All degrees of freedom held at zero.
-    Fixed,
     /// Prescribed displacements (U1..U3) and rotations (UR1..UR3); `None` leaves one free.
     Displacement([Option<f64>; 6]),
+    /// Prescribed displacements and rotations of a point at the centre of the region or
+    /// elsewhere, which the region follows rigidly, as a mean or node by node (Ansys' remote
+    /// displacement). The point and its coupling exist only in the input file (`*RIGID BODY`
+    /// or `*EQUATION`).
+    RemoteDisplacement(RemoteDisplacement),
     /// Prescribed temperature (degree of freedom 11), PrePoMax's `TemperatureBC`.
     Temperature(f64),
     /// Displacements (U1..U3) and rotations (UR1..UR3) taken from the results of the global
@@ -1460,11 +1467,11 @@ pub enum BoundaryKind {
 }
 
 impl BoundaryKind {
-    /// Whether an amplitude can scale the boundary condition; fixed supports stay zero.
+    /// Whether an amplitude can scale the boundary condition; symmetry supports stay zero.
     pub fn takes_amplitude(&self) -> bool {
         !matches!(
             self,
-            BoundaryKind::Fixed | BoundaryKind::Submodel { .. } | BoundaryKind::Symmetry { .. }
+            BoundaryKind::Submodel { .. } | BoundaryKind::Symmetry { .. }
         )
     }
 
@@ -1759,7 +1766,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::ElementSet("A".into()),
-            kind: BoundaryKind::Fixed,
+            kind: BoundaryKind::Displacement([Some(0.0); 6]),
             amplitude: None,
         });
         step.loads.push(Load {

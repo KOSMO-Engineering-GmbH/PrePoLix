@@ -7,12 +7,16 @@ or with #menu("Model", "Create Boundary Condition ...") for the last step. The d
 the types the step accepts. In the 3D view, supports are drawn as cones (translations) and
 plates (rotations).
 
-#screenshot("boundary-condition.png", [Fixed support on a face])
+#screenshot("boundary-condition.png", [Support holding a face in all directions])
 
 #fields(
-  [Fixed], [All degrees of freedom held at zero. In 2D only the two translations are fixed.],
   [Displacement/Rotation], [Prescribed values for the ticked components `U1`, `U2`, `U3`
-    (length) and `UR1`, `UR2`, `UR3` (angle in radians). Unticked components are free.],
+    (length) and `UR1`, `UR2`, `UR3` (angle in radians). Unticked components are free. A new
+    one holds all components at zero, a fixed support; in 2D only `U1` and `U2` are shown.
+    Rotations act on nodes of beams and shells only; solid nodes have none, so zero rotations
+    there change nothing.],
+  [Remote Displacement], [Moves the selection with a point at its centre or elsewhere, rigidly or
+    as a mean (@remote-displacement).],
   [Temperature], [Prescribed temperature (heat transfer, coupled and uncoupled steps).],
   [Submodel], [Displacements taken from the global model (static steps of a submodel,
     @submodel). #ui("Global step") selects the step of the global results, the check boxes the
@@ -22,6 +26,62 @@ plates (rotations).
 
 The region is a selection of faces, edges or nodes, a node set or a surface. Displacement and
 temperature boundary conditions can follow an #ui("Amplitude") (@amplitudes).
+
+=== Remote displacement <remote-displacement>
+
+A #ui("Remote Displacement") prescribes the displacements `U1` to `U3` and rotations `UR1` to
+`UR3` of a point, and the selection follows the point: a shaft end turned by an angle, or a bolt
+hole held in place while the part turns about it. Unticked components of the point are free. A
+new one holds all components at zero, which clamps the selection rigidly in place.
+
+#screenshot("remote-displacement.png", [Deformable remote displacement on the bore of a plate,
+  held in place but free to turn about z like on a pin])
+
+#fields(
+  [Behavior], [How the selection follows the point, see below. #ui("Rigid") by default.],
+  [Coordinate system], [The directions of the components and of the coordinates below:
+    #ui("Global") or a coordinate system under #ui("Features") (@features). In a cylindrical
+    system `U1` is radial, `U2` tangential and `U3` axial, taken at the point, and the
+    coordinates are R, Theta in degrees and Z.],
+  [Location], [#ui("Centroid") puts the point at the area-weighted centre of the selected faces
+    (of the edges in 2D, the mean of the nodes when no faces are selected).
+    #ui("Coordinates") puts it anywhere, given in the coordinate system; switching starts from
+    the centroid. #ui("Point") shows where the point is, in global coordinates.],
+  [Pinball region], [When ticked, only the selected nodes within this distance of the point
+    follow it. Ticking it starts with the distance of the farthest node.],
+)
+
+The three behaviors match those of Ansys:
+
+- #ui("Rigid"): the selection keeps its shape and moves with the point as a rigid body. This
+  stiffens the selection, like a pin glued into the bore.
+- #ui("Deformable"): the point moves with the area-weighted mean of the selection, and the
+  selection may deform. Its mean displacement equals that of the point and its mean rotation
+  about the point that of the point, so a bore can ovalize while it is held. This is the
+  distributing coupling (RBE3) of other programs.
+- #ui("Coupled"): every node of the selection shifts like the point in the ticked directions
+  and is free in the others. The point has no rotations here, so `UR1` to `UR3` are not shown.
+
+You define no reference point, rigid body or equation for it. When the input file is written,
+PrePoLix adds a reference node and a rotation node at the point. #ui("Rigid") writes a
+`*RIGID BODY` on the selection; #ui("Deformable") and #ui("Coupled") write `*EQUATION`s
+between the nodes and the point. The values go on these two nodes, with a `*TRANSFORM` when a
+coordinate system is chosen. The point is computed on the current mesh, so a selection of
+geometry faces keeps working after remeshing. In the 3D view the supports are drawn at the point
+with lines to the selection.
+
+- In plane stress and plane strain models the point has `U1`, `U2` and `UR3` (rotation about
+  z); in axisymmetric models `U1` and `U2`.
+- Remote displacements of several steps on the same selection with the same behavior,
+  coordinate system, location and pinball region share one point. The rigid body or the
+  equations belong to the whole model, so they still act in steps without the boundary
+  condition.
+- A node can belong to only one rigid body or remote point: do not let the selection overlap
+  that of another remote displacement or a rigid body constraint (@rigid-body). The model check
+  (@model-check) reports "Nodes in several rigid bodies or remote points" otherwise.
+- Ansys features that CalculiX cannot carry over are left out: the #ui("Beam") behavior, the
+  augmented Lagrange formulation (PrePoLix always writes exact constraints) and tabular values
+  per component (one amplitude acts on all components).
 
 === Motion preview <motion-preview>
 
