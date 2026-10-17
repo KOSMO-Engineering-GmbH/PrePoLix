@@ -1056,6 +1056,10 @@ pub struct ProjectApp {
     picker: Option<NodePicker>,
     /// Show All Blocks was asked for: the view fits the blocks in the next frame.
     show_all: bool,
+    /// Where the pins of the schematic were drawn on the screen in the last frame.
+    pin_rects: Vec<(PinKey, egui::Rect)>,
+    /// The pin a wire is being dragged from in the schematic.
+    dragging: Option<PinKey>,
     /// The properties of a new analysis being asked for, with where its block goes.
     new_analysis: Option<(egui::Pos2, ModelPropertiesDialog)>,
     /// A project file being read on a worker thread, with notes on its conversion.
@@ -1135,6 +1139,8 @@ impl ProjectApp {
             update_after_sync: false,
             picker: None,
             show_all: false,
+            pin_rects: Vec::new(),
+            dragging: None,
             new_analysis: None,
             opening: None,
             update_queue: VecDeque::new(),
@@ -2131,31 +2137,7 @@ impl ProjectApp {
 
     /// The label of the parameter row `slot`, `["Parameters", key]`, of a block.
     fn parameter_label(&self, id: u64, slot: &[String]) -> String {
-        let key = slot.get(1).map_or("", String::as_str);
-        if key == REFINEMENT {
-            return "Refine".into();
-        }
-        (self.nodes.iter().find(|n| n.id == id))
-            .and_then(Node::as_mesh)
-            .and_then(|m| m.primitive.params().iter().find(|param| param.key == key))
-            .map_or_else(|| key.to_owned(), |param| param.label.to_owned())
-    }
-
-    /// What kind of number a block gives at `item` or takes at `slot`.
-    fn value_kind(&self, id: u64, path: &[String]) -> Option<ValueKind> {
-        let node = self.nodes.iter().find(|n| n.id == id)?;
-        match path {
-            [cell, name] if cell == links::VALUE => (node.as_parameters()?.parameters.iter())
-                .find(|p| &p.name == name)
-                .map(|p| p.kind),
-            [cell, _] if cell == links::LOOP => Some(node.as_optimizer()?.kind.value_kind()),
-            [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => {
-                Some(ValueKind::Factor)
-            }
-            [cell, key] if cell == links::PARAMETERS => node.as_mesh()?.primitive.value_kind(key),
-
-            _ => None,
-        }
+        parameter_label(&self.nodes, id, slot)
     }
 
     /// Adds a mesh export block with no file yet; returns its id.
@@ -3739,7 +3721,10 @@ impl ProjectApp {
             })
             .collect();
         self.sync_wires(&blocks);
+        let verdicts = self.drag_verdicts(ui.ctx(), &blocks);
         let mut viewer = Viewer {
+            drag: self.dragging.clone(),
+            verdicts,
             nodes: blocks,
             actions: Vec::new(),
             to_global: Default::default(),
@@ -3756,6 +3741,11 @@ impl ProjectApp {
             .show(&mut self.graph, &mut viewer, ui);
         let clip = viewer.to_global.inverse() * ui.clip_rect();
         draw_feedback(ui.ctx(), &viewer.feedback, viewer.bottom, clip);
+        self.pin_rects = ui.ctx().data_mut(|d| {
+            d.remove_temp::<Vec<(PinKey, egui::Rect)>>(egui::Id::new(PIN_RECTS))
+                .unwrap_or_default()
+        });
+        self.show_refusal(ui, &viewer.verdicts);
         // A double-click into empty space shows the blocks to add there, as in Blender.
         // The response lies on the zoomed and panned layer of the schematic, so its pointer
         // position is in the schematic; the picker needs the one on the screen.
@@ -3793,6 +3783,91 @@ impl ProjectApp {
             );
         }
         viewer.actions
+    }
+
+    /// Finds the pin a wire is dragged from, by where the drag started, and for each pin of the
+    /// other side why the wire cannot end there; empty while no wire is dragged.
+    fn drag_verdicts(
+        &mut self,
+        ctx: &egui::Context,
+        blocks: &[BlockView],
+    ) -> HashMap<PinKey, Option<String>> {
+        let (down, origin, dragging) = ctx.input(|i| {
+            let p = &i.pointer;
+            (
+                p.primary_down(),
+                p.press_origin(),
+                p.is_decidedly_dragging(),
+            )
+        });
+        if !down {
+            self.dragging = None;
+        } else if self.dragging.is_none()
+            && dragging
+            && let Some(origin) = origin
+        {
+            self.dragging = (self.pin_rects.iter())
+                .find(|(_, rect)| rect.expand(2.0).contains(origin))
+                .map(|(key, _)| key.clone());
+        }
+        let Some(drag) = &self.dragging else {
+            return HashMap::new();
+        };
+        let mut verdicts = HashMap::new();
+        for block in blocks {
+            for row in &block.rows {
+                let other = if drag.output { row.input } else { row.output };
+                if !other {
+                    continue;
+                }
+                let key = PinKey {
+                    id: block.id,
+                    path: row.path.clone(),
+                    output: !drag.output,
+                };
+                let why = if drag.output {
+                    refusal(
+                        &self.nodes,
+                        &self.links,
+                        drag.id,
+                        &drag.path,
+                        block.id,
+                        &row.path,
+                    )
+                } else {
+                    refusal(
+                        &self.nodes,
+                        &self.links,
+                        block.id,
+                        &row.path,
+                        drag.id,
+                        &drag.path,
+                    )
+                };
+                verdicts.insert(key, why);
+            }
+        }
+        verdicts
+    }
+
+    /// Says why the wire being dragged cannot end at the pin under the pointer.
+    fn show_refusal(&self, ui: &egui::Ui, verdicts: &HashMap<PinKey, Option<String>>) {
+        let Some(pointer) = ui.ctx().pointer_hover_pos() else {
+            return;
+        };
+        let refused = (self.pin_rects.iter())
+            .filter(|(_, rect)| rect.expand(2.0).contains(pointer))
+            .find_map(|(key, _)| verdicts.get(key).cloned().flatten());
+        if let Some(why) = refused {
+            let id = egui::Id::new("schematic link refusal");
+            egui::Tooltip::always_open(
+                ui.ctx().clone(),
+                ui.layer_id(),
+                id,
+                egui::PopupAnchor::Pointer,
+            )
+            .show(|ui| ui.label(format!("Cannot link: {why}")));
+        }
     }
 
     /// Lets the wires of the schematic show the project's links, each between the rows its
@@ -3853,34 +3928,11 @@ impl ProjectApp {
         if source == target {
             return;
         }
-        if !links::compatible(&item, &slot) {
-            self.output.push(format!(
-                "Not linked: {} of {from} cannot go to {} of {to}.",
-                links::label(&item),
-                links::label(&slot)
-            ));
-            return;
-        }
-        // Only analyses and mesh blocks have a model space.
-        let space = |id: u64| (self.nodes.iter().find(|n| n.id == id)).and_then(Node::space);
-        if let (Some(a), Some(b)) = (space(source), space(target))
-            && a != b
-        {
-            self.output.push(format!(
-                "Not linked: {from} is {} and {to} {}; linked analyses need the same model \
-                 space.",
-                a.label(),
-                b.label()
-            ));
+        if let Some(why) = refusal(&self.nodes, &self.links, source, &item, target, &slot) {
+            self.output.push(format!("Not linked: {why}"));
             return;
         }
         let feedback = item.first().is_some_and(|c| c == links::LOOP);
-        if !feedback && links::makes_cycle(&self.links, source, target) {
-            self.output.push(format!(
-                "Not linked: {to} comes before {from} already, and a link cannot go back."
-            ));
-            return;
-        }
         if slot.first().is_some_and(|c| c == links::MEASURE) {
             self.link_measure(source, item, target);
             return;
@@ -3889,47 +3941,12 @@ impl ProjectApp {
             self.link_campbell(source, item, target);
             return;
         }
-        let state = slot.first().is_some_and(|c| c == links::STATE);
-        if let Some(chain) = (self.links.iter()).find(|l| l.target == target && links::is_state(l))
-            && !state
-        {
-            self.output.push(format!(
-                "Not linked: {to} continues {} and takes its model from there; unlink it first.",
-                self.name_of(chain.source)
-            ));
-            return;
-        }
-        if state {
+        if slot.first().is_some_and(|c| c == links::STATE) {
             self.link_state(source, item, target);
             return;
         }
         let value = item.first().is_some_and(|c| c == links::VALUE) || feedback;
         let objective = slot.first().is_some_and(|c| c == links::OBJECTIVE);
-        if objective {
-            let measure = (self.nodes.iter()).any(|n| n.id == source && n.kind() == Kind::Measure);
-            if !measure {
-                self.output.push(format!(
-                    "Not linked: {to} reads the value of a Measure block, and {from} is none."
-                ));
-                return;
-            }
-        } else if value {
-            let (given, taken) = (
-                self.value_kind(source, &item),
-                self.value_kind(target, &slot),
-            );
-            if given.is_none() || given != taken {
-                let kind = |k: Option<ValueKind>| k.map_or("no number", ValueKind::label);
-                self.output.push(format!(
-                    "Not linked: {} of {from} is a {} and {} of {to} a {}.",
-                    item.get(1).map_or("", String::as_str),
-                    kind(given).to_lowercase(),
-                    self.parameter_label(target, &slot),
-                    kind(taken).to_lowercase()
-                ));
-                return;
-            }
-        }
         let results = item.first().is_some_and(|c| c == links::RESULTS);
         // A category or item links into the same place of the target; a step's results go
         // to the step they are dropped on.
@@ -5971,6 +5988,156 @@ fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     rows
 }
 
+/// Why `item` of the block `source` cannot go to `slot` of the block `target`; `None`
+/// when the link may be made. The type of the two pins comes first, then the model space
+/// of what they carry, then what the blocks and the links between them allow.
+fn refusal(
+    nodes: &[Node],
+    existing: &[Link],
+    source: u64,
+    item: &[String],
+    target: u64,
+    slot: &[String],
+) -> Option<String> {
+    let node = |id: u64| nodes.iter().find(|n| n.id == id);
+    let name = |id: u64| node(id).map_or_else(String::new, |n| n.name.clone());
+    let (from, to) = (name(source), name(target));
+    let (Some(source_node), Some(target_node)) = (node(source), node(target)) else {
+        return Some(format!("{from} or {to} is gone."));
+    };
+    if source == target {
+        return Some(format!("{from} cannot take data from itself."));
+    }
+    if !links::compatible(item, slot) {
+        let kind = |path: &[String]| links::DataType::of(path).map_or("nothing", |t| t.label());
+        return Some(format!(
+            "{} of {from} is {} and {} of {to} takes {}.",
+            links::label(item),
+            with_article(kind(item)),
+            links::label(slot),
+            with_article(kind(slot)),
+        ));
+    }
+    // Data of a model goes only between blocks of the same model space; materials and
+    // the other blocks without one take it from any.
+    if links::DataType::of(item).is_some_and(links::DataType::has_space)
+        && let (Some(a), Some(b)) = (source_node.space(), target_node.space())
+        && a != b
+    {
+        return Some(format!(
+            "{from} is {} and {to} is {}: linked blocks need the same model space.",
+            a.label(),
+            b.label()
+        ));
+    }
+    let feedback = item.first().is_some_and(|c| c == links::LOOP);
+    if !feedback && links::makes_cycle(existing, source, target) {
+        return Some(format!(
+            "{to} comes before {from} already, and a link cannot go back."
+        ));
+    }
+    let first = slot.first().map(String::as_str);
+    if first == Some(links::MEASURE) {
+        return None;
+    }
+    if first == Some(links::ANALYSIS) {
+        return (source_node.kind() != Kind::Analysis || target_node.kind() != Kind::Campbell)
+            .then(|| format!("{to} sweeps an analysis, and {from} is none."));
+    }
+    if first != Some(links::STATE)
+        && let Some(chain) = existing
+            .iter()
+            .find(|l| l.target == target && links::is_state(l))
+    {
+        return Some(format!(
+            "{to} continues {} and takes its model from there; unlink it first.",
+            name(chain.source)
+        ));
+    }
+    if first == Some(links::OBJECTIVE) {
+        return (source_node.kind() != Kind::Measure)
+            .then(|| format!("{to} reads the value of a Measure block, and {from} is none."));
+    }
+    if item.first().is_some_and(|c| c == links::VALUE) || feedback {
+        let (given, taken) = (
+            value_kind(nodes, source, item),
+            value_kind(nodes, target, slot),
+        );
+        if given.is_none() || given != taken {
+            let kind = |k: Option<ValueKind>| k.map_or("no number", ValueKind::label);
+            return Some(format!(
+                "{} of {from} is a {} and {} of {to} a {}.",
+                item.get(1).map_or("", String::as_str),
+                kind(given).to_lowercase(),
+                parameter_label(nodes, target, slot),
+                kind(taken).to_lowercase()
+            ));
+        }
+    }
+    if item.first().is_some_and(|c| c == links::RESULTS) && first != Some(links::STATE) {
+        // What the results are used for follows from the steps at both ends.
+        let (Some(source_data), Some(target_data)) =
+            (source_node.link_data(), target_node.link_data())
+        else {
+            return Some(format!("{from} or {to} is still loading."));
+        };
+        let step =
+            (item.get(1)).and_then(|n| source_data.fe.steps.iter().find(|s| &s.name == n))?;
+        if let Err(why) = links::results_slot(step, target_data.fe, slot) {
+            return Some(format!(
+                "{} of {from} cannot go to {} of {to}: {why}.",
+                links::label(item),
+                links::label(slot)
+            ));
+        }
+    }
+    None
+}
+
+/// The label of the parameter row `slot`, `["Parameters", key]`, of a block.
+fn parameter_label(nodes: &[Node], id: u64, slot: &[String]) -> String {
+    let key = slot.get(1).map_or("", String::as_str);
+    if key == REFINEMENT {
+        return "Refine".into();
+    }
+    (nodes.iter().find(|n| n.id == id))
+        .and_then(Node::as_mesh)
+        .and_then(|m| m.primitive.params().iter().find(|param| param.key == key))
+        .map_or_else(|| key.to_owned(), |param| param.label.to_owned())
+}
+
+/// What kind of number a block gives at `item` or takes at `slot`.
+fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
+    let node = nodes.iter().find(|n| n.id == id)?;
+    match path {
+        [cell, name] if cell == links::VALUE => (node.as_parameters()?.parameters.iter())
+            .find(|p| &p.name == name)
+            .map(|p| p.kind),
+        [cell, _] if cell == links::LOOP => Some(node.as_optimizer()?.kind.value_kind()),
+        [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => Some(ValueKind::Factor),
+        [cell, key] if cell == links::PARAMETERS => node.as_mesh()?.primitive.value_kind(key),
+
+        _ => None,
+    }
+}
+
+/// `word` with a capital first letter.
+fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
+}
+
+/// `word` with its indefinite article: "a mesh", "an analysis"; "nothing" stays as it is.
+fn with_article(word: &str) -> String {
+    match word.chars().next() {
+        _ if word == "nothing" => word.to_owned(),
+        Some('a' | 'e' | 'i' | 'o' | 'u') => format!("an {word}"),
+        _ => format!("a {word}"),
+    }
+}
+
 /// The file a relative export path names: next to the project file, or in the working folder
 /// while the project has none.
 fn export_file(path: &str, base: Option<&Path>) -> PathBuf {
@@ -6549,11 +6716,31 @@ struct Viewer {
     feedback: Vec<(u64, u64, Vec<String>)>,
     /// The lowest edge of the blocks, which feedback wires go around below.
     bottom: f32,
+    /// The pin a wire is being dragged from.
+    drag: Option<PinKey>,
+    /// Why the wire being dragged cannot end at each pin of the other side; `None` for the
+    /// pins it fits.
+    verdicts: HashMap<PinKey, Option<String>>,
 }
 
 impl Viewer {
     fn block(&self, id: u64) -> Option<&BlockView> {
         self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// `pin` of the row of `path` in the block `id`, marked as fitting the wire being dragged
+    /// or not, and kept where it is drawn.
+    fn typed(&self, mut pin: BlockPin, id: u64, path: &[String], output: bool) -> BlockPin {
+        let key = PinKey {
+            id,
+            path: path.to_vec(),
+            output,
+        };
+        if self.drag.as_ref().is_some_and(|d| d.output != output) {
+            pin.fits = self.verdicts.get(&key).map(Option::is_none);
+        }
+        pin.key = Some(key);
+        pin
     }
 
     /// The analysis and step whose results a wire dropped on empty space comes from.
@@ -6877,9 +7064,10 @@ impl SnarlViewer<u64> for Viewer {
                 .iter()
                 .any(|(_, target, slot)| *target == id && *slot == row.path)
             {
-                return BlockPin::anchored(info, feedback_end(id, &row.path));
+                let pin = BlockPin::anchored(info, feedback_end(id, &row.path));
+                return self.typed(pin, id, &row.path, false);
             }
-            return BlockPin::single(info);
+            return self.typed(BlockPin::single(info), id, &row.path, false);
         }
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::click());
@@ -6949,6 +7137,15 @@ impl SnarlViewer<u64> for Viewer {
         if let Some(source) = &row.linked_from {
             tip.push_str(&format!("\nLinked from {source}."));
         }
+        if let Some(data) = links::DataType::of(&row.path)
+            && (row.input || row.output)
+        {
+            // The type of the pin, and the model space of what it carries where it has one.
+            let space = (self.block(id))
+                .filter(|b| data.has_space() && matches!(b.kind, Kind::Analysis | Kind::Mesh))
+                .map_or(String::new(), |b| format!(", {}", b.space.label()));
+            tip.push_str(&format!("\nPin: {}{space}.", capitalized(data.label())));
+        }
         if row.input || row.output {
             tip.push_str("\nRight-click a pin to remove its links.");
         }
@@ -6960,7 +7157,8 @@ impl SnarlViewer<u64> for Viewer {
         }
         let color = wire_color(&row.path);
         if row.path.first().is_some_and(|c| c == links::STATE) {
-            BlockPin::single(PinInfo::square().with_fill(color).with_wire_color(color))
+            let pin = BlockPin::single(PinInfo::square().with_fill(color).with_wire_color(color));
+            self.typed(pin, id, &row.path, false)
         } else if row.input {
             // A wire takes the mixed colour of its two pins: a wire from the results of a
             // step is orange on both ends, whichever row takes them.
@@ -6974,12 +7172,12 @@ impl SnarlViewer<u64> for Viewer {
                 color
             };
             let info = PinInfo::circle().with_fill(color).with_wire_color(wire);
-            BlockPin {
-                info,
+            let pin = BlockPin {
                 collection: row.collection,
                 partial: row.partial,
-                anchor: None,
-            }
+                ..BlockPin::single(info)
+            };
+            self.typed(pin, id, &row.path, false)
         } else {
             BlockPin::single(hidden_pin())
         }
@@ -7000,13 +7198,14 @@ impl SnarlViewer<u64> for Viewer {
             Some((id, row)) if row.output && row.path.first().is_some_and(|c| c == links::LOOP) => {
                 let color = wire_color(&row.path);
                 let info = PinInfo::circle().with_fill(color).with_wire_color(color);
-                if pin.remotes.is_empty() {
+                let shown = if pin.remotes.is_empty() {
                     BlockPin::single(info)
                 } else {
                     BlockPin::anchored(info, feedback_start(id))
-                }
+                };
+                self.typed(shown, id, &row.path, true)
             }
-            Some((_, row)) if row.output => {
+            Some((id, row)) if row.output => {
                 let color = wire_color(&row.path);
                 // A wire takes the mixed colour of its two pins, so the results pin of a step
                 // whose wires all go to a State row gives them the green of a state link.
@@ -7017,7 +7216,9 @@ impl SnarlViewer<u64> for Viewer {
                             .is_some_and(|(_, row)| row.path == state)
                     });
                 let wire = if continues { wire_color(&state) } else { color };
-                BlockPin::single(PinInfo::circle().with_fill(color).with_wire_color(wire))
+                let shown =
+                    BlockPin::single(PinInfo::circle().with_fill(color).with_wire_color(wire));
+                self.typed(shown, id, &row.path, true)
             }
             _ => BlockPin::single(hidden_pin()),
         }
@@ -7300,7 +7501,24 @@ struct BlockPin {
     /// Where the pin is drawn is kept under this id, for a wire drawn by the project window:
     /// the dashed feedback of a loop. The wire of the schematic is then not drawn.
     anchor: Option<egui::Id>,
+    /// The block and row of the pin, whose place on the screen is kept for the project window
+    /// to find the pin a wire is dragged from, see [`PIN_RECTS`].
+    key: Option<PinKey>,
+    /// Whether the wire being dragged may end at the pin: drawn with a ring if so, faded if
+    /// not; `None` while no wire is dragged, and for the pin it comes from.
+    fits: Option<bool>,
 }
+
+/// A pin of the schematic: its block, the path of its row and whether it is an output.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PinKey {
+    id: u64,
+    path: Vec<String>,
+    output: bool,
+}
+
+/// Where the pins were drawn on the screen in this pass, see [`BlockPin::key`].
+const PIN_RECTS: &str = "schematic pin rects";
 
 impl BlockPin {
     fn single(info: PinInfo) -> Self {
@@ -7309,6 +7527,8 @@ impl BlockPin {
             collection: false,
             partial: false,
             anchor: None,
+            key: None,
+            fits: None,
         }
     }
 
@@ -7332,6 +7552,41 @@ impl egui_snarl::ui::SnarlPin for BlockPin {
     }
 
     fn draw(
+        mut self,
+        snarl_style: &SnarlStyle,
+        style: &egui::Style,
+        rect: egui::Rect,
+        painter: &egui::Painter,
+    ) -> egui_snarl::ui::PinWireInfo {
+        let ctx = painter.ctx();
+        if let Some(key) = self.key.take() {
+            let to_global = ctx.layer_transform_to_global(painter.layer_id());
+            let screen = to_global.map_or(rect, |t| t * rect);
+            let id = egui::Id::new(PIN_RECTS);
+            ctx.data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<(PinKey, egui::Rect)>>(id)
+                    .push((key, screen))
+            });
+        }
+        match self.fits.take() {
+            Some(false) => {
+                let mut faded = painter.clone();
+                faded.multiply_opacity(0.2);
+                self.draw_shape(snarl_style, style, rect, &faded)
+            }
+            Some(true) => {
+                let ring = egui::Stroke::new(2.0, style.visuals.selection.bg_fill);
+                let radius = rect.width().max(rect.height()) * 0.5 + 3.0;
+                painter.circle_stroke(rect.center(), radius, ring);
+                self.draw_shape(snarl_style, style, rect, painter)
+            }
+            None => self.draw_shape(snarl_style, style, rect, painter),
+        }
+    }
+}
+
+impl BlockPin {
+    fn draw_shape(
         self,
         snarl_style: &SnarlStyle,
         style: &egui::Style,
@@ -8035,6 +8290,68 @@ mod tests {
         assert!(!made);
         assert!(lines[0].contains("no mesh made"), "{lines:?}");
         assert_eq!(stale_meshes(&nodes, &links, 3), ["Box"]);
+    }
+
+    #[test]
+    fn pins_take_only_data_of_their_type_and_model_space() {
+        let path = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let analysis = |id, space| {
+            let mut model = plx_model::FeModel::default();
+            model.properties.space = space;
+            let data = ProjectAnalysis {
+                model,
+                ..Default::default()
+            };
+            Node::analysis(id, format!("Analysis-{id}"), data)
+        };
+        let mesh = |id, space| {
+            let primitive = MeshPrimitive::default_rectangle();
+            let units = plx_model::UnitSystem::default();
+            let mesh = Default::default();
+            Node::mesh_block(id, "Plate".into(), space, units, primitive, mesh, None)
+        };
+        let parameters = Node::new(
+            5,
+            "Parameters".into(),
+            Block::Parameters(ParametersBlock {
+                units: Default::default(),
+                parameters: vec![Parameter::new("Width", ValueKind::Length, 0.1)],
+            }),
+        );
+        let nodes = vec![
+            analysis(1, ModelSpace::ThreeD),
+            analysis(2, ModelSpace::PlaneStress),
+            mesh(3, ModelSpace::PlaneStress),
+            parameters,
+        ];
+        let why = |source, item: &[&str], target, slot: &[&str]| {
+            refusal(&nodes, &[], source, &path(item), target, &path(slot))
+        };
+        // The mesh of a plane stress block goes to the plane stress analysis, not to the 3D one.
+        assert_eq!(why(3, &["Mesh"], 2, &["Mesh"]), None);
+        let space = why(3, &["Mesh"], 1, &["Mesh"]).unwrap();
+        assert!(space.contains("same model space"), "{space}");
+        assert!(why(2, &["Setup"], 1, &["Setup"]).is_some());
+        // A pin of another type refuses it, whatever the model space.
+        let kind = why(3, &["Mesh"], 2, &["Setup"]).unwrap();
+        assert_eq!(
+            kind,
+            "Mesh of Plate is a mesh and Setup of Analysis-2 takes a setup."
+        );
+        // A number has no model space: it goes to a length of the mesh block.
+        let width = path(&["Value", "Width"]);
+        let slot = path(&["Parameters", "lx"]);
+        assert_eq!(refusal(&nodes, &[], 5, &width, 3, &slot), None);
+        assert!(refusal(&nodes, &[], 5, &width, 3, &path(&["Parameters", "nx"])).is_some());
+        // A link cannot go back: the analysis comes after the mesh block once linked.
+        let link = Link {
+            source: 3,
+            target: 2,
+            item: path(&["Mesh"]),
+            ..Default::default()
+        };
+        let back = refusal(&nodes, &[link], 2, &path(&["Mesh"]), 3, &path(&["Mesh"]));
+        assert!(back.is_some());
     }
 
     #[test]

@@ -38,15 +38,26 @@ A block thus reads from top to bottom: where it starts (#ui("State")), what it i
 rows of the definition), what it uses (the orange inputs of its steps in the setup) and what it
 produces (#ui("Results"), with pins on the right only).
 
+Each pin has a type: geometry, mesh, setup, results, a number, the value of an optimizer's
+loop, or a whole analysis. Pins of model data also have the model space of their block (3D, 2D
+plane stress, 2D plane strain or axisymmetric); the tooltip of a row names both. While a wire is
+dragged, the pins it can end at get a ring and all others fade. Hovering over a faded pin says
+why the link cannot be made there.
+
+#screenshot("typed-pins.png", [The mesh of a 3D analysis dragged to a 2D analysis: every pin
+  fades, and the tooltip says why])
+
 The output pane of the project window says what each link does ("Axial-load takes Mesh from
 Cantilever") and why a link cannot be made:
 
-- the two analyses have different model spaces ("linked analyses need the same model space"; a
-  different unit system is fine);
+- the pins are of different types, for example a mesh dropped on the setup;
+- the two blocks have different model spaces ("linked blocks need the same model space"). A
+  different unit system is fine, since every block keeps its values in SI units. Numbers have
+  no model space;
 - the link would go back to an analysis that already comes before the source, and form a
   cycle;
-- the item does not fit the slot, for example a material dropped on the mesh, or results
-  dropped on the results of another analysis;
+- the item does not fit the slot, for example a material dropped on the sections, or results
+  dropped on a step that cannot use them;
 - the target continues another analysis and takes its whole model from there (@state-links).
 
 Right-click a pin to remove its links, or use #ui("Unlink") in the analysis window. The target
