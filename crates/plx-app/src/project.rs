@@ -10,10 +10,7 @@ use std::time::{Duration, Instant};
 use crate::node_picker::{self, NodePicker};
 use egui_snarl::ui::{AnyPins, PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
-use plx_io::project::{
-    CampbellBlock, Link, MaterialSet, MeasureBlock, MeshBlock, MeshExport, OptimizerBlock,
-    ParameterSet, Project, ProjectAnalysis, ProjectNode,
-};
+use plx_io::project::{self as file, Link, Project, ProjectAnalysis, ProjectNode};
 use plx_model::{
     Iteration, MeasureKind, MeshPrimitive, ModelProperties, ModelSpace, Next, OptimizerKind,
     Outcome as LoopOutcome, Param, ParamSlot, Parameter, Quantity, UnitSystem, ValueKind,
@@ -40,25 +37,17 @@ use crate::tree_icons::StepGlyph;
 /// Storage key of the project file open at exit, reopened at the next start.
 const LAST_PROJECT_KEY: &str = "last_project";
 
-/// What a block of the schematic is.
+/// What a block of the schematic is, without its data: for menus, texts and decisions that
+/// only depend on the kind.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Analysis,
-    /// A collection of materials, held in the setup of its data: a source of data for
-    /// analyses, which has no steps and is not solved.
     Materials,
-    /// A structured mesh made from a few parameters, held in the mesh of its data.
     Mesh,
-    /// Named numbers that value links give to other blocks.
     Parameters,
-    /// A key figure computed from the results of a step linked to it.
     Measure,
-    /// A loop that gives values to the blocks before a measure until it is done.
     Optimizer,
-    /// A sink that writes the mesh linked to it to a file, held in the mesh of its data.
     MeshExport,
-    /// A sweep of the analysis linked to it over the rotational speed, with its Campbell
-    /// diagram.
     Campbell,
 }
 
@@ -83,154 +72,440 @@ impl Kind {
     }
 }
 
-/// A block of the schematic: an analysis of the project, or a source of data analyses link
-/// to, which holds what it gives in the same form as an analysis.
+/// A block of the schematic: its name, the rows of it that are open, and what it is with
+/// the data of that kind.
 struct Node {
     id: u64,
     name: String,
-    kind: Kind,
-    /// The analysis' data while its window is closed; an open window holds it. A source
-    /// always holds its data.
+    /// Rows of its block that are open: the setup and its categories.
+    expanded: BTreeSet<Vec<String>>,
+    block: Block,
+}
+
+/// A block with the data of its kind.
+enum Block {
+    Analysis(Box<AnalysisBlock>),
+    /// A collection of materials, a source of data for analyses that is not solved.
+    Materials(Box<MaterialsBlock>),
+    /// A structured mesh made from a few parameters.
+    Mesh(Box<MeshBlock>),
+    /// Named numbers that value links give to other blocks.
+    Parameters(ParametersBlock),
+    /// A key figure computed from the results of a step linked to it.
+    Measure(MeasureBlock),
+    /// A loop that gives values to the blocks before a measure until it is done.
+    Optimizer(OptimizerBlock),
+    /// A sink that writes the mesh linked to it to a file.
+    MeshExport(Box<ExportBlock>),
+    /// A sweep of the analysis linked to it over the rotational speed, with its Campbell
+    /// diagram.
+    Campbell(CampbellBlock),
+}
+
+/// An analysis: its data, or the window that holds them while it is open.
+struct AnalysisBlock {
+    /// The analysis' data while its window is closed; an open window holds it.
     data: Option<ProjectAnalysis>,
     window: Option<Box<AnalysisWindow>>,
     /// Where the window opens the first time: over the project window.
     window_position: Option<egui::Pos2>,
     /// The state of its cells, as last found.
     status: Option<AnalysisStatus>,
-    /// Rows of its block that are open: the setup and its categories.
-    expanded: BTreeSet<Vec<String>>,
     /// Its model space, shown in the header of its block.
     space: ModelSpace,
-    /// What a mesh block meshes, and the fingerprint of what its mesh was made from.
-    primitive: Option<MeshPrimitive>,
-    generated: Option<u64>,
-    /// Factor on the divisions of a mesh block, see [`MeshPrimitive::refined`].
-    refinement: f64,
-    /// The numbers of a parameters block.
-    parameters: Vec<Parameter>,
-    /// What a measure block computes and what it computed.
-    measure: Option<MeasureState>,
-    /// What an optimizer varies and its last run.
-    optimizer: Option<OptimizerState>,
-    /// Solved in the background, its window closed.
-    solving: bool,
-    /// What a mesh export block writes to, the fingerprint of the mesh and path it last
-    /// wrote, and why its last write failed.
-    export_path: String,
-    written: Option<u64>,
-    export_error: Option<String>,
     /// What it takes from other blocks that is not ready yet; found by
     /// [`ProjectApp::sync_links`].
     upstream: crate::status::Upstream,
-    /// The sweep and diagram of a Campbell block, and the fingerprint of the analysis linked
-    /// to it as last found by [`ProjectApp::sync_links`], see
-    /// [`crate::campbell::sweep_fingerprint`].
-    campbell: Option<Box<CampbellWindow>>,
-    campbell_input: Option<u64>,
+    /// Solved in the background, its window closed.
+    solving: bool,
+}
+
+/// The model data a block that is no analysis gives to links or takes from them, in the form
+/// links read and fill: the materials of a materials block, the mesh of a mesh block or of a
+/// mesh export block.
+#[derive(Default)]
+struct LinkedModel {
+    geometry: Option<plx_model::Geometry>,
+    mesh: plx_mesh::FeMesh,
+    fe: plx_model::FeModel,
+    mesh_inputs: BTreeMap<String, u64>,
+}
+
+impl LinkedModel {
+    fn data(&self) -> links::Data<'_> {
+        links::Data {
+            geometry: self.geometry.as_ref(),
+            mesh: &self.mesh,
+            fe: &self.fe,
+            mesh_inputs: &self.mesh_inputs,
+        }
+    }
+
+    fn data_mut(&mut self) -> ModelMut<'_> {
+        ModelMut {
+            geometry: &mut self.geometry,
+            mesh: &mut self.mesh,
+            fe: &mut self.fe,
+            mesh_inputs: &mut self.mesh_inputs,
+        }
+    }
+}
+
+/// What links fill in a block whose model is not in an open window.
+struct ModelMut<'a> {
+    geometry: &'a mut Option<plx_model::Geometry>,
+    mesh: &'a mut plx_mesh::FeMesh,
+    fe: &'a mut plx_model::FeModel,
+    mesh_inputs: &'a mut BTreeMap<String, u64>,
+}
+
+impl ModelMut<'_> {
+    /// Takes over a mesh with what belongs to it.
+    fn take_mesh(&mut self, copy: links::MeshCopy) {
+        let links::MeshCopy {
+            geometry,
+            mesh,
+            mesh_inputs,
+            mesh_sets,
+            element_types,
+        } = copy;
+        *self.geometry = geometry;
+        *self.mesh = mesh;
+        *self.mesh_inputs = mesh_inputs;
+        self.fe.mesh_sets = mesh_sets;
+        self.fe.element_types = element_types;
+    }
+}
+
+/// A materials block: its materials, in the setup of a model, and the units they are shown
+/// in.
+struct MaterialsBlock {
+    model: LinkedModel,
+    units: UnitSystem,
+}
+
+/// A mesh block: what it meshes, the mesh it made and the fingerprint of what that was made
+/// from.
+struct MeshBlock {
+    model: LinkedModel,
+    space: ModelSpace,
+    units: UnitSystem,
+    primitive: MeshPrimitive,
+    generated: Option<u64>,
+    /// Factor on the divisions, see [`MeshPrimitive::refined`].
+    refinement: f64,
+}
+
+/// A parameters block: its numbers.
+struct ParametersBlock {
+    units: UnitSystem,
+    parameters: Vec<Parameter>,
+}
+
+/// What a measure block computes, and the value it last computed with the fingerprint of the
+/// results and the definition it was computed from, see [`ProjectApp::measure_key`].
+struct MeasureBlock {
+    units: UnitSystem,
+    kind: MeasureKind,
+    value: Option<f64>,
+    evaluated: Option<u64>,
+    /// Why the last evaluation gave no value.
+    error: Option<String>,
+}
+
+/// What an optimizer varies, the value it gives now and its last run: the iterations, how
+/// it ended and the fingerprint of the measure it ended on, see [`ProjectApp::measure_key`].
+struct OptimizerBlock {
+    units: UnitSystem,
+    kind: OptimizerKind,
+    value: f64,
+    history: Vec<Iteration>,
+    report: Option<String>,
+    done: Option<u64>,
+}
+
+/// A mesh export block: the mesh linked to it, the file it writes to, the fingerprint of the
+/// mesh and path it last wrote, and why its last write failed.
+struct ExportBlock {
+    model: LinkedModel,
+    path: String,
+    written: Option<u64>,
+    error: Option<String>,
+}
+
+/// A Campbell block: its sweep and diagram, and the fingerprint of the analysis linked to it
+/// as last found by [`ProjectApp::sync_links`], see [`crate::campbell::sweep_fingerprint`].
+struct CampbellBlock {
+    /// Taken out while the project window shows it or starts its sweep.
+    window: Option<Box<CampbellWindow>>,
+    input: Option<u64>,
 }
 
 impl Node {
-    fn new(id: u64, name: String, data: ProjectAnalysis) -> Self {
-        Self::of_kind(Kind::Analysis, id, name, data)
-    }
-
-    fn of_kind(kind: Kind, id: u64, name: String, data: ProjectAnalysis) -> Self {
-        let space = data.model.properties.space;
+    fn new(id: u64, name: String, block: Block) -> Self {
         // A materials block shows its materials at first.
-        let expanded = match kind {
-            Kind::Materials => BTreeSet::from([material_set_path()]),
+        let expanded = match block {
+            Block::Materials(_) => BTreeSet::from([material_set_path()]),
             _ => BTreeSet::new(),
         };
         let mut node = Self {
             id,
             name,
-            kind,
-            data: Some(data),
-            window: None,
-            window_position: None,
-            status: None,
             expanded,
-            space,
-            primitive: None,
-            generated: None,
-            refinement: 1.0,
-            parameters: Vec::new(),
-            measure: None,
-            optimizer: None,
-            export_path: String::new(),
-            written: None,
-            export_error: None,
-            solving: false,
-            upstream: crate::status::Upstream::default(),
-            campbell: None,
-            campbell_input: None,
+            block,
         };
         node.refresh_closed();
         node
     }
 
-    /// A mesh block meshing `primitive`, with the mesh in `data` made from `generated`.
+    /// An analysis with these data.
+    fn analysis(id: u64, name: String, data: ProjectAnalysis) -> Self {
+        let space = data.model.properties.space;
+        let block = AnalysisBlock {
+            data: Some(data),
+            window: None,
+            window_position: None,
+            status: None,
+            space,
+            upstream: Default::default(),
+            solving: false,
+        };
+        Self::new(id, name, Block::Analysis(Box::new(block)))
+    }
+
+    /// A mesh block meshing `primitive`, with `mesh` made from `generated`.
     fn mesh_block(
         id: u64,
         name: String,
-        data: ProjectAnalysis,
+        space: ModelSpace,
+        units: UnitSystem,
         primitive: MeshPrimitive,
+        mesh: plx_mesh::FeMesh,
         generated: Option<u64>,
     ) -> Self {
-        let mut node = Self::of_kind(Kind::Mesh, id, name, data);
-        node.primitive = Some(primitive);
-        node.generated = generated;
-        node
+        let mut model = LinkedModel {
+            mesh,
+            ..Default::default()
+        };
+        model.fe.properties.space = space;
+        let block = MeshBlock {
+            model,
+            space,
+            units,
+            primitive,
+            generated,
+            refinement: 1.0,
+        };
+        Self::new(id, name, Block::Mesh(Box::new(block)))
     }
 
     /// A mesh export block writing to `path`, which it wrote with `written`.
     fn mesh_export(id: u64, name: String, path: String, written: Option<u64>) -> Self {
-        let data = ProjectAnalysis {
-            id,
-            name: name.clone(),
-            ..Default::default()
+        let block = ExportBlock {
+            model: LinkedModel::default(),
+            path,
+            written,
+            error: None,
         };
-        let mut node = Self::of_kind(Kind::MeshExport, id, name, data);
-        node.export_path = path;
-        node.written = written;
-        node
+        Self::new(id, name, Block::MeshExport(Box::new(block)))
     }
 
     /// A Campbell block with its sweep and diagram.
     fn campbell_block(id: u64, name: String, window: CampbellWindow) -> Self {
-        let data = ProjectAnalysis {
-            id,
-            name: name.clone(),
-            ..Default::default()
+        let block = CampbellBlock {
+            window: Some(Box::new(window)),
+            input: None,
         };
-        let mut node = Self::of_kind(Kind::Campbell, id, name, data);
-        node.campbell = Some(Box::new(window));
-        node
+        Self::new(id, name, Block::Campbell(block))
+    }
+
+    fn kind(&self) -> Kind {
+        match &self.block {
+            Block::Analysis(_) => Kind::Analysis,
+            Block::Materials(_) => Kind::Materials,
+            Block::Mesh(_) => Kind::Mesh,
+            Block::Parameters(_) => Kind::Parameters,
+            Block::Measure(_) => Kind::Measure,
+            Block::Optimizer(_) => Kind::Optimizer,
+            Block::MeshExport(_) => Kind::MeshExport,
+            Block::Campbell(_) => Kind::Campbell,
+        }
+    }
+
+    fn as_analysis(&self) -> Option<&AnalysisBlock> {
+        match &self.block {
+            Block::Analysis(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    fn as_analysis_mut(&mut self) -> Option<&mut AnalysisBlock> {
+        match &mut self.block {
+            Block::Analysis(a) => Some(a),
+            _ => None,
+        }
+    }
+
+    fn as_materials(&self) -> Option<&MaterialsBlock> {
+        match &self.block {
+            Block::Materials(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    fn as_materials_mut(&mut self) -> Option<&mut MaterialsBlock> {
+        match &mut self.block {
+            Block::Materials(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    fn as_mesh(&self) -> Option<&MeshBlock> {
+        match &self.block {
+            Block::Mesh(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    fn as_mesh_mut(&mut self) -> Option<&mut MeshBlock> {
+        match &mut self.block {
+            Block::Mesh(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    fn as_measure(&self) -> Option<&MeasureBlock> {
+        match &self.block {
+            Block::Measure(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    fn as_measure_mut(&mut self) -> Option<&mut MeasureBlock> {
+        match &mut self.block {
+            Block::Measure(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    fn as_optimizer(&self) -> Option<&OptimizerBlock> {
+        match &self.block {
+            Block::Optimizer(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    fn as_optimizer_mut(&mut self) -> Option<&mut OptimizerBlock> {
+        match &mut self.block {
+            Block::Optimizer(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    fn as_parameters(&self) -> Option<&ParametersBlock> {
+        match &self.block {
+            Block::Parameters(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    fn as_parameters_mut(&mut self) -> Option<&mut ParametersBlock> {
+        match &mut self.block {
+            Block::Parameters(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    fn as_export(&self) -> Option<&ExportBlock> {
+        match &self.block {
+            Block::MeshExport(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    fn as_export_mut(&mut self) -> Option<&mut ExportBlock> {
+        match &mut self.block {
+            Block::MeshExport(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    fn as_campbell(&self) -> Option<&CampbellBlock> {
+        match &self.block {
+            Block::Campbell(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    fn as_campbell_mut(&mut self) -> Option<&mut CampbellBlock> {
+        match &mut self.block {
+            Block::Campbell(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    /// The open window of an analysis.
+    fn window(&self) -> Option<&AnalysisWindow> {
+        self.as_analysis()?.window.as_deref()
+    }
+
+    fn window_mut(&mut self) -> Option<&mut AnalysisWindow> {
+        self.as_analysis_mut()?.window.as_deref_mut()
+    }
+
+    /// The state of an analysis' cells, as last found.
+    fn status(&self) -> Option<&AnalysisStatus> {
+        self.as_analysis()?.status.as_ref()
+    }
+
+    /// The model space shown in the header of the block, of an analysis or a mesh block.
+    fn space(&self) -> Option<ModelSpace> {
+        match &self.block {
+            Block::Analysis(a) => Some(a.space),
+            Block::Mesh(m) => Some(m.space),
+            _ => None,
+        }
+    }
+
+    /// The unit system the block shows its values in; an analysis' is that of its model.
+    fn units(&self) -> UnitSystem {
+        match &self.block {
+            Block::Analysis(_) => {
+                (self.link_data()).map_or_else(UnitSystem::default, |d| d.fe.properties.units)
+            }
+            Block::Materials(m) => m.units,
+            Block::Mesh(m) => m.units,
+            Block::Parameters(p) => p.units,
+            Block::Measure(m) => m.units,
+            Block::Optimizer(o) => o.units,
+            Block::MeshExport(_) | Block::Campbell(_) => UnitSystem::default(),
+        }
     }
 
     /// Fingerprint of the mesh a mesh export block holds and the path it writes to; `None`
     /// while no mesh is linked to it.
     fn export_print(&self) -> Option<u64> {
-        let data = self.link_data()?;
+        let export = self.as_export()?;
+        let data = export.model.data();
         if data.mesh.element_count() == 0 {
             return None;
         }
         let mut hash = plx_mesh::Fnv::new();
         hash.add(&links::fingerprint(data, &[links::MESH.to_owned()]).to_le_bytes());
-        hash.add_str(&self.export_path);
+        hash.add_str(&export.path);
         Some(hash.finish())
     }
 
     /// The state of a mesh export block's file; `base` is the folder of the project file.
     fn export_state(&self, base: Option<&Path>) -> CellState {
-        let Some(print) = self.export_print() else {
+        let (Some(export), Some(print)) = (self.as_export(), self.export_print()) else {
             return CellState::Missing;
         };
-        if self.export_path.trim().is_empty() {
+        if export.path.trim().is_empty() {
             CellState::Missing
-        } else if self.export_error.is_some() {
+        } else if export.error.is_some() {
             CellState::Failed
-        } else if self.written == Some(print) && export_file(&self.export_path, base).is_file() {
+        } else if export.written == Some(print) && export_file(&export.path, base).is_file() {
             CellState::UpToDate
         } else {
             CellState::OutOfDate
@@ -242,133 +517,97 @@ impl Node {
         let print = self
             .export_print()
             .ok_or("no mesh is linked to it, drag the mesh of a block to its Mesh row")?;
-        if self.export_path.trim().is_empty() {
+        let name = self.name.clone();
+        let export = self.as_export_mut().ok_or("not a mesh export block")?;
+        if export.path.trim().is_empty() {
             return Err("no file is chosen".into());
         }
-        let file = export_file(&self.export_path, base);
-        let data = self.data.as_ref().ok_or("no data")?;
-        let text = plx_io::inp::write_inp(&data.mesh, &data.model, &self.name)
+        let file = export_file(&export.path, base);
+        let text = plx_io::inp::write_inp(&export.model.mesh, &export.model.fe, &name)
             .map_err(|e| e.to_string())?;
         std::fs::write(&file, text).map_err(|e| format!("{} not written: {e}", file.display()))?;
-        self.written = Some(print);
+        export.written = Some(print);
         Ok(file)
     }
 
     /// The state of a mesh block's mesh: out of date once its parameters changed.
     fn mesh_state(&self) -> CellState {
-        let made = self
-            .data
-            .as_ref()
-            .is_some_and(|d| d.mesh.element_count() > 0);
-        match self.meshed() {
-            _ if !made => CellState::Missing,
-            Some(primitive) if Some(primitive.fingerprint(self.space)) == self.generated => {
-                CellState::UpToDate
-            }
-            _ => CellState::OutOfDate,
+        let Some(block) = self.as_mesh() else {
+            return CellState::Missing;
+        };
+        if block.model.mesh.element_count() == 0 {
+            CellState::Missing
+        } else if Some(block.meshed().fingerprint(block.space)) == block.generated {
+            CellState::UpToDate
+        } else {
+            CellState::OutOfDate
         }
-    }
-
-    /// What a mesh block meshes: its primitive with the divisions refined.
-    fn meshed(&self) -> Option<MeshPrimitive> {
-        (self.primitive.as_ref()).map(|p| p.refined(self.refinement))
     }
 
     /// Makes a mesh block's mesh from its parameters; returns the number of elements, or
     /// why it cannot be made.
     fn generate(&mut self) -> Result<usize, String> {
-        let primitive = self.meshed().ok_or("not a mesh block")?;
-        if let Some(problem) = primitive.problem(self.space) {
-            return Err(problem);
-        }
-        let mesh = primitive.generate(self.space, &primitive.label().to_uppercase());
-        let count = mesh.element_count();
-        self.generated = Some(primitive.fingerprint(self.space));
-        let data = self.data.as_mut().ok_or("no data")?;
-        data.mesh = mesh;
-        data.model.properties.space = self.space;
-        Ok(count)
+        self.as_mesh_mut().ok_or("not a mesh block")?.generate()
     }
 
     /// A block read from the project file.
     fn read(node: ProjectNode) -> Self {
         match node {
             ProjectNode::Analysis(analysis) => {
-                Self::new(analysis.id, analysis.name.clone(), *analysis)
+                Self::analysis(analysis.id, analysis.name.clone(), *analysis)
             }
             ProjectNode::Materials(set) => {
-                let mut data = ProjectAnalysis {
-                    id: set.id,
-                    name: set.name.clone(),
-                    position: set.position,
-                    ..Default::default()
+                let mut model = LinkedModel::default();
+                model.fe.materials = set.materials;
+                let block = MaterialsBlock {
+                    model,
+                    units: set.units,
                 };
-                data.model.materials = set.materials;
-                data.model.properties.units = set.units;
-                Self::of_kind(Kind::Materials, set.id, set.name, data)
+                Self::new(set.id, set.name, Block::Materials(Box::new(block)))
             }
             ProjectNode::Mesh(block) => {
                 let block = *block;
-                let mut data = ProjectAnalysis {
-                    id: block.id,
-                    name: block.name.clone(),
-                    position: block.position,
-                    mesh: block.mesh,
-                    ..Default::default()
-                };
-                data.model.properties.space = block.space;
-                data.model.properties.units = block.units;
-                let mut node =
-                    Self::mesh_block(block.id, block.name, data, block.primitive, block.generated);
-                node.refinement = block.refinement;
+                let mut node = Self::mesh_block(
+                    block.id,
+                    block.name,
+                    block.space,
+                    block.units,
+                    block.primitive,
+                    block.mesh,
+                    block.generated,
+                );
+                if let Some(mesh) = node.as_mesh_mut() {
+                    mesh.refinement = block.refinement;
+                }
                 node
             }
             ProjectNode::Parameters(set) => {
-                let mut data = ProjectAnalysis {
-                    id: set.id,
-                    name: set.name.clone(),
-                    position: set.position,
-                    ..Default::default()
+                let block = ParametersBlock {
+                    units: set.units,
+                    parameters: set.parameters,
                 };
-                data.model.properties.units = set.units;
-                let mut node = Self::of_kind(Kind::Parameters, set.id, set.name, data);
-                node.parameters = set.parameters;
-                node
+                Self::new(set.id, set.name, Block::Parameters(block))
             }
             ProjectNode::Measure(block) => {
-                let mut data = ProjectAnalysis {
-                    id: block.id,
-                    name: block.name.clone(),
-                    position: block.position,
-                    ..Default::default()
-                };
-                data.model.properties.units = block.units;
-                let mut node = Self::of_kind(Kind::Measure, block.id, block.name, data);
-                node.measure = Some(MeasureState {
+                let measure = MeasureBlock {
+                    units: block.units,
                     kind: block.kind,
                     value: block.value,
                     evaluated: block.evaluated,
                     error: None,
-                });
-                node
+                };
+                Self::new(block.id, block.name, Block::Measure(measure))
             }
             ProjectNode::Optimizer(block) => {
-                let mut data = ProjectAnalysis {
-                    id: block.id,
-                    name: block.name.clone(),
-                    position: block.position,
-                    ..Default::default()
-                };
-                data.model.properties.units = block.units;
-                let mut node = Self::of_kind(Kind::Optimizer, block.id, block.name, data);
-                node.optimizer = Some(OptimizerState {
+                let optimizer = OptimizerBlock {
+                    units: block.units,
                     kind: block.kind,
                     value: block.value,
                     history: block.history,
                     report: block.report,
                     done: block.done,
-                });
-                node
+                };
+                Self::new(block.id, block.name, Block::Optimizer(optimizer))
             }
             ProjectNode::MeshExport(e) => Self::mesh_export(e.id, e.name, e.path, e.written),
             ProjectNode::Campbell(block) => {
@@ -387,123 +626,215 @@ impl Node {
     /// The block as the project file keeps it, from the window of an analysis if it is
     /// open; `position` is that of its block.
     fn written(&mut self, position: [f32; 2]) -> Option<ProjectNode> {
-        if self.kind == Kind::MeshExport {
-            // It keeps no mesh: the link brings it again.
-            return Some(ProjectNode::MeshExport(MeshExport {
-                id: self.id,
-                name: self.name.clone(),
-                position,
-                path: self.export_path.clone(),
-                written: self.written,
-            }));
-        }
-        if self.kind == Kind::Campbell {
-            // It keeps no model: the link brings it again.
-            let window = self.campbell.as_ref()?;
-            return Some(ProjectNode::Campbell(Box::new(CampbellBlock {
-                id: self.id,
-                name: self.name.clone(),
-                position,
-                setup: window.setup().clone(),
-                points: window.points().to_vec(),
-                focus: window.focus(),
-                fingerprint: window.fingerprint(),
-            })));
-        }
-        let mut data = self.data()?;
-        data.id = self.id;
-        data.name = self.name.clone();
-        data.position = position;
-        Some(match self.kind {
-            Kind::Analysis => ProjectNode::Analysis(Box::new(data)),
-            Kind::MeshExport | Kind::Campbell => return None,
-            Kind::Materials => ProjectNode::Materials(MaterialSet {
-                id: data.id,
-                name: data.name,
-                position,
-                units: data.model.properties.units,
-                materials: data.model.materials,
-            }),
-            Kind::Mesh => ProjectNode::Mesh(Box::new(MeshBlock {
-                id: data.id,
-                name: data.name,
-                position,
-                space: self.space,
-                units: data.model.properties.units,
-                primitive: self.primitive.clone()?,
-                mesh: data.mesh,
-                generated: self.generated,
-                refinement: self.refinement,
-            })),
-            Kind::Parameters => ProjectNode::Parameters(ParameterSet {
-                id: data.id,
-                name: data.name,
-                position,
-                units: data.model.properties.units,
-                parameters: self.parameters.clone(),
-            }),
-            Kind::Measure => {
-                let measure = self.measure.as_ref()?;
-                ProjectNode::Measure(MeasureBlock {
-                    id: data.id,
-                    name: data.name,
-                    position,
-                    units: data.model.properties.units,
-                    kind: measure.kind.clone(),
-                    value: measure.value,
-                    evaluated: measure.evaluated,
-                })
+        let (id, name) = (self.id, self.name.clone());
+        Some(match &mut self.block {
+            Block::Analysis(analysis) => {
+                let mut data = match &mut analysis.window {
+                    Some(window) => window.data()?,
+                    None => analysis.data.clone()?,
+                };
+                data.id = id;
+                data.name = name;
+                data.position = position;
+                ProjectNode::Analysis(Box::new(data))
             }
-            Kind::Optimizer => {
-                let optimizer = self.optimizer.as_ref()?;
-                ProjectNode::Optimizer(OptimizerBlock {
-                    id: data.id,
-                    name: data.name,
+            Block::Materials(m) => ProjectNode::Materials(file::MaterialSet {
+                id,
+                name,
+                position,
+                units: m.units,
+                materials: m.model.fe.materials.clone(),
+            }),
+            Block::Mesh(m) => ProjectNode::Mesh(Box::new(file::MeshBlock {
+                id,
+                name,
+                position,
+                space: m.space,
+                units: m.units,
+                primitive: m.primitive.clone(),
+                mesh: m.model.mesh.clone(),
+                generated: m.generated,
+                refinement: m.refinement,
+            })),
+            Block::Parameters(p) => ProjectNode::Parameters(file::ParameterSet {
+                id,
+                name,
+                position,
+                units: p.units,
+                parameters: p.parameters.clone(),
+            }),
+            Block::Measure(m) => ProjectNode::Measure(file::MeasureBlock {
+                id,
+                name,
+                position,
+                units: m.units,
+                kind: m.kind.clone(),
+                value: m.value,
+                evaluated: m.evaluated,
+            }),
+            Block::Optimizer(o) => ProjectNode::Optimizer(file::OptimizerBlock {
+                id,
+                name,
+                position,
+                units: o.units,
+                kind: o.kind.clone(),
+                value: o.value,
+                history: o.history.clone(),
+                report: o.report.clone(),
+                done: o.done,
+            }),
+            // It keeps no mesh: the link brings it again.
+            Block::MeshExport(e) => ProjectNode::MeshExport(file::MeshExport {
+                id,
+                name,
+                position,
+                path: e.path.clone(),
+                written: e.written,
+            }),
+            // It keeps no model: the link brings it again.
+            Block::Campbell(c) => {
+                let window = c.window.as_ref()?;
+                ProjectNode::Campbell(Box::new(file::CampbellBlock {
+                    id,
+                    name,
                     position,
-                    units: data.model.properties.units,
-                    kind: optimizer.kind.clone(),
-                    value: optimizer.value,
-                    history: optimizer.history.clone(),
-                    report: optimizer.report.clone(),
-                    done: optimizer.done,
-                })
+                    setup: window.setup().clone(),
+                    points: window.points().to_vec(),
+                    focus: window.focus(),
+                    fingerprint: window.fingerprint(),
+                }))
             }
         })
     }
 
+    /// A copy of the block as a new one, `id` named `name`: its definition without what it
+    /// computed.
+    fn copied(&mut self, id: u64, name: String) -> Option<Self> {
+        let block = match &mut self.block {
+            Block::Analysis(analysis) => {
+                let mut data = match &mut analysis.window {
+                    Some(window) => window.data()?,
+                    None => analysis.data.clone()?,
+                };
+                data.id = id;
+                data.name = name.clone();
+                return Some(Self::analysis(id, name, data));
+            }
+            Block::Materials(m) => {
+                let mut model = LinkedModel::default();
+                model.fe.materials = m.model.fe.materials.clone();
+                Block::Materials(Box::new(MaterialsBlock {
+                    model,
+                    units: m.units,
+                }))
+            }
+            Block::Mesh(m) => {
+                let mut model = LinkedModel {
+                    mesh: m.model.mesh.clone(),
+                    ..Default::default()
+                };
+                model.fe.properties.space = m.space;
+                Block::Mesh(Box::new(MeshBlock {
+                    model,
+                    space: m.space,
+                    units: m.units,
+                    primitive: m.primitive.clone(),
+                    generated: m.generated,
+                    refinement: m.refinement,
+                }))
+            }
+            Block::Parameters(p) => Block::Parameters(ParametersBlock {
+                units: p.units,
+                parameters: p.parameters.clone(),
+            }),
+            Block::Measure(m) => Block::Measure(MeasureBlock {
+                units: m.units,
+                kind: m.kind.clone(),
+                value: None,
+                evaluated: None,
+                error: None,
+            }),
+            Block::Optimizer(o) => Block::Optimizer(OptimizerBlock {
+                units: o.units,
+                kind: o.kind.clone(),
+                value: o.kind.start(),
+                history: Vec::new(),
+                report: None,
+                done: None,
+            }),
+            Block::MeshExport(e) => {
+                return Some(Self::mesh_export(id, name, e.path.clone(), None));
+            }
+            Block::Campbell(c) => {
+                let setup = c.window.as_ref()?.setup().clone();
+                let window = CampbellWindow::saved(setup, Vec::new(), None, None);
+                return Some(Self::campbell_block(id, name, window));
+            }
+        };
+        Some(Self::new(id, name, block))
+    }
+
     /// Finds the state of a closed analysis from its data, once after it changed.
     fn refresh_closed(&mut self) {
-        if self.kind.is_source() {
+        let Some(analysis) = self.as_analysis_mut() else {
             return;
-        }
-        if let Some(data) = &self.data {
-            self.status = Some(status::analysis_status(
+        };
+        if let Some(data) = &analysis.data {
+            analysis.status = Some(status::analysis_status(
                 data.geometry.as_ref(),
                 &data.mesh,
                 &data.model,
                 &data.mesh_inputs,
                 data.results.as_ref(),
-                &self.upstream,
-                self.solving,
+                &analysis.upstream,
+                analysis.solving,
             ));
         }
     }
 
-    /// What links read of the analysis; `None` while its window loads it.
+    /// What links read of the block; `None` while the window of an analysis loads it, and
+    /// for blocks that hold no model.
     fn link_data(&self) -> Option<links::Data<'_>> {
-        match (&self.window, &self.data) {
-            (Some(window), _) => window.model().map(|m| links::Data {
-                geometry: m.geometry.as_ref(),
-                mesh: &m.mesh,
-                fe: &m.fe,
-                mesh_inputs: &m.mesh_inputs,
-            }),
-            (None, Some(data)) => Some(links::Data {
-                geometry: data.geometry.as_ref(),
-                mesh: &data.mesh,
-                fe: &data.model,
-                mesh_inputs: &data.mesh_inputs,
-            }),
+        match &self.block {
+            Block::Analysis(analysis) => match (&analysis.window, &analysis.data) {
+                (Some(window), _) => window.model().map(|m| links::Data {
+                    geometry: m.geometry.as_ref(),
+                    mesh: &m.mesh,
+                    fe: &m.fe,
+                    mesh_inputs: &m.mesh_inputs,
+                }),
+                (None, Some(data)) => Some(links::Data {
+                    geometry: data.geometry.as_ref(),
+                    mesh: &data.mesh,
+                    fe: &data.model,
+                    mesh_inputs: &data.mesh_inputs,
+                }),
+                _ => None,
+            },
+            Block::Materials(m) => Some(m.model.data()),
+            Block::Mesh(m) => Some(m.model.data()),
+            Block::MeshExport(e) => Some(e.model.data()),
+            Block::Parameters(_) | Block::Measure(_) | Block::Optimizer(_) | Block::Campbell(_) => {
+                None
+            }
+        }
+    }
+
+    /// What links fill in the block while no window holds its model.
+    fn closed_model_mut(&mut self) -> Option<ModelMut<'_>> {
+        match &mut self.block {
+            Block::Analysis(analysis) if analysis.window.is_none() => {
+                let data = analysis.data.as_mut()?;
+                Some(ModelMut {
+                    geometry: &mut data.geometry,
+                    mesh: &mut data.mesh,
+                    fe: &mut data.model,
+                    mesh_inputs: &mut data.mesh_inputs,
+                })
+            }
+            Block::Materials(m) => Some(m.model.data_mut()),
+            Block::Mesh(m) => Some(m.model.data_mut()),
+            Block::MeshExport(e) => Some(e.model.data_mut()),
             _ => None,
         }
     }
@@ -511,9 +842,9 @@ impl Node {
     /// The refinement of its mesh: of a mesh block, or of the geometry an analysis meshes;
     /// `None` for other blocks and an analysis without geometry.
     fn refinement(&self) -> Option<f64> {
-        match self.kind {
-            Kind::Mesh => Some(self.refinement),
-            Kind::Analysis => self.link_data()?.geometry.map(|g| g.refinement),
+        match &self.block {
+            Block::Mesh(m) => Some(m.refinement),
+            Block::Analysis(_) => self.link_data()?.geometry.map(|g| g.refinement),
             _ => None,
         }
     }
@@ -523,13 +854,13 @@ impl Node {
         if !(value.is_finite() && value > 0.0) {
             return;
         }
-        match self.kind {
-            Kind::Mesh => self.refinement = value,
-            Kind::Analysis => {
-                if let Some(window) = &mut self.window {
+        match &mut self.block {
+            Block::Mesh(m) => m.refinement = value,
+            Block::Analysis(analysis) => {
+                if let Some(window) = &mut analysis.window {
                     window.set_refinement(value);
                 } else if let Some(geometry) =
-                    (self.data.as_mut()).and_then(|d| d.geometry.as_mut())
+                    (analysis.data.as_mut()).and_then(|d| d.geometry.as_mut())
                     && geometry.refinement != value
                 {
                     geometry.refinement = value;
@@ -540,11 +871,10 @@ impl Node {
         }
     }
 
-    /// The results the analysis keeps.
     /// Whether it has results, but made from data that changed since or being made anew.
     fn results_out_of_date(&self) -> bool {
         self.bound_results().is_some()
-            && (self.status.as_ref()).is_some_and(|s| {
+            && self.status().is_some_and(|s| {
                 matches!(
                     s.solution,
                     status::CellState::OutOfDate | status::CellState::Running
@@ -552,41 +882,37 @@ impl Node {
             })
     }
 
+    /// The results the analysis keeps.
     fn bound_results(&self) -> Option<&plx_io::project::BoundResults> {
-        match (&self.window, &self.data) {
+        let analysis = self.as_analysis()?;
+        match (&analysis.window, &analysis.data) {
             (Some(window), _) => window.model()?.bound_results.as_ref(),
             (None, Some(data)) => data.results.as_ref(),
             _ => None,
         }
     }
+}
 
-    /// The analysis' data as the project saves it, from its window if it is open.
-    fn data(&mut self) -> Option<ProjectAnalysis> {
-        match &mut self.window {
-            Some(window) => window.data(),
-            None => self.data.clone(),
-        }
+impl MeshBlock {
+    /// What it meshes: its primitive with the divisions refined.
+    fn meshed(&self) -> MeshPrimitive {
+        self.primitive.refined(self.refinement)
     }
-}
 
-/// What a measure block computes, and the value it last computed with the fingerprint of the
-/// results and the definition it was computed from, see [`ProjectApp::measure_key`].
-struct MeasureState {
-    kind: MeasureKind,
-    value: Option<f64>,
-    evaluated: Option<u64>,
-    /// Why the last evaluation gave no value.
-    error: Option<String>,
-}
-
-/// What an optimizer varies, the value it gives now and its last run: the iterations, how
-/// it ended and the fingerprint of the measure it ended on, see [`ProjectApp::measure_key`].
-struct OptimizerState {
-    kind: OptimizerKind,
-    value: f64,
-    history: Vec<Iteration>,
-    report: Option<String>,
-    done: Option<u64>,
+    /// Makes its mesh from its parameters; returns the number of elements, or why it cannot
+    /// be made.
+    fn generate(&mut self) -> Result<usize, String> {
+        let primitive = self.meshed();
+        if let Some(problem) = primitive.problem(self.space) {
+            return Err(problem);
+        }
+        let mesh = primitive.generate(self.space, &primitive.label().to_uppercase());
+        let count = mesh.element_count();
+        self.generated = Some(primitive.fingerprint(self.space));
+        self.model.mesh = mesh;
+        self.model.fe.properties.space = self.space;
+        Ok(count)
+    }
 }
 
 /// The loop of an optimizer under way: the values of the round left to solve, the one being
@@ -730,6 +1056,10 @@ pub struct ProjectApp {
     picker: Option<NodePicker>,
     /// Show All Blocks was asked for: the view fits the blocks in the next frame.
     show_all: bool,
+    /// Where the pins of the schematic were drawn on the screen in the last frame.
+    pin_rects: Vec<(PinKey, egui::Rect)>,
+    /// The pin a wire is being dragged from in the schematic.
+    dragging: Option<PinKey>,
     /// The properties of a new analysis being asked for, with where its block goes.
     new_analysis: Option<(egui::Pos2, ModelPropertiesDialog)>,
     /// A project file being read on a worker thread, with notes on its conversion.
@@ -809,6 +1139,8 @@ impl ProjectApp {
             update_after_sync: false,
             picker: None,
             show_all: false,
+            pin_rects: Vec::new(),
+            dragging: None,
             new_analysis: None,
             opening: None,
             update_queue: VecDeque::new(),
@@ -891,7 +1223,7 @@ impl ProjectApp {
             ..Default::default()
         };
         data.model.properties = properties;
-        self.nodes.push(Node::new(id, name, data));
+        self.nodes.push(Node::analysis(id, name, data));
         self.graph.insert_node(position, id);
         id
     }
@@ -900,14 +1232,12 @@ impl ProjectApp {
     fn add_materials(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
         let name = self.unique_name("Materials");
-        let mut data = ProjectAnalysis {
-            id,
-            name: name.clone(),
-            ..Default::default()
+        let block = MaterialsBlock {
+            model: LinkedModel::default(),
+            units: self.settings.new_model.units,
         };
-        data.model.properties.units = self.settings.new_model.units;
-        self.nodes
-            .push(Node::of_kind(Kind::Materials, id, name.clone(), data));
+        let block = Block::Materials(Box::new(block));
+        self.nodes.push(Node::new(id, name.clone(), block));
         self.graph.insert_node(position, id);
         self.output.push(format!(
             "{name} created: double-click it to add materials, then drag them to analyses."
@@ -926,14 +1256,9 @@ impl ProjectApp {
                 space => space,
             },
         };
-        let mut data = ProjectAnalysis {
-            id,
-            name: name.clone(),
-            ..Default::default()
-        };
-        data.model.properties.space = space;
-        data.model.properties.units = self.settings.new_model.units;
-        let mut node = Node::mesh_block(id, name.clone(), data, primitive, None);
+        let units = self.settings.new_model.units;
+        let mesh = Default::default();
+        let mut node = Node::mesh_block(id, name.clone(), space, units, primitive, mesh, None);
         let made = node.generate();
         self.nodes.push(node);
         self.graph.insert_node(position, id);
@@ -952,15 +1277,12 @@ impl ProjectApp {
     fn add_parameters(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
         let name = self.unique_name("Parameters");
-        let mut data = ProjectAnalysis {
-            id,
-            name: name.clone(),
-            ..Default::default()
+        let block = ParametersBlock {
+            units: self.settings.new_model.units,
+            parameters: vec![Parameter::new("Length", ValueKind::Length, 0.1)],
         };
-        data.model.properties.units = self.settings.new_model.units;
-        let mut node = Node::of_kind(Kind::Parameters, id, name.clone(), data);
-        node.parameters = vec![Parameter::new("Length", ValueKind::Length, 0.1)];
-        self.nodes.push(node);
+        self.nodes
+            .push(Node::new(id, name.clone(), Block::Parameters(block)));
         self.graph.insert_node(position, id);
         self.output.push(format!(
             "{name} created: drag the pin of a parameter to a parameter of a mesh block; \
@@ -974,15 +1296,14 @@ impl ProjectApp {
         let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
             return;
         };
-        let units = node
-            .data
-            .as_ref()
-            .map_or(UnitSystem::default(), |d| d.model.properties.units);
+        let Some(block) = node.as_parameters() else {
+            return;
+        };
         self.parameter_set = Some(ParameterSetEditor::new(
             id,
             &node.name,
-            &node.parameters,
-            units,
+            &block.parameters,
+            block.units,
         ));
     }
 
@@ -1015,11 +1336,9 @@ impl ProjectApp {
                         None => false,
                     }
                 });
-                if let Some(node) = self.node(id) {
-                    node.parameters = rows.into_iter().map(|(_, p)| p).collect();
-                    if let Some(data) = &mut node.data {
-                        data.model.properties.units = units;
-                    }
+                if let Some(block) = self.node(id).and_then(Node::as_parameters_mut) {
+                    block.parameters = rows.into_iter().map(|(_, p)| p).collect();
+                    block.units = units;
                 }
                 self.sync_due = true;
             }
@@ -1030,20 +1349,15 @@ impl ProjectApp {
     fn add_measure(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
         let name = self.unique_name("Measure");
-        let mut data = ProjectAnalysis {
-            id,
-            name: name.clone(),
-            ..Default::default()
-        };
-        data.model.properties.units = self.settings.new_model.units;
-        let mut node = Node::of_kind(Kind::Measure, id, name.clone(), data);
-        node.measure = Some(MeasureState {
+        let block = MeasureBlock {
+            units: self.settings.new_model.units,
             kind: MeasureKind::default(),
             value: None,
             evaluated: None,
             error: None,
-        });
-        self.nodes.push(node);
+        };
+        self.nodes
+            .push(Node::new(id, name.clone(), Block::Measure(block)));
         self.graph.insert_node(position, id);
         self.output.push(format!(
             "{name} created: drag the results of a step to its Results row; double-click it \
@@ -1057,11 +1371,10 @@ impl ProjectApp {
         let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
             return;
         };
-        let Some(measure) = &node.measure else {
+        let Some(measure) = node.as_measure() else {
             return;
         };
-        let units =
-            (node.data.as_ref()).map_or(UnitSystem::default(), |d| d.model.properties.units);
+        let units = measure.units;
         let node_sets = (self.links.iter().find(|l| l.target == id))
             .and_then(|l| self.nodes.iter().find(|n| n.id == l.source))
             .and_then(Node::link_data)
@@ -1110,13 +1423,9 @@ impl ProjectApp {
             MeasureEditorResult::Cancel => self.measure_editor = None,
             MeasureEditorResult::Ok(kind, units) => {
                 self.measure_editor = None;
-                if let Some(node) = self.node(id) {
-                    if let Some(measure) = &mut node.measure {
-                        measure.kind = kind;
-                    }
-                    if let Some(data) = &mut node.data {
-                        data.model.properties.units = units;
-                    }
+                if let Some(measure) = self.node(id).and_then(Node::as_measure_mut) {
+                    measure.kind = kind;
+                    measure.units = units;
                 }
                 self.sync_due = true;
             }
@@ -1136,7 +1445,7 @@ impl ProjectApp {
     /// measures and its definition; `None` while it has no results to measure.
     fn measure_key(&self, id: u64) -> Option<u64> {
         let node = self.nodes.iter().find(|n| n.id == id)?;
-        let kind = &node.measure.as_ref()?.kind;
+        let kind = &node.as_measure()?.kind;
         let (_, step, bound) = self.measured(id)?;
         let mut print = plx_mesh::Fnv::new();
         print.add(&bound.input.unwrap_or_default().to_le_bytes());
@@ -1155,14 +1464,14 @@ impl ProjectApp {
         let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
             return CellState::Missing;
         };
-        let Some(measure) = &node.measure else {
+        let Some(measure) = node.as_measure() else {
             return CellState::Missing;
         };
         let Some(key) = self.measure_key(id) else {
             return CellState::Missing;
         };
         let fresh = (self.measured(id))
-            .and_then(|(source, _, _)| source.status.as_ref())
+            .and_then(|(source, _, _)| source.status())
             .is_some_and(|s| s.results == CellState::UpToDate);
         match measure.value {
             _ if measure.evaluated != Some(key) => CellState::OutOfDate,
@@ -1189,12 +1498,11 @@ impl ProjectApp {
             let Some(node) = self.node(id) else {
                 continue;
             };
-            let units =
-                (node.data.as_ref()).map_or(UnitSystem::default(), |d| d.model.properties.units);
             let name = node.name.clone();
-            let Some(measure) = &mut node.measure else {
+            let Some(measure) = node.as_measure_mut() else {
                 continue;
             };
+            let units = measure.units;
             measure.evaluated = Some(key);
             let line = match result {
                 Ok(value) => {
@@ -1216,7 +1524,7 @@ impl ProjectApp {
             self.output.push(line);
         }
         let measures: Vec<u64> = (self.nodes.iter())
-            .filter(|n| n.kind == Kind::Measure)
+            .filter(|n| n.kind() == Kind::Measure)
             .map(|n| n.id)
             .collect();
         for id in measures {
@@ -1224,7 +1532,7 @@ impl ProjectApp {
                 continue;
             };
             let evaluated = (self.nodes.iter().find(|n| n.id == id))
-                .and_then(|n| n.measure.as_ref())
+                .and_then(Node::as_measure)
                 .and_then(|m| m.evaluated);
             if evaluated == Some(key) || self.measuring.get(&id).is_some_and(|(k, _)| *k == key) {
                 continue;
@@ -1233,7 +1541,7 @@ impl ProjectApp {
                 continue;
             };
             let Some(kind) = (self.nodes.iter().find(|n| n.id == id))
-                .and_then(|n| n.measure.as_ref())
+                .and_then(Node::as_measure)
                 .map(|m| m.kind.clone())
             else {
                 continue;
@@ -1257,22 +1565,17 @@ impl ProjectApp {
     fn add_optimizer(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
         let name = self.unique_name("Optimizer");
-        let mut data = ProjectAnalysis {
-            id,
-            name: name.clone(),
-            ..Default::default()
-        };
-        data.model.properties.units = self.settings.new_model.units;
-        let mut node = Node::of_kind(Kind::Optimizer, id, name.clone(), data);
         let kind = OptimizerKind::default();
-        node.optimizer = Some(OptimizerState {
+        let block = OptimizerBlock {
+            units: self.settings.new_model.units,
             value: kind.start(),
             kind,
             history: Vec::new(),
             report: None,
             done: None,
-        });
-        self.nodes.push(node);
+        };
+        self.nodes
+            .push(Node::new(id, name.clone(), Block::Optimizer(block)));
         self.graph.insert_node(position, id);
         self.output.push(format!(
             "{name} created: drag its value to Refine of a mesh block and the value of a Measure \
@@ -1285,16 +1588,14 @@ impl ProjectApp {
         let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
             return;
         };
-        let Some(optimizer) = &node.optimizer else {
+        let Some(optimizer) = node.as_optimizer() else {
             return;
         };
-        let units =
-            (node.data.as_ref()).map_or(UnitSystem::default(), |d| d.model.properties.units);
         self.optimizer_editor = Some(OptimizerEditor::new(
             id,
             &node.name,
             optimizer.kind.clone(),
-            units,
+            optimizer.units,
         ));
     }
 
@@ -1308,13 +1609,9 @@ impl ProjectApp {
         };
         let result = editor.show(ctx, &history);
         let settle = |app: &mut Self, kind: OptimizerKind, units: UnitSystem| {
-            if let Some(node) = app.node(id) {
-                if let Some(data) = &mut node.data {
-                    data.model.properties.units = units;
-                }
-                if let Some(optimizer) = &mut node.optimizer
-                    && optimizer.kind != kind
-                {
+            if let Some(optimizer) = app.node(id).and_then(Node::as_optimizer_mut) {
+                optimizer.units = units;
+                if optimizer.kind != kind {
                     // Other settings: the last run is no longer what it would give.
                     if optimizer.kind.value_kind() != kind.value_kind() {
                         optimizer.value = kind.start();
@@ -1363,24 +1660,20 @@ impl ProjectApp {
     fn shown_measure(&self, id: u64, value: f64) -> String {
         let measure = (self.objective_of(id))
             .and_then(|m| self.nodes.iter().find(|n| n.id == m))
-            .and_then(|n| Some((n.measure.as_ref()?, n.data.as_ref()?)));
+            .and_then(Node::as_measure);
         match measure {
-            Some((measure, data)) => {
-                crate::measure::shown(&measure.kind, value, data.model.properties.units)
-            }
+            Some(measure) => crate::measure::shown(&measure.kind, value, measure.units),
             None => crate::results::format_value(value as f32),
         }
     }
 
     /// The value of an optimizer as text.
     fn shown_loop_value(&self, id: u64, value: f64) -> String {
-        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+        let Some(optimizer) = (self.nodes.iter().find(|n| n.id == id)).and_then(Node::as_optimizer)
+        else {
             return String::new();
         };
-        let units =
-            (node.data.as_ref()).map_or(UnitSystem::default(), |d| d.model.properties.units);
-        let kind = (node.optimizer.as_ref()).map_or(ValueKind::Factor, |o| o.kind.value_kind());
-        crate::optimizer::shown(kind, value, units)
+        crate::optimizer::shown(optimizer.kind.value_kind(), value, optimizer.units)
     }
 
     /// How many elements the meshes an optimizer varies would have at `value`: of a mesh
@@ -1391,12 +1684,14 @@ impl ProjectApp {
             .filter_map(|link| {
                 let node = self.nodes.iter().find(|n| n.id == link.target)?;
                 let key = links::parameter_key(link)?;
-                if node.kind == Kind::Analysis {
+                if node.kind() == Kind::Analysis {
                     return (key == REFINEMENT)
                         .then(|| estimated_elements(node, value))
                         .flatten();
                 }
-                let (mut primitive, mut refinement) = (node.primitive.clone()?, node.refinement);
+                let mesh = node.as_mesh()?;
+                let (mut primitive, mut refinement) = (mesh.primitive.clone(), mesh.refinement);
+
                 if key == REFINEMENT {
                     refinement = value;
                 } else {
@@ -1418,8 +1713,7 @@ impl ProjectApp {
 
     /// The state of an optimizer: up to date while its measure is what its last run ended on.
     fn optimizer_state(&self, id: u64) -> CellState {
-        let Some(optimizer) =
-            (self.nodes.iter().find(|n| n.id == id)).and_then(|n| n.optimizer.as_ref())
+        let Some(optimizer) = (self.nodes.iter().find(|n| n.id == id)).and_then(Node::as_optimizer)
         else {
             return CellState::Missing;
         };
@@ -1440,8 +1734,7 @@ impl ProjectApp {
     /// The iterations of an optimizer for its editor.
     fn optimizer_history(&self, id: u64) -> crate::optimizer::History {
         let mut history = crate::optimizer::History::default();
-        let Some(optimizer) =
-            (self.nodes.iter().find(|n| n.id == id)).and_then(|n| n.optimizer.as_ref())
+        let Some(optimizer) = (self.nodes.iter().find(|n| n.id == id)).and_then(Node::as_optimizer)
         else {
             return history;
         };
@@ -1449,9 +1742,8 @@ impl ProjectApp {
         let measure_of = |value: f64| {
             let (measure, units) = (self.objective_of(id))
                 .and_then(|m| self.nodes.iter().find(|n| n.id == m))
-                .and_then(|n| {
-                    Some((n.measure.as_ref()?, n.data.as_ref()?.model.properties.units))
-                })?;
+                .and_then(Node::as_measure)
+                .map(|m| (m, m.units))?;
             let (field, component) = measure.kind.field();
             Some(if field == "FREQ" {
                 units.shown(value, Quantity::Frequency)
@@ -1507,7 +1799,7 @@ impl ProjectApp {
         node: &Node,
         incoming: &HashMap<u64, Vec<(Vec<String>, String)>>,
     ) -> Vec<Row> {
-        let Some(optimizer) = &node.optimizer else {
+        let Some(optimizer) = node.as_optimizer() else {
             return Vec::new();
         };
         let row = |path: &[&str], text: String, icon, tip: &str| Row {
@@ -1575,7 +1867,7 @@ impl ProjectApp {
     /// updates the project at every iteration, or else updates the project.
     fn update_all(&mut self) {
         self.loops_due = (self.nodes.iter())
-            .filter(|n| n.kind == Kind::Optimizer)
+            .filter(|n| n.kind() == Kind::Optimizer)
             .map(|n| n.id)
             .filter(|&id| {
                 self.optimizer_state(id) != CellState::UpToDate
@@ -1602,7 +1894,7 @@ impl ProjectApp {
             ));
             return;
         }
-        if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+        if let Some(optimizer) = self.node(id).and_then(Node::as_optimizer_mut) {
             optimizer.history.clear();
             optimizer.report = None;
             optimizer.done = None;
@@ -1621,7 +1913,7 @@ impl ProjectApp {
         if self.looping.as_ref().is_some_and(|run| run.id == id) {
             return;
         }
-        if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+        if let Some(optimizer) = self.node(id).and_then(Node::as_optimizer_mut) {
             optimizer.history.clear();
             optimizer.report = None;
             optimizer.done = None;
@@ -1661,7 +1953,7 @@ impl ProjectApp {
                 let measure = (self.objective_of(id)).and_then(|m| {
                     let node = self.nodes.iter().find(|n| n.id == m)?;
                     (self.measure_state(m) == CellState::UpToDate)
-                        .then(|| node.measure.as_ref()?.value)?
+                        .then(|| node.as_measure()?.value)?
                 });
                 let iteration = Iteration {
                     value,
@@ -1673,14 +1965,14 @@ impl ProjectApp {
                     "{}: iteration {}, value {}: {}",
                     self.name_of(id),
                     (self.nodes.iter().find(|n| n.id == id))
-                        .and_then(|n| n.optimizer.as_ref())
+                        .and_then(Node::as_optimizer)
                         .map_or(0, |o| o.history.len())
                         + 1,
                     self.shown_loop_value(id, value),
                     measure.map_or("no measure".into(), |m| self.shown_measure(id, m))
                 );
                 self.output.push(line);
-                if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+                if let Some(optimizer) = self.node(id).and_then(Node::as_optimizer_mut) {
                     optimizer.history.push(iteration);
                 }
                 if let Some(run) = &mut self.looping {
@@ -1693,8 +1985,7 @@ impl ProjectApp {
 
     /// Gives the next value of the loop, or ends it.
     fn next_iteration(&mut self, id: u64) {
-        let Some(optimizer) =
-            (self.nodes.iter().find(|n| n.id == id)).and_then(|n| n.optimizer.as_ref())
+        let Some(optimizer) = (self.nodes.iter().find(|n| n.id == id)).and_then(Node::as_optimizer)
         else {
             self.looping = None;
             return;
@@ -1718,7 +2009,7 @@ impl ProjectApp {
         let Some((&value, rest)) = batch.split_first() else {
             return self.finish_loop(id, None, LoopOutcome::StudyDone);
         };
-        if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+        if let Some(optimizer) = self.node(id).and_then(Node::as_optimizer_mut) {
             optimizer.value = value;
         }
         self.looping = Some(LoopRun {
@@ -1735,8 +2026,7 @@ impl ProjectApp {
     fn finish_loop(&mut self, id: u64, value: Option<f64>, outcome: LoopOutcome) {
         self.looping = None;
         let name = self.name_of(id);
-        let Some(optimizer) =
-            (self.nodes.iter().find(|n| n.id == id)).and_then(|n| n.optimizer.as_ref())
+        let Some(optimizer) = (self.nodes.iter().find(|n| n.id == id)).and_then(Node::as_optimizer)
         else {
             return;
         };
@@ -1792,7 +2082,7 @@ impl ProjectApp {
         let done = (self.objective_of(id))
             .filter(|&m| value.is_none() && self.measure_state(m) == CellState::UpToDate)
             .and_then(|m| self.measure_key(m));
-        if let Some(optimizer) = self.node(id).and_then(|n| n.optimizer.as_mut()) {
+        if let Some(optimizer) = self.node(id).and_then(Node::as_optimizer_mut) {
             if let Some(value) = value {
                 optimizer.value = value;
             }
@@ -1825,8 +2115,8 @@ impl ProjectApp {
             };
             if key == REFINEMENT {
                 node.set_refinement(value);
-            } else if let Some(primitive) = &mut node.primitive {
-                primitive.set_value(&key, value);
+            } else if let Some(mesh) = node.as_mesh_mut() {
+                mesh.primitive.set_value(&key, value);
             }
         }
     }
@@ -1838,39 +2128,16 @@ impl ProjectApp {
             return None;
         };
         if cell == links::LOOP {
-            return node.optimizer.as_ref().map(|o| o.value);
+            return node.as_optimizer().map(|o| o.value);
         }
-        (node.parameters.iter())
+        (node.as_parameters()?.parameters.iter())
             .find(|p| &p.name == name)
             .map(|p| p.value)
     }
 
     /// The label of the parameter row `slot`, `["Parameters", key]`, of a block.
     fn parameter_label(&self, id: u64, slot: &[String]) -> String {
-        let key = slot.get(1).map_or("", String::as_str);
-        if key == REFINEMENT {
-            return "Refine".into();
-        }
-        (self.nodes.iter().find(|n| n.id == id))
-            .and_then(|n| n.primitive.as_ref())
-            .and_then(|p| p.params().iter().find(|param| param.key == key))
-            .map_or_else(|| key.to_owned(), |param| param.label.to_owned())
-    }
-
-    /// What kind of number a block gives at `item` or takes at `slot`.
-    fn value_kind(&self, id: u64, path: &[String]) -> Option<ValueKind> {
-        let node = self.nodes.iter().find(|n| n.id == id)?;
-        match path {
-            [cell, name] if cell == links::VALUE => (node.parameters.iter())
-                .find(|p| &p.name == name)
-                .map(|p| p.kind),
-            [cell, _] if cell == links::LOOP => Some(node.optimizer.as_ref()?.kind.value_kind()),
-            [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => {
-                Some(ValueKind::Factor)
-            }
-            [cell, key] if cell == links::PARAMETERS => node.primitive.as_ref()?.value_kind(key),
-            _ => None,
-        }
+        parameter_label(&self.nodes, id, slot)
     }
 
     /// Adds a mesh export block with no file yet; returns its id.
@@ -1952,14 +2219,18 @@ impl ProjectApp {
         let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
             return CellState::Missing;
         };
-        let Some(window) = &node.campbell else {
+        let Some(CampbellBlock {
+            window: Some(window),
+            input,
+        }) = node.as_campbell()
+        else {
             return CellState::Missing;
         };
         if window.is_running() {
             CellState::Running
         } else if window.points().is_empty() || self.campbell_source(id).is_none() {
             CellState::Missing
-        } else if node.campbell_input.is_some() && window.fingerprint() == node.campbell_input {
+        } else if input.is_some() && window.fingerprint() == *input {
             CellState::UpToDate
         } else {
             CellState::OutOfDate
@@ -1968,12 +2239,13 @@ impl ProjectApp {
 
     /// Starts the sweep of a Campbell block, or continues it with `keep`.
     fn start_campbell(&mut self, id: u64, keep: bool) -> Result<(), String> {
-        let mut window = (self.node(id).and_then(|n| n.campbell.take()))
+        let mut window = (self.node(id).and_then(Node::as_campbell_mut))
+            .and_then(|c| c.window.take())
             .ok_or_else(|| "not a Campbell block".to_string())?;
         let default_solver = self.settings.solver.default_solver();
         let result = self.start_sweep(id, &mut window, default_solver, keep);
-        if let Some(node) = self.node(id) {
-            node.campbell = Some(window);
+        if let Some(campbell) = self.node(id).and_then(Node::as_campbell_mut) {
+            campbell.window = Some(window);
         }
         result
     }
@@ -2003,11 +2275,13 @@ impl ProjectApp {
     /// Takes the finished speeds of the Campbell blocks and shows their open diagrams.
     fn campbell_windows(&mut self, ctx: &egui::Context) {
         let ids: Vec<u64> = (self.nodes.iter())
-            .filter(|n| n.kind == Kind::Campbell)
+            .filter(|n| n.kind() == Kind::Campbell)
             .map(|n| n.id)
             .collect();
         for id in ids {
-            let Some(mut window) = self.node(id).and_then(|n| n.campbell.take()) else {
+            let Some(mut window) =
+                (self.node(id).and_then(Node::as_campbell_mut)).and_then(|c| c.window.take())
+            else {
                 continue;
             };
             window.poll();
@@ -2026,8 +2300,8 @@ impl ProjectApp {
             if window.is_running() {
                 ctx.request_repaint_after(Duration::from_millis(250));
             }
-            if let Some(node) = self.node(id) {
-                node.campbell = Some(window);
+            if let Some(campbell) = self.node(id).and_then(Node::as_campbell_mut) {
+                campbell.window = Some(window);
             }
         }
     }
@@ -2036,7 +2310,7 @@ impl ProjectApp {
     /// whether any started.
     fn update_campbells(&mut self) -> bool {
         let due: Vec<u64> = (self.nodes.iter())
-            .filter(|n| n.kind == Kind::Campbell)
+            .filter(|n| n.kind() == Kind::Campbell)
             .map(|n| n.id)
             .filter(|&id| {
                 self.campbell_source(id).is_some()
@@ -2076,17 +2350,14 @@ impl ProjectApp {
             return true;
         }
         let name = node.name.clone();
-        let line = match node.write_export(base.as_deref()) {
-            Ok(file) => {
-                node.export_error = None;
-                format!("{name}: {} written", file.display())
-            }
-            Err(why) => {
-                node.export_error = Some(why.clone());
-                format!("{name}: not written: {why}")
-            }
+        let (line, error) = match node.write_export(base.as_deref()) {
+            Ok(file) => (format!("{name}: {} written", file.display()), None),
+            Err(why) => (format!("{name}: not written: {why}"), Some(why)),
         };
-        let ok = self.node(id).is_some_and(|n| n.export_error.is_none());
+        let ok = error.is_none();
+        if let Some(export) = node.as_export_mut() {
+            export.error = error;
+        }
         self.output.push(line);
         ok
     }
@@ -2100,11 +2371,13 @@ impl ProjectApp {
         let base = self.export_base();
         let ids: Vec<u64> = self.nodes.iter().map(|n| n.id).collect();
         for id in links::order(&ids, &self.links) {
-            let Some(node) = (self.nodes.iter()).find(|n| n.id == id && n.kind == Kind::MeshExport)
-            else {
+            let Some(node) = (self.nodes.iter()).find(|n| n.id == id) else {
                 continue;
             };
-            if node.export_path.trim().is_empty() {
+            let Some(export) = node.as_export() else {
+                continue;
+            };
+            if export.path.trim().is_empty() {
                 self.output
                     .push(format!("{} skipped: no file is chosen.", node.name));
             } else if !changed_only || node.export_state(base.as_deref()) != CellState::UpToDate {
@@ -2143,8 +2416,11 @@ impl ProjectApp {
         let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
             return;
         };
-        let current = export_file(&node.export_path, base.as_deref());
-        let name = Path::new(&node.export_path).file_name().map_or_else(
+        let Some(export) = node.as_export() else {
+            return;
+        };
+        let current = export_file(&export.path, base.as_deref());
+        let name = Path::new(&export.path).file_name().map_or_else(
             || format!("{}.inp", node.name),
             |n| n.to_string_lossy().into(),
         );
@@ -2167,9 +2443,9 @@ impl ProjectApp {
             None => &file,
         };
         let shown = shown.to_string_lossy().into_owned();
-        if let Some(node) = self.node(id) {
-            node.export_path = shown;
-            node.export_error = None;
+        if let Some(export) = self.node(id).and_then(Node::as_export_mut) {
+            export.path = shown;
+            export.error = None;
         }
     }
 
@@ -2209,15 +2485,15 @@ impl ProjectApp {
         let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
             return;
         };
-        let (Some(primitive), Some(data)) = (&node.primitive, &node.data) else {
+        let Some(mesh) = node.as_mesh() else {
             return;
         };
         self.mesh_block = Some(MeshBlockEditor::new(
             id,
             &node.name,
-            primitive.clone(),
-            node.space,
-            data.model.properties.units,
+            mesh.primitive.clone(),
+            mesh.space,
+            mesh.units,
             linked,
         ));
     }
@@ -2233,10 +2509,10 @@ impl ProjectApp {
             MeshBlockResult::Ok(primitive, space, units) => {
                 self.mesh_block = None;
                 if let Some(node) = self.node(id) {
-                    node.primitive = Some(primitive);
-                    node.space = space;
-                    if let Some(data) = &mut node.data {
-                        data.model.properties.units = units;
+                    if let Some(mesh) = node.as_mesh_mut() {
+                        mesh.primitive = primitive;
+                        mesh.space = space;
+                        mesh.units = units;
                     }
                     if node.mesh_state() == CellState::OutOfDate {
                         let line = format!(
@@ -2254,20 +2530,20 @@ impl ProjectApp {
     /// Opens the editor of a materials block, with the materials of the analyses to import.
     fn edit_materials(&mut self, id: u64) {
         let analyses = (self.nodes.iter())
-            .filter(|n| n.kind == Kind::Analysis)
+            .filter(|n| n.kind() == Kind::Analysis)
             .filter_map(|n| Some((n.name.clone(), n.link_data()?.fe.materials.clone())))
             .collect();
         let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
             return;
         };
-        let Some(data) = &node.data else {
+        let Some(block) = node.as_materials() else {
             return;
         };
         self.material_set = Some(MaterialSetEditor::new(
             id,
             &node.name,
-            &data.model.materials,
-            data.model.properties.units,
+            &block.model.fe.materials,
+            block.units,
             analyses,
         ));
     }
@@ -2282,10 +2558,11 @@ impl ProjectApp {
             MaterialSetResult::Cancel => self.material_set = None,
             MaterialSetResult::Ok(materials, units) => {
                 self.material_set = None;
-                if let Some(data) = self.node(id).and_then(|n| n.data.as_mut()) {
-                    data.model.materials = materials;
-                    data.model.properties.units = units;
+                if let Some(block) = self.node(id).and_then(Node::as_materials_mut) {
+                    block.model.fe.materials = materials;
+                    block.units = units;
                 }
+
                 // The analyses that link them take them now.
                 self.sync_due = true;
             }
@@ -2300,7 +2577,7 @@ impl ProjectApp {
     }
 
     fn open_window(&mut self, ctx: &egui::Context, id: u64, view: Option<Show>) {
-        match self.nodes.iter().find(|n| n.id == id).map(|n| n.kind) {
+        match self.nodes.iter().find(|n| n.id == id).map(Node::kind) {
             Some(Kind::Analysis) => {}
             Some(Kind::Materials) => {
                 // Asked for from an analysis window: the editor is in the project window.
@@ -2320,7 +2597,9 @@ impl ProjectApp {
             }
             Some(Kind::Campbell) => {
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
-                if let Some(window) = self.node(id).and_then(|n| n.campbell.as_mut()) {
+                if let Some(window) =
+                    (self.node(id).and_then(Node::as_campbell_mut)).and_then(|c| c.window.as_mut())
+                {
                     window.visible = true;
                 }
                 return;
@@ -2354,19 +2633,23 @@ impl ProjectApp {
         let Some(node) = self.node(id) else {
             return;
         };
-        if node.window.is_some() {
+        let name = node.name.clone();
+        let Some(analysis) = node.as_analysis_mut() else {
+            return;
+        };
+        if analysis.window.is_some() {
             // Brought to the front.
             let viewport = analysis_viewport(id);
             ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
-            if let (Some(view), Some(window)) = (view, &mut node.window) {
+            if let (Some(view), Some(window)) = (view, &mut analysis.window) {
                 window.show_workspace(view.clone());
             }
             return;
         }
-        let Some(data) = node.data.take() else {
+        let Some(data) = analysis.data.take() else {
             return;
         };
-        let mut window = AnalysisWindow::new(render_state, settings, &node.name);
+        let mut window = AnalysisWindow::new(render_state, settings, &name);
         window.set_project_folder(folder);
         window.set_links(incoming, upstream);
         if let Some(view) = view {
@@ -2376,8 +2659,8 @@ impl ProjectApp {
         if !import.is_empty() {
             window.import_after_load(import);
         }
-        node.window = Some(Box::new(window));
-        node.window_position = at;
+        analysis.window = Some(Box::new(window));
+        analysis.window_position = at;
     }
 
     /// The path the analyses' models take: the project file, or a name for an unsaved one.
@@ -2392,17 +2675,21 @@ impl ProjectApp {
         let Some(node) = self.node(id) else {
             return true;
         };
-        let Some(window) = &mut node.window else {
+        let name = node.name.clone();
+        let Some(analysis) = node.as_analysis_mut() else {
+            return true;
+        };
+        let Some(window) = &mut analysis.window else {
             return true;
         };
         if let Some(reason) = window.busy() {
-            let line = format!("{} stays open while {reason}.", node.name);
+            let line = format!("{name} stays open while {reason}.");
             window.message(line.clone());
             self.output.push(line);
             return false;
         }
-        node.data = window.data();
-        node.window = None;
+        analysis.data = window.data();
+        analysis.window = None;
         node.refresh_closed();
         true
     }
@@ -2485,7 +2772,7 @@ impl ProjectApp {
                     self.nodes.push(Node::read(node));
                 }
                 let analyses = (self.nodes.iter())
-                    .filter(|n| n.kind == Kind::Analysis)
+                    .filter(|n| n.kind() == Kind::Analysis)
                     .count();
                 let sources = self.nodes.len() - analyses;
                 self.output.push(if sources == 0 {
@@ -2538,7 +2825,7 @@ impl ProjectApp {
         if let Some(name) = self
             .nodes
             .iter()
-            .find(|n| n.window.as_ref().is_some_and(|w| w.model().is_none()))
+            .find(|n| n.window().is_some_and(|w| w.model().is_none()))
         {
             self.output
                 .push(format!("Not saved: {} is still loading.", name.name));
@@ -2562,7 +2849,7 @@ impl ProjectApp {
                     &path.file_stem().unwrap_or_default().to_string_lossy(),
                 );
                 for node in &mut self.nodes {
-                    if let Some(window) = &mut node.window {
+                    if let Some(window) = node.window_mut() {
                         window.saved(&path);
                         window.set_project_folder(folder.clone());
                         window.message(line.clone());
@@ -2600,53 +2887,14 @@ impl ProjectApp {
             .map_or(egui::pos2(40.0, 40.0), |info| {
                 info.pos + egui::vec2(40.0, 260.0)
             });
-        let Some(node) = self.node(id) else {
+        let Some(name) = self.node(id).map(|n| format!("Copy of {}", n.name)) else {
             return;
         };
-        let Some(mut data) = node.data() else {
-            return;
-        };
-        let name = format!("Copy of {}", node.name);
-        let (kind, primitive, generated) = (node.kind, node.primitive.clone(), node.generated);
-        let (refinement, parameters) = (node.refinement, node.parameters.clone());
-        let optimizer = (node.optimizer.as_ref()).map(|o| OptimizerState {
-            kind: o.kind.clone(),
-            value: o.kind.start(),
-            history: Vec::new(),
-            report: None,
-            done: None,
-        });
-        let measure = (node.measure.as_ref()).map(|m| MeasureState {
-            kind: m.kind.clone(),
-            value: None,
-            evaluated: None,
-            error: None,
-        });
-        let campbell = (node.campbell.as_ref()).map(|w| {
-            Box::new(CampbellWindow::saved(
-                w.setup().clone(),
-                Vec::new(),
-                None,
-                None,
-            ))
-        });
         let new_id = self.next_id();
         let name = self.unique_name(&name);
-        data.id = new_id;
-        data.name = name.clone();
-        let path = (self.nodes.iter().find(|n| n.id == id)).map(|n| n.export_path.clone());
-        let mut copy = match primitive {
-            Some(primitive) => Node::mesh_block(new_id, name.clone(), data, primitive, generated),
-            None if kind == Kind::MeshExport => {
-                Node::mesh_export(new_id, name.clone(), path.unwrap_or_default(), None)
-            }
-            None => Node::of_kind(kind, new_id, name.clone(), data),
+        let Some(copy) = self.node(id).and_then(|n| n.copied(new_id, name.clone())) else {
+            return;
         };
-        copy.refinement = refinement;
-        copy.parameters = parameters;
-        copy.measure = measure;
-        copy.optimizer = optimizer;
-        copy.campbell = campbell;
         self.nodes.push(copy);
         self.graph.insert_node(position, new_id);
         self.output.push(format!("{name} created"));
@@ -2713,7 +2961,7 @@ impl ProjectApp {
             let after_source = (self.links.iter()).any(|l| {
                 l.target == id && links::is_results(l) && self.update_queue.contains(&l.source)
             });
-            match &node.status {
+            match &node.status() {
                 Some(status) if (status.needs_solve() || after_source) && status.solvable() => {
                     self.update_queue.push_back(node.id)
                 }
@@ -2749,7 +2997,7 @@ impl ProjectApp {
             let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) else {
                 continue;
             };
-            let outcome = match (background, &mut node.window) {
+            let outcome = match (background, node.window_mut()) {
                 (Some(solve), _) if solve.active() => {
                     self.updating.push(id);
                     continue;
@@ -2766,9 +3014,9 @@ impl ProjectApp {
             };
             // Done: solved, or stopped by an error the monitor shows.
             let failed = matches!(outcome, Some(Outcome::Failed | Outcome::Stopped))
-                || match &node.window {
+                || match node.window() {
                     Some(window) => window.current_status().is_some_and(|s| s.needs_solve()),
-                    None => node.status.as_ref().is_some_and(|s| s.needs_solve()),
+                    None => node.status().is_some_and(|s| s.needs_solve()),
                 };
             let name = node.name.clone();
             if failed {
@@ -2846,7 +3094,7 @@ impl ProjectApp {
         let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) else {
             return false;
         };
-        if let Some(window) = &mut node.window {
+        if let Some(window) = node.window_mut() {
             window.solve_when_loaded();
             self.solves.retain(|s| s.id != id);
             self.window_runs.retain(|&run| run != id);
@@ -2854,9 +3102,13 @@ impl ProjectApp {
             self.monitor.show(id);
             return true;
         }
-        if !node.upstream.is_ready() {
+        let name = node.name.clone();
+        let Some(analysis) = node.as_analysis_mut() else {
+            return false;
+        };
+        if !analysis.upstream.is_ready() {
             // Update Project could not bring them up to date: the old data is not solved.
-            let upstream = &node.upstream;
+            let upstream = &analysis.upstream;
             let mut reasons = Vec::new();
             if !upstream.stale_meshes.is_empty() {
                 reasons.push(format!(
@@ -2877,14 +3129,14 @@ impl ProjectApp {
                 ));
             }
             self.output
-                .push(format!("{} not solved: {}.", node.name, reasons.join("; ")));
+                .push(format!("{name} not solved: {}.", reasons.join("; ")));
             return false;
         }
-        let Some(data) = node.data.clone() else {
+        let Some(data) = analysis.data.clone() else {
             return false;
         };
-        work_dir.push(crate::analysis::job_name(&node.name));
-        node.solving = true;
+        work_dir.push(crate::analysis::job_name(&name));
+        analysis.solving = true;
         node.refresh_closed();
         let solve =
             BackgroundSolve::start(ctx, path, data, settings, work_dir, incoming.continuation);
@@ -2925,8 +3177,11 @@ impl ProjectApp {
             let Some(node) = self.node(id) else {
                 continue;
             };
-            node.solving = false;
-            if let (Some(solved), Some(data)) = (solved, &mut node.data) {
+            let Some(analysis) = node.as_analysis_mut() else {
+                continue;
+            };
+            analysis.solving = false;
+            if let (Some(solved), Some(data)) = (solved, &mut analysis.data) {
                 if let Some((mesh, mesh_inputs)) = solved.meshed {
                     data.mesh = mesh;
                     data.mesh_inputs = mesh_inputs;
@@ -2950,7 +3205,7 @@ impl ProjectApp {
         if let Some(run) = self.looping.take() {
             self.loops_due.clear();
             let name = self.name_of(run.id);
-            if let Some(optimizer) = self.node(run.id).and_then(|n| n.optimizer.as_mut()) {
+            if let Some(optimizer) = self.node(run.id).and_then(Node::as_optimizer_mut) {
                 let line = format!("Stopped after {} iterations.", optimizer.history.len());
                 optimizer.report = Some(line.clone());
                 optimizer.done = None;
@@ -2961,7 +3216,7 @@ impl ProjectApp {
         self.export_queue.clear();
         self.update_failed = false;
         for id in std::mem::take(&mut self.updating) {
-            if let Some(window) = self.node(id).and_then(|n| n.window.as_mut()) {
+            if let Some(window) = self.node(id).and_then(Node::window_mut) {
                 window.stop_solve();
             }
         }
@@ -3000,7 +3255,7 @@ impl ProjectApp {
             let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
                 continue;
             };
-            let Some(window) = &node.window else {
+            let Some(window) = node.window() else {
                 continue;
             };
             let updating = self.updating.contains(&id);
@@ -3047,7 +3302,7 @@ impl ProjectApp {
             Some(id) => match (self.solves.iter()).find(|s| s.id == id) {
                 Some(solve) => solve.output().into_iter().map(str::to_owned).collect(),
                 None => (self.nodes.iter().find(|n| n.id == id))
-                    .and_then(|n| n.window.as_ref()?.run())
+                    .and_then(|n| n.window()?.run())
                     .map(|run| run.output().to_vec())
                     .unwrap_or_default(),
             },
@@ -3203,7 +3458,7 @@ impl ProjectApp {
         if let Some(solve) = (self.solves.iter_mut()).find(|s| s.id == id && s.active()) {
             solve.stop();
         }
-        if let Some(window) = self.node(id).and_then(|n| n.window.as_mut()) {
+        if let Some(window) = self.node(id).and_then(Node::window_mut) {
             window.stop_solve();
         }
     }
@@ -3406,7 +3661,7 @@ impl ProjectApp {
         let blocks: Vec<BlockView> = (self.nodes.iter())
             .map(|n| {
                 let fe = n.link_data().map(|d| d.fe);
-                let rows = match (n.kind, &n.status) {
+                let rows = match (n.kind(), &n.status()) {
                     (Kind::Materials, _) => fe
                         .map(|fe| material_rows(fe, &n.expanded))
                         .unwrap_or_default(),
@@ -3448,26 +3703,28 @@ impl ProjectApp {
                 BlockView {
                     id: n.id,
                     name: n.name.clone(),
-                    export_path: n.export_path.clone(),
-                    kind: n.kind,
-                    space: n.space,
+                    export_path: (n.as_export()).map_or_else(String::new, |e| e.path.clone()),
+                    kind: n.kind(),
+                    space: n.space().unwrap_or_default(),
                     steps: (fe.into_iter().flat_map(|fe| &fe.steps))
                         .map(|s| s.name.clone())
                         .collect(),
                     continues,
                     rows,
-                    loading: n.window.as_ref().is_some_and(|w| w.model().is_none()),
-                    open: n.window.is_some(),
-                    primitive: n.primitive.clone(),
+                    loading: n.window().is_some_and(|w| w.model().is_none()),
+                    open: n.window().is_some(),
+                    primitive: n.as_mesh().map(|m| m.primitive.clone()),
                     refinement: n.refinement().unwrap_or(1.0),
-                    parameters: n.parameters.clone(),
-                    units: (n.data.as_ref())
-                        .map_or(UnitSystem::default(), |d| d.model.properties.units),
+                    parameters: (n.as_parameters()).map_or_else(Vec::new, |p| p.parameters.clone()),
+                    units: n.units(),
                 }
             })
             .collect();
         self.sync_wires(&blocks);
+        let verdicts = self.drag_verdicts(ui.ctx(), &blocks);
         let mut viewer = Viewer {
+            drag: self.dragging.clone(),
+            verdicts,
             nodes: blocks,
             actions: Vec::new(),
             to_global: Default::default(),
@@ -3484,6 +3741,11 @@ impl ProjectApp {
             .show(&mut self.graph, &mut viewer, ui);
         let clip = viewer.to_global.inverse() * ui.clip_rect();
         draw_feedback(ui.ctx(), &viewer.feedback, viewer.bottom, clip);
+        self.pin_rects = ui.ctx().data_mut(|d| {
+            d.remove_temp::<Vec<(PinKey, egui::Rect)>>(egui::Id::new(PIN_RECTS))
+                .unwrap_or_default()
+        });
+        self.show_refusal(ui, &viewer.verdicts);
         // A double-click into empty space shows the blocks to add there, as in Blender.
         // The response lies on the zoomed and panned layer of the schematic, so its pointer
         // position is in the schematic; the picker needs the one on the screen.
@@ -3521,6 +3783,91 @@ impl ProjectApp {
             );
         }
         viewer.actions
+    }
+
+    /// Finds the pin a wire is dragged from, by where the drag started, and for each pin of the
+    /// other side why the wire cannot end there; empty while no wire is dragged.
+    fn drag_verdicts(
+        &mut self,
+        ctx: &egui::Context,
+        blocks: &[BlockView],
+    ) -> HashMap<PinKey, Option<String>> {
+        let (down, origin, dragging) = ctx.input(|i| {
+            let p = &i.pointer;
+            (
+                p.primary_down(),
+                p.press_origin(),
+                p.is_decidedly_dragging(),
+            )
+        });
+        if !down {
+            self.dragging = None;
+        } else if self.dragging.is_none()
+            && dragging
+            && let Some(origin) = origin
+        {
+            self.dragging = (self.pin_rects.iter())
+                .find(|(_, rect)| rect.expand(2.0).contains(origin))
+                .map(|(key, _)| key.clone());
+        }
+        let Some(drag) = &self.dragging else {
+            return HashMap::new();
+        };
+        let mut verdicts = HashMap::new();
+        for block in blocks {
+            for row in &block.rows {
+                let other = if drag.output { row.input } else { row.output };
+                if !other {
+                    continue;
+                }
+                let key = PinKey {
+                    id: block.id,
+                    path: row.path.clone(),
+                    output: !drag.output,
+                };
+                let why = if drag.output {
+                    refusal(
+                        &self.nodes,
+                        &self.links,
+                        drag.id,
+                        &drag.path,
+                        block.id,
+                        &row.path,
+                    )
+                } else {
+                    refusal(
+                        &self.nodes,
+                        &self.links,
+                        block.id,
+                        &row.path,
+                        drag.id,
+                        &drag.path,
+                    )
+                };
+                verdicts.insert(key, why);
+            }
+        }
+        verdicts
+    }
+
+    /// Says why the wire being dragged cannot end at the pin under the pointer.
+    fn show_refusal(&self, ui: &egui::Ui, verdicts: &HashMap<PinKey, Option<String>>) {
+        let Some(pointer) = ui.ctx().pointer_hover_pos() else {
+            return;
+        };
+        let refused = (self.pin_rects.iter())
+            .filter(|(_, rect)| rect.expand(2.0).contains(pointer))
+            .find_map(|(key, _)| verdicts.get(key).cloned().flatten());
+        if let Some(why) = refused {
+            let id = egui::Id::new("schematic link refusal");
+            egui::Tooltip::always_open(
+                ui.ctx().clone(),
+                ui.layer_id(),
+                id,
+                egui::PopupAnchor::Pointer,
+            )
+            .show(|ui| ui.label(format!("Cannot link: {why}")));
+        }
     }
 
     /// Lets the wires of the schematic show the project's links, each between the rows its
@@ -3581,49 +3928,11 @@ impl ProjectApp {
         if source == target {
             return;
         }
-        if !links::compatible(&item, &slot) {
-            self.output.push(format!(
-                "Not linked: {} of {from} cannot go to {} of {to}.",
-                links::label(&item),
-                links::label(&slot)
-            ));
-            return;
-        }
-        // Materials have no model space.
-        let space = |id: u64| {
-            (self.nodes.iter())
-                .find(|n| {
-                    n.id == id
-                        && !matches!(
-                            n.kind,
-                            Kind::Materials
-                                | Kind::Parameters
-                                | Kind::Measure
-                                | Kind::Optimizer
-                                | Kind::MeshExport
-                                | Kind::Campbell
-                        )
-                })
-                .map(|n| n.space)
-        };
-        if let (Some(a), Some(b)) = (space(source), space(target))
-            && a != b
-        {
-            self.output.push(format!(
-                "Not linked: {from} is {} and {to} {}; linked analyses need the same model \
-                 space.",
-                a.label(),
-                b.label()
-            ));
+        if let Some(why) = refusal(&self.nodes, &self.links, source, &item, target, &slot) {
+            self.output.push(format!("Not linked: {why}"));
             return;
         }
         let feedback = item.first().is_some_and(|c| c == links::LOOP);
-        if !feedback && links::makes_cycle(&self.links, source, target) {
-            self.output.push(format!(
-                "Not linked: {to} comes before {from} already, and a link cannot go back."
-            ));
-            return;
-        }
         if slot.first().is_some_and(|c| c == links::MEASURE) {
             self.link_measure(source, item, target);
             return;
@@ -3632,47 +3941,12 @@ impl ProjectApp {
             self.link_campbell(source, item, target);
             return;
         }
-        let state = slot.first().is_some_and(|c| c == links::STATE);
-        if let Some(chain) = (self.links.iter()).find(|l| l.target == target && links::is_state(l))
-            && !state
-        {
-            self.output.push(format!(
-                "Not linked: {to} continues {} and takes its model from there; unlink it first.",
-                self.name_of(chain.source)
-            ));
-            return;
-        }
-        if state {
+        if slot.first().is_some_and(|c| c == links::STATE) {
             self.link_state(source, item, target);
             return;
         }
         let value = item.first().is_some_and(|c| c == links::VALUE) || feedback;
         let objective = slot.first().is_some_and(|c| c == links::OBJECTIVE);
-        if objective {
-            let measure = (self.nodes.iter()).any(|n| n.id == source && n.kind == Kind::Measure);
-            if !measure {
-                self.output.push(format!(
-                    "Not linked: {to} reads the value of a Measure block, and {from} is none."
-                ));
-                return;
-            }
-        } else if value {
-            let (given, taken) = (
-                self.value_kind(source, &item),
-                self.value_kind(target, &slot),
-            );
-            if given.is_none() || given != taken {
-                let kind = |k: Option<ValueKind>| k.map_or("no number", ValueKind::label);
-                self.output.push(format!(
-                    "Not linked: {} of {from} is a {} and {} of {to} a {}.",
-                    item.get(1).map_or("", String::as_str),
-                    kind(given).to_lowercase(),
-                    self.parameter_label(target, &slot),
-                    kind(taken).to_lowercase()
-                ));
-                return;
-            }
-        }
         let results = item.first().is_some_and(|c| c == links::RESULTS);
         // A category or item links into the same place of the target; a step's results go
         // to the step they are dropped on.
@@ -3890,7 +4164,7 @@ impl ProjectApp {
     /// in place of the one it swept.
     fn link_campbell(&mut self, source: u64, item: Vec<String>, target: u64) {
         let (from, to) = (self.name_of(source), self.name_of(target));
-        let kind = |id: u64| self.nodes.iter().find(|n| n.id == id).map(|n| n.kind);
+        let kind = |id: u64| self.nodes.iter().find(|n| n.id == id).map(|n| n.kind());
         if kind(source) != Some(Kind::Analysis) || kind(target) != Some(Kind::Campbell) {
             self.output.push(format!(
                 "Not linked: {to} sweeps an analysis, and {from} is none."
@@ -3982,7 +4256,7 @@ impl ProjectApp {
         if index + 1 >= fe.steps.len() {
             return;
         }
-        if let Some(window) = self.node(id).and_then(|n| n.window.as_ref())
+        if let Some(window) = self.node(id).and_then(|n| n.window())
             && let Some(reason) = window.busy()
         {
             self.output.push(format!("Not split while {reason}."));
@@ -4000,8 +4274,8 @@ impl ProjectApp {
         let Some(new) = self.continue_from(id, step.clone(), position) else {
             return;
         };
-        let kept = match self.node(new).and_then(|n| n.data.as_mut()) {
-            Some(data) => links::split_after(&fe, index, &mut data.model),
+        let kept = match self.node(new).and_then(Node::closed_model_mut) {
+            Some(data) => links::split_after(&fe, index, data.fe),
             None => links::split_after(&fe, index, &mut plx_model::FeModel::default()),
         };
         // What took the results or state of a moved step takes them from the new analysis.
@@ -4074,13 +4348,13 @@ impl ProjectApp {
         let Some(node) = self.node(id) else {
             return;
         };
-        match &mut node.window {
+        match node.window_mut() {
             Some(window) => {
                 window.apply_setup(fe, path);
                 window.set_user_keywords(fe.user_keywords.clone());
             }
             None => {
-                if let Some(data) = &mut node.data {
+                if let Some(data) = (node.as_analysis_mut()).and_then(|a| a.data.as_mut()) {
                     links::apply_setup(&mut data.model, fe, path);
                     data.model.user_keywords = fe.user_keywords.clone();
                 }
@@ -4151,10 +4425,10 @@ impl ProjectApp {
             if links::is_results(&link)
                 && let Some(node) = self.node(target)
             {
-                match &mut node.window {
+                match node.window_mut() {
                     Some(window) => window.clear_results(&link, submodel),
                     None => {
-                        if let Some(data) = &mut node.data {
+                        if let Some(data) = (node.as_analysis_mut()).and_then(|a| a.data.as_mut()) {
                             links::clear_results(&mut data.model, &link, submodel);
                         }
                         node.refresh_closed();
@@ -4197,23 +4471,25 @@ impl ProjectApp {
             if self
                 .nodes
                 .iter()
-                .any(|n| n.id == target && n.kind == Kind::Campbell)
+                .any(|n| n.id == target && n.kind() == Kind::Campbell)
             {
                 let input = (self.campbell_source(target))
                     .and_then(Node::link_data)
                     .map(|d| crate::campbell::sweep_fingerprint(d.mesh, d.fe));
-                if let Some(node) = self.node(target) {
-                    node.campbell_input = input;
+                if let Some(campbell) = self.node(target).and_then(Node::as_campbell_mut) {
+                    campbell.input = input;
                 }
                 continue;
             }
             let incoming = self.incoming(target);
             upstream.stale_meshes = self.stale_meshes(target);
             if let Some(node) = self.node(target) {
-                match &mut node.window {
+                match node.window_mut() {
                     Some(window) => window.set_links(incoming, upstream),
                     None => {
-                        node.upstream = upstream;
+                        if let Some(analysis) = node.as_analysis_mut() {
+                            analysis.upstream = upstream;
+                        }
                         node.refresh_closed();
                     }
                 }
@@ -4282,10 +4558,10 @@ impl ProjectApp {
         let source = self.nodes.iter().find(|n| n.id == link.source)?;
         let target = self.nodes.iter().find(|n| n.id == link.target)?;
         // A Campbell block reads the analysis when its sweep starts.
-        if target.kind == Kind::Campbell {
+        if target.kind() == Kind::Campbell {
             return None;
         }
-        if let Some(window) = &target.window
+        if let Some(window) = target.window()
             && (window.busy().is_some() || window.model().is_none())
         {
             return None;
@@ -4498,7 +4774,7 @@ impl ProjectApp {
         let path = &link.item;
         if let Payload::Chain { mesh, fe, step } = payload {
             let mut inherited = None;
-            match &mut node.window {
+            match node.window_mut() {
                 Some(window) => {
                     if let Some(mesh) = mesh {
                         window.apply_mesh(*mesh);
@@ -4509,43 +4785,32 @@ impl ProjectApp {
                     window.message(format!("Model and steps taken from {source}"));
                 }
                 None => {
-                    let data = node.data.as_mut()?;
+                    let mut data = node.closed_model_mut()?;
                     if let Some(mesh) = mesh {
-                        let links::MeshCopy {
-                            geometry,
-                            mesh,
-                            mesh_inputs,
-                            mesh_sets,
-                            element_types,
-                        } = *mesh;
-                        data.geometry = geometry;
-                        data.mesh = mesh;
-                        data.mesh_inputs = mesh_inputs;
-                        data.model.mesh_sets = mesh_sets;
-                        data.model.element_types = element_types;
+                        data.take_mesh(*mesh);
                     }
                     if let Some(fe) = fe {
-                        inherited = Some(links::apply_chain(&mut data.model, &fe, step, link));
+                        inherited = Some(links::apply_chain(data.fe, &fe, step, link));
                     }
                 }
             }
             return inherited;
         }
         if let Payload::Bundle { fe, names, ahead } = payload {
-            let taken = match &mut node.window {
+            let taken = match node.window_mut() {
                 Some(window) => {
                     let taken = window.apply_bundle(&fe, link, &names, &ahead);
                     window.message(format!("{} taken from {source}", links::label(path)));
                     taken
                 }
                 None => {
-                    let model = &mut node.data.as_mut()?.model;
-                    links::apply_bundle(model, &fe, link, &names, &ahead)
+                    let data = node.closed_model_mut()?;
+                    links::apply_bundle(data.fe, &fe, link, &names, &ahead)
                 }
             };
             return Some(taken);
         }
-        if let Some(window) = &mut node.window {
+        if let Some(window) = node.window_mut() {
             match payload {
                 Payload::Setup(fe) => {
                     window.apply_setup(&fe, path);
@@ -4564,26 +4829,13 @@ impl ProjectApp {
             }
             return None;
         }
-        let data = node.data.as_mut()?;
+        let mut data = node.closed_model_mut()?;
         match payload {
-            Payload::Setup(fe) => links::apply_setup(&mut data.model, &fe, path),
-            Payload::Geometry(geometry) => data.geometry = geometry,
-            Payload::Mesh(mesh) => {
-                let links::MeshCopy {
-                    geometry,
-                    mesh,
-                    mesh_inputs,
-                    mesh_sets,
-                    element_types,
-                } = *mesh;
-                data.geometry = geometry;
-                data.mesh = mesh;
-                data.mesh_inputs = mesh_inputs;
-                data.model.mesh_sets = mesh_sets;
-                data.model.element_types = element_types;
-            }
+            Payload::Setup(fe) => links::apply_setup(data.fe, &fe, path),
+            Payload::Geometry(geometry) => *data.geometry = geometry,
+            Payload::Mesh(mesh) => data.take_mesh(*mesh),
             Payload::Results(global, file) => {
-                links::apply_results(&mut data.model, link, global, file);
+                links::apply_results(data.fe, link, global, file);
             }
             Payload::Chain { .. } | Payload::Bundle { .. } => {}
         }
@@ -4666,7 +4918,9 @@ impl ProjectApp {
             Action::RunLoop(id) => self.start_loop(id),
             Action::ResetLoop(id) => self.reset_loop(id),
             Action::SetParameter(id, index, value) => {
-                if let Some(parameter) = self.node(id).and_then(|n| n.parameters.get_mut(index)) {
+                if let Some(parameter) = (self.node(id).and_then(Node::as_parameters_mut))
+                    .and_then(|p| p.parameters.get_mut(index))
+                {
                     parameter.value = parameter.kind.clean(value);
                 }
                 self.sync_due = true;
@@ -4684,9 +4938,9 @@ impl ProjectApp {
                 self.add_campbell(pos);
             }
             Action::SetExportPath(id, path) => {
-                if let Some(node) = self.node(id) {
-                    node.export_path = path;
-                    node.export_error = None;
+                if let Some(export) = self.node(id).and_then(Node::as_export_mut) {
+                    export.path = path;
+                    export.error = None;
                 }
             }
             Action::ExportNow(id) => {
@@ -4697,8 +4951,8 @@ impl ProjectApp {
             }
             Action::Generate(id) => self.generate_mesh(id),
             Action::SetPrimitive(id, primitive) => {
-                if let Some(node) = self.node(id) {
-                    node.primitive = Some(primitive);
+                if let Some(mesh) = self.node(id).and_then(Node::as_mesh_mut) {
+                    mesh.primitive = primitive;
                 }
             }
             Action::Open(id, view) => self.open_window(ctx, id, view),
@@ -4757,7 +5011,7 @@ impl ProjectApp {
         let taken =
             (self.nodes.iter()).any(|n| n.id != id && n.name.eq_ignore_ascii_case(name.trim()));
         let valid = !name.trim().is_empty() && !taken;
-        let noun = (self.nodes.iter().find(|n| n.id == id)).map_or("analysis", |n| n.kind.noun());
+        let noun = (self.nodes.iter().find(|n| n.id == id)).map_or("analysis", |n| n.kind().noun());
         egui::Window::new(format!("Rename {}", title_case(noun)))
             .open(&mut open)
             .collapsible(false)
@@ -4795,7 +5049,7 @@ impl ProjectApp {
             let name = name.trim().to_owned();
             if let Some(node) = self.node(id) {
                 node.name = name.clone();
-                if let Some(window) = &mut node.window {
+                if let Some(window) = node.window_mut() {
                     window.rename(&name);
                 }
             }
@@ -4827,7 +5081,7 @@ impl ProjectApp {
             self.confirm_delete = None;
             return;
         };
-        let (name, kind) = (node.name.clone(), node.kind);
+        let (name, kind) = (node.name.clone(), node.kind());
         let what = match kind {
             Kind::Analysis => "with its model and results",
             Kind::Materials => "with its materials",
@@ -4943,7 +5197,7 @@ impl ProjectApp {
     /// Gives every analysis window the program's settings.
     fn share_settings(&mut self) {
         for node in &mut self.nodes {
-            if let Some(window) = &mut node.window {
+            if let Some(window) = node.window_mut() {
                 window.set_settings(&self.settings);
             }
         }
@@ -4956,19 +5210,22 @@ impl ProjectApp {
         let mut closing = Vec::new();
         let mut settings = None;
         for node in &mut self.nodes {
-            let Some(window) = &mut node.window else {
+            let (id, name) = (node.id, &node.name);
+            let Block::Analysis(analysis) = &mut node.block else {
+                continue;
+            };
+            let Some(window) = &mut analysis.window else {
                 continue;
             };
             let mut builder = egui::ViewportBuilder::default()
-                .with_title(format!("{} - {project} - PrePoLix", node.name))
+                .with_title(format!("{name} - {project} - PrePoLix"))
                 .with_app_id("prepolix")
                 .with_inner_size([1400.0, 900.0])
                 .with_min_inner_size([640.0, 400.0])
                 .with_icon(std::sync::Arc::new(crate::window_icon()));
-            if let Some(position) = node.window_position {
+            if let Some(position) = analysis.window_position {
                 builder = builder.with_position(position);
             }
-            let id = node.id;
             ctx.show_viewport_immediate(analysis_viewport(id), builder, |ui, _| {
                 window.ui(ui);
                 if ui.input(|i| i.viewport().close_requested()) {
@@ -4985,10 +5242,10 @@ impl ProjectApp {
             }
             // The block shows the state live.
             if let Some(status) = window.status() {
-                node.status = Some(status);
+                analysis.status = Some(status);
             }
             if let Some(model) = window.model() {
-                node.space = model.fe.properties.space;
+                analysis.space = model.fe.properties.space;
             }
         }
         if let Some(settings) = settings {
@@ -5618,7 +5875,7 @@ fn material_rows(fe: &plx_model::FeModel, expanded: &BTreeSet<Vec<String>>) -> V
 fn generate_stale_meshes(nodes: &mut [Node]) -> (bool, Vec<String>) {
     let mut lines = Vec::new();
     let mut made = false;
-    for node in (nodes.iter_mut()).filter(|n| n.kind == Kind::Mesh) {
+    for node in (nodes.iter_mut()).filter(|n| n.kind() == Kind::Mesh) {
         if node.mesh_state() == CellState::UpToDate {
             continue;
         }
@@ -5638,7 +5895,7 @@ fn generate_stale_meshes(nodes: &mut [Node]) -> (bool, Vec<String>) {
 fn stale_meshes(nodes: &[Node], links: &[Link], id: u64) -> Vec<String> {
     (links::upstream(links, id).into_iter())
         .filter_map(|source| nodes.iter().find(|n| n.id == source))
-        .filter(|n| n.kind == Kind::Mesh && n.mesh_state() != CellState::UpToDate)
+        .filter(|n| n.kind() == Kind::Mesh && n.mesh_state() != CellState::UpToDate)
         .map(|n| n.name.clone())
         .collect()
 }
@@ -5647,7 +5904,10 @@ fn stale_meshes(nodes: &[Node], links: &[Link], id: u64) -> Vec<String> {
 /// parameters, which value links fill as `incoming` says.
 fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     let state = node.mesh_state();
-    let mesh = node.data.as_ref().map(|d| &d.mesh);
+    let Some(block) = node.as_mesh() else {
+        return Vec::new();
+    };
+    let mesh = Some(&block.model.mesh);
     let count = mesh.map_or(0, plx_mesh::FeMesh::element_count);
     let element = (mesh.and_then(|m| m.elements().first())).map_or("", |e| e.type_name.as_str());
     let sides = mesh.map_or_else(String::new, |m| {
@@ -5657,7 +5917,7 @@ fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     if state == CellState::OutOfDate {
         tip = "Mesh: out of date: Update Project or Generate Mesh makes it again".into();
     }
-    if let Some(problem) = (node.primitive.as_ref()).and_then(|p| p.problem(node.space)) {
+    if let Some(problem) = block.primitive.problem(block.space) {
         tip.push_str(&format!("\nIt cannot be made: {problem}"));
     }
     if count > 0 {
@@ -5682,9 +5942,7 @@ fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
         tip,
     }];
     // Its parameters below, like the inputs of a Blender node under its outputs.
-    let Some(primitive) = &node.primitive else {
-        return rows;
-    };
+    let primitive = &block.primitive;
     let row = |key: &str, text: &str, widget: RowWidget, tip: String| {
         let path = vec![PARAMETERS.to_owned(), key.to_owned()];
         Row {
@@ -5723,11 +5981,161 @@ fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
         MeshPrimitive::Rectangle { .. } => format!(
             "Element type: linear (4-node) or quadratic (8-node) quadrilaterals, with reduced \
              integration (R) or not; the family follows from the model space, {}",
-            node.space.label()
+            block.space.label()
         ),
     };
     rows.push(row("element", "Element", RowWidget::Element, tip));
     rows
+}
+
+/// Why `item` of the block `source` cannot go to `slot` of the block `target`; `None`
+/// when the link may be made. The type of the two pins comes first, then the model space
+/// of what they carry, then what the blocks and the links between them allow.
+fn refusal(
+    nodes: &[Node],
+    existing: &[Link],
+    source: u64,
+    item: &[String],
+    target: u64,
+    slot: &[String],
+) -> Option<String> {
+    let node = |id: u64| nodes.iter().find(|n| n.id == id);
+    let name = |id: u64| node(id).map_or_else(String::new, |n| n.name.clone());
+    let (from, to) = (name(source), name(target));
+    let (Some(source_node), Some(target_node)) = (node(source), node(target)) else {
+        return Some(format!("{from} or {to} is gone."));
+    };
+    if source == target {
+        return Some(format!("{from} cannot take data from itself."));
+    }
+    if !links::compatible(item, slot) {
+        let kind = |path: &[String]| links::DataType::of(path).map_or("nothing", |t| t.label());
+        return Some(format!(
+            "{} of {from} is {} and {} of {to} takes {}.",
+            links::label(item),
+            with_article(kind(item)),
+            links::label(slot),
+            with_article(kind(slot)),
+        ));
+    }
+    // Data of a model goes only between blocks of the same model space; materials and
+    // the other blocks without one take it from any.
+    if links::DataType::of(item).is_some_and(links::DataType::has_space)
+        && let (Some(a), Some(b)) = (source_node.space(), target_node.space())
+        && a != b
+    {
+        return Some(format!(
+            "{from} is {} and {to} is {}: linked blocks need the same model space.",
+            a.label(),
+            b.label()
+        ));
+    }
+    let feedback = item.first().is_some_and(|c| c == links::LOOP);
+    if !feedback && links::makes_cycle(existing, source, target) {
+        return Some(format!(
+            "{to} comes before {from} already, and a link cannot go back."
+        ));
+    }
+    let first = slot.first().map(String::as_str);
+    if first == Some(links::MEASURE) {
+        return None;
+    }
+    if first == Some(links::ANALYSIS) {
+        return (source_node.kind() != Kind::Analysis || target_node.kind() != Kind::Campbell)
+            .then(|| format!("{to} sweeps an analysis, and {from} is none."));
+    }
+    if first != Some(links::STATE)
+        && let Some(chain) = existing
+            .iter()
+            .find(|l| l.target == target && links::is_state(l))
+    {
+        return Some(format!(
+            "{to} continues {} and takes its model from there; unlink it first.",
+            name(chain.source)
+        ));
+    }
+    if first == Some(links::OBJECTIVE) {
+        return (source_node.kind() != Kind::Measure)
+            .then(|| format!("{to} reads the value of a Measure block, and {from} is none."));
+    }
+    if item.first().is_some_and(|c| c == links::VALUE) || feedback {
+        let (given, taken) = (
+            value_kind(nodes, source, item),
+            value_kind(nodes, target, slot),
+        );
+        if given.is_none() || given != taken {
+            let kind = |k: Option<ValueKind>| k.map_or("no number", ValueKind::label);
+            return Some(format!(
+                "{} of {from} is a {} and {} of {to} a {}.",
+                item.get(1).map_or("", String::as_str),
+                kind(given).to_lowercase(),
+                parameter_label(nodes, target, slot),
+                kind(taken).to_lowercase()
+            ));
+        }
+    }
+    if item.first().is_some_and(|c| c == links::RESULTS) && first != Some(links::STATE) {
+        // What the results are used for follows from the steps at both ends.
+        let (Some(source_data), Some(target_data)) =
+            (source_node.link_data(), target_node.link_data())
+        else {
+            return Some(format!("{from} or {to} is still loading."));
+        };
+        let step =
+            (item.get(1)).and_then(|n| source_data.fe.steps.iter().find(|s| &s.name == n))?;
+        if let Err(why) = links::results_slot(step, target_data.fe, slot) {
+            return Some(format!(
+                "{} of {from} cannot go to {} of {to}: {why}.",
+                links::label(item),
+                links::label(slot)
+            ));
+        }
+    }
+    None
+}
+
+/// The label of the parameter row `slot`, `["Parameters", key]`, of a block.
+fn parameter_label(nodes: &[Node], id: u64, slot: &[String]) -> String {
+    let key = slot.get(1).map_or("", String::as_str);
+    if key == REFINEMENT {
+        return "Refine".into();
+    }
+    (nodes.iter().find(|n| n.id == id))
+        .and_then(Node::as_mesh)
+        .and_then(|m| m.primitive.params().iter().find(|param| param.key == key))
+        .map_or_else(|| key.to_owned(), |param| param.label.to_owned())
+}
+
+/// What kind of number a block gives at `item` or takes at `slot`.
+fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
+    let node = nodes.iter().find(|n| n.id == id)?;
+    match path {
+        [cell, name] if cell == links::VALUE => (node.as_parameters()?.parameters.iter())
+            .find(|p| &p.name == name)
+            .map(|p| p.kind),
+        [cell, _] if cell == links::LOOP => Some(node.as_optimizer()?.kind.value_kind()),
+        [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => Some(ValueKind::Factor),
+        [cell, key] if cell == links::PARAMETERS => node.as_mesh()?.primitive.value_kind(key),
+
+        _ => None,
+    }
+}
+
+/// `word` with a capital first letter.
+fn capitalized(word: &str) -> String {
+    let mut chars = word.chars();
+    chars
+        .next()
+        .map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
+}
+
+/// `word` with its indefinite article: "a mesh", "an analysis"; "nothing" stays as it is.
+fn with_article(word: &str) -> String {
+    match word.chars().next() {
+        _ if word == "nothing" => word.to_owned(),
+        Some('a' | 'e' | 'i' | 'o' | 'u') => format!("an {word}"),
+        _ => format!("a {word}"),
+    }
 }
 
 /// The file a relative export path names: next to the project file, or in the working folder
@@ -5744,14 +6152,15 @@ fn export_file(path: &str, base: Option<&Path>) -> PathBuf {
 /// file it writes.
 fn export_rows(node: &Node, base: Option<&Path>, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     let state = node.export_state(base);
+    let Some(export) = node.as_export() else {
+        return Vec::new();
+    };
     let mesh = [links::MESH.to_owned()];
     let source = (incoming.iter())
         .find(|(slot, _)| links::covers(slot, &mesh))
         .map(|(_, source)| source.clone());
     let mut tip = match state {
-        CellState::Missing if node.export_path.trim().is_empty() => {
-            "Mesh: no file is chosen".to_owned()
-        }
+        CellState::Missing if export.path.trim().is_empty() => "Mesh: no file is chosen".to_owned(),
         CellState::Missing => "Mesh: nothing is linked yet, drag the mesh of a block here".into(),
         CellState::UpToDate => "Mesh: the file is up to date".into(),
         CellState::OutOfDate => {
@@ -5761,10 +6170,10 @@ fn export_rows(node: &Node, base: Option<&Path>, incoming: &[(Vec<String>, Strin
         }
         _ => "Mesh: the file could not be written".into(),
     };
-    if let Some(why) = &node.export_error {
+    if let Some(why) = &export.error {
         tip.push_str(&format!("\n{why}"));
     }
-    let count = (node.data.as_ref()).map_or(0, |d| d.mesh.element_count());
+    let count = export.model.mesh.element_count();
     if count > 0 {
         tip.push_str(&format!(
             "\n{count} elements, written as a CalculiX input file."
@@ -5858,7 +6267,10 @@ fn estimated_elements(node: &Node, value: f64) -> Option<u64> {
 
 /// The rows of a parameters block: a number each, edited in place, with a pin to give it.
 fn parameter_rows(node: &Node) -> Vec<Row> {
-    (node.parameters.iter().enumerate())
+    let Some(block) = node.as_parameters() else {
+        return Vec::new();
+    };
+    (block.parameters.iter().enumerate())
         .map(|(index, parameter)| Row {
             path: vec![links::VALUE.to_owned(), parameter.name.clone()],
             text: parameter.name.clone(),
@@ -5890,10 +6302,10 @@ fn measure_rows(
     state: CellState,
     busy: bool,
 ) -> Vec<Row> {
-    let Some(measure) = &node.measure else {
+    let Some(measure) = node.as_measure() else {
         return Vec::new();
     };
-    let units = (node.data.as_ref()).map_or(UnitSystem::default(), |d| d.model.properties.units);
+    let units = measure.units;
     let row = |path: &[&str], text: String, icon, tip: String| Row {
         path: path.iter().map(|p| p.to_string()).collect(),
         text,
@@ -5953,7 +6365,7 @@ fn measure_rows(
 /// The rows of a Campbell block: the analysis it sweeps, how far its sweep is and the
 /// critical speeds of its diagram.
 fn campbell_rows(node: &Node, incoming: &[(Vec<String>, String)], state: CellState) -> Vec<Row> {
-    let Some(window) = &node.campbell else {
+    let Some(window) = node.as_campbell().and_then(|c| c.window.as_deref()) else {
         return Vec::new();
     };
     let row = |path: &[&str], text: String, icon, tip: String| Row {
@@ -6304,11 +6716,31 @@ struct Viewer {
     feedback: Vec<(u64, u64, Vec<String>)>,
     /// The lowest edge of the blocks, which feedback wires go around below.
     bottom: f32,
+    /// The pin a wire is being dragged from.
+    drag: Option<PinKey>,
+    /// Why the wire being dragged cannot end at each pin of the other side; `None` for the
+    /// pins it fits.
+    verdicts: HashMap<PinKey, Option<String>>,
 }
 
 impl Viewer {
     fn block(&self, id: u64) -> Option<&BlockView> {
         self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// `pin` of the row of `path` in the block `id`, marked as fitting the wire being dragged
+    /// or not, and kept where it is drawn.
+    fn typed(&self, mut pin: BlockPin, id: u64, path: &[String], output: bool) -> BlockPin {
+        let key = PinKey {
+            id,
+            path: path.to_vec(),
+            output,
+        };
+        if self.drag.as_ref().is_some_and(|d| d.output != output) {
+            pin.fits = self.verdicts.get(&key).map(Option::is_none);
+        }
+        pin.key = Some(key);
+        pin
     }
 
     /// The analysis and step whose results a wire dropped on empty space comes from.
@@ -6632,9 +7064,10 @@ impl SnarlViewer<u64> for Viewer {
                 .iter()
                 .any(|(_, target, slot)| *target == id && *slot == row.path)
             {
-                return BlockPin::anchored(info, feedback_end(id, &row.path));
+                let pin = BlockPin::anchored(info, feedback_end(id, &row.path));
+                return self.typed(pin, id, &row.path, false);
             }
-            return BlockPin::single(info);
+            return self.typed(BlockPin::single(info), id, &row.path, false);
         }
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::click());
@@ -6704,6 +7137,15 @@ impl SnarlViewer<u64> for Viewer {
         if let Some(source) = &row.linked_from {
             tip.push_str(&format!("\nLinked from {source}."));
         }
+        if let Some(data) = links::DataType::of(&row.path)
+            && (row.input || row.output)
+        {
+            // The type of the pin, and the model space of what it carries where it has one.
+            let space = (self.block(id))
+                .filter(|b| data.has_space() && matches!(b.kind, Kind::Analysis | Kind::Mesh))
+                .map_or(String::new(), |b| format!(", {}", b.space.label()));
+            tip.push_str(&format!("\nPin: {}{space}.", capitalized(data.label())));
+        }
         if row.input || row.output {
             tip.push_str("\nRight-click a pin to remove its links.");
         }
@@ -6715,7 +7157,8 @@ impl SnarlViewer<u64> for Viewer {
         }
         let color = wire_color(&row.path);
         if row.path.first().is_some_and(|c| c == links::STATE) {
-            BlockPin::single(PinInfo::square().with_fill(color).with_wire_color(color))
+            let pin = BlockPin::single(PinInfo::square().with_fill(color).with_wire_color(color));
+            self.typed(pin, id, &row.path, false)
         } else if row.input {
             // A wire takes the mixed colour of its two pins: a wire from the results of a
             // step is orange on both ends, whichever row takes them.
@@ -6729,12 +7172,12 @@ impl SnarlViewer<u64> for Viewer {
                 color
             };
             let info = PinInfo::circle().with_fill(color).with_wire_color(wire);
-            BlockPin {
-                info,
+            let pin = BlockPin {
                 collection: row.collection,
                 partial: row.partial,
-                anchor: None,
-            }
+                ..BlockPin::single(info)
+            };
+            self.typed(pin, id, &row.path, false)
         } else {
             BlockPin::single(hidden_pin())
         }
@@ -6755,13 +7198,14 @@ impl SnarlViewer<u64> for Viewer {
             Some((id, row)) if row.output && row.path.first().is_some_and(|c| c == links::LOOP) => {
                 let color = wire_color(&row.path);
                 let info = PinInfo::circle().with_fill(color).with_wire_color(color);
-                if pin.remotes.is_empty() {
+                let shown = if pin.remotes.is_empty() {
                     BlockPin::single(info)
                 } else {
                     BlockPin::anchored(info, feedback_start(id))
-                }
+                };
+                self.typed(shown, id, &row.path, true)
             }
-            Some((_, row)) if row.output => {
+            Some((id, row)) if row.output => {
                 let color = wire_color(&row.path);
                 // A wire takes the mixed colour of its two pins, so the results pin of a step
                 // whose wires all go to a State row gives them the green of a state link.
@@ -6772,7 +7216,9 @@ impl SnarlViewer<u64> for Viewer {
                             .is_some_and(|(_, row)| row.path == state)
                     });
                 let wire = if continues { wire_color(&state) } else { color };
-                BlockPin::single(PinInfo::circle().with_fill(color).with_wire_color(wire))
+                let shown =
+                    BlockPin::single(PinInfo::circle().with_fill(color).with_wire_color(wire));
+                self.typed(shown, id, &row.path, true)
             }
             _ => BlockPin::single(hidden_pin()),
         }
@@ -7055,7 +7501,24 @@ struct BlockPin {
     /// Where the pin is drawn is kept under this id, for a wire drawn by the project window:
     /// the dashed feedback of a loop. The wire of the schematic is then not drawn.
     anchor: Option<egui::Id>,
+    /// The block and row of the pin, whose place on the screen is kept for the project window
+    /// to find the pin a wire is dragged from, see [`PIN_RECTS`].
+    key: Option<PinKey>,
+    /// Whether the wire being dragged may end at the pin: drawn with a ring if so, faded if
+    /// not; `None` while no wire is dragged, and for the pin it comes from.
+    fits: Option<bool>,
 }
+
+/// A pin of the schematic: its block, the path of its row and whether it is an output.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PinKey {
+    id: u64,
+    path: Vec<String>,
+    output: bool,
+}
+
+/// Where the pins were drawn on the screen in this pass, see [`BlockPin::key`].
+const PIN_RECTS: &str = "schematic pin rects";
 
 impl BlockPin {
     fn single(info: PinInfo) -> Self {
@@ -7064,6 +7527,8 @@ impl BlockPin {
             collection: false,
             partial: false,
             anchor: None,
+            key: None,
+            fits: None,
         }
     }
 
@@ -7087,6 +7552,41 @@ impl egui_snarl::ui::SnarlPin for BlockPin {
     }
 
     fn draw(
+        mut self,
+        snarl_style: &SnarlStyle,
+        style: &egui::Style,
+        rect: egui::Rect,
+        painter: &egui::Painter,
+    ) -> egui_snarl::ui::PinWireInfo {
+        let ctx = painter.ctx();
+        if let Some(key) = self.key.take() {
+            let to_global = ctx.layer_transform_to_global(painter.layer_id());
+            let screen = to_global.map_or(rect, |t| t * rect);
+            let id = egui::Id::new(PIN_RECTS);
+            ctx.data_mut(|d| {
+                d.get_temp_mut_or_default::<Vec<(PinKey, egui::Rect)>>(id)
+                    .push((key, screen))
+            });
+        }
+        match self.fits.take() {
+            Some(false) => {
+                let mut faded = painter.clone();
+                faded.multiply_opacity(0.2);
+                self.draw_shape(snarl_style, style, rect, &faded)
+            }
+            Some(true) => {
+                let ring = egui::Stroke::new(2.0, style.visuals.selection.bg_fill);
+                let radius = rect.width().max(rect.height()) * 0.5 + 3.0;
+                painter.circle_stroke(rect.center(), radius, ring);
+                self.draw_shape(snarl_style, style, rect, painter)
+            }
+            None => self.draw_shape(snarl_style, style, rect, painter),
+        }
+    }
+}
+
+impl BlockPin {
+    fn draw_shape(
         self,
         snarl_style: &SnarlStyle,
         style: &egui::Style,
@@ -7494,7 +7994,7 @@ mod tests {
 
     #[test]
     fn a_materials_block_keeps_its_materials_and_gives_them_as_setup() {
-        let set = MaterialSet {
+        let set = file::MaterialSet {
             id: 4,
             name: "Materials".into(),
             position: [5.0, 6.0],
@@ -7506,8 +8006,8 @@ mod tests {
             }],
         };
         let mut node = Node::read(ProjectNode::Materials(set.clone()));
-        assert_eq!(node.kind, Kind::Materials);
-        assert!(node.status.is_none(), "a source is not solved");
+        assert_eq!(node.kind(), Kind::Materials);
+        assert!(node.status().is_none(), "a source is not solved");
         // Analyses link its materials like those of another analysis.
         let data = node.link_data().unwrap();
         let path = vec![links::SETUP.to_owned(), "Materials".to_owned()];
@@ -7531,7 +8031,7 @@ mod tests {
 
     #[test]
     fn a_mesh_block_is_out_of_date_once_its_parameters_change() {
-        let block = MeshBlock {
+        let block = file::MeshBlock {
             id: 2,
             name: "Box".into(),
             position: [0.0; 2],
@@ -7543,7 +8043,7 @@ mod tests {
             refinement: 1.0,
         };
         let mut node = Node::read(ProjectNode::Mesh(Box::new(block)));
-        assert_eq!(node.kind, Kind::Mesh);
+        assert_eq!(node.kind(), Kind::Mesh);
         assert_eq!(node.mesh_state(), CellState::Missing);
         assert_eq!(node.generate(), Ok(40));
         assert_eq!(node.mesh_state(), CellState::UpToDate);
@@ -7568,14 +8068,14 @@ mod tests {
         );
         assert!(!element[0].input && !element[0].output);
         // A refinement of 1.5 makes 15 x 3 x 3 elements.
-        node.refinement = 1.5;
+        node.as_mesh_mut().unwrap().refinement = 1.5;
         assert_eq!(node.mesh_state(), CellState::OutOfDate);
         assert_eq!(node.generate(), Ok(135));
-        node.refinement = 1.0;
+        node.as_mesh_mut().unwrap().refinement = 1.0;
         assert_eq!(node.mesh_state(), CellState::OutOfDate);
         assert_eq!(node.generate(), Ok(40));
         // What the rows edit: the count of elements along X and the element type.
-        let primitive = node.primitive.as_mut().unwrap();
+        let primitive = &mut node.as_mesh_mut().unwrap().primitive;
         assert!(primitive.set("nx", plx_model::ParamValue::Count(20)));
         if let MeshPrimitive::Box { element, .. } = primitive {
             *element = "C3D8I".into();
@@ -7585,7 +8085,7 @@ mod tests {
         match node.written([1.0, 2.0]) {
             Some(ProjectNode::Mesh(written)) => {
                 assert_eq!(written.mesh.element_count(), 40);
-                assert_eq!(written.primitive, node.primitive.clone().unwrap());
+                assert_eq!(written.primitive, node.as_mesh().unwrap().primitive.clone());
                 assert_eq!(written.position, [1.0, 2.0]);
             }
             other => panic!("{other:?}"),
@@ -7623,10 +8123,10 @@ mod tests {
         };
         let mut node = Node::read(ProjectNode::Analysis(Box::new(data)));
         assert_eq!(node.refinement(), Some(1.0));
-        assert_eq!(node.status.as_ref().unwrap().mesh, CellState::UpToDate);
+        assert_eq!(node.status().unwrap().mesh, CellState::UpToDate);
         // A Refine row below the mesh takes a value link.
         let rows = block_rows(
-            node.status.as_ref().unwrap(),
+            node.status().unwrap(),
             None,
             node.refinement(),
             &BTreeSet::new(),
@@ -7641,10 +8141,10 @@ mod tests {
         assert_eq!(estimated_elements(&node, 2.0), Some(320));
         node.set_refinement(2.0);
         assert_eq!(node.refinement(), Some(2.0));
-        assert_eq!(node.status.as_ref().unwrap().mesh, CellState::OutOfDate);
+        assert_eq!(node.status().unwrap().mesh, CellState::OutOfDate);
         assert_eq!(estimated_elements(&node, 2.0), Some(40));
         // An analysis without geometry has no Refine row.
-        node.data.as_mut().unwrap().geometry = None;
+        (node.as_analysis_mut().unwrap().data.as_mut().unwrap()).geometry = None;
         assert_eq!(node.refinement(), None);
     }
 
@@ -7679,7 +8179,7 @@ mod tests {
 
     #[test]
     fn a_parameters_block_reads_back_and_gives_its_values() {
-        let set = ParameterSet {
+        let set = file::ParameterSet {
             id: 4,
             name: "Parameters".into(),
             position: [3.0, 4.0],
@@ -7690,7 +8190,7 @@ mod tests {
             ],
         };
         let node = Node::read(ProjectNode::Parameters(set.clone()));
-        assert_eq!(node.kind, Kind::Parameters);
+        assert_eq!(node.kind(), Kind::Parameters);
         let rows = parameter_rows(&node);
         assert_eq!(rows[1].path, ["Value", "Cells"]);
         assert!(rows.iter().all(|r| r.output && !r.input));
@@ -7703,7 +8203,7 @@ mod tests {
 
     #[test]
     fn a_measure_block_reads_back_and_takes_results() {
-        let block = MeasureBlock {
+        let block = file::MeasureBlock {
             id: 5,
             name: "Measure".into(),
             position: [5.0, 6.0],
@@ -7713,7 +8213,7 @@ mod tests {
             evaluated: Some(7),
         };
         let mut node = Node::read(ProjectNode::Measure(block.clone()));
-        assert_eq!(node.kind, Kind::Measure);
+        assert_eq!(node.kind(), Kind::Measure);
         let incoming = vec![(vec!["Measure".to_owned()], "Modal".to_owned())];
         let rows = measure_rows(&node, &incoming, CellState::UpToDate, false);
         assert_eq!(rows[0].path, ["Measure"]);
@@ -7735,7 +8235,7 @@ mod tests {
     #[test]
     fn results_made_from_changed_data_are_out_of_date() {
         // Never solved: nothing to take, and nothing out of date either.
-        let mut node = Node::new(1, "Static".into(), ProjectAnalysis::default());
+        let mut node = Node::analysis(1, "Static".into(), ProjectAnalysis::default());
         node.refresh_closed();
         assert!(node.bound_results().is_none() && !node.results_out_of_date());
         // Results whose model changed since: a results link waits for them to be made anew,
@@ -7744,14 +8244,14 @@ mod tests {
             results: Some(Default::default()),
             ..Default::default()
         };
-        let mut node = Node::new(1, "Static".into(), data);
+        let mut node = Node::analysis(1, "Static".into(), data);
         node.refresh_closed();
         assert!(node.results_out_of_date());
     }
 
     #[test]
     fn analyses_taking_the_mesh_of_a_changed_block_are_out_of_date() {
-        let block = MeshBlock {
+        let block = file::MeshBlock {
             id: 2,
             name: "Box".into(),
             position: [0.0; 2],
@@ -7764,8 +8264,8 @@ mod tests {
         };
         let mut nodes = vec![
             Node::read(ProjectNode::Mesh(Box::new(block))),
-            Node::new(1, "Analysis-1".into(), ProjectAnalysis::default()),
-            Node::new(3, "Analysis-2".into(), ProjectAnalysis::default()),
+            Node::analysis(1, "Analysis-1".into(), ProjectAnalysis::default()),
+            Node::analysis(3, "Analysis-2".into(), ProjectAnalysis::default()),
         ];
         let link = |source, target| Link {
             source,
@@ -7779,13 +8279,13 @@ mod tests {
         assert!(generate_stale_meshes(&mut nodes).0);
         assert!(stale_meshes(&nodes, &links, 3).is_empty());
         // New divisions: the analyses hold the old mesh until the block makes the new one.
-        let primitive = nodes[0].primitive.as_mut().unwrap();
+        let primitive = &mut nodes[0].as_mesh_mut().unwrap().primitive;
         assert!(primitive.set("nx", plx_model::ParamValue::Count(20)));
         assert_eq!(stale_meshes(&nodes, &links, 1), ["Box"]);
         assert_eq!(stale_meshes(&nodes, &links, 3), ["Box"]);
         // A mesh that cannot be made leaves the block out of date and is not reported as
         // made, so that Update Project does not try again and again.
-        nodes[0].primitive = Some(MeshPrimitive::default_rectangle());
+        nodes[0].as_mesh_mut().unwrap().primitive = MeshPrimitive::default_rectangle();
         let (made, lines) = generate_stale_meshes(&mut nodes);
         assert!(!made);
         assert!(lines[0].contains("no mesh made"), "{lines:?}");
@@ -7793,8 +8293,70 @@ mod tests {
     }
 
     #[test]
+    fn pins_take_only_data_of_their_type_and_model_space() {
+        let path = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let analysis = |id, space| {
+            let mut model = plx_model::FeModel::default();
+            model.properties.space = space;
+            let data = ProjectAnalysis {
+                model,
+                ..Default::default()
+            };
+            Node::analysis(id, format!("Analysis-{id}"), data)
+        };
+        let mesh = |id, space| {
+            let primitive = MeshPrimitive::default_rectangle();
+            let units = plx_model::UnitSystem::default();
+            let mesh = Default::default();
+            Node::mesh_block(id, "Plate".into(), space, units, primitive, mesh, None)
+        };
+        let parameters = Node::new(
+            5,
+            "Parameters".into(),
+            Block::Parameters(ParametersBlock {
+                units: Default::default(),
+                parameters: vec![Parameter::new("Width", ValueKind::Length, 0.1)],
+            }),
+        );
+        let nodes = vec![
+            analysis(1, ModelSpace::ThreeD),
+            analysis(2, ModelSpace::PlaneStress),
+            mesh(3, ModelSpace::PlaneStress),
+            parameters,
+        ];
+        let why = |source, item: &[&str], target, slot: &[&str]| {
+            refusal(&nodes, &[], source, &path(item), target, &path(slot))
+        };
+        // The mesh of a plane stress block goes to the plane stress analysis, not to the 3D one.
+        assert_eq!(why(3, &["Mesh"], 2, &["Mesh"]), None);
+        let space = why(3, &["Mesh"], 1, &["Mesh"]).unwrap();
+        assert!(space.contains("same model space"), "{space}");
+        assert!(why(2, &["Setup"], 1, &["Setup"]).is_some());
+        // A pin of another type refuses it, whatever the model space.
+        let kind = why(3, &["Mesh"], 2, &["Setup"]).unwrap();
+        assert_eq!(
+            kind,
+            "Mesh of Plate is a mesh and Setup of Analysis-2 takes a setup."
+        );
+        // A number has no model space: it goes to a length of the mesh block.
+        let width = path(&["Value", "Width"]);
+        let slot = path(&["Parameters", "lx"]);
+        assert_eq!(refusal(&nodes, &[], 5, &width, 3, &slot), None);
+        assert!(refusal(&nodes, &[], 5, &width, 3, &path(&["Parameters", "nx"])).is_some());
+        // A link cannot go back: the analysis comes after the mesh block once linked.
+        let link = Link {
+            source: 3,
+            target: 2,
+            item: path(&["Mesh"]),
+            ..Default::default()
+        };
+        let back = refusal(&nodes, &[link], 2, &path(&["Mesh"]), 3, &path(&["Mesh"]));
+        assert!(back.is_some());
+    }
+
+    #[test]
     fn an_optimizer_reads_back_with_its_iterations() {
-        let block = OptimizerBlock {
+        let block = file::OptimizerBlock {
             id: 7,
             name: "Optimizer".into(),
             position: [7.0, 8.0],
@@ -7811,16 +8373,23 @@ mod tests {
             done: Some(9),
         };
         let mut node = Node::read(ProjectNode::Optimizer(block.clone()));
-        assert_eq!(node.kind, Kind::Optimizer);
+        assert_eq!(node.kind(), Kind::Optimizer);
         match node.written([7.0, 8.0]) {
             Some(ProjectNode::Optimizer(written)) => assert_eq!(written, block),
             other => panic!("{other:?}"),
         }
+        // A copy starts over: its definition, without the run.
+        let copy = node.copied(8, "Copy".into()).unwrap();
+        let optimizer = copy.as_optimizer().unwrap();
+        assert_eq!((copy.id, copy.kind()), (8, Kind::Optimizer));
+        assert_eq!(optimizer.kind, block.kind);
+        assert_eq!(optimizer.units, block.units);
+        assert!(optimizer.history.is_empty() && optimizer.done.is_none());
     }
 
     /// A mesh block with its mesh made, and a mesh export block that took it over.
     fn export_of_a_box(path: &Path) -> (Node, Node) {
-        let block = MeshBlock {
+        let block = file::MeshBlock {
             id: 1,
             name: "Box".into(),
             position: [0.0; 2],
@@ -7841,10 +8410,7 @@ mod tests {
         );
         // What the link does.
         let copy = links::MeshCopy::of(source.link_data().unwrap());
-        let data = export.data.as_mut().unwrap();
-        data.mesh = copy.mesh;
-        data.model.mesh_sets = copy.mesh_sets;
-        data.model.element_types = copy.element_types;
+        export.closed_model_mut().unwrap().take_mesh(copy);
         (source, export)
     }
 
@@ -7861,7 +8427,7 @@ mod tests {
         // What it wrote reads back with the same mesh and the sides as sets.
         let text = std::fs::read_to_string(&file).unwrap();
         let read = plx_io::inp::read_inp_str(&text, None).unwrap();
-        let made = &source.data.as_ref().unwrap().mesh;
+        let made = &source.as_mesh().unwrap().model.mesh;
         assert_eq!(read.mesh.element_count(), made.element_count());
         assert_eq!(read.mesh.node_ids().len(), made.node_ids().len());
         for (name, nodes) in &made.node_sets {
@@ -7876,19 +8442,14 @@ mod tests {
         assert!(upper.contains("*NSET") && upper.contains("*SURFACE"));
         // A relative path starts at the folder of the project file; a new mesh, a new path,
         // or a deleted file makes it out of date again.
-        export.export_path = "box.inp".into();
+        export.as_export_mut().unwrap().path = "box.inp".into();
         assert_eq!(export.export_state(Some(&dir)), CellState::OutOfDate);
         export.write_export(Some(&dir)).unwrap();
         assert_eq!(export.export_state(Some(&dir)), CellState::UpToDate);
         std::fs::remove_file(&file).unwrap();
         assert_eq!(export.export_state(Some(&dir)), CellState::OutOfDate);
         export.write_export(Some(&dir)).unwrap();
-        export
-            .data
-            .as_mut()
-            .unwrap()
-            .mesh
-            .set_node(1, [9.0, 9.0, 9.0]);
+        (export.as_export_mut().unwrap().model.mesh).set_node(1, [9.0, 9.0, 9.0]);
         assert_eq!(export.export_state(Some(&dir)), CellState::OutOfDate);
         // The block is saved with the path and what it wrote, but without the mesh.
         match export.written([3.0, 4.0]) {
@@ -7909,7 +8470,7 @@ mod tests {
         let (_, mut export) = export_of_a_box(Path::new("/nonexistent-folder/box.inp"));
         let why = export.write_export(None).unwrap_err();
         assert!(why.contains("not written"), "{why}");
-        export.export_path = String::new();
+        export.as_export_mut().unwrap().path = String::new();
         assert!(export.write_export(None).unwrap_err().contains("no file"));
         assert_eq!(export.export_state(None), CellState::Missing);
         // Nothing linked yet.
@@ -7948,7 +8509,7 @@ mod tests {
             (&setup, &points, Some(9))
         );
         let read = Node::read(ProjectNode::Campbell(Box::new(saved)));
-        assert_eq!(read.kind, Kind::Campbell);
+        assert_eq!(read.kind(), Kind::Campbell);
         let incoming = [(vec![links::ANALYSIS.to_owned()], "Rotor".to_owned())];
         let rows = campbell_rows(&read, &incoming, CellState::UpToDate);
         assert!(rows[0].input && rows[0].linked_from.as_deref() == Some("Rotor"));

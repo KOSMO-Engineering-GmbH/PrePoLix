@@ -903,6 +903,58 @@ pub fn clear_submodel(fe: &mut FeModel) {
     fe.properties.global_results = None;
 }
 
+/// What flows through the pin of a row: the type a link checks before anything is copied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DataType {
+    Geometry,
+    Mesh,
+    /// The setup of a model or a part of it: materials, steps and the like.
+    Setup,
+    /// The results of a step, also where a row takes them: the State row, a measure.
+    Results,
+    /// A number: a parameter, the value of a measure, the objective of an optimizer.
+    Number,
+    /// The value an optimizer gives in its loop.
+    Loop,
+    /// A whole analysis, to sweep.
+    Analysis,
+}
+
+impl DataType {
+    /// The type of the row of `path`; `None` for rows without a pin of their own.
+    pub fn of(path: &[String]) -> Option<Self> {
+        Some(match path.first()?.as_str() {
+            GEOMETRY => Self::Geometry,
+            MESH => Self::Mesh,
+            SETUP if is_step_input(path) => Self::Results,
+            SETUP => Self::Setup,
+            RESULTS | STATE | MEASURE => Self::Results,
+            VALUE | PARAMETERS | OBJECTIVE => Self::Number,
+            LOOP => Self::Loop,
+            ANALYSIS => Self::Analysis,
+            _ => return None,
+        })
+    }
+
+    /// Whether it is data of a model, which only goes between blocks of the same model
+    /// space: numbers and loop values have none.
+    pub fn has_space(self) -> bool {
+        !matches!(self, Self::Number | Self::Loop)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Geometry => "geometry",
+            Self::Mesh => "mesh",
+            Self::Setup => "setup",
+            Self::Results => "results",
+            Self::Number => "number",
+            Self::Loop => "loop value",
+            Self::Analysis => "analysis",
+        }
+    }
+}
+
 /// Whether a link from `item` of one analysis may go to `slot` of another, by one of two
 /// rules. A reference goes from like to like: a row to the row of the same path, an item of
 /// a category to the category or its item of another name. An operation link goes from the
