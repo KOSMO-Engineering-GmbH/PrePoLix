@@ -446,6 +446,10 @@ impl AnalysisWindow {
         let Some(model) = &mut workbench.model else {
             return;
         };
+        // The analysis keeps its own mesh setup.
+        let mut own = model.geometry.take();
+        crate::links::take_geometry(&mut own, geometry);
+        let geometry = own;
         workbench.geometry = match &geometry {
             Some(geometry) => match plx_mesher::tessellate(geometry) {
                 Ok(display) => Some(Model::geometry_view(&model.path, display)),
@@ -2030,13 +2034,18 @@ impl Workbench {
                 TreeView::Geometry
                     if path[0] == crate::links::GEOMETRY || path[0] == crate::links::MESH =>
                 {
-                    let mut items = vec![TreeItem::Group("Parts"), TreeItem::Group("Mesh Setup")];
+                    let mut items = vec![TreeItem::Group("Parts")];
                     items.extend(
                         (0..self.geometry.as_ref().map_or(0, |g| g.parts.len()))
                             .map(TreeItem::Part),
                     );
-                    let setup = model.geometry.as_ref().map_or(0, |g| g.mesh_items.len());
-                    items.extend((0..setup).map(TreeItem::MeshItem));
+                    // A geometry link takes the shapes only, the mesh setup stays this
+                    // analysis' own; a mesh link takes the setup it was meshed with too.
+                    if path[0] == crate::links::MESH {
+                        items.push(TreeItem::Group("Mesh Setup"));
+                        let setup = model.geometry.as_ref().map_or(0, |g| g.mesh_items.len());
+                        items.extend((0..setup).map(TreeItem::MeshItem));
+                    }
                     items
                 }
                 TreeView::Geometry => Vec::new(),
@@ -2058,7 +2067,13 @@ impl Workbench {
     fn linked_source(&self, view: TreeView, item: &TreeItem) -> Option<(Vec<String>, String)> {
         let source = self.tree.linked.get(item)?;
         let path = match view {
-            TreeView::Geometry => vec![crate::links::GEOMETRY.to_owned()],
+            // The mesh setup is linked only with the mesh.
+            TreeView::Geometry => match item {
+                TreeItem::Group("Mesh Setup") | TreeItem::MeshItem(_) => {
+                    vec![crate::links::MESH.to_owned()]
+                }
+                _ => vec![crate::links::GEOMETRY.to_owned()],
+            },
             _ => (self.model.as_ref()).and_then(|m| crate::links::path_of(&m.fe, item))?,
         };
         // The link that covers it: a whole category rather than the item in it.
@@ -2118,10 +2133,9 @@ impl Workbench {
             || response.mesh_part.is_some()
             || response.transform_part.is_some()
             || response.merge_parts;
-        if meshing
-            && (check(Some(&mesh), self)
-                || self.tree.linked.contains_key(&TreeItem::Group("Parts")))
-        {
+        let mesh_linked =
+            (self.incoming.paths.iter()).any(|(path, _)| path[0] == crate::links::MESH);
+        if meshing && (check(Some(&mesh), self) || mesh_linked) {
             if refused.is_none() {
                 refused = Some("The mesh comes from another analysis: mesh it there.".into());
             }
@@ -2131,7 +2145,7 @@ impl Workbench {
             response.merge_parts = false;
         }
         if response.mesh_defaults && self.tree.linked.contains_key(&geometry) {
-            refused = Some("The geometry comes from another analysis: set it up there.".into());
+            refused = Some("The mesh comes from another analysis: set it up there.".into());
             response.mesh_defaults = false;
         }
         if let Some(line) = refused {
