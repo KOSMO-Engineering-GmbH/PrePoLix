@@ -506,7 +506,7 @@ mod tests {
         let tip = faces_where(&mesh, |p| p[0] == LENGTH);
         let fe = beam_model(
             &mesh,
-            plx_model::LoadKind::SurfaceTraction([0.0, 0.0, -1.0]),
+            plx_model::LoadKind::force([0.0, 0.0, -1.0]),
             plx_model::Region::Faces(tip),
         );
         let data = ProjectAnalysis {

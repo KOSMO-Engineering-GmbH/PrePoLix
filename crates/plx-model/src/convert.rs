@@ -197,9 +197,7 @@ impl FeModel {
                         };
                         c.value(value, quantity);
                     }
-                    LoadKind::ConcentratedForce(force) | LoadKind::SurfaceTraction(force) => {
-                        c.all(force, Quantity::Force)
-                    }
+                    LoadKind::Force { value: force, .. } => c.all(force, Quantity::Force),
                     LoadKind::Pressure(pressure) => c.value(pressure, Quantity::Pressure),
                     LoadKind::ConcentratedFlux(flux) => c.value(flux, Quantity::Power),
                     LoadKind::SurfaceFlux(flux) => c.value(flux, Quantity::HeatFlux),
@@ -515,7 +513,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(Vec::new()),
-            kind: LoadKind::ConcentratedForce([1000.0, 0.0, 0.0]),
+            kind: LoadKind::force([1000.0, 0.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
         });
@@ -533,7 +531,7 @@ mod tests {
         assert!(close(model.sections[0].thickness, 0.005));
         let loads = &model.steps[0].loads;
         assert!(matches!(loads[0].kind, LoadKind::Pressure(p) if close(p, 2000.0)));
-        assert!(matches!(loads[1].kind, LoadKind::ConcentratedForce([f, _, _]) if close(f, 1.0)));
+        assert!(matches!(loads[1].kind, LoadKind::Force { value: [f, _, _], .. } if close(f, 1.0)));
         // Without units, the numbers are only reinterpreted.
         model.convert_units(UnitSystem::Unitless);
         assert!(close(model.sections[0].thickness, 0.005));

@@ -182,6 +182,29 @@ pub fn wireframe_edges(coords: &[[f64; 3]], skin: &PartSkin, origin: DVec3) -> V
     lines
 }
 
+/// Every edge of the faces of a part as lines in the colour of the wireframe of the
+/// undeformed shape, such as the global model drawn around the results of a submodel.
+pub fn mesh_wireframe(coords: &[[f64; 3]], skin: &PartSkin, origin: DVec3) -> Vec<Vertex> {
+    let vertex = |node: usize| Vertex {
+        position: (DVec3::from(coords[node]) - origin).as_vec3().to_array(),
+        normal: [0.0; 3],
+        color: EDGE_COLOR,
+        scalar: WIREFRAME_OPACITY,
+    };
+    let mut lines = Vec::new();
+    for edge in &skin.edges {
+        let nodes: &[usize] = match edge.mid {
+            Some(mid) => &[edge.a, mid, mid, edge.b],
+            None => &[edge.a, edge.b],
+        };
+        lines.extend(nodes.iter().map(|&n| vertex(n)));
+    }
+    for &[a, b] in &skin.lines {
+        lines.extend([vertex(a), vertex(b)]);
+    }
+    lines
+}
+
 /// For each face in turn, one normal for each of its corner and mid nodes: the area-weighted
 /// average of the normals of all faces of the same patch at that node that deviate from this
 /// face by less than the angle.

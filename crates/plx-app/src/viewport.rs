@@ -298,14 +298,6 @@ impl Viewport {
         self.renderer.set_part_visible(index, visible);
     }
 
-    pub fn set_part_behind(&mut self, index: usize, behind: bool) {
-        self.renderer.set_part_behind(index, behind);
-    }
-
-    pub fn set_part_transparent(&mut self, index: usize, transparent: bool) {
-        self.renderer.set_part_transparent(index, transparent);
-    }
-
     pub fn apply(&mut self, command: ViewCommand, bounds: Option<(Vec3, Vec3)>) {
         match command {
             ViewCommand::Fit => {

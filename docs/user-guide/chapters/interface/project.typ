@@ -19,8 +19,8 @@ both.
 
 === Creating an analysis <new-analysis>
 
-#menu("Project", "New Analysis ..."), a right-click on the background of the schematic or
-#ui("Analysis") in the block search (@block-search) open #ui("Model Properties") for the new analysis
+#menu("Project", "New Analysis ..."), a double-click or right-click on the background of the
+schematic or #ui("Analysis") in the block search (@block-search) open #ui("Model Properties") for the new analysis
 (@model-properties). Choose its *model space* (3D, plane stress, plane strain or axisymmetric)
 and its *unit system* there.
 
@@ -105,9 +105,9 @@ the state of another analysis (@data-links).
   #menu("Project", "Show All Blocks") (#key("Home")) fits all blocks into the view.
 - *Drag* from a pin on the right of a row to a pin on the left of a row of another block to
   link them (@links). Right-click a pin to remove its links.
-- *Right-click* a block for its context menu, or the background for #ui("New Analysis"),
-  #ui("Add Materials") and #ui("Add Mesh") (@source-blocks).
-- *Double-click* the background to search the blocks to add there (@block-search).
+- *Right-click* a block for its context menu.
+- *Double-click* or *right-click* the background to search the blocks to add there
+  (@block-search, @source-blocks).
 
 #screenshot("project-node-menu.png", [Context menu of an analysis])
 
@@ -128,19 +128,19 @@ the state of another analysis (@data-links).
 
 ==== Adding blocks by search <block-search>
 
-Like the add menu of Blender, a double-click into empty space of the schematic shows every kind
-of block PrePoLix can add, grouped as in the background menu. Just start typing: the search
+Like the add menu of Blender, a double-click or right-click into empty space of the schematic shows every kind
+of block PrePoLix can add, grouped as in the #menu("Project") menu. Just start typing: the search
 field has the focus and finds blocks by fuzzy matching, so letters in order are enough
 (#ui("rct") finds #ui("Rectangle")). It also knows other words for a block, such as
 #ui("hexahedra") for #ui("Box") or #ui("library") for #ui("Materials"). Search results show
 their group on the right.
 
 #key("Enter") adds the highlighted block, the best match while you type, where you
-double-clicked; #key("Up") and #key("Down") move the highlight, a click adds any block, and
+clicked; #key("Up") and #key("Down") move the highlight, a click adds any block, and
 #key("Esc") or a click elsewhere closes the search. #ui("Analysis") asks for the model
 properties first (@new-analysis).
 
-#screenshot("node-picker.png", [All blocks after a double-click (left) and the search for
+#screenshot("node-picker.png", [All blocks after a double-click or right-click (left) and the search for
   "mesh" (right)])
 
 === Menus and toolbar of the project window
@@ -204,6 +204,24 @@ first (@mesh-block).
 - If CalculiX fails, only the analyses that depend on the failed one are skipped, independent
   ones go on. The output pane sums up with #ui("Project updated") or
   #ui("Update finished with errors"); the solution monitor tells what went wrong.
+
+==== Updating one block <update-block>
+
+When the schematic holds independent branches, one of them can be brought up to date without
+the others: click the amber circular arrow of a block (or the blue question mark of a
+#ui("Solution") or #ui("Results") row that was never solved). PrePoLix updates that block and
+every block it takes data from, directly or through others, the way #ui("Update Project") does:
+mesh blocks make their meshes anew, analyses are solved in the order of their links, Campbell
+blocks sweep and mesh export blocks write their files. Blocks that are neither the clicked one
+nor upstream of it stay as they are. Clicking the arrow of an optimizer runs its loop
+(@optimization-loops). The symbols cannot be clicked while an update is under way. The output pane ends
+with #ui("<block> updated").
+
+#screenshot("update-block-hover.png", [Hovering the out-of-date symbol of
+  #ui("Beam-A-Variant"); #ui("Beam-B") is a branch of its own])
+
+#screenshot("update-block-done.png", [After the click: #ui("Beam-A-Variant") and #ui("Beam-A"),
+  whose setup it takes, are solved; #ui("Beam-B") is still out of date])
 
 === Solution monitor <solution-monitor>
 

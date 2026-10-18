@@ -9,7 +9,6 @@ pub mod equation;
 pub mod field_output;
 pub mod history_output;
 pub mod hot_spot;
-pub mod overlap;
 pub mod path;
 pub mod saved_view;
 pub mod transformation;

@@ -35,7 +35,7 @@ Geometry and meshes must fit the model space of their analysis: a 2D mesh from a
 cannot be imported into a 3D analysis, nor solids into a 2D one.
 
 #note(title: "Axisymmetric models")[As in CalculiX, forces in an axisymmetric model act on the
-full 360° circumference. Surface tractions are distributed according to the radius.]
+full 360° circumference. Forces are distributed according to the radius.]
 
 === Model type
 

@@ -85,8 +85,9 @@ use serde::{Deserialize, Serialize};
 /// the analyses alone. Format 6 lets the results of a step go to an input of a step of the
 /// setup (`["Setup", "Steps", step, "Temperatures"]`) in place of a step of the results.
 /// Format 7 drops the fixed boundary condition, a displacement holding all degrees of freedom
-/// at zero takes its place.
-pub const PROJECT_FORMAT: u32 = 7;
+/// at zero takes its place. Format 8 drops the concentrated force and the surface traction for
+/// the force, which acts on faces, edges or points and optionally at each node.
+pub const PROJECT_FORMAT: u32 = 8;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1505,17 +1506,18 @@ pub struct Load {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum LoadKind {
-    /// Force applied at every node of the region, as CalculiX's `*CLOAD` on a node set.
-    ConcentratedForce([f64; 3]),
     /// Moment applied at every node of the region (`*CLOAD` on degrees of freedom 4 to 6):
     /// at a reference point of a rigid body, or at nodes of beams and shells, which have
     /// rotations.
     Moment([f64; 3]),
     /// Pressure on a surface region; positive pushes into the material.
     Pressure(f64),
-    /// Total force on a surface region, spread over its nodes by area when the input file is
-    /// written (PrePoMax's surface traction).
-    SurfaceTraction([f64; 3]),
+    /// Total force on the region, spread over its nodes when the input file is written: on
+    /// faces by area (PrePoMax's surface traction), along edges by length and on nodes in
+    /// equal shares; at the reference point of a rigid body it acts as a whole. With
+    /// `each_node` the whole value acts at every node of the region instead (PrePoMax's
+    /// concentrated force).
+    Force { value: [f64; 3], each_node: bool },
     /// Bolt preload across a cut through the shank (`*PRE-TENSION SECTION`), PrePoMax's
     /// pre-tension load: the region is the element faces on one side of the cut, the value
     /// the force pulling the two sides together, or the shortening when `by_displacement`.
@@ -1553,6 +1555,14 @@ pub enum LoadKind {
 }
 
 impl LoadKind {
+    /// A total force, spread over the nodes of the region.
+    pub fn force(value: [f64; 3]) -> Self {
+        LoadKind::Force {
+            value,
+            each_node: false,
+        }
+    }
+
     /// What the second amplitude of a film or radiation scales, if the load has one.
     pub fn factor_amplitude_label(&self) -> Option<&'static str> {
         match self {
@@ -1566,10 +1576,9 @@ impl LoadKind {
     pub fn is_thermal(&self) -> bool {
         !matches!(
             self,
-            LoadKind::ConcentratedForce(_)
-                | LoadKind::Moment(_)
+            LoadKind::Moment(_)
                 | LoadKind::Pressure(_)
-                | LoadKind::SurfaceTraction(_)
+                | LoadKind::Force { .. }
                 | LoadKind::PreTension { .. }
                 | LoadKind::Gravity(_)
                 | LoadKind::Centrifugal { .. }

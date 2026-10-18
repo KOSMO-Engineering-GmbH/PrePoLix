@@ -12,7 +12,8 @@ use plx_model::SectionKind;
 use plx_model::{FeModel, Finding, Geometry, MeshCheck, UnitSystem};
 use plx_render::{
     ClipPlane, RenderMesh, SectionCells, SectionValues, ShellThickness, Vertex, lighten,
-    part_color, part_render_mesh, section_mesh, section_values, thick_shell_mesh, wireframe_edges,
+    mesh_wireframe, part_color, part_render_mesh, section_mesh, section_values, thick_shell_mesh,
+    wireframe_edges,
 };
 
 use crate::exploded::{Assembly, Explosion, Parameters, PartShape};
@@ -129,60 +130,27 @@ pub struct Model {
     /// Shell and membrane sections whose elements are drawn as the solid of their
     /// thickness and offset, see [`Model::shell_sections`]; empty draws them as surfaces.
     pub thick_shells: Vec<plx_model::Section>,
-    /// The global model drawn around the results of a submodel.
+    /// The global results of a submodel, see [`ResultsView::show_global_contours`].
     pub global: Option<Box<GlobalModel>>,
 }
 
-/// The results of the global model of a submodel, drawn around the submodel's results
-/// without the region the submodel details.
+/// The results of the global model of a submodel, whose deformed mesh can be drawn as a
+/// wireframe around the submodel's results.
 pub struct GlobalModel {
-    /// The global results without the elements the submodel covers.
     pub model: Model,
-    /// The whole global mesh, drawn see-through around the submodel.
-    whole: Model,
     /// The increment the submodel's boundary follows: the last of the global step it reads.
     pub increment: usize,
-    pub visible: bool,
-    pub display: GlobalDisplay,
-    /// Elements cut away inside the submodel.
-    pub removed: usize,
-    /// Bounds as last drawn, in render coordinates.
-    pub bounds: Option<(Vec3, Vec3)>,
-}
-
-/// How the global model around a submodel is drawn.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GlobalDisplay {
-    /// Coloured by the shown result in the submodel's legend and deformed alike.
-    Results,
-    /// Whole and see-through, without results.
-    Transparent,
 }
 
 impl GlobalModel {
-    /// The global results `model` without the elements `submodel` covers; `step` is the
-    /// global step the submodel reads, counted from 1.
-    pub fn cut(model: Model, submodel: &FeMesh, step: u32) -> Option<Self> {
+    /// The global results `model`; `step` is the global step the submodel reads, counted
+    /// from 1.
+    pub fn new(model: Model, step: u32) -> Option<Self> {
         let view = model.results.as_ref()?;
         let increment = (view.increments.iter())
             .rposition(|i| i.step == step)
             .or_else(|| view.increments.len().checked_sub(1))?;
-        let covered = plx_results::overlap::covered_elements(&model.mesh, submodel);
-        let removed = covered.iter().filter(|c| **c).count();
-        let mesh = model.mesh.without_elements(&covered);
-        let whole = Model::new(&model.path, model.mesh);
-        let mut cut = Model::new(&model.path, mesh);
-        cut.results = model.results;
-        cut.fe = model.fe;
-        Some(Self {
-            model: cut,
-            whole,
-            increment,
-            visible: true,
-            display: GlobalDisplay::Results,
-            removed,
-            bounds: None,
-        })
+        Some(Self { model, increment })
     }
 }
 
@@ -969,55 +937,24 @@ impl Model {
         meshes
     }
 
-    /// Lets the legend of the results take in the values of the global model drawn around
-    /// them in colour.
-    pub fn update_global_range(&mut self) {
-        let Some(view) = &mut self.results else {
-            return;
-        };
-        let global =
-            (self.global.as_ref()).filter(|g| g.visible && g.display == GlobalDisplay::Results);
-        view.beside = global.and_then(|global| {
-            let (field, component) = view.current()?;
-            let increment = global
-                .model
-                .results
-                .as_ref()?
-                .increments
-                .get(global.increment)?;
-            let values = &increment
-                .field(&field.name)?
-                .component(&component.name)?
-                .values;
-            let range = (values.iter().copied().filter(|v| v.is_finite()))
-                .map(|v| (v, v))
-                .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))?;
-            Some((field.name.clone(), component.name.clone(), range))
-        });
-    }
-
-    /// [`Model::render_meshes`] followed by those of the shown global model of a submodel.
+    /// [`Model::render_meshes`] followed, for a submodel, by the wireframe of its global model.
     pub fn scene_meshes(&self) -> Vec<RenderMesh> {
         let mut meshes = self.render_meshes();
-        meshes.extend(self.global_meshes());
+        meshes.extend(self.global_wireframe());
         meshes
     }
 
-    /// The parts of the global model around the results of a submodel, deformed by the
-    /// same scale and coloured in the same legend, so that they continue the submodel.
-    fn global_meshes(&self) -> Vec<RenderMesh> {
+    /// The edges of the global model of a submodel, deformed by the same scale as the
+    /// results, as a mesh of lines only: it neither shows in the tree nor in the legend.
+    fn global_wireframe(&self) -> Option<RenderMesh> {
         let (Some(global), Some(view)) = (&self.global, &self.results) else {
-            return Vec::new();
+            return None;
         };
-        let model = &global.model;
-        let Some(increment) =
-            (model.results.as_ref()).and_then(|v| v.increments.get(global.increment))
-        else {
-            return Vec::new();
-        };
-        if !global.visible {
-            return Vec::new();
+        if !view.show_global_contours {
+            return None;
         }
+        let model = &global.model;
+        let increment = (model.results.as_ref())?.increments.get(global.increment)?;
         let mut coords = model.mesh.coords().to_vec();
         let scale = (view.scale() * view.amplitude()) as f64;
         if scale != 0.0
@@ -1027,53 +964,13 @@ impl Model {
                 *p = [0, 1, 2].map(|k| p[k] + scale * d[k] as f64);
             }
         }
-        let scalars = (global.display == GlobalDisplay::Results)
-            .then(|| {
-                let (field, component) = view.current()?;
-                let values = &increment
-                    .field(&field.name)?
-                    .component(&component.name)?
-                    .values;
-                let amplitude = view.value_amplitude();
-                let values: Vec<f32> = values.iter().map(|v| v * amplitude).collect();
-                Some(view.legend()?.normalize(&values))
-            })
-            .flatten();
-        // Render positions are relative to the submodel's origin. Seen through, the global
-        // model may overlap the submodel and stays whole; both share their nodes.
-        let shape = match global.display {
-            GlobalDisplay::Results => model,
-            GlobalDisplay::Transparent => &global.whole,
-        };
-        let mut meshes = shape.part_meshes_around(self.origin, &coords, scalars.as_deref());
-        if global.display == GlobalDisplay::Transparent {
-            for mesh in &mut meshes {
-                mesh.mesh_edges.clear();
-            }
+        // Render positions are relative to the submodel's origin.
+        let mut mesh = RenderMesh::default();
+        for skin in &model.skins {
+            mesh.wireframe_edges
+                .extend(mesh_wireframe(&coords, skin, self.origin));
         }
-        meshes
-    }
-
-    /// Plain meshes of the parts at `coords`, with render positions relative to `origin`.
-    fn part_meshes_around(
-        &self,
-        origin: DVec3,
-        coords: &[[f64; 3]],
-        scalars: Option<&[f32]>,
-    ) -> Vec<RenderMesh> {
-        (self.parts.iter().zip(&self.skins))
-            .map(|(info, skin)| {
-                part_render_mesh(
-                    coords,
-                    skin,
-                    origin,
-                    info.color,
-                    |_| None,
-                    SMOOTH_ANGLE_DEG,
-                    scalars,
-                )
-            })
-            .collect()
+        Some(mesh)
     }
 
     fn part_meshes(
@@ -1687,14 +1584,10 @@ impl Model {
 
     /// Bounding box of all visible parts, relative to the model origin.
     pub fn visible_bounds(&self) -> Option<(Vec3, Vec3)> {
-        let global = (self.global.as_ref())
-            .filter(|g| g.visible)
-            .and_then(|g| g.bounds);
         self.parts
             .iter()
             .filter(|p| p.visible)
             .filter_map(|p| p.bounds)
-            .chain(global)
             .reduce(|(min_a, max_a), (min_b, max_b)| (min_a.min(min_b), max_a.max(max_b)))
     }
 }
@@ -1851,6 +1744,27 @@ mod tests {
         model.parts[1].visible = false;
         let (min, max) = model.visible_bounds().unwrap();
         assert_eq!(max.z - min.z, 0.0);
+    }
+
+    #[test]
+    fn global_contours_add_the_deformed_edges_of_the_global_model_only_when_shown() {
+        let frd = testdata("kragbalken_c3d8.frd");
+        let mut model = load(&frd, UnitSystem::Unitless).unwrap().model;
+        let global = load(&frd, UnitSystem::Unitless).unwrap().model;
+        let parts = model.render_meshes().len();
+        model.global = GlobalModel::new(global, 1).map(Box::new);
+        assert_eq!(model.scene_meshes().len(), parts);
+        model.results.as_mut().unwrap().show_global_contours = true;
+        let meshes = model.scene_meshes();
+        assert_eq!(meshes.len(), parts + 1);
+        let wireframe = &meshes[parts];
+        assert!(wireframe.vertices.is_empty() && !wireframe.wireframe_edges.is_empty());
+        // Deformed like the results: the beam bends below its undeformed bottom at z = -5,
+        // relative to the origin of the results.
+        let lowest = (wireframe.wireframe_edges.iter())
+            .map(|v| v.position[2])
+            .fold(f32::MAX, f32::min);
+        assert!(lowest < -5.0, "{lowest}");
     }
 
     #[test]

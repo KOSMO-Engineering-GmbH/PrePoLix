@@ -164,34 +164,6 @@ impl FeMesh {
         }
     }
 
-    /// The mesh without the elements marked in `removed`, by index into
-    /// [`FeMesh::elements`]: all nodes stay in their order, so that nodal results still
-    /// fit; parts left empty go, sets and surfaces are not kept.
-    pub fn without_elements(&self, removed: &[bool]) -> FeMesh {
-        let mut mesh = FeMesh {
-            node_ids: self.node_ids.clone(),
-            coords: self.coords.clone(),
-            node_lookup: self.node_lookup.clone(),
-            ..Default::default()
-        };
-        for (index, element) in self.elements.iter().enumerate() {
-            if !removed.get(index).copied().unwrap_or(false) {
-                mesh.element_lookup.insert(element.id, mesh.elements.len());
-                mesh.elements.push(element.clone());
-            }
-        }
-        mesh.parts = (self.parts.iter())
-            .map(|part| Part {
-                name: part.name.clone(),
-                elements: (part.elements.iter().copied())
-                    .filter(|&id| mesh.element_lookup.contains_key(&id))
-                    .collect(),
-            })
-            .filter(|part| !part.elements.is_empty())
-            .collect();
-        mesh
-    }
-
     pub fn node_count(&self) -> usize {
         self.node_ids.len()
     }

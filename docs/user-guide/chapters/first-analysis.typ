@@ -21,7 +21,7 @@ end and pulled at the other. Each step links to the chapter with the details.
 + *Support.* #menu("Model", "Create Boundary Condition ..."), type #ui("Displacement/Rotation"), which
   holds all components at zero; click the end
   face of the plate in the 3D view (@boundary-conditions, @selection).
-+ *Load.* #menu("Model", "Create Load ..."), type #ui("Surface Traction") with `F1` = 20000 N on
++ *Load.* #menu("Model", "Create Load ..."), type #ui("Force") with `F1` = 20000 N on
   the opposite end face (@loads).
 + *Solve.* #ui("Solve") in the toolbar or #key("F5"). The #ui("Analysis") tab below the 3D view shows
   the output of CalculiX (@monitor). If the tree shows warning signs, click them first (@model-check).
