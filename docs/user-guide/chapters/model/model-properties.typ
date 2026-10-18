@@ -40,9 +40,9 @@ full 360° circumference. Surface tractions are distributed according to the rad
 === Model type
 
 #ui("General model") or #ui("Submodel"). A submodel takes the displacements at its cut
-boundaries from a global model. A results link in the project schematic sets the type and the
-global results (@submodel); a result file from outside the project is chosen under
-#ui("Global results .frd").
+boundaries from a global model. With #ui("Submodel"), the block of the analysis in the project
+schematic gets a #ui("Global results") row: the results of a step of the global analysis are
+dragged there (@submodel). No result file is picked in the dialog.
 
 === Unit system <unit-systems>
 

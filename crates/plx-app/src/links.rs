@@ -118,6 +118,14 @@ pub fn slot(link: &Link) -> &[String] {
     }
 }
 
+/// Whether `link` ends at the row of `path` of its target: in it, or, for the global
+/// results of a submodel, at the Global results row of the block.
+pub fn ends_at(path: &[String], link: &Link) -> bool {
+    covers(path, slot(link))
+        || (matches!(path, [cell] if cell == GLOBAL_RESULTS)
+            && ResultsUse::of(link) == Some(ResultsUse::Submodel))
+}
+
 /// Whether the link carries the results of a step, for a submodel.
 pub fn is_results(link: &Link) -> bool {
     link.item.first().is_some_and(|c| c == RESULTS)
@@ -467,6 +475,22 @@ pub fn results_slot(
     let thermal = source_step.kind.is_thermal();
     let source = &source_step.name;
     match slot {
+        // The Global results row of a submodel's block: the step whose submodel boundary
+        // conditions read them, else the first step.
+        [cell] if cell == GLOBAL_RESULTS => {
+            let submodel = |s: &&Step| {
+                (s.boundary_conditions.iter())
+                    .any(|bc| matches!(bc.kind, BoundaryKind::Submodel { .. }))
+            };
+            let step = (target.steps.iter().find(submodel))
+                .or_else(|| target.steps.first())
+                .ok_or_else(|| "the submodel has no step yet".to_string())?;
+            results_slot(
+                source_step,
+                target,
+                &path(&[SETUP, STEPS, &step.name, GLOBAL_RESULTS]),
+            )
+        }
         [cell, category, rest @ ..]
             if cell == SETUP
                 && category == INITIAL_CONDITIONS
@@ -897,9 +921,10 @@ pub fn apply_submodel(fe: &mut FeModel, step: &str, global: u32, results: PathBu
     set_global_step(fe, step, global) || changed
 }
 
-/// Makes `fe` an ordinary model again, once its last results link is gone.
+/// Takes the global results from `fe` once its last results link is gone. It stays a
+/// submodel, whose Global results row takes a new link; Model Properties makes it a general
+/// model again.
 pub fn clear_submodel(fe: &mut FeModel) {
-    fe.properties.kind = ModelKind::General;
     fe.properties.global_results = None;
 }
 
@@ -928,7 +953,7 @@ impl DataType {
             MESH => Self::Mesh,
             SETUP if is_step_input(path) => Self::Results,
             SETUP => Self::Setup,
-            RESULTS | STATE | MEASURE => Self::Results,
+            RESULTS | STATE | MEASURE | GLOBAL_RESULTS => Self::Results,
             VALUE | PARAMETERS | OBJECTIVE => Self::Number,
             LOOP => Self::Loop,
             ANALYSIS => Self::Analysis,
@@ -990,7 +1015,7 @@ pub fn compatible(item: &[String], slot: &[String]) -> bool {
 /// Whether the row of `path` takes the results of a step of another analysis.
 pub fn takes_results(path: &[String]) -> bool {
     match path {
-        [cell] => cell == STATE || cell == MEASURE,
+        [cell] => cell == STATE || cell == MEASURE || cell == GLOBAL_RESULTS,
         [cell, category] => cell == SETUP && category == INITIAL_CONDITIONS,
         [cell, category, _] if cell == SETUP && category == STEPS => true,
         _ => ResultsUse::of_slot(path).is_some(),
@@ -1575,6 +1600,38 @@ mod tests {
             ["Temperatures", "Global results"]
         );
         assert!(step_inputs(&target.steps[1]).contains(&"Eigenmodes"));
+        // The Global results row of a submodel's block: the step with submodel boundary
+        // conditions takes them, else the first step.
+        let global = path(&["Global results"]);
+        assert_eq!(DataType::of(&global), Some(DataType::Results));
+        assert!(compatible(&path(&["Results", "Preload"]), &global));
+        assert!(!compatible(&path(&["Mesh"]), &global));
+        assert_eq!(
+            results_slot(&static_step, &target, &global).unwrap(),
+            path(&["Setup", "Steps", "Load", "Global results"])
+        );
+        target.steps[1].boundary_conditions.push(BoundaryCondition {
+            name: "Cut".into(),
+            active: true,
+            visible: true,
+            region: Region::Geometry(Vec::new()),
+            kind: BoundaryKind::Submodel {
+                step: 1,
+                dofs: Default::default(),
+            },
+            amplitude: None,
+        });
+        assert_eq!(
+            results_slot(&static_step, &target, &global).unwrap(),
+            path(&["Setup", "Steps", "Shake", "Global results"])
+        );
+        let submodel = Link {
+            item: path(&["Results", "Preload"]),
+            slot: path(&["Setup", "Steps", "Shake", "Global results"]),
+            ..Default::default()
+        };
+        assert!(ends_at(&global, &submodel) && ends_at(&path(&["Setup", "Steps"]), &submodel));
+        assert!(!ends_at(&path(&["State"]), &submodel));
 
         let link = |item: &[&str], slot: Vec<String>| Link {
             source: 1,

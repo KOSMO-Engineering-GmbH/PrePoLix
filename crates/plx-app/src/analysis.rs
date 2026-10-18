@@ -105,7 +105,7 @@ pub fn stage_global_results(
     if same(&source, &dir.join(format!("{name}.frd"))) {
         return Err(format!(
             "The global results {} are this analysis's own results file, which the run \
-             overwrites. Copy the file elsewhere and pick the copy in Model > Model Properties.",
+             overwrites. Link the results of another analysis to Global results.",
             source.display()
         ));
     }

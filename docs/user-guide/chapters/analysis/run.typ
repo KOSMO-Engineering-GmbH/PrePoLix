@@ -175,18 +175,25 @@ linked in the schematic (@results-links):
   another.
 + In the submodel, create a boundary condition of type #ui("Submodel") on the cut faces in a
   static step, and choose the displacement components.
-+ In the project schematic, drag the results of the global step (the row of the step below
-  #ui("Results") of the global analysis) to the #ui("Global results") input of that step of the
-  submodel, under #ui("Setup") > #ui("Steps"), or to the step itself. The output pane confirms
-  "takes the displacements of Step-1 of Global in Step-1 (submodel)". The link sets
-  #ui("Model Type") to #ui("Submodel") in the submodel's #ui("Model Properties") and the global
-  step of the boundary condition.
++ Set #ui("Model Type") to #ui("Submodel") in the submodel's #ui("Model Properties"). Its block
+  in the project schematic gets a #ui("Global results") row below #ui("State"), with an orange
+  input pin and a question mark while nothing is linked.
++ Drag the results of the global step (the row of the step below #ui("Results") of the global
+  analysis) to #ui("Global results"). The output pane confirms "takes the displacements of
+  Step-1 of Global in Step-1 (submodel)", and the row names the global analysis. The step with
+  submodel boundary conditions takes them, or the first step; the link also sets the global
+  step of the boundary condition. Each step can take the results of another global step at its
+  own #ui("Global results") input under #ui("Setup") > #ui("Steps"). Dropping results there
+  makes an analysis a submodel too.
+
+  #screenshot("submodel-global-results.png", [The results of Step-1 of the global analysis
+    linked to the Global results row of the submodel])
 + #ui("Solve") the submodel or #ui("Update Project"): the global model is solved first if it has
   no results yet. PrePoLix copies the global results next to the input file and writes
   `*SUBMODEL` and `*BOUNDARY, SUBMODEL`.
 
-A result file from outside the project can still be chosen by hand under #ui("Global results
-.frd") in #ui("Model Properties") with #ui("Model Type") #ui("Submodel").
+Removing the link leaves the analysis a submodel whose #ui("Global results") row waits for a new
+one. #ui("Model Properties") makes it a general model again.
 
 #limitation[Only displacements can be transferred. The global result file must not be the result
 file of the submodel's own analysis.]

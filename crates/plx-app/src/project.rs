@@ -3896,7 +3896,16 @@ impl ProjectApp {
             let nodes = (self.graph_node(link.source), self.graph_node(link.target));
             for (output, input) in paths {
                 let output = shown_row(&source.rows, &output);
-                let input = shown_row(&target.rows, &input);
+                // The global results of a submodel end at its Global results row while the
+                // input of the step is not shown.
+                let input = match shown_row(&target.rows, &input) {
+                    Some(row) if target.rows[row].path != input => (target.rows.iter())
+                        .position(|r| {
+                            r.path == [links::GLOBAL_RESULTS] && links::ends_at(&r.path, link)
+                        })
+                        .or(Some(row)),
+                    row => row,
+                };
                 if let (Some(output), Some(input), (Some(from), Some(to))) = (output, input, nodes)
                 {
                     wanted.insert((
@@ -4994,9 +5003,9 @@ impl ProjectApp {
                 self.unlink(|link| {
                     source.as_ref().is_none_or(|(id, path)| {
                         link.source == *id && links::covers(path, &links::output_path(link))
-                    }) && target.as_ref().is_none_or(|(id, path)| {
-                        link.target == *id && links::covers(path, links::slot(link))
-                    })
+                    }) && target
+                        .as_ref()
+                        .is_none_or(|(id, path)| link.target == *id && links::ends_at(path, link))
                 })
             }
         }
@@ -5567,39 +5576,69 @@ fn block_rows(
     };
     let state = vec![links::STATE.to_owned()];
     let continues = from(&state);
-    let mut rows = vec![
-        Row {
-            text: match &continues {
-                Some(source) => match continuation {
-                    Some(c) => format!("After {} of {}", c.step, c.source),
-                    None => format!("State of {source}"),
-                },
-                None => "State".to_owned(),
+    let mut rows = vec![Row {
+        text: match &continues {
+            Some(source) => match continuation {
+                Some(c) => format!("After {} of {}", c.step, c.source),
+                None => format!("State of {source}"),
             },
+            None => "State".to_owned(),
+        },
+        depth: 0,
+        icon: NodeIcon::State,
+        state: None,
+        expander: None,
+        input: true,
+        output: false,
+        tip: "Drop the results of a step of another analysis here: this analysis then \
+                  continues from the state after that step. It takes the model and the steps \
+                  up to it, and CalculiX solves only its own steps."
+            .into(),
+        linked_from: continues,
+        collection: false,
+        partial: false,
+        widget: None,
+        path: state,
+    }];
+    // A submodel takes the results of its global model here, like the State row.
+    let global: Vec<&str> = (incoming.iter())
+        .filter(|(slot, _)| links::ResultsUse::of_slot(slot) == Some(links::ResultsUse::Submodel))
+        .map(|(_, source)| source.as_str())
+        .collect();
+    let submodel = fe.is_some_and(|fe| fe.properties.kind == plx_model::ModelKind::Submodel);
+    if submodel || !global.is_empty() {
+        let linked_from = (!global.is_empty()).then(|| global.join(", "));
+        let text = match &linked_from {
+            Some(source) => format!("Global results of {source}"),
+            None => links::GLOBAL_RESULTS.to_owned(),
+        };
+        rows.push(Row {
+            text,
             depth: 0,
-            icon: NodeIcon::State,
-            state: None,
+            icon: NodeIcon::Results,
+            // Missing until a global analysis gives them.
+            state: global.is_empty().then_some(CellState::Missing),
             expander: None,
             input: true,
             output: false,
-            tip: "Drop the results of a step of another analysis here: this analysis then \
-                  continues from the state after that step. It takes the model and the steps \
-                  up to it, and CalculiX solves only its own steps."
+            tip: "Global results: drop the results of a step of the global analysis here. \
+                  The submodel boundary conditions read its displacements on the cut \
+                  boundary; open a step under Setup > Steps to give it the results of \
+                  another global step."
                 .into(),
-            linked_from: continues,
+            linked_from,
             collection: false,
             partial: false,
             widget: None,
-            path: state,
-        },
-        cell(links::GEOMETRY, NodeIcon::Geometry, status.geometry, true),
-        cell(links::MESH, NodeIcon::Mesh, status.mesh, true),
-    ];
-    if !status.stale_parts.is_empty() {
-        rows[1]
-            .tip
-            .push_str(&format!(" ({})", status.stale_parts.join(", ")));
+            path: vec![links::GLOBAL_RESULTS.to_owned()],
+        });
     }
+    let mut geometry = cell(links::GEOMETRY, NodeIcon::Geometry, status.geometry, true);
+    if !status.stale_parts.is_empty() {
+        (geometry.tip).push_str(&format!(" ({})", status.stale_parts.join(", ")));
+    }
+    rows.push(geometry);
+    rows.push(cell(links::MESH, NodeIcon::Mesh, status.mesh, true));
     // The mesh of geometry can be refined as a whole, by a value link too.
     if refinement.is_some() {
         let path = vec![PARAMETERS.to_owned(), REFINEMENT.to_owned()];
@@ -6696,7 +6735,7 @@ fn wire_color(path: &[String]) -> egui::Color32 {
         crate::style::adapt(egui::Color32::from_rgb(40, 150, 60))
     } else if path
         .first()
-        .is_some_and(|c| c == links::RESULTS || c == links::MEASURE)
+        .is_some_and(|c| c == links::RESULTS || c == links::MEASURE || c == links::GLOBAL_RESULTS)
         || links::is_step_input(path)
     {
         crate::style::adapt(egui::Color32::from_rgb(230, 130, 20))
@@ -8352,6 +8391,43 @@ mod tests {
         };
         let back = refusal(&nodes, &[link], 2, &path(&["Mesh"]), 3, &path(&["Mesh"]));
         assert!(back.is_some());
+    }
+
+    #[test]
+    fn a_submodel_has_a_global_results_row() {
+        let mut model = plx_model::FeModel::default();
+        model.steps.push(plx_model::Step::new_static("Step-1"));
+        let data = ProjectAnalysis {
+            model: model.clone(),
+            ..Default::default()
+        };
+        let node = Node::analysis(1, "Detail".into(), data);
+        let status = node.status().unwrap();
+        let global = |fe: &plx_model::FeModel, incoming: &[(Vec<String>, String)]| {
+            let rows = block_rows(
+                status,
+                Some(fe),
+                None,
+                &BTreeSet::new(),
+                incoming,
+                &[],
+                None,
+            );
+            rows.into_iter().find(|r| r.path == [links::GLOBAL_RESULTS])
+        };
+        // A general model has none; a submodel has an input for the global results.
+        assert!(global(&model, &[]).is_none());
+        model.properties.kind = plx_model::ModelKind::Submodel;
+        let row = global(&model, &[]).unwrap();
+        assert!(row.input && !row.output && row.state == Some(CellState::Missing));
+        // Once linked, it names the global analysis, whichever step takes the results.
+        let slot = ["Setup", "Steps", "Step-1", "Global results"]
+            .map(String::from)
+            .to_vec();
+        let row = global(&model, &[(slot, "Global".into())]).unwrap();
+        assert_eq!(row.text, "Global results of Global");
+        assert_eq!(row.linked_from.as_deref(), Some("Global"));
+        assert!(row.state.is_none());
     }
 
     #[test]
