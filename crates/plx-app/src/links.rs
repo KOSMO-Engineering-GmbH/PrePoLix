@@ -650,17 +650,31 @@ pub fn exists(data: Data, path: &[String]) -> bool {
     }
 }
 
+/// Takes over the shapes of a geometry link's source: the mesh setup, the default meshing
+/// parameters and the refinement stay those the target has, so that each analysis meshes
+/// the same geometry its own way. A target without geometry starts from the source's setup.
+pub fn take_geometry(target: &mut Option<Geometry>, source: Option<Geometry>) {
+    *target = match (target.take(), source) {
+        (Some(own), Some(source)) => Some(Geometry {
+            meshing: own.meshing,
+            mesh_items: own.mesh_items,
+            refinement: own.refinement,
+            ..source
+        }),
+        (_, source) => source,
+    };
+}
+
 /// Fingerprint of what the path takes from the analysis: a link copies it anew when the
 /// source's differs from what the target has, or had last time for the mesh and geometry.
 pub fn fingerprint(data: Data, path: &[String]) -> u64 {
     let mut hash = Fnv::new();
     match path {
         [cell] if cell == GEOMETRY => {
+            // The shapes only: the mesh setup stays the target's own, see [`take_geometry`].
             if let Some(geometry) = data.geometry {
                 hash.add_str(&geometry.source);
                 hash.add_str(&geometry.brep);
-                hash.add_debug(&geometry.meshing);
-                hash.add_debug(&geometry.mesh_items);
                 hash.add_debug(&geometry.part_names);
             }
         }
@@ -1213,7 +1227,7 @@ pub fn path_of(fe: &FeModel, item: &TreeItem) -> Option<Vec<String>> {
         | TreeItem::NodeSet(_)
         | TreeItem::ElementSet(_)
         | TreeItem::Surface(_) => Some(vec![MESH.to_owned()]),
-        TreeItem::MeshItem(_) => Some(vec![GEOMETRY.to_owned()]),
+        TreeItem::MeshItem(_) => Some(vec![MESH.to_owned()]),
         TreeItem::Material(i) => entry("Materials", &fe.materials.get(*i)?.name),
         TreeItem::Section(i) => entry("Sections", &fe.sections.get(*i)?.name),
         TreeItem::Constraint(i) => entry("Constraints", fe.constraints.get(*i)?.name()),
@@ -1271,6 +1285,55 @@ mod tests {
             mesh_inputs: &inputs,
         };
         fingerprint(data, path)
+    }
+
+    #[test]
+    fn a_geometry_link_takes_the_shapes_and_leaves_the_mesh_setup_to_the_target() {
+        let shapes = |brep: &str| Geometry {
+            source: "part.step".into(),
+            brep: brep.into(),
+            meshing: Default::default(),
+            mesh_items: Vec::new(),
+            part_names: Vec::new(),
+            refinement: 1.0,
+        };
+        let mut own = shapes("old");
+        own.meshing.max_size = 2.0;
+        own.mesh_items.push(plx_model::MeshSetupItem {
+            name: "Local Size-1".into(),
+            kind: plx_model::MeshSetupKind::LocalMeshSize {
+                faces: vec![1],
+                edges: Vec::new(),
+                size: 0.5,
+            },
+        });
+        own.refinement = 2.0;
+        // The setup of the target counts as nothing the link takes.
+        let print = |geometry: &Geometry| {
+            let (mesh, fe, inputs) = (FeMesh::default(), FeModel::default(), BTreeMap::new());
+            let data = Data {
+                geometry: Some(geometry),
+                mesh: &mesh,
+                fe: &fe,
+                mesh_inputs: &inputs,
+            };
+            fingerprint(data, &path(&[GEOMETRY]))
+        };
+        assert_eq!(print(&own), print(&shapes("old")));
+        assert_ne!(print(&own), print(&shapes("new")));
+        let mut target = Some(own.clone());
+        take_geometry(&mut target, Some(shapes("new")));
+        let taken = target.unwrap();
+        assert_eq!(taken.brep, "new");
+        assert_eq!(taken.meshing, own.meshing);
+        assert_eq!(taken.mesh_items, own.mesh_items);
+        assert_eq!(taken.refinement, 2.0);
+        // Without geometry yet, the target starts from the source's; unlinked, it has none.
+        let mut target = None;
+        take_geometry(&mut target, Some(own.clone()));
+        assert_eq!(target.as_ref(), Some(&own));
+        take_geometry(&mut target, None);
+        assert_eq!(target, None);
     }
 
     fn material(name: &str, young: f64) -> Material {

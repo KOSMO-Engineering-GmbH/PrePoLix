@@ -5369,6 +5369,8 @@ impl ProjectApp {
                     let path = [cell.to_owned()];
                     print.add(&links::fingerprint(data, &path).to_le_bytes());
                 }
+                // The mesh copy carries the mesh setup too.
+                print.add_debug(&data.geometry.map(|g| (&g.meshing, &g.mesh_items)));
                 let print = print.finish();
                 let key = (link.target, vec![links::STATE.to_owned()]);
                 let mesh = (self.applied.get(&key) != Some(&print))
@@ -5529,7 +5531,7 @@ impl ProjectApp {
         let mut data = node.closed_model_mut()?;
         match payload {
             Payload::Setup(fe) => links::apply_setup(data.fe, &fe, path),
-            Payload::Geometry(geometry) => *data.geometry = geometry,
+            Payload::Geometry(geometry) => links::take_geometry(data.geometry, geometry),
             Payload::Mesh(mesh) => data.take_mesh(*mesh),
             Payload::Results(global, file) => {
                 links::apply_results(data.fe, link, global, file);

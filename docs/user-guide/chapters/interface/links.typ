@@ -71,6 +71,16 @@ the setup (open #ui("Setup") with the arrow in front of it: #ui("Materials"), #u
 #ui("Constraints") and so on) or a single item of a category (open the category: one material,
 one contact pair, one step). A linked category also passes on items added to it later.
 
+A linked #ui("Geometry") takes the shapes only: the parts are read-only, but the mesh setup on
+the #ui("Geometry") tab (#ui("Default Mesh Parameters ..."), the #ui("Mesh Setup") items) stays
+the target's own, and the target meshes the geometry itself. Several analyses can so mesh the
+same geometry, from another analysis or from a file block (@file-block), each its own way. A
+target without geometry starts from the mesh setup of the source. A linked #ui("Mesh") takes the
+mesh with the setup it was made with; both are read-only then.
+
+#screenshot("linked-geometry-mesh-setup.png", [Geometry linked from a file block: the parts carry
+  the link sign, the Meshing Parameters item belongs to the analysis])
+
 The FE Model tree of the target shows only what is set up in that analysis: linked items are
 hidden by default, so that the tree lists the inputs that matter for it. Categories stay in the
 tree, also when everything in them is linked, so that items of the analysis itself can be added;
