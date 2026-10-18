@@ -958,7 +958,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(vec![13, 14, 15, 16]),
-            kind: LoadKind::ConcentratedForce([0.0, 1.0, 0.0]),
+            kind: LoadKind::force([0.0, 1.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
         });

@@ -208,12 +208,6 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     add(faces[index].center, -faces[index].normal, SymbolShape::Cone);
                 }
             }
-            Kind::Load(LoadKind::ConcentratedForce(force)) => {
-                let points = node_points(model, &item.region, &visible);
-                for index in sample(&points, DIVISIONS) {
-                    add(points[index], DVec3::from(force), SymbolShape::Arrow);
-                }
-            }
             Kind::Load(LoadKind::Moment(moment)) => {
                 let points = node_points(model, &item.region, &visible);
                 for index in sample(&points, DIVISIONS) {
@@ -232,7 +226,17 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     }
                 }
             }
-            Kind::Load(LoadKind::SurfaceTraction(force)) => {
+            // Applied to all nodes, an arrow at the nodes; else one for the total force.
+            Kind::Load(LoadKind::Force {
+                value: force,
+                each_node: true,
+            }) => {
+                let points = node_points(model, &item.region, &visible);
+                for index in sample(&points, DIVISIONS) {
+                    add(points[index], DVec3::from(force), SymbolShape::Arrow);
+                }
+            }
+            Kind::Load(LoadKind::Force { value: force, .. }) => {
                 if let Some(center) = region_center(model, &item.region, &visible) {
                     add(center, DVec3::from(force), SymbolShape::Arrow);
                 }

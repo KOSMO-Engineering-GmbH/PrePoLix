@@ -1009,10 +1009,9 @@ const INITIAL_VELOCITY: &str = "Initial_Velocity";
 const INITIAL_ANGULAR_VELOCITY: &str = "Initial_Angular_Velocity";
 const SUBMODEL: &str = "Submodel";
 const SYMMETRY: &str = "Symmetry";
-const FORCE: &str = "Concentrated_Force";
+const FORCE: &str = "Force";
 const MOMENT: &str = "Moment";
 const PRESSURE: &str = "Pressure";
-const TRACTION: &str = "Surface_Traction";
 const PRE_TENSION: &str = "Pre-tension";
 const CFLUX: &str = "Concentrated_Flux";
 const SURFACE_FLUX: &str = "Surface_Flux";
@@ -1303,22 +1302,13 @@ fn submodel_rows(ui: &mut egui::Ui, step: u32, dofs: &mut [bool; 6], two_d: bool
 
 const DOF_LABELS: [&str; 6] = ["U1", "U2", "U3", "UR1", "UR2", "UR3"];
 
-/// The load kinds of the dialog in PrePoMax's order: label, default name and the kind with
-/// zero values.
-fn load_kinds() -> [(&'static str, &'static str, LoadKind); 13] {
+/// The load kinds of the dialog, the force first: label, default name and the kind with zero
+/// values.
+fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
     [
-        (
-            "Concentrated Force",
-            FORCE,
-            LoadKind::ConcentratedForce([0.0; 3]),
-        ),
+        ("Force", FORCE, LoadKind::force([0.0; 3])),
         ("Moment", MOMENT, LoadKind::Moment([0.0; 3])),
         ("Pressure", PRESSURE, LoadKind::Pressure(0.0)),
-        (
-            "Surface Traction",
-            TRACTION,
-            LoadKind::SurfaceTraction([0.0; 3]),
-        ),
         ("Gravity", GRAVITY, LoadKind::Gravity([0.0, 0.0, -9.81])),
         (
             "Centrifugal load",
@@ -1418,10 +1408,9 @@ fn vector_rows(
 
 fn load_kind_name(kind: &LoadKind) -> &'static str {
     match kind {
-        LoadKind::ConcentratedForce(_) => FORCE,
         LoadKind::Moment(_) => MOMENT,
         LoadKind::Pressure(_) => PRESSURE,
-        LoadKind::SurfaceTraction(_) => TRACTION,
+        LoadKind::Force { .. } => FORCE,
         LoadKind::PreTension { .. } => PRE_TENSION,
         LoadKind::ConcentratedFlux(_) => CFLUX,
         LoadKind::SurfaceFlux(_) => SURFACE_FLUX,
@@ -1431,6 +1420,24 @@ fn load_kind_name(kind: &LoadKind) -> &'static str {
         LoadKind::Gravity(_) => GRAVITY,
         LoadKind::Centrifugal { .. } => CENTRIFUGAL,
         LoadKind::Moving(_) => MOVING,
+    }
+}
+
+/// What the force of the load dialog acts on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ForceTarget {
+    Faces,
+    Edges,
+    Points,
+}
+
+impl ForceTarget {
+    fn of(target: Target) -> Self {
+        match target {
+            Target::Lines => ForceTarget::Edges,
+            Target::Nodes => ForceTarget::Points,
+            _ => ForceTarget::Faces,
+        }
     }
 }
 
@@ -1444,9 +1451,7 @@ enum LoadTarget {
 
 fn load_target(kind: &LoadKind) -> LoadTarget {
     match kind {
-        LoadKind::ConcentratedForce(_) | LoadKind::Moment(_) | LoadKind::ConcentratedFlux(_) => {
-            LoadTarget::Nodes
-        }
+        LoadKind::Moment(_) | LoadKind::ConcentratedFlux(_) => LoadTarget::Nodes,
         LoadKind::BodyFlux(_) | LoadKind::Gravity(_) | LoadKind::Centrifugal { .. } => {
             LoadTarget::Elements
         }
@@ -1461,12 +1466,13 @@ fn load_region(
     fe: &FeModel,
     mesh: &FeMesh,
 ) -> RegionDraft {
-    // A surface traction on a 3D model may act along picked edges instead of faces.
-    let along_edges = matches!(kind, LoadKind::SurfaceTraction(_))
-        && !fe.properties.space.is_2d()
-        && region.is_some_and(is_edge_region);
+    // A force may act along picked edges of a 3D model instead of faces, or on points.
+    let force = matches!(kind, LoadKind::Force { .. });
+    let along_edges = force && !fe.properties.space.is_2d() && region.is_some_and(is_edge_region);
+    let on_points = force && region.is_some_and(is_point_region);
     let (sources, target) = match load_target(kind) {
         LoadTarget::Faces if along_edges => (EDGE_SOURCES, Target::Lines),
+        LoadTarget::Faces if on_points => (SUPPORT_SOURCES, Target::Nodes),
         // Forces and moments also act on the reference point of a rigid body.
         LoadTarget::Nodes if !kind.is_thermal() => (SUPPORT_SOURCES, Target::Nodes),
         LoadTarget::Nodes => (NODE_SOURCES, Target::Nodes),
@@ -1476,6 +1482,18 @@ fn load_region(
     match region {
         Some(region) => RegionDraft::from_region(region, sources, target, mesh),
         None => RegionDraft::new(sources, target),
+    }
+}
+
+/// Whether a region consists of points: nodes, CAD vertices or the reference point of a
+/// rigid body.
+fn is_point_region(region: &Region) -> bool {
+    match region {
+        Region::Nodes(_) | Region::NodeSet(_) | Region::ReferencePoint(_) => true,
+        Region::Geometry(entities) => {
+            !entities.is_empty() && entities.iter().all(|e| matches!(e, CadEntity::Vertex(_)))
+        }
+        _ => false,
     }
 }
 
@@ -2253,9 +2271,11 @@ impl Editor {
                             if ui.selectable_label(current == name, label).clicked()
                                 && current != name
                             {
-                                // Only a surface traction acts along edges.
+                                // Only a force acts along edges or on points.
                                 let moved = load_target(&kind) != load_target(&load.kind)
-                                    || region.target == Target::Lines;
+                                    || region.target == Target::Lines
+                                    || (matches!(load.kind, LoadKind::Force { .. })
+                                        && region.target == Target::Nodes);
                                 load.kind = kind;
                                 rename_default(&mut load.name, current, name, &taken);
                                 if moved {
@@ -2266,13 +2286,6 @@ impl Editor {
                     });
                 ui.end_row();
                 match &mut load.kind {
-                    LoadKind::ConcentratedForce(force) => {
-                        force_rows(ui, force, two_d, units);
-                        ui.label("");
-                        ui.weak("The force acts on every node of the region.");
-                        ui.end_row();
-                        revolution_hint(ui, axisymmetric);
-                    }
                     LoadKind::Moment(moment) => {
                         if two_d {
                             ui.label("");
@@ -2299,29 +2312,50 @@ impl Editor {
                         ui.add(numeric::quantity(pressure, units, Quantity::Pressure).speed(0.1));
                         ui.end_row();
                     }
-                    LoadKind::SurfaceTraction(force) => {
-                        force_rows(ui, force, two_d, units);
-                        let mut edges = region.target == Target::Lines;
-                        if !two_d {
-                            ui.label("Apply to");
-                            ui.horizontal(|ui| {
-                                ui.radio_value(&mut edges, false, "Faces");
-                                ui.radio_value(&mut edges, true, "Edges");
-                            });
-                            ui.end_row();
-                            if edges != (region.target == Target::Lines) {
-                                *region = if edges {
-                                    RegionDraft::new(EDGE_SOURCES, Target::Lines)
-                                } else {
-                                    load_region(&load.kind, None, &model.fe, &model.mesh)
-                                };
+                    LoadKind::Force { value, each_node } => {
+                        force_rows(ui, value, two_d, units);
+                        ui.label("");
+                        ui.checkbox(each_node, "Apply to all nodes");
+                        ui.end_row();
+                        let each_node = *each_node;
+                        let current = ForceTarget::of(region.target);
+                        let mut picked = current;
+                        ui.label("Apply to");
+                        ui.horizontal(|ui| {
+                            // In 2D models the faces of the elements are their edges.
+                            if two_d {
+                                ui.radio_value(&mut picked, ForceTarget::Faces, "Edges");
+                            } else {
+                                ui.radio_value(&mut picked, ForceTarget::Faces, "Faces");
+                                ui.radio_value(&mut picked, ForceTarget::Edges, "Edges");
                             }
+                            ui.radio_value(&mut picked, ForceTarget::Points, "Points");
+                        });
+                        ui.end_row();
+                        if picked != current {
+                            *region = match picked {
+                                ForceTarget::Faces => {
+                                    load_region(&load.kind, None, &model.fe, &model.mesh)
+                                }
+                                ForceTarget::Edges => RegionDraft::new(EDGE_SOURCES, Target::Lines),
+                                ForceTarget::Points => {
+                                    RegionDraft::new(SUPPORT_SOURCES, Target::Nodes)
+                                }
+                            };
                         }
                         ui.label("");
-                        ui.weak(if edges {
-                            "Total force, distributed to the nodes by length on export."
-                        } else {
-                            "Total force, distributed to the nodes by area on export."
+                        ui.weak(match picked {
+                            _ if each_node => "The whole force acts at every node of the region.",
+                            ForceTarget::Faces => {
+                                "Total force, distributed to the nodes by area on export."
+                            }
+                            ForceTarget::Edges => {
+                                "Total force, distributed to the nodes by length on export."
+                            }
+                            ForceTarget::Points => {
+                                "Total force, shared equally by the nodes or taken by a \
+                                 reference point."
+                            }
                         });
                         ui.end_row();
                         revolution_hint(ui, axisymmetric);
@@ -4657,7 +4691,7 @@ mod tests {
     fn a_surface_traction_on_edges_keeps_its_edges() {
         let fe = FeModel::default();
         let mesh = FeMesh::default();
-        let traction = LoadKind::SurfaceTraction([0.0, 0.0, -1.0]);
+        let traction = LoadKind::force([0.0, 0.0, -1.0]);
         let mut draft = RegionDraft::new(EDGE_SOURCES, Target::Lines);
         draft.take(
             &mesh,
@@ -4685,6 +4719,30 @@ mod tests {
             load_region(&traction, Some(&cad), &fe, &mesh).target,
             Target::Lines
         );
+        // Points: nodes, vertices or a reference point.
+        for points in [
+            Region::Nodes(vec![1]),
+            Region::Geometry(vec![CadEntity::Vertex(2)]),
+            Region::ReferencePoint("RP-1".into()),
+        ] {
+            let reopened = load_region(&traction, Some(&points), &fe, &mesh);
+            assert_eq!(reopened.target, Target::Nodes);
+            assert_eq!(ForceTarget::of(reopened.target), ForceTarget::Points);
+        }
+    }
+
+    #[test]
+    fn a_new_load_is_a_force() {
+        let mut fe = FeModel::default();
+        Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        let Draft::Load(_, load, region) = Editor::create(NewItem::Load(0), &fe).unwrap().draft
+        else {
+            unreachable!()
+        };
+        assert_eq!(load.name, "Force-1");
+        assert_eq!(load.kind, LoadKind::force([0.0; 3]));
+        assert_eq!(ForceTarget::of(region.target), ForceTarget::Faces);
+        assert_eq!(load_kinds()[0].0, "Force");
     }
 
     #[test]
@@ -4995,7 +5053,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(vec![1]),
-            kind: LoadKind::ConcentratedForce([1.0, 0.0, 0.0]),
+            kind: LoadKind::force([1.0, 0.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
         });
