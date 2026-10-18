@@ -193,20 +193,15 @@ linked in the schematic (@results-links):
   no results yet. PrePoLix copies the global results next to the input file and writes
   `*SUBMODEL` and `*BOUNDARY, SUBMODEL`.
 
-The #ui("Results") tab of the submodel shows the global model around it as a part of its own,
-#ui("Global Model") under #ui("Parts"), read from the global results the submodel took. Where
-the submodel lies wholly, the global elements are cut away. A global element the submodel only
-reaches into stays, drawn behind the submodel: where the two overlap, the submodel shows, and no
-gap opens at the cut, in the section view too. The global
-model shows the result chosen for the submodel at the global increment the submodel follows,
-deformed by the same scale and coloured in the same legend, whose range takes in the global
-values. Its check box hides it; its context menu draws it #ui("Transparent") instead: whole,
-see-through and without results, with the submodel inside it.
+In the #ui("Results") tab of the submodel, #ui("Show Global Contours") in the results tool bar,
+next to #ui("Show Undeformed"), draws the edges of the global model around the results, read from
+the global results the submodel took: at the global increment the submodel follows and deformed by
+the same scale. They show where the submodel sits in the global model and how the two deform; the
+global model is neither a part in the tree nor coloured, and the legend leaves its values out. The
+switch shows only for a submodel whose global results file is there.
 
-#screenshot("submodel-global-model.png", [Results of a submodel at the clamped end of a beam,
-  with the global model around it in the same legend])
-
-#screenshot("submodel-global-transparent.png", [The same global model drawn transparent])
+#screenshot("submodel-global-contours.png", [Results of a submodel at the clamped end of a beam,
+  with the edges of the global model around it])
 
 Removing the link leaves the analysis a submodel whose #ui("Global results") row waits for a new
 one. #ui("Model Properties") makes it a general model again.
