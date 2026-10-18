@@ -53,8 +53,7 @@ impl ModelPropertiesDialog {
         let mut open = true;
         let mut result = DialogResult::Open;
         let error = (mesh.and_then(|mesh| space_error(self.draft.space, mesh)))
-            .or_else(|| geometry.and_then(|g| geometry_check(self.draft.space, g).err()))
-            .or_else(|| submodel_error(&self.draft));
+            .or_else(|| geometry.and_then(|g| geometry_check(self.draft.space, g).err()));
         egui::Window::new("Model Properties")
             .id(egui::Id::new("model properties"))
             .open(&mut open)
@@ -143,7 +142,8 @@ impl ModelPropertiesDialog {
     }
 }
 
-/// PrePoMax's model type and, for a submodel, the results file of the global model.
+/// PrePoMax's model type. A submodel takes the results of its global model through a link
+/// in the project, not from a file picked here.
 fn model_type(ui: &mut egui::Ui, draft: &mut ModelProperties) {
     ui.horizontal(|ui| {
         for kind in ModelKind::ALL {
@@ -153,49 +153,10 @@ fn model_type(ui: &mut egui::Ui, draft: &mut ModelProperties) {
     if draft.kind != ModelKind::Submodel {
         return;
     }
-    ui.horizontal(|ui| {
-        ui.label("Global results .frd");
-        let shown = (draft.global_results.as_deref())
-            .and_then(|p| p.file_name())
-            .map_or_else(
-                || "(none)".to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            );
-        let label = ui.add(egui::Label::new(shown).truncate());
-        if let Some(path) = &draft.global_results {
-            label.on_hover_text(path.display().to_string());
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let browse = ui
-                .button("...")
-                .on_hover_text("Pick the results file (.frd) of the global model");
-            if browse.clicked() {
-                let mut dialog = rfd::FileDialog::new()
-                    .set_title("Global results")
-                    .add_filter("CalculiX results (*.frd)", &["frd"]);
-                if let Some(dir) = (draft.global_results.as_deref()).and_then(|p| p.parent()) {
-                    dialog = dialog.set_directory(dir);
-                }
-                if let Some(path) = dialog.pick_file() {
-                    draft.global_results = Some(path);
-                }
-            }
-        });
-    });
-    let note = match &draft.global_results {
-        Some(path) if !path.exists() => "The file does not exist (any more).",
-        _ => {
-            "The submodel boundary conditions read the displacements of the global model \
-             from this file; it is copied next to the input file when the analysis runs."
-        }
-    };
+    let note = "The submodel takes the displacements of its global model through the Global \
+                results row of its block in the project window: drag the results of a step of \
+                the global analysis there.";
     ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap());
-}
-
-/// Why a submodel cannot be set up yet: it needs the results of its global model.
-fn submodel_error(properties: &ModelProperties) -> Option<String> {
-    (properties.kind == ModelKind::Submodel && properties.global_results.is_none())
-        .then(|| "Pick the results file (.frd) of the global model.".to_string())
 }
 
 /// Why the model space does not fit the existing mesh: a 2D model takes no solid elements,

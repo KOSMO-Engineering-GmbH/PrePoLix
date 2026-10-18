@@ -155,7 +155,7 @@ its inputs are listed below it, each with an orange pin:
   [#ui("Eigenmodes") (modal dynamics and steady state dynamics steps)],
   [a frequency step with #ui("Storage") on],
   [the eigenmodes these steps work on: the `.eig` file of the other run (@modal-dynamics)],
-  [#ui("Global results") (every step)],
+  [#ui("Global results") (every step, and a row of the block of a submodel)],
   [any step of the global model],
   [the displacements on the cut boundary of a submodel (@submodel)],
 )

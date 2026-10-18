@@ -1298,8 +1298,8 @@ fn submodel_rows(
     }
     let note = match fe.properties.submodel_input() {
         Some(path) => format!("Global results: {}", path.display()),
-        None => "No global results file yet: set the model type to Submodel in Model > \
-                 Model Properties and pick the global .frd file."
+        None => "No global results yet: in the project window, drag the results of a step \
+                 of the global analysis to the Global results row of this analysis."
             .into(),
     };
     ui.label("");

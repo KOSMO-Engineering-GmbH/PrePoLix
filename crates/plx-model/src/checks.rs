@@ -1265,8 +1265,8 @@ impl FeModel {
                     ModelItem::BoundaryCondition(s, i),
                     Problem::NoGlobalResults,
                     format!(
-                        "{} needs the results of a global model (Model > Model Properties: model type \
-                         Submodel and global results file)",
+                        "{} needs the results of a global model: in the project window, link the \
+                         results of a step of the global analysis to Global results",
                         bc.name
                     ),
                 ));
