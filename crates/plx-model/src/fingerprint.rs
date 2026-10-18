@@ -58,7 +58,14 @@ pub fn solve_input(mesh: &FeMesh, fe: &FeModel) -> u64 {
     hash.add_debug(node_ties);
     hash.add_debug(amplitudes);
     hash.add_debug(initial_conditions);
-    hash.add_debug(steps);
+    // Temperatures read from results files count by their folder and file name too.
+    let mut steps = steps.clone();
+    for field in steps.iter_mut().flat_map(|s| s.defined_fields.iter_mut()) {
+        if let crate::DefinedFieldKind::TemperatureFromFile { file, .. } = &mut field.kind {
+            *file = short(file);
+        }
+    }
+    hash.add_debug(&steps);
     hash.add_debug(user_keywords);
     hash.add_debug(reference_points);
     hash.add_debug(coordinate_systems);
@@ -128,6 +135,30 @@ mod tests {
         fe.properties.global_results = Some("/home/b/Global-1/global.frd".into());
         assert_eq!(solve_input(&mesh, &fe), before);
         fe.properties.global_results = Some("/home/b/Global-2/global.frd".into());
+        assert_ne!(solve_input(&mesh, &fe), before);
+    }
+
+    #[test]
+    fn temperatures_from_files_count_by_folder_and_name() {
+        let mesh = FeMesh::default();
+        let mut fe = FeModel::default();
+        let mut step = Step::new_static("Step-1");
+        let field = |file: &str| crate::DefinedField {
+            name: "Temperatures".into(),
+            active: true,
+            region: crate::Region::Parts(Vec::new()),
+            kind: crate::DefinedFieldKind::TemperatureFromFile {
+                file: file.into(),
+                step: 1,
+            },
+            amplitude: None,
+        };
+        step.defined_fields.push(field("/tmp/a/Global-1/heat.frd"));
+        fe.steps.push(step);
+        let before = solve_input(&mesh, &fe);
+        fe.steps[0].defined_fields[0] = field("/home/b/Global-1/heat.frd");
+        assert_eq!(solve_input(&mesh, &fe), before);
+        fe.steps[0].defined_fields[0] = field("/home/b/Global-2/heat.frd");
         assert_ne!(solve_input(&mesh, &fe), before);
     }
 

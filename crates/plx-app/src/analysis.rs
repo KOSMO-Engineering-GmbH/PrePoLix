@@ -21,16 +21,12 @@ pub struct Analysis {
     /// Fingerprint of the model the run solves, see [`plx_model::fingerprint::solve_input`];
     /// kept with its results to tell when they are out of date.
     pub input: u64,
-    /// Started by Solve: the results are opened and kept once the run ends.
-    pub open_when_done: bool,
     output: Vec<String>,
     /// Text typed into the monitor's filter field; only output lines containing it are shown.
     filter: String,
     started: Instant,
     finished: Option<f32>,
     status: JobStatus,
-    /// The results of this run were bound to the project when they were opened.
-    pub bound: bool,
     /// The keywords of the input file, see [`plx_io::inp::keywords::input_keywords`].
     keywords: Vec<String>,
     /// How the run reuses the state of an earlier one; `None` for a model check.
@@ -55,6 +51,82 @@ pub enum MonitorEvent {
     None,
     /// Open the results of the run.
     OpenResults,
+    /// Stop the run.
+    Stop,
+}
+
+/// The project's solve of an analysis as its window shows it, copied from the solve as it
+/// goes on.
+#[derive(Default)]
+pub struct RunView {
+    /// When the solve started, which tells one solve from the next.
+    pub started: Option<Instant>,
+    pub active: bool,
+    pub state: &'static str,
+    pub seconds: f32,
+    pub progress: Option<String>,
+    pub lines: Vec<String>,
+    pub filter: String,
+}
+
+impl RunView {
+    /// The monitor of the solve, like that of a run: Stop, Results, the filter and the
+    /// output.
+    pub fn monitor(&mut self, ui: &mut egui::Ui, name: &str) -> MonitorEvent {
+        let mut event = MonitorEvent::None;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(self.active, egui::Button::new("Stop"))
+                .on_hover_text("Stops the solve")
+                .clicked()
+            {
+                event = MonitorEvent::Stop;
+            }
+            if ui
+                .add_enabled(!self.active, egui::Button::new("Results"))
+                .on_hover_text("Opens the results the analysis keeps")
+                .clicked()
+            {
+                event = MonitorEvent::OpenResults;
+            }
+            ui.separator();
+            ui.label("Filter:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.filter)
+                    .hint_text("Show only lines containing ...")
+                    .desired_width(180.0),
+            );
+            if ui
+                .add_enabled(!self.filter.is_empty(), egui::Button::new("Clear"))
+                .clicked()
+            {
+                self.filter.clear();
+            }
+            ui.separator();
+            if self.active {
+                ui.spinner();
+            }
+            ui.label(format!("{name}: {} ({:.1} s)", self.state, self.seconds));
+            if let Some(text) = &self.progress {
+                ui.separator();
+                ui.label(text);
+            }
+        });
+        let area = egui::ScrollArea::both()
+            .id_salt("solve output")
+            .auto_shrink([false, false])
+            .stick_to_bottom(true);
+        if self.filter.is_empty() {
+            crate::virtual_table::lines(ui, area, &self.lines);
+        } else {
+            let needle = self.filter.to_lowercase();
+            let shown: Vec<&String> = (self.lines.iter())
+                .filter(|line| line.to_lowercase().contains(&needle))
+                .collect();
+            crate::virtual_table::lines(ui, area, &shown);
+        }
+        event
+    }
 }
 
 /// The analysis name as the name of its files: CalculiX takes no spaces in them, and the
@@ -270,11 +342,9 @@ impl Analysis {
             job,
             name: name.to_owned(),
             input: plx_model::fingerprint::solve_input(&model.mesh, &model.fe),
-            open_when_done: false,
             started: Instant::now(),
             finished: None,
             status: JobStatus::Running,
-            bound: false,
             keywords,
             restart,
         })
@@ -325,10 +395,6 @@ impl Analysis {
         Some(status)
     }
 
-    pub fn status(&self) -> JobStatus {
-        self.status
-    }
-
     /// How long the run has taken so far, or took.
     pub fn seconds(&self) -> f32 {
         (self.finished).unwrap_or_else(|| self.started.elapsed().as_secs_f32())
@@ -373,7 +439,7 @@ impl Analysis {
                 .add_enabled(status == JobStatus::Running, egui::Button::new("Kill"))
                 .clicked()
             {
-                self.kill();
+                event = MonitorEvent::Stop;
             }
             let results = self.job.results().filter(|_| status != JobStatus::Running);
             if ui

@@ -184,13 +184,28 @@ linked in the schematic (@results-links):
   submodel boundary conditions takes them, or the first step; the link also sets the global
   step of the boundary condition. Each step can take the results of another global step at its
   own #ui("Global results") input under #ui("Setup") > #ui("Steps"). Dropping results there
-  makes an analysis a submodel too.
+  makes an analysis a submodel too. Global results computed elsewhere come from a file block
+  (@file-block) that reads their `.frd` file; its steps link the same way.
 
   #screenshot("submodel-global-results.png", [The results of Step-1 of the global analysis
     linked to the Global results row of the submodel])
 + #ui("Solve") the submodel or #ui("Update Project"): the global model is solved first if it has
   no results yet. PrePoLix copies the global results next to the input file and writes
   `*SUBMODEL` and `*BOUNDARY, SUBMODEL`.
+
+The #ui("Results") tab of the submodel shows the global model around it as a part of its own,
+#ui("Global Model") under #ui("Parts"), read from the global results the submodel took. Where
+the submodel lies, the global elements are cut away, so the two do not overlap; a global element
+the submodel reaches into goes as a whole, which can leave a small gap at the cut. The global
+model shows the result chosen for the submodel at the global increment the submodel follows,
+deformed by the same scale and coloured in the same legend, whose range takes in the global
+values. Its check box hides it; its context menu draws it #ui("Transparent") instead: whole,
+see-through and without results, with the submodel inside it.
+
+#screenshot("submodel-global-model.png", [Results of a submodel at the clamped end of a beam,
+  with the global model around it in the same legend])
+
+#screenshot("submodel-global-transparent.png", [The same global model drawn transparent])
 
 Removing the link leaves the analysis a submodel whose #ui("Global results") row waits for a new
 one. #ui("Model Properties") makes it a general model again.

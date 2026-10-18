@@ -1217,7 +1217,7 @@ impl FeModel {
                 // Degree of freedom 11.
                 BoundaryKind::Temperature(t) => vec![(10, t)],
                 // The values come from the global model; NaN stands for them.
-                BoundaryKind::Submodel { dofs: held, .. } => (0..dofs)
+                BoundaryKind::Submodel { dofs: held, .. } => (0..dofs.min(3))
                     .filter(|&d| held[d])
                     .map(|d| (d, f64::NAN))
                     .collect(),
@@ -1549,7 +1549,7 @@ impl FeModel {
                     out.extend((0..dofs).filter(|&d| values[d].is_some()));
                 }
                 BoundaryKind::Submodel { dofs: driven, .. } => {
-                    out.extend((0..dofs).filter(|&d| driven[d]));
+                    out.extend((0..dofs.min(3)).filter(|&d| driven[d]));
                 }
                 // A reference point fixes no plane; a remote displacement brings its own.
                 BoundaryKind::Temperature(_)

@@ -127,8 +127,9 @@ impl History {
     }
 }
 
-/// Notes what changed since the last call as one change that can be undone; called once
-/// at the end of every frame, after everything the user did in it.
+/// Notes what changed since the last call as one change that can be undone, and counts it
+/// in the model's revision; called once at the end of every frame, after everything the
+/// user did in it.
 pub fn record(model: &mut Model) {
     let geometry = model.geometry.as_ref();
     let history = &mut model.history;
@@ -160,6 +161,7 @@ pub fn record(model: &mut Model) {
         meshing: Meshing::of(geometry),
         shapes,
     });
+    model.revision += 1;
 }
 
 /// Reverts the last change; false if there is none.

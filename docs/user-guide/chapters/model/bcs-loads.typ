@@ -19,8 +19,9 @@ plates (rotations).
     as a mean (@remote-displacement).],
   [Temperature], [Prescribed temperature (heat transfer, coupled and uncoupled steps).],
   [Submodel], [Displacements taken from the global model (static steps of a submodel,
-    @submodel). #ui("Global step") selects the step of the global results, the check boxes the
-    components.],
+    @submodel). The check boxes select the displacements U1 to U3; the step of the global
+    results is the one linked to the #ui("Global results") row. The global results hold no
+    rotations.],
   [Symmetry], [Holds the selected faces in their plane like a mirror image (@symmetry).],
 )
 
