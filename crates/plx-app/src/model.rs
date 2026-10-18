@@ -89,6 +89,10 @@ pub struct Model {
     cad_entities: Vec<CadEntity>,
     /// Solids of the CAD geometry a geometry display shows.
     pub geometry_solids: usize,
+    /// How the faces, edges and vertices of a geometry display meet.
+    geometry_topology: plx_mesher::CadTopology,
+    /// Lookups for selections on a geometry display, built when first needed.
+    geometry_index: std::sync::OnceLock<crate::geometry_selection::GeometryIndex>,
     /// Hot spots defined on a results file, with their values.
     pub hot_spots: crate::hot_spots::HotSpots,
     /// Plots of result paths shown in the 3D view.
@@ -542,6 +546,8 @@ impl Model {
             is_geometry: false,
             cad_entities: Vec::new(),
             geometry_solids: 0,
+            geometry_topology: Default::default(),
+            geometry_index: Default::default(),
             hot_spots: Default::default(),
             path_plots: Vec::new(),
             highlight: Highlight::default(),
@@ -589,6 +595,7 @@ impl Model {
         }
         model.cad_entities = display.entities;
         model.geometry_solids = display.solids;
+        model.geometry_topology = display.topology;
         model
     }
 
@@ -633,6 +640,7 @@ impl Model {
         self.part_nodes = Default::default();
         self.checks = Default::default();
         self.cad_index = Default::default();
+        self.geometry_index = Default::default();
         self.query_annotations.clear();
         // Reference points at the centre of a selection follow the new mesh.
         self.fe.update_reference_points(&self.mesh);
@@ -669,6 +677,17 @@ impl Model {
             findings: findings.clone(),
         });
         findings
+    }
+
+    /// Lookups for selections on the geometry display, see [`crate::geometry_selection`].
+    pub fn geometry_index(&self) -> &crate::geometry_selection::GeometryIndex {
+        (self.geometry_index).get_or_init(|| {
+            crate::geometry_selection::GeometryIndex::new(
+                &self.mesh,
+                &self.cad_entities,
+                &self.geometry_topology,
+            )
+        })
     }
 
     pub fn cad_index(&self) -> &crate::cad_selection::CadIndex {

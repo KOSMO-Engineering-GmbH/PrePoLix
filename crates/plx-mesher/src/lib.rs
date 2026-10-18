@@ -87,6 +87,17 @@ pub struct GeometryDisplay {
     pub solids: usize,
     pub faces: usize,
     pub edges: usize,
+    /// How the CAD faces, edges and vertices meet, for selections that grow across them.
+    pub topology: CadTopology,
+}
+
+/// The boundary of each CAD face and edge, by tag.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CadTopology {
+    /// The edges bounding each face.
+    pub face_edges: BTreeMap<i32, Vec<i32>>,
+    /// The vertices at the ends of each edge; one for a closed edge.
+    pub edge_vertices: BTreeMap<i32, Vec<i32>>,
 }
 
 impl GeometryDisplay {
@@ -1631,6 +1642,18 @@ fn display_mesh(
         segments.insert(curve, nodes);
     }
 
+    let mut topology = CadTopology::default();
+    for &surface in &surfaces {
+        topology
+            .face_edges
+            .insert(surface, gmsh.adjacencies(2, surface)?.1);
+    }
+    for &curve in &curves {
+        topology
+            .edge_vertices
+            .insert(curve, gmsh.adjacencies(1, curve)?.1);
+    }
+
     let mut mesh = FeMesh::default();
     let mut entities = Vec::new();
     let mut part_dimensions = Vec::new();
@@ -1674,7 +1697,7 @@ fn display_mesh(
             for triangle in nodes.as_chunks::<3>().0 {
                 add(&mut mesh, &mut part, CadEntity::Face(face), triangle)?;
             }
-            edges.extend(gmsh.adjacencies(2, face)?.1);
+            edges.extend(topology.face_edges.get(&face).into_iter().flatten());
         }
         for edge in edges {
             let nodes = segments.get(&edge).map_or(&[][..], Vec::as_slice);
@@ -1694,6 +1717,7 @@ fn display_mesh(
         solids: gmsh.entities(3)?.len(),
         faces: surfaces.len(),
         edges: curves.len(),
+        topology,
     })
 }
 

@@ -103,14 +103,22 @@ values and meshes at once.
 / Meshing Parameters: the fields above for selected parts. If several items name the same part,
   the last one counts.
 / Local Mesh Size: an element size on selected CAD faces and edges. Click them in the 3D view;
-  #key("Shift") adds, #key("Ctrl") removes. The default is a quarter of the maximum element
-  size.
+  #key("Shift") adds, #key("Ctrl") removes. The #ui("Selection") window next to the dialog
+  (@selection-window) offers the geometry based modes: #ui("Faces and edges") takes the face
+  under the cursor or the edge near it, #ui("Part") all faces of a part, #ui("Edge angle")
+  the clicked edge and the edges that continue it, #ui("Surface angle") the clicked face and
+  the neighbouring faces that meet it at less than the angle, such as the pieces of a split
+  cylinder. A box takes the faces inside it. The default size is a quarter of the maximum
+  element size.
 / Tetrahedral Gmsh: chooses the Gmsh algorithms for selected parts. #ui("Surface algorithm"):
   Frontal-Delaunay (default), Delaunay, MeshAdapt or Automatic. #ui("Volume algorithm"):
   Delaunay (default), Frontal or HXT.
 / Extrude Mesh: hexahedra and wedges for parts that are extrusions of a face (@extrude-mesh).
 
 #screenshot("mesh-setup-item.png", [Creating a mesh setup item])
+
+#screenshot("local-mesh-size-surface-angle.png", [A Local Mesh Size on the three faces of a
+  split cylinder, picked with one click in the #ui("Surface angle") mode])
 
 #ui("OK") stores the item. #ui("OK & Remesh") stores it and meshes again the parts it names.
 A Local Mesh Size item is picked on faces and edges, so it meshes all parts again.
@@ -127,7 +135,9 @@ meshing parameters and local mesh sizes, as for tetrahedra.
 #fields(
   [Source faces], [#ui("Automatic") finds a face of each selected part that the part is an
     extrusion of. #ui("Selected faces") uses the faces you click at one end of the parts; the
-    dialog shows which parts they belong to. A source may consist of several faces.],
+    dialog shows which parts they belong to. A source may consist of several faces; the
+    #ui("Surface angle") mode of the selection window takes the faces that continue the
+    clicked one with one click.],
   [Surface algorithm], [The Gmsh algorithm for the source face. #ui("Frontal-Delaunay for
     quads") (default) gives triangles that join well to quadrilaterals.],
   [Recombine algorithm], [How triangles are joined to quadrilaterals: #ui("Blossom") (default)

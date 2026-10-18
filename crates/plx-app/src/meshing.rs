@@ -12,9 +12,10 @@ use plx_model::{
     MeshingParameters, Quantity, Recombination, UnitSystem, next_name,
 };
 
+use crate::geometry_selection;
 use crate::model::{Highlight, Hit, Model};
 use crate::numeric;
-use crate::selection::{History, Operation, PartPicks, Picker};
+use crate::selection::{GeometryRegion, History, Operation, PartPicks, Picker, PickerAction};
 use crate::viewport::{BoxSelect, Preview};
 
 /// The rows of the meshing parameters in a two-column grid.
@@ -414,14 +415,19 @@ impl MeshItemEditor {
                     }
                 });
             });
-        if let (Some(window), Some(view)) = (window, view)
-            && self.has_parts()
-        {
+        if let (Some(window), Some(view)) = (window, view) {
             let anchor = window.response.rect;
-            let can_undo = self.parts.can_undo();
-            if let Some(action) = self.picker.parts_window(ctx, anchor, can_undo) {
-                self.parts.action(view, action);
-                self.sync_parts();
+            if self.has_parts() {
+                let can_undo = self.parts.can_undo();
+                if let Some(action) = self.picker.parts_window(ctx, anchor, can_undo) {
+                    self.parts.action(view, action);
+                    self.sync_parts();
+                }
+            } else if let Some(region) = self.geometry_region() {
+                let can_undo = self.picks.can_undo();
+                if let Some(action) = self.picker.geometry_window(ctx, anchor, region, can_undo) {
+                    self.entity_action(view, action);
+                }
             }
         }
         if !open {
@@ -442,6 +448,41 @@ impl MeshItemEditor {
     /// Whether clicks pick faces or edges rather than parts.
     fn picks_entities(&self) -> bool {
         !self.has_parts()
+    }
+
+    /// What the picked CAD entities may be, when they are picked rather than parts.
+    fn geometry_region(&self) -> Option<GeometryRegion> {
+        match self.draft.kind {
+            _ if self.has_parts() => None,
+            MeshSetupKind::ExtrudeMesh(_) => Some(GeometryRegion::Faces),
+            _ => Some(GeometryRegion::FacesAndEdges),
+        }
+    }
+
+    /// Applies a button of the selection window to the picked faces and edges.
+    fn entity_action(&mut self, view: &Model, action: PickerAction) {
+        match action {
+            PickerAction::Undo => self.picks.undo(),
+            PickerAction::Clear => self.picks.clear(),
+            PickerAction::All => {
+                let faces = geometry_selection::visible_faces(view);
+                self.picks.push(Operation::Replace, faces);
+            }
+            // The faces of the visible parts not picked take the place of those picked;
+            // picked edges stay.
+            PickerAction::Invert => {
+                let picked = self.picks.items();
+                let mut inverted: BTreeSet<CadEntity> = geometry_selection::visible_faces(view)
+                    .difference(&picked)
+                    .copied()
+                    .collect();
+                inverted.extend(picked.iter().filter(|e| matches!(e, CadEntity::Edge(_))));
+                self.picks.push(Operation::Replace, inverted);
+            }
+            // The geometry window has no mesh based modes.
+            PickerAction::Ids(..) => {}
+        }
+        self.update_face_parts(view);
     }
 
     /// Writes the picked parts to the draft.
@@ -509,15 +550,8 @@ impl MeshItemEditor {
                         if ui.button("Clear Selection").clicked() {
                             self.picks.clear();
                         }
-                        if ui
-                            .add_enabled(self.picks.can_undo(), egui::Button::new("Undo"))
-                            .clicked()
-                        {
-                            self.picks.undo();
-                        }
                     });
                     ui.weak("Click faces and edges in the 3D view.");
-                    ui.weak("Shift: add, Ctrl: remove");
                 });
                 ui.end_row();
                 ui.label("Element size");
@@ -574,18 +608,11 @@ impl MeshItemEditor {
                             if ui.button("Clear Selection").clicked() {
                                 self.picks.clear();
                             }
-                            if ui
-                                .add_enabled(self.picks.can_undo(), egui::Button::new("Undo"))
-                                .clicked()
-                            {
-                                self.picks.undo();
-                            }
                         });
                         if !self.face_parts.1.is_empty() {
                             ui.weak(format!("Parts: {}", self.face_parts.1.join(", ")));
                         }
                         ui.weak("Click the faces at one end of the parts.");
-                        ui.weak("Shift: add, Ctrl: remove");
                     });
                     ui.end_row();
                 } else {
@@ -753,14 +780,14 @@ impl MeshItemEditor {
             self.sync_parts();
             return;
         }
+        let Some(region) = self.geometry_region() else {
+            return;
+        };
         match pick {
             Some((hit, precision)) => {
-                let entity = match self.draft.kind {
-                    MeshSetupKind::ExtrudeMesh(_) => face_pick(view, hit),
-                    _ => cad_pick(view, hit, precision),
-                };
-                if let Some(entity) = entity {
-                    self.picks.push(operation, BTreeSet::from([entity]));
+                let picked = geometry_selection::pick(view, &self.picker, region, hit, precision);
+                if !picked.is_empty() {
+                    self.picks.push(operation, picked);
                     self.update_face_parts(view);
                 }
             }
@@ -771,24 +798,23 @@ impl MeshItemEditor {
         }
     }
 
-    /// A selection box dragged on the geometry picks the parts inside it.
+    /// A selection box dragged on the geometry picks the parts, or the faces, inside it.
     pub fn box_select(&mut self, view: &Model, area: &BoxSelect, operation: Operation) {
         if self.has_parts() {
             self.parts.box_select(view, area, operation);
             self.sync_parts();
+        } else {
+            self.picks
+                .push(operation, geometry_selection::pick_box(view, area));
+            self.update_face_parts(view);
         }
     }
 
     /// What a click at the hit would select, for the hover preview.
     pub fn preview(&self, view: &Model, hit: &Hit, precision: f32) -> Preview {
-        match self.draft.kind {
-            _ if self.has_parts() => PartPicks::preview(view, hit),
-            MeshSetupKind::ExtrudeMesh(_) => face_pick(view, hit)
-                .map(|entity| entity_preview(view, entity))
-                .unwrap_or_default(),
-            _ => cad_pick(view, hit, precision)
-                .map(|entity| entity_preview(view, entity))
-                .unwrap_or_default(),
+        match self.geometry_region() {
+            None => PartPicks::preview(view, hit),
+            Some(region) => geometry_selection::preview(view, &self.picker, region, hit, precision),
         }
     }
 
@@ -826,16 +852,6 @@ fn algorithm_combo<T: Copy + PartialEq>(
                 ui.selectable_value(value, choice, label);
             }
         });
-}
-
-/// The CAD face under the hit point.
-fn face_pick(view: &Model, hit: &Hit) -> Option<CadEntity> {
-    if hit.line {
-        return None;
-    }
-    let face = view.skin(hit.part).faces.get(hit.face)?;
-    view.cad_entity(view.mesh.elements()[face.element].id)
-        .filter(|e| matches!(e, CadEntity::Face(_)))
 }
 
 /// Names of the parts the CAD faces lie on.
@@ -917,28 +933,31 @@ fn edge_segments(view: &Model, tags: &BTreeSet<i32>) -> Vec<[NodeId; 2]> {
         .collect()
 }
 
-fn entity_preview(view: &Model, entity: CadEntity) -> Preview {
-    match entity {
-        CadEntity::Face(tag) => {
-            let faces = face_items(view, &BTreeSet::from([tag]));
-            crate::selection::preview(
-                view,
-                &crate::selection::Items::Faces(faces.into_iter().collect()),
-            )
-        }
-        CadEntity::Edge(tag) => {
-            let position = |id| view.mesh.node_index(id).map(|n| view.render_position(n));
-            Preview {
-                lines: edge_segments(view, &BTreeSet::from([tag]))
-                    .into_iter()
-                    .filter_map(|[a, b]| Some([position(a)?, position(b)?]))
-                    .collect(),
-                points: Vec::new(),
-            }
-        }
-        // The display has no vertices to pick.
-        CadEntity::Vertex(_) => Preview::default(),
+/// The outlines of CAD faces and the lines of CAD edges, for the hover preview.
+pub fn entities_preview(view: &Model, entities: &BTreeSet<CadEntity>) -> Preview {
+    let (mut faces, mut edges) = (BTreeSet::new(), BTreeSet::new());
+    for entity in entities {
+        match *entity {
+            CadEntity::Face(tag) => faces.insert(tag),
+            CadEntity::Edge(tag) => edges.insert(tag),
+            // The display has no vertices to pick.
+            CadEntity::Vertex(_) => false,
+        };
     }
+    let mut preview = Preview::default();
+    if !faces.is_empty() {
+        let faces = face_items(view, &faces);
+        preview = crate::selection::preview(
+            view,
+            &crate::selection::Items::Faces(faces.into_iter().collect()),
+        );
+    }
+    let position = |id| view.mesh.node_index(id).map(|n| view.render_position(n));
+    preview.lines.extend(
+        (edge_segments(view, &edges).into_iter())
+            .filter_map(|[a, b]| Some([position(a)?, position(b)?])),
+    );
+    preview
 }
 
 pub fn entities_highlight(view: &Model, entities: &BTreeSet<CadEntity>) -> Highlight {
@@ -1049,6 +1068,7 @@ mod tests {
     use glam::Vec3;
 
     use super::*;
+    use crate::selection::SelectBy;
 
     fn geometry_view() -> Option<(Geometry, Model)> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1098,6 +1118,45 @@ mod tests {
         assert_eq!(size, geometry.meshing.max_size / 4.0);
         editor.click(&view, None, Operation::Replace);
         assert!(editor.finish().is_err(), "a click into empty space clears");
+
+        // The modes of the selection window: the part takes all its seven faces, the
+        // surface angle only the top face, which meets the others at right angles.
+        let faces = |editor: &MeshItemEditor| match editor.finish().unwrap().kind {
+            MeshSetupKind::LocalMeshSize { faces, edges, .. } => (faces.len(), edges.len()),
+            kind => panic!("{kind:?}"),
+        };
+        editor.picker.select_by = SelectBy::GeometryPart;
+        editor.click(&view, Some((&face_hit, 0.5)), Operation::Replace);
+        assert_eq!(faces(&editor), (7, 0));
+        editor.picker.select_by = SelectBy::GeometrySurfaceAngle;
+        editor.click(&view, Some((&face_hit, 0.5)), Operation::Replace);
+        assert_eq!(faces(&editor), (1, 0));
+        editor.entity_action(&view, PickerAction::Invert);
+        assert_eq!(faces(&editor), (6, 0));
+        editor.entity_action(&view, PickerAction::Clear);
+        assert!(editor.finish().is_err());
+        editor.entity_action(&view, PickerAction::All);
+        assert_eq!(faces(&editor), (7, 0));
+        // The edge angle mode takes the straight edge alone, its neighbours turn by 90°.
+        editor.picker.select_by = SelectBy::GeometryEdgeAngle;
+        editor.click(&view, Some((&edge_hit, 0.5)), Operation::Replace);
+        assert_eq!(faces(&editor), (0, 1));
+
+        // A box takes the faces inside it, dragged to the left also those it crosses.
+        let area = |crossing| BoxSelect {
+            // A view from above: x and y as they are, depth from 0 to 1 over z = ±100.
+            view_proj: glam::Mat4::from_translation(Vec3::new(0.0, 0.0, 0.5))
+                * glam::Mat4::from_scale(Vec3::new(1.0 / 60.0, 1.0 / 30.0, 1.0 / 200.0)),
+            min: glam::Vec2::new(-1.0, -1.0),
+            max: glam::Vec2::new(-0.01, 1.0),
+            crossing,
+            shift: false,
+            ctrl: false,
+        };
+        editor.box_select(&view, &area(false), Operation::Replace);
+        assert_eq!(faces(&editor), (1, 0), "the end face at x = -50");
+        editor.box_select(&view, &area(true), Operation::Replace);
+        assert_eq!(faces(&editor), (6, 0), "all but the end face at x = 50");
     }
 
     #[test]

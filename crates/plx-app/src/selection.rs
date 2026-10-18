@@ -209,6 +209,37 @@ impl SelectBy {
     }
 }
 
+/// What a selection of CAD entities on the Geometry tab consists of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GeometryRegion {
+    /// Faces and edges, e.g. of a local mesh size.
+    FacesAndEdges,
+    /// Faces only, e.g. the source faces of an extrude mesh.
+    Faces,
+}
+
+impl GeometryRegion {
+    fn allows(self, mode: SelectBy) -> bool {
+        match self {
+            GeometryRegion::FacesAndEdges => mode.is_geometry(),
+            GeometryRegion::Faces => {
+                matches!(mode, SelectBy::Geometry | SelectBy::GeometrySurfaceAngle)
+            }
+        }
+    }
+}
+
+/// Which modes the selection window offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowKind {
+    /// A region of the FE model picked as the target.
+    Region(Target),
+    /// Whole parts only.
+    Parts,
+    /// CAD entities on the Geometry tab: the geometry based modes only.
+    Geometry(GeometryRegion),
+}
+
 /// Picked items in the id space of the target.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Items {
@@ -287,7 +318,7 @@ impl Picker {
         if !self.select_by.allowed(target) {
             self.select_by = SelectBy::Geometry;
         }
-        self.show(ctx, anchor, target, can_undo, false)
+        self.show(ctx, anchor, WindowKind::Region(target), can_undo)
     }
 
     /// The selection window of a region of whole parts: as in PrePoMax only the part mode
@@ -298,17 +329,45 @@ impl Picker {
         anchor: egui::Rect,
         can_undo: bool,
     ) -> Option<PickerAction> {
-        self.show(ctx, anchor, Target::Faces, can_undo, true)
+        self.show(ctx, anchor, WindowKind::Parts, can_undo)
+    }
+
+    /// The selection window of CAD faces and edges on the Geometry tab: only the geometry
+    /// based modes, the display has no mesh to pick from.
+    pub fn geometry_window(
+        &mut self,
+        ctx: &egui::Context,
+        anchor: egui::Rect,
+        region: GeometryRegion,
+        can_undo: bool,
+    ) -> Option<PickerAction> {
+        if !region.allows(self.select_by) {
+            self.select_by = SelectBy::Geometry;
+        }
+        self.show(ctx, anchor, WindowKind::Geometry(region), can_undo)
+    }
+
+    /// The angle of the angle modes in degrees.
+    pub fn angle(&self) -> f64 {
+        self.angle
     }
 
     fn show(
         &mut self,
         ctx: &egui::Context,
         anchor: egui::Rect,
-        target: Target,
+        kind: WindowKind,
         can_undo: bool,
-        parts: bool,
     ) -> Option<PickerAction> {
+        let parts = kind == WindowKind::Parts;
+        let target = match kind {
+            WindowKind::Region(target) => target,
+            _ => Target::Faces,
+        };
+        let geometry = match kind {
+            WindowKind::Geometry(region) => Some(region),
+            _ => None,
+        };
         let mut action = None;
         // egui's own constraint uses a default size before the first layout and pins the
         // window there; keep it on screen with its real size instead. It follows the dialog,
@@ -340,13 +399,15 @@ impl Picker {
                             for mode in GEOMETRY_MODES {
                                 if parts {
                                     self.part_mode_row(ui, mode);
+                                } else if let Some(region) = geometry {
+                                    self.geometry_mode_row(ui, mode, region);
                                 } else {
                                     self.mode_row(ui, mode, target);
                                 }
                             }
                         });
                     });
-                    if self.expanded && !parts {
+                    if self.expanded && kind == WindowKind::Region(target) {
                         ui.group(|ui| {
                             ui.vertical(|ui| {
                                 ui.strong("Mesh Based");
@@ -400,7 +461,7 @@ impl Picker {
                     if ui.button("Clear").clicked() {
                         action = Some(PickerAction::Clear);
                     }
-                    let mesh = parts || !self.select_by.is_geometry();
+                    let mesh = parts || geometry.is_some() || !self.select_by.is_geometry();
                     if ui.add_enabled(mesh, egui::Button::new("All")).clicked() {
                         action = Some(PickerAction::All);
                     }
@@ -408,7 +469,7 @@ impl Picker {
                         action = Some(PickerAction::Invert);
                     }
                     let more = if self.expanded { "Less" } else { "More" };
-                    if !parts && ui.button(more).clicked() {
+                    if matches!(kind, WindowKind::Region(_)) && ui.button(more).clicked() {
                         self.expanded = !self.expanded;
                         if !self.expanded && !self.select_by.is_geometry() {
                             self.select_by = SelectBy::Geometry;
@@ -436,13 +497,24 @@ impl Picker {
         });
     }
 
+    /// A mode of the geometry window, with the label of what the region consists of.
+    fn geometry_mode_row(&mut self, ui: &mut egui::Ui, mode: SelectBy, region: GeometryRegion) {
+        let label = match (mode, region) {
+            (SelectBy::Geometry, GeometryRegion::FacesAndEdges) => "Faces and edges",
+            (SelectBy::Geometry, GeometryRegion::Faces) => "Faces",
+            _ => mode.label(Target::Faces),
+        };
+        self.labelled_mode_row(ui, mode, label, region.allows(mode));
+    }
+
     fn mode_row(&mut self, ui: &mut egui::Ui, mode: SelectBy, target: Target) {
-        ui.add_enabled_ui(mode.allowed(target), |ui| {
+        self.labelled_mode_row(ui, mode, mode.label(target), mode.allowed(target));
+    }
+
+    fn labelled_mode_row(&mut self, ui: &mut egui::Ui, mode: SelectBy, label: &str, enabled: bool) {
+        ui.add_enabled_ui(enabled, |ui| {
             ui.horizontal(|ui| {
-                if ui
-                    .radio(self.select_by == mode, mode.label(target))
-                    .clicked()
-                {
+                if ui.radio(self.select_by == mode, label).clicked() {
                     self.select_by = mode;
                 }
                 if mode.angle_mode() {
