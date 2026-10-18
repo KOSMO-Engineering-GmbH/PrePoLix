@@ -4088,10 +4088,11 @@ impl ProjectApp {
                 .unwrap_or_default()
         });
         self.show_refusal(ui, &viewer.verdicts);
-        // A double-click into empty space shows the blocks to add there, as in Blender.
+        // A double-click or right-click into empty space shows the blocks to add there, as in
+        // Blender.
         // The response lies on the zoomed and panned layer of the schematic, so its pointer
         // position is in the schematic; the picker needs the one on the screen.
-        if response.double_clicked()
+        if (response.double_clicked() || response.secondary_clicked())
             && let Some(screen) = ui.ctx().input(|i| i.pointer.interact_pos())
         {
             let graph = viewer.to_global.inverse() * screen;
@@ -4114,7 +4115,7 @@ impl ProjectApp {
                 egui::Rect::from_center_size(ui.max_rect().center(), egui::vec2(420.0, 60.0)),
                 egui::Label::new(
                     egui::RichText::new(
-                        "Double-click here, or use the Project menu, to add an analysis,\n\
+                        "Double-click or right-click here, or use the Project menu, to add an analysis,\n\
                          materials or a mesh. Double-click an analysis to open it in its\n\
                          own window.",
                     )
@@ -8116,15 +8117,10 @@ impl SnarlViewer<u64> for Viewer {
         }
     }
 
+    // No graph menu: a right-click into empty space opens the block search, as a
+    // double-click does.
     fn has_graph_menu(&mut self, _pos: egui::Pos2, _snarl: &mut Snarl<u64>) -> bool {
-        true
-    }
-
-    fn show_graph_menu(&mut self, pos: egui::Pos2, ui: &mut egui::Ui, _snarl: &mut Snarl<u64>) {
-        if let Some(action) = add_block_menu(ui, pos) {
-            self.actions.push(action);
-            ui.close();
-        }
+        false
     }
 
     fn current_transform(
