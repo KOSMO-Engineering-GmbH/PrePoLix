@@ -34,6 +34,8 @@ use crate::status::{self, AnalysisStatus, CellState};
 use crate::tree::TreeView;
 use crate::tree_icons::StepGlyph;
 
+mod history;
+
 /// Storage key of the project file open at exit, reopened at the next start.
 const LAST_PROJECT_KEY: &str = "last_project";
 
@@ -1106,6 +1108,8 @@ pub struct ProjectApp {
     /// Whether links have to bring their targets up to date: something changed that they
     /// may take.
     sync_due: bool,
+    /// What the user changed in the project window, to undo and redo it.
+    history: history::History,
     /// Global results being written for submodels, by the folder they are written to;
     /// `None` once writing failed.
     restoring: HashMap<PathBuf, Option<Receiver<Result<PathBuf, String>>>>,
@@ -1174,6 +1178,7 @@ impl ProjectApp {
             startup_import: Vec::new(),
             applied: HashMap::new(),
             sync_due: true,
+            history: Default::default(),
             restoring: HashMap::new(),
             warned: BTreeSet::new(),
         };
@@ -1224,8 +1229,10 @@ impl ProjectApp {
             .unwrap_or_default()
     }
 
+    /// An id no block had: those of deleted blocks stay theirs, for undo.
     fn next_id(&self) -> u64 {
-        self.nodes.iter().map(|n| n.id).max().unwrap_or(0) + 1
+        let highest = self.nodes.iter().map(|n| n.id).max().unwrap_or(0);
+        highest.max(self.history.highest_id) + 1
     }
 
     /// Adds an empty analysis with these model properties; returns its id.
@@ -1336,6 +1343,7 @@ impl ProjectApp {
             ParameterSetResult::Open => {}
             ParameterSetResult::Cancel => self.parameter_set = None,
             ParameterSetResult::Ok(rows, units) => {
+                self.checkpoint(&[]);
                 self.parameter_set = None;
                 // Links follow a renamed parameter; those of a removed one go.
                 let kept: Vec<(String, String)> = (rows.iter())
@@ -1442,6 +1450,7 @@ impl ProjectApp {
             MeasureEditorResult::Open => {}
             MeasureEditorResult::Cancel => self.measure_editor = None,
             MeasureEditorResult::Ok(kind, units) => {
+                self.checkpoint(&[]);
                 self.measure_editor = None;
                 if let Some(measure) = self.node(id).and_then(Node::as_measure_mut) {
                     measure.kind = kind;
@@ -1646,6 +1655,7 @@ impl ProjectApp {
             OptimizerEditorResult::Open => {}
             OptimizerEditorResult::Cancel => self.optimizer_editor = None,
             OptimizerEditorResult::Ok(kind, units) => {
+                self.checkpoint(&[]);
                 self.optimizer_editor = None;
                 settle(self, kind, units);
             }
@@ -2527,6 +2537,7 @@ impl ProjectApp {
             MeshBlockResult::Open => {}
             MeshBlockResult::Cancel => self.mesh_block = None,
             MeshBlockResult::Ok(primitive, space, units) => {
+                self.checkpoint(&[]);
                 self.mesh_block = None;
                 if let Some(node) = self.node(id) {
                     if let Some(mesh) = node.as_mesh_mut() {
@@ -2577,6 +2588,7 @@ impl ProjectApp {
             MaterialSetResult::Open => {}
             MaterialSetResult::Cancel => self.material_set = None,
             MaterialSetResult::Ok(materials, units) => {
+                self.checkpoint(&[]);
                 self.material_set = None;
                 if let Some(block) = self.node(id).and_then(Node::as_materials_mut) {
                     block.model.fe.materials = materials;
@@ -2723,6 +2735,7 @@ impl ProjectApp {
         self.graph_generation += 1;
         self.path = None;
         self.forget_solves();
+        self.history.clear();
         self.output.push("New project".into());
     }
 
@@ -2770,6 +2783,7 @@ impl ProjectApp {
                 }
                 self.output.extend(notes);
                 self.nodes.clear();
+                self.history.clear();
                 self.graph = Snarl::new();
                 self.graph_generation += 1;
                 self.links = project.links;
@@ -2910,9 +2924,19 @@ impl ProjectApp {
         self.output.push(format!("{name} created"));
     }
 
+    /// Deletes the block; undo brings it back.
     fn delete(&mut self, id: u64) {
+        if let Some(node) = self.detach(id) {
+            self.output.push(format!("{} deleted", node.name));
+            self.keep_deleted(node);
+        }
+    }
+
+    /// Takes the block out of the project, with its links and what works on it; `None` if
+    /// its window cannot close now.
+    fn detach(&mut self, id: u64) -> Option<Node> {
         if !self.close_window(id) {
-            return;
+            return None;
         }
         for solve in self.solves.iter_mut().filter(|s| s.id == id) {
             solve.stop();
@@ -2922,10 +2946,7 @@ impl ProjectApp {
         if let Some(graph_id) = self.graph_node(id) {
             self.graph.remove_node(graph_id);
         }
-        if let Some(index) = self.nodes.iter().position(|n| n.id == id) {
-            let node = self.nodes.remove(index);
-            self.output.push(format!("{} deleted", node.name));
-        }
+        let node = (self.nodes.iter().position(|n| n.id == id)).map(|i| self.nodes.remove(i));
         self.links.retain(|l| l.source != id && l.target != id);
         self.applied.retain(|(target, _), _| *target != id);
         if self.material_set.as_ref().is_some_and(|e| e.id == id) {
@@ -2949,6 +2970,7 @@ impl ProjectApp {
         }
         self.loops_due.retain(|&due| due != id);
         self.update_queue.retain(|&queued| queued != id);
+        node
     }
 
     /// Ansys Workbench's Update Project: solves every analysis that is not up to date, one
@@ -3550,6 +3572,21 @@ impl ProjectApp {
                 ui.separator();
                 if ui.button("Exit").clicked() {
                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            });
+            ui.menu_button("Edit", |ui| {
+                let ctx = ui.ctx().clone();
+                let undo = egui::Button::new("Undo").shortcut_text("Ctrl+Z");
+                if ui
+                    .add_enabled(self.history.can_undo(), undo)
+                    .on_hover_text(UNDO_TIP)
+                    .clicked()
+                {
+                    self.undo(&ctx);
+                }
+                let redo = egui::Button::new("Redo").shortcut_text("Ctrl+Y");
+                if ui.add_enabled(self.history.can_redo(), redo).clicked() {
+                    self.redo(&ctx);
                 }
             });
             ui.menu_button("Project", |ui| {
@@ -4920,7 +4957,53 @@ impl ProjectApp {
         }
     }
 
+    /// The analyses whose data `action` rewrites, which undo has to keep; `None` for an
+    /// action that changes nothing undo brings back, such as opening a window or solving.
+    fn rewritten_by(&self, action: &Action) -> Option<Vec<u64>> {
+        Some(match action {
+            Action::New(_)
+            | Action::Open(..)
+            | Action::Solve(_)
+            | Action::Rename(_)
+            | Action::Delete(_)
+            | Action::Toggle(..)
+            | Action::Generate(_)
+            | Action::ExportNow(_)
+            | Action::RunLoop(_) => return None,
+            Action::Link { target, .. } => vec![*target],
+            Action::Unlink { source, target } => (self.links.iter())
+                .filter(|l| {
+                    source.as_ref().is_some_and(|(id, _)| l.source == *id)
+                        || target.as_ref().is_some_and(|(id, _)| l.target == *id)
+                })
+                .map(|l| l.target)
+                .collect(),
+            Action::SetRefinement(id, _) | Action::Split(id, _) => vec![*id],
+            // The analysis it continues takes its steps.
+            Action::Merge(id) => (self.links.iter())
+                .filter(|l| l.target == *id && links::is_state(l))
+                .map(|l| l.source)
+                .collect(),
+            Action::AddMaterials(_)
+            | Action::AddMesh(..)
+            | Action::AddMeshExport(_)
+            | Action::AddCampbell(_)
+            | Action::AddParameters(_)
+            | Action::AddMeasure(_)
+            | Action::AddOptimizer(_)
+            | Action::SetExportPath(..)
+            | Action::SetPrimitive(..)
+            | Action::ResetLoop(_)
+            | Action::SetParameter(..)
+            | Action::Duplicate(_)
+            | Action::Continue { .. } => Vec::new(),
+        })
+    }
+
     fn act(&mut self, ctx: &egui::Context, action: Action) {
+        if let Some(rewritten) = self.rewritten_by(&action) {
+            self.checkpoint(&rewritten);
+        }
         match action {
             Action::New(pos) => self.ask_new_analysis(pos),
             Action::AddMaterials(pos) => {
@@ -5069,6 +5152,7 @@ impl ProjectApp {
             open = false;
         }
         if done {
+            self.checkpoint(&[]);
             let name = name.trim().to_owned();
             if let Some(node) = self.node(id) {
                 node.name = name.clone();
@@ -5145,6 +5229,7 @@ impl ProjectApp {
         match answer {
             Some(true) => {
                 self.confirm_delete = None;
+                self.checkpoint(&[]);
                 self.delete(id);
             }
             Some(false) => self.confirm_delete = None,
@@ -5172,6 +5257,7 @@ impl ProjectApp {
             DialogResult::Open => {}
             DialogResult::Cancel => self.new_analysis = None,
             DialogResult::Ok(properties) => {
+                self.checkpoint(&[]);
                 self.new_analysis = None;
                 self.settings.new_model = ModelProperties {
                     kind: plx_model::ModelKind::General,
@@ -5405,6 +5491,15 @@ impl eframe::App for ProjectApp {
             self.save(false);
         }
         let typing = ctx.memory(|m| m.focused().is_some());
+        if !typing {
+            if ctx.input_mut(|i| i.consume_key(shift_command, egui::Key::Z))
+                || ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y))
+            {
+                self.redo(&ctx);
+            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z)) {
+                self.undo(&ctx);
+            }
+        }
         if !typing && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Home)) {
             self.show_all = true;
         }
@@ -5490,6 +5585,7 @@ impl eframe::App for ProjectApp {
         self.run_loop();
         self.run_exports();
         self.analysis_windows(&ctx);
+        self.record_change(&ctx);
     }
 }
 
@@ -7924,6 +8020,9 @@ const MATERIALS_TIP: &str = "Adds a block of materials kept in the project: anal
      them one by one or all at once, so that they are defined in one place.";
 
 /// Tooltip of Update Project.
+const UNDO_TIP: &str = "Undoes the last change of the project: blocks added, deleted, renamed or \
+                        moved, links, and what the blocks hold. Changes inside an analysis are \
+                        undone in its window.";
 const UPDATE_TIP: &str = "Update Project (F5): solves every analysis that is not up to date, \
      one after the other, and keeps the new results.";
 
