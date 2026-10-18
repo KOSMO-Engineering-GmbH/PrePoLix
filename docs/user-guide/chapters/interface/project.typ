@@ -205,6 +205,24 @@ first (@mesh-block).
   ones go on. The output pane sums up with #ui("Project updated") or
   #ui("Update finished with errors"); the solution monitor tells what went wrong.
 
+==== Updating one block <update-block>
+
+When the schematic holds independent branches, one of them can be brought up to date without
+the others: click the amber circular arrow of a block (or the blue question mark of a
+#ui("Solution") or #ui("Results") row that was never solved). PrePoLix updates that block and
+every block it takes data from, directly or through others, the way #ui("Update Project") does:
+mesh blocks make their meshes anew, analyses are solved in the order of their links, Campbell
+blocks sweep and mesh export blocks write their files. Blocks that are neither the clicked one
+nor upstream of it stay as they are. Clicking the arrow of an optimizer runs its loop
+(@optimization-loops). The symbols cannot be clicked while an update is under way. The output pane ends
+with #ui("<block> updated").
+
+#screenshot("update-block-hover.png", [Hovering the out-of-date symbol of
+  #ui("Beam-A-Variant"); #ui("Beam-B") is a branch of its own])
+
+#screenshot("update-block-done.png", [After the click: #ui("Beam-A-Variant") and #ui("Beam-A"),
+  whose setup it takes, are solved; #ui("Beam-B") is still out of date])
+
 === Solution monitor <solution-monitor>
 
 The project window has its own monitor, like the monitor of an analysis window (@monitor) but

@@ -1128,6 +1128,8 @@ enum Action {
     /// Open the analysis' window, in the workspace of a cell if given.
     Open(u64, Option<Show>),
     Solve(u64),
+    /// Update the block and what it takes data from: its out-of-date symbol was clicked.
+    Update(u64),
     Rename(u64),
     Duplicate(u64),
     Delete(u64),
@@ -1197,6 +1199,9 @@ pub struct ProjectApp {
     loops_due: VecDeque<u64>,
     /// Update Project made meshes anew and goes on once links took them.
     update_after_sync: bool,
+    /// The blocks the update is kept to: a block whose out-of-date symbol was clicked and
+    /// those it takes data from; `None` for Update Project, which updates them all.
+    update_scope: Option<Vec<u64>>,
     /// The overview of blocks to add, open after a double-click into the schematic.
     picker: Option<NodePicker>,
     /// Show All Blocks was asked for: the view fits the blocks in the next frame.
@@ -1289,6 +1294,7 @@ impl ProjectApp {
             looping: None,
             loops_due: VecDeque::new(),
             update_after_sync: false,
+            update_scope: None,
             picker: None,
             show_all: false,
             pin_rects: Vec::new(),
@@ -2025,6 +2031,7 @@ impl ProjectApp {
     /// Update Project: runs the loops of optimizers that are not up to date, each of which
     /// updates the project at every iteration, or else updates the project.
     fn update_all(&mut self) {
+        self.update_scope = None;
         self.loops_due = (self.nodes.iter())
             .filter(|n| n.kind() == Kind::Optimizer)
             .map(|n| n.id)
@@ -2059,6 +2066,8 @@ impl ProjectApp {
             optimizer.done = None;
         }
         self.output.push(format!("{name}: loop started"));
+        // A loop updates the whole project at every iteration.
+        self.update_scope = None;
         self.looping = Some(LoopRun {
             id,
             batch: Vec::new(),
@@ -2621,7 +2630,8 @@ impl ProjectApp {
             .filter(|n| n.kind() == Kind::Campbell)
             .map(|n| n.id)
             .filter(|&id| {
-                self.campbell_source(id).is_some()
+                self.in_scope(id)
+                    && self.campbell_source(id).is_some()
                     && matches!(
                         self.campbell_state(id),
                         CellState::Missing | CellState::OutOfDate
@@ -2677,7 +2687,10 @@ impl ProjectApp {
         self.export_queue.clear();
         self.update_failed = false;
         let base = self.export_base();
-        let ids: Vec<u64> = self.nodes.iter().map(|n| n.id).collect();
+        let ids: Vec<u64> = (self.nodes.iter())
+            .map(|n| n.id)
+            .filter(|&id| self.in_scope(id))
+            .collect();
         for id in links::order(&ids, &self.links) {
             let Some(node) = (self.nodes.iter()).find(|n| n.id == id) else {
                 continue;
@@ -2714,7 +2727,7 @@ impl ProjectApp {
         self.output.push(if failed {
             "Update finished with errors".into()
         } else {
-            "Project updated".into()
+            self.updated_line()
         });
     }
 
@@ -2761,7 +2774,7 @@ impl ProjectApp {
     /// made any. A block whose mesh cannot be made stays out of date, and so do the
     /// analyses that take their mesh from it.
     fn generate_meshes(&mut self) -> bool {
-        let (made, lines) = generate_stale_meshes(&mut self.nodes);
+        let (made, lines) = generate_stale_meshes(&mut self.nodes, None);
         self.output.extend(lines);
         if made {
             self.sync_due = true;
@@ -3255,19 +3268,60 @@ impl ProjectApp {
         node
     }
 
+    /// Updates the block `id` and the blocks it takes data from, as Update Project does,
+    /// and leaves the others as they are; an optimizer runs its loop.
+    fn update_block(&mut self, id: u64) {
+        if self.busy() {
+            return;
+        }
+        if self.node(id).is_some_and(|n| n.kind() == Kind::Optimizer) {
+            self.start_loop(id);
+            return;
+        }
+        let mut scope = links::upstream(&self.links, id);
+        scope.push(id);
+        self.output.push(format!(
+            "Updating {} and what it takes data from",
+            self.name_of(id)
+        ));
+        self.update_scope = Some(scope);
+        self.update_project();
+    }
+
+    /// The line an update that went well ends with.
+    fn updated_line(&self) -> String {
+        match self.update_scope.as_ref().and_then(|scope| scope.last()) {
+            Some(&id) => format!("{} updated", self.name_of(id)),
+            None => "Project updated".into(),
+        }
+    }
+
+    /// Whether the update under way takes in the block `id`.
+    fn in_scope(&self, id: u64) -> bool {
+        (self.update_scope.as_ref()).is_none_or(|scope| scope.contains(&id))
+    }
+
     /// Ansys Workbench's Update Project: solves every analysis that is not up to date, one
-    /// after the other.
+    /// after the other; only those of [`Self::update_scope`] when it is set.
     fn update_project(&mut self) {
         // Mesh blocks first: what links their meshes takes the new one before it is found
         // out of date, so the update goes on once the links are brought up to date.
-        if self.generate_meshes() || self.sync_due {
+        let (made, lines) = generate_stale_meshes(&mut self.nodes, self.update_scope.as_deref());
+        self.output.extend(lines);
+        if made {
+            self.sync_due = true;
+        }
+        if self.sync_due {
             self.update_after_sync = true;
             return;
         }
         let mut skipped = Vec::new();
         self.update_queue.clear();
         // Sources before their targets; a submodel is solved again after its global model.
-        let ids: Vec<u64> = self.nodes.iter().map(|n| n.id).collect();
+        let ids: Vec<u64> = (self.nodes.iter())
+            .map(|n| n.id)
+            .filter(|&id| self.in_scope(id))
+            .collect();
         for id in links::order(&ids, &self.links) {
             let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
                 continue;
@@ -3359,7 +3413,7 @@ impl ProjectApp {
                         .push(if failed || std::mem::take(&mut self.update_failed) {
                             "Update finished with errors".into()
                         } else {
-                            "Project updated".into()
+                            self.updated_line()
                         });
                 } else {
                     // The export blocks write their files, then the update is done.
@@ -4076,6 +4130,7 @@ impl ProjectApp {
                 .map(|l| (l.source, l.target, l.slot.clone()))
                 .collect(),
             bottom: f32::MIN,
+            busy: self.busy(),
         };
         let response = SnarlWidget::new()
             .id_salt(("project schematic", self.graph_generation))
@@ -5345,6 +5400,7 @@ impl ProjectApp {
             Action::New(_)
             | Action::Open(..)
             | Action::Solve(_)
+            | Action::Update(_)
             | Action::Rename(_)
             | Action::Delete(_)
             | Action::Toggle(..)
@@ -5458,6 +5514,7 @@ impl ProjectApp {
             }
             Action::Open(id, view) => self.open_window(ctx, id, view),
             Action::Solve(id) => self.solve_chain(id),
+            Action::Update(id) => self.update_block(id),
             Action::Rename(id) => {
                 let name = self
                     .nodes
@@ -6440,12 +6497,14 @@ fn material_rows(fe: &plx_model::FeModel, expanded: &BTreeSet<Vec<String>>) -> V
     rows
 }
 
-/// Makes the meshes of the mesh blocks among `nodes` that are out of date anew; returns
-/// whether it made any, and a line on each.
-fn generate_stale_meshes(nodes: &mut [Node]) -> (bool, Vec<String>) {
+/// Makes the meshes of the mesh blocks among `nodes` that are out of date anew, of those in
+/// `only` when it is given; returns whether it made any, and a line on each.
+fn generate_stale_meshes(nodes: &mut [Node], only: Option<&[u64]>) -> (bool, Vec<String>) {
     let mut lines = Vec::new();
     let mut made = false;
-    for node in (nodes.iter_mut()).filter(|n| n.kind() == Kind::Mesh) {
+    for node in (nodes.iter_mut())
+        .filter(|n| n.kind() == Kind::Mesh && only.is_none_or(|ids| ids.contains(&n.id)))
+    {
         if node.mesh_state() == CellState::UpToDate {
             continue;
         }
@@ -7523,6 +7582,8 @@ struct Viewer {
     /// Why the wire being dragged cannot end at each pin of the other side; `None` for the
     /// pins it fits.
     verdicts: HashMap<PinKey, Option<String>>,
+    /// An update or loop is under way: the out-of-date symbols cannot be clicked.
+    busy: bool,
 }
 
 impl Viewer {
@@ -7942,9 +8003,38 @@ impl SnarlViewer<u64> for Viewer {
             egui::TextStyle::Body.resolve(ui.style()),
             color,
         );
+        let mut update = None;
         if let Some(state) = row.state {
             let symbol = egui::pos2(rect.right() - 18.0, middle - 8.0);
+            // Out of date, or a solution that is not there yet.
+            let solved = matches!(
+                row.path.first().map(String::as_str),
+                Some("Solution" | "Results")
+            ) && row.path.len() == 1;
+            let due = state == CellState::OutOfDate || (state == CellState::Missing && solved);
+            if due && !self.busy {
+                // Click: the block is updated with what it takes data from, nothing else.
+                let area = egui::Rect::from_min_size(symbol, egui::vec2(16.0, 16.0)).expand(2.0);
+                let clicked = ui
+                    .interact(
+                        area,
+                        ui.id().with(("update", id, &row.path)),
+                        egui::Sense::click(),
+                    )
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(
+                        "Update this block: solves it and the blocks it takes data from that \
+                         are out of date, and nothing else.",
+                    );
+                if clicked.hovered() {
+                    painter.rect_filled(area, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+                }
+                update = Some(clicked.clicked());
+            }
             status::paint(painter, symbol, state);
+        }
+        if update == Some(true) {
+            self.actions.push(Action::Update(id));
         }
         let mut tip = row.tip.clone();
         if let Some(source) = &row.linked_from {
@@ -9091,7 +9181,7 @@ mod tests {
         // Analysis-2 takes the mesh of Analysis-1, which takes that of the block.
         let links = [link(2, 1), link(1, 3)];
         assert_eq!(stale_meshes(&nodes, &links, 3), ["Box"]);
-        assert!(generate_stale_meshes(&mut nodes).0);
+        assert!(generate_stale_meshes(&mut nodes, None).0);
         assert!(stale_meshes(&nodes, &links, 3).is_empty());
         // New divisions: the analyses hold the old mesh until the block makes the new one.
         let primitive = &mut nodes[0].as_mesh_mut().unwrap().primitive;
@@ -9101,10 +9191,33 @@ mod tests {
         // A mesh that cannot be made leaves the block out of date and is not reported as
         // made, so that Update Project does not try again and again.
         nodes[0].as_mesh_mut().unwrap().primitive = MeshPrimitive::default_rectangle();
-        let (made, lines) = generate_stale_meshes(&mut nodes);
+        let (made, lines) = generate_stale_meshes(&mut nodes, None);
         assert!(!made);
         assert!(lines[0].contains("no mesh made"), "{lines:?}");
         assert_eq!(stale_meshes(&nodes, &links, 3), ["Box"]);
+    }
+
+    #[test]
+    fn updating_one_block_makes_only_the_meshes_before_it() {
+        let block = |id, name: &str| {
+            Node::read(ProjectNode::Mesh(Box::new(file::MeshBlock {
+                id,
+                name: name.into(),
+                position: [0.0; 2],
+                space: ModelSpace::ThreeD,
+                units: plx_model::UnitSystem::MmTonSC,
+                primitive: MeshPrimitive::default_box(),
+                mesh: Default::default(),
+                generated: None,
+                refinement: 1.0,
+            })))
+        };
+        let mut nodes = vec![block(1, "Box"), block(2, "Box-2")];
+        let (made, lines) = generate_stale_meshes(&mut nodes, Some(&[2]));
+        assert!(made);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_ne!(nodes[0].mesh_state(), CellState::UpToDate);
+        assert_eq!(nodes[1].mesh_state(), CellState::UpToDate);
     }
 
     #[test]
