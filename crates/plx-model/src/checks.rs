@@ -74,6 +74,8 @@ pub enum Problem {
     SkewedSymmetryShared,
     IncrementExceedsStep,
     NoLoad,
+    /// A radiation load in a model without absolute zero or Stefan-Boltzmann constant.
+    NoPhysicalConstants,
     /// A defined temperature in a step whose materials have no thermal expansion.
     NoExpansion,
     /// A step that builds on stored eigenmodes (modal dynamics, steady state dynamics,
@@ -163,6 +165,7 @@ impl Problem {
             Problem::SkewedSymmetryShared => "Nodes of a skewed symmetry plane shared",
             Problem::IncrementExceedsStep => "Increment larger than the step",
             Problem::NoLoad => "No load",
+            Problem::NoPhysicalConstants => "Physical constants missing",
             Problem::NoRigidBody => "Reference point without rigid body",
             Problem::SharedRigidBody => "Nodes in several rigid bodies or remote points",
             Problem::InvalidPlastic => "Invalid plasticity",
@@ -432,6 +435,13 @@ impl Problem {
                  card with only a warning and carries on without it, so the step, load or \
                  material it defines is missing from the results."
             }
+            Problem::NoPhysicalConstants => {
+                "Radiation (*RADIATE) depends on the fourth power of the absolute \
+                 temperature, so CalculiX needs the absolute zero of the model's temperature \
+                 scale and the Stefan-Boltzmann constant in its units (*PHYSICAL \
+                 CONSTANTS). Without them it aborts with \"*RADIATE card was selected but no \
+                 *PHYSICAL CONSTANTS card encountered\"."
+            }
             Problem::SolverError => {
                 "CalculiX aborted with an error message that PrePoLix does not know. \
                  The exact text is shown in the Monitor."
@@ -617,6 +627,10 @@ impl Problem {
                  \"Test CalculiX\" there lists the features it supports. Check user \
                  keywords in the Keyword Editor for typing errors."
             }
+            Problem::NoPhysicalConstants => {
+                "Open Model > Model Properties and enter Absolute zero and Stefan-Boltzmann \
+                 under Physical Constants; Defaults fills them in for the unit system."
+            }
             Problem::SolverError => {
                 "Read the message in the Monitor; \"Check Model\" in the context menu of \
                  the analysis often helps."
@@ -787,8 +801,22 @@ impl FeModel {
     }
 
     pub fn check(&self, mesh: &FeMesh, mesh_check: &MeshCheck) -> Vec<Finding> {
+        let constants =
+            self.properties.absolute_zero.is_some() && self.properties.stefan_boltzmann.is_some();
         let mut findings: Vec<Finding> = (self.invalid_items(mesh).into_iter())
-            .map(|i| Finding::new(i.item, Problem::MissingReference, i.reason))
+            .map(|i| {
+                let radiation = match i.item {
+                    ModelItem::Load(s, l) => (self.steps.get(s)).and_then(|s| s.loads.get(l)),
+                    _ => None,
+                }
+                .is_some_and(|load| matches!(load.kind, LoadKind::Radiation { .. }));
+                let problem = if radiation && !constants {
+                    Problem::NoPhysicalConstants
+                } else {
+                    Problem::MissingReference
+                };
+                Finding::new(i.item, problem, i.reason)
+            })
             .collect();
         for (i, section) in self.sections.iter().enumerate() {
             let item = ModelItem::Section(i);
@@ -2319,11 +2347,11 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             }
         }
     }
-    let known: [(Problem, &[&str]); 12] = [
+    let known: [(Problem, &[&str]); 13] = [
         (Problem::NoElastic, &["no elastic constants"]),
         (
             Problem::InvalidPlastic,
-            &["reading *PLASTIC", "plastic strain must be"],
+            &["reading *plastic", "plastic strain must be"],
         ),
         (Problem::NoDensity, &["no density was assigned"]),
         (Problem::NoConductivity, &["no conductivity constants"]),
@@ -2353,15 +2381,23 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             Problem::IncrementExceedsStep,
             &["initial increment size exceeds step size"],
         ),
+        (
+            Problem::NoPhysicalConstants,
+            &["*radiate card was selected", "no *physical constants card"],
+        ),
         (Problem::MpcAndSpc, &["dependent side of a mpc and a spc"]),
         (Problem::RotationIn2d, &["usermpc: mpc of type"]),
     ];
     for (problem, markers) in known {
         if let Some(marker) = markers.iter().find(|m| text.contains(*m)) {
+            // The line as CalculiX wrote it, if the marker does not span two lines.
+            let line = (lines.iter().map(|l| l.trim()))
+                .find(|l| l.to_ascii_lowercase().contains(marker))
+                .unwrap_or(marker);
             add(
                 &mut findings,
                 problem,
-                format!("CalculiX reports \"{marker}\""),
+                format!("CalculiX reports \"{line}\""),
             );
         }
     }
@@ -3464,6 +3500,19 @@ mod tests {
         );
         model.materials[0].conductivity = Some(50.0);
         assert_eq!(check(&model, &mesh), []);
+        // Radiation needs the physical constants.
+        model.steps[0].loads[0].kind = LoadKind::Radiation {
+            sink: 20.0,
+            emissivity: 0.8,
+        };
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Load(0, 0), Problem::NoPhysicalConstants)]
+        );
+        model.properties.absolute_zero = Some(-273.15);
+        model.properties.stefan_boltzmann = Some(5.67e-11);
+        assert_eq!(check(&model, &mesh), []);
+        model.steps[0].loads[0].kind = LoadKind::ConcentratedFlux(10.0);
         if let StepKind::HeatTransfer(settings) = &mut model.steps[0].kind {
             settings.steady_state = false;
         }
@@ -3507,6 +3556,21 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].problem, Problem::UnknownKeyword);
         assert_eq!(findings[0].detail, "CalculiX skipped *CYCLICSYMMETRYMODEL");
+        let radiate = [
+            " *ERROR reading *RADIATE: *RADIATE card was selected",
+            "        but no *PHYSICAL CONSTANTS card encountered",
+            "        or incomplete (Stefan Boltzmann constant",
+        ]
+        .map(String::from);
+        let findings = diagnose_solver_output(&radiate, &mesh);
+        assert_eq!(
+            problems(&findings),
+            [(ModelItem::Analysis, Problem::NoPhysicalConstants)]
+        );
+        assert_eq!(
+            findings[0].detail,
+            "CalculiX reports \"*ERROR reading *RADIATE: *RADIATE card was selected\""
+        );
         let unknown = [" *ERROR in something: new message".to_string()];
         assert_eq!(
             diagnose_solver_output(&unknown, &mesh)[0].problem,

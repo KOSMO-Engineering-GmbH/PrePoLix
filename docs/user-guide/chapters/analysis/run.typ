@@ -147,8 +147,8 @@ what is wrong and how to fix it.
 Errors include elements without material, materials without the data the step needs (elasticity,
 density, conductivity, specific heat), invalid material constants, distorted elements, a missing
 initial temperature in a transient heat transfer step, an increment larger than the step, rigid
-body motion of a part in a static step, truss structures that are mechanisms and missing
-references (a deleted material, part or set that an item still uses). Warnings include parts held
+body motion of a part in a static step, truss structures that are mechanisms, radiation without
+the physical constants (@model-properties) and missing references (a deleted material, part or set that an item still uses). Warnings include parts held
 only by contact, conflicting boundary conditions, loads on fixed nodes, rotations without effect
 and steps without load.
 
@@ -156,6 +156,12 @@ When a run starts, PrePoLix also checks that the configured CalculiX knows every
 input file (see #ui("Test CalculiX") in @settings). An unknown keyword, for example of a step
 type that an older CalculiX lacks, appears as error "Keyword unknown to CalculiX" on the
 analysis and in the monitor, with the feature that needs it.
+
+When CalculiX aborts, PrePoLix explains the error messages it knows in the same way, for
+example "*RADIATE card was selected but no *PHYSICAL CONSTANTS card encountered" as "Physical
+constants missing"; other messages appear as "CalculiX error" with the text of the monitor.
+
+#screenshot("model-check-solver-error.png", [A CalculiX error explained after the run])
 
 The checks do not stop a run; their errors are listed at the top of the monitor. Missing
 references do stop it, because the input file cannot be written.
