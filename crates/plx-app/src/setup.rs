@@ -1276,28 +1276,22 @@ fn symmetry_rows(ui: &mut egui::Ui, normal: &mut Option<[f64; 3]>, region: &Regi
     ui.end_row();
 }
 
-/// Rows of a submodel boundary condition, PrePoMax's `ViewSubmodelBC`: the step of the
-/// global model to read and the degrees of freedom that follow it.
-fn submodel_rows(
-    ui: &mut egui::Ui,
-    step: &mut u32,
-    dofs: &mut [bool; 6],
-    two_d: bool,
-    fe: &FeModel,
-) {
-    ui.label("Global step");
-    ui.add(egui::DragValue::new(step).range(1..=u32::MAX).speed(0.1))
-        .on_hover_text("Step of the global model whose displacements are read");
-    ui.end_row();
+/// Rows of a submodel boundary condition, PrePoMax's `ViewSubmodelBC`: the displacements
+/// that follow the global model. Which step of it is read, the link of the global results
+/// says; the global results hold no rotations.
+fn submodel_rows(ui: &mut egui::Ui, step: u32, dofs: &mut [bool; 6], two_d: bool, fe: &FeModel) {
     // Nodes of 2D models only move in the x-y plane.
-    let count = if two_d { 2 } else { 6 };
+    let count = if two_d { 2 } else { 3 };
     for (held, label) in dofs.iter_mut().zip(DOF_LABELS).take(count) {
         ui.label("");
         ui.checkbox(held, label);
         ui.end_row();
     }
     let note = match fe.properties.submodel_input() {
-        Some(path) => format!("Global results: {}", path.display()),
+        Some(_) => format!(
+            "The displacements of step {step} of the global analysis, the step whose \
+             results are linked to the Global results row of this analysis."
+        ),
         None => "No global results yet: in the project window, drag the results of a step \
                  of the global analysis to the Global results row of this analysis."
             .into(),
@@ -2179,7 +2173,7 @@ impl Editor {
                     }
                 }
                 if let BoundaryKind::Submodel { step, dofs } = &mut bc.kind {
-                    submodel_rows(ui, step, dofs, two_d, &model.fe);
+                    submodel_rows(ui, *step, dofs, two_d, &model.fe);
                 }
                 if let BoundaryKind::Symmetry { normal } = &mut bc.kind {
                     symmetry_rows(ui, normal, &region.region(), model);

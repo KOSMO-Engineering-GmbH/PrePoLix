@@ -1449,10 +1449,12 @@ pub enum BoundaryKind {
     RemoteDisplacement(RemoteDisplacement),
     /// Prescribed temperature (degree of freedom 11), PrePoMax's `TemperatureBC`.
     Temperature(f64),
-    /// Displacements (U1..U3) and rotations (UR1..UR3) taken from the results of the global
-    /// model of a submodel (`*BOUNDARY, SUBMODEL`), PrePoMax's `SubmodelBC`.
+    /// Displacements (U1..U3) taken from the results of the global model of a submodel
+    /// (`*BOUNDARY, SUBMODEL`), PrePoMax's `SubmodelBC`. The results file of the global
+    /// model holds no rotations, so the rotations (the last three) never follow it.
     Submodel {
-        /// Step of the global model whose results are read, counted from 1.
+        /// Step of the global model whose results are read, counted from 1; the results
+        /// link of the step sets it.
         step: u32,
         /// The degrees of freedom that follow the global model.
         dofs: [bool; 6],

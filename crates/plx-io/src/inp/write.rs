@@ -2079,8 +2079,9 @@ fn step_block<'f>(
             BoundaryKind::Temperature(t) => {
                 let _ = writeln!(out, "{set}, 11, 11, {}", number(t));
             }
+            // The global results hold displacements, no rotations.
             BoundaryKind::Submodel { dofs: held, .. } => {
-                for dof in (1..=dofs).filter(|&d| held[d - 1]) {
+                for dof in (1..=dofs.min(3)).filter(|&d| held[d - 1]) {
                     let _ = writeln!(out, "{set}, {dof}, {dof}");
                 }
                 if !sets.submodel_sets.iter().any(|(s, _)| *s == set) {
