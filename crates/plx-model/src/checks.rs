@@ -1352,10 +1352,7 @@ impl FeModel {
             let point_loads = step.kind.supports_loads()
                 && step.loads.iter().any(|load| {
                     load.active
-                        && matches!(
-                            load.kind,
-                            LoadKind::ConcentratedForce(_) | LoadKind::Moment(_)
-                        )
+                        && matches!(load.kind, LoadKind::Force { .. } | LoadKind::Moment(_))
                         && load.region.nodes(mesh).iter().any(|n| nodes.contains(n))
                 });
             if point_loads {
@@ -1408,7 +1405,7 @@ impl FeModel {
                 }
                 loaded = true;
                 let directions: Vec<usize> = match load.kind {
-                    LoadKind::ConcentratedForce(f) | LoadKind::SurfaceTraction(f) => {
+                    LoadKind::Force { value: f, .. } => {
                         (0..3).filter(|&d| f[d] != 0.0 && d < dofs).collect()
                     }
                     LoadKind::Moment(m) => (0..3)
@@ -2509,7 +2506,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(vec![7]),
-            kind: LoadKind::ConcentratedForce([0.0, 0.0, -1.0]),
+            kind: LoadKind::force([0.0, 0.0, -1.0]),
             amplitude: None,
             factor_amplitude: None,
         });
@@ -3281,7 +3278,7 @@ mod tests {
         model.properties.space = ModelSpace::PlaneStress;
         model.steps[0].boundary_conditions[0].region = Region::Nodes(vec![1]);
         model.steps[0].loads[0].region = Region::Nodes(vec![3]);
-        model.steps[0].loads[0].kind = LoadKind::ConcentratedForce([1.0, 0.0, 0.0]);
+        model.steps[0].loads[0].kind = LoadKind::force([1.0, 0.0, 0.0]);
         let findings = check(&model, &mesh);
         assert_eq!(findings[0].problem, Problem::RigidBodyMotion);
         assert!(

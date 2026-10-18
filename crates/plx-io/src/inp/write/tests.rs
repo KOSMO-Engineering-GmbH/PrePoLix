@@ -68,7 +68,7 @@ fn tip_force() -> Load {
         active: true,
         visible: true,
         region: Region::Nodes(vec![99]),
-        kind: LoadKind::ConcentratedForce([0.0, 0.0, -100.0]),
+        kind: LoadKind::force([0.0, 0.0, -100.0]),
         amplitude: None,
         factor_amplitude: None,
     }
@@ -204,7 +204,7 @@ fn empty_regions_and_unknown_materials_are_errors() {
         active: true,
         visible: true,
         region: Region::Nodes(Vec::new()),
-        kind: LoadKind::ConcentratedForce([1.0, 0.0, 0.0]),
+        kind: LoadKind::force([1.0, 0.0, 0.0]),
         amplitude: None,
         factor_amplitude: None,
     });
@@ -295,7 +295,7 @@ fn shell_plate() -> (FeMesh, FeModel) {
         ModelSpace::ThreeD,
         1.0,
         vec![(nodes_at(&mesh, 0, 0.0), [Some(0.0); 6])],
-        LoadKind::ConcentratedForce([0.0, 0.0, force]),
+        LoadKind::force([0.0, 0.0, force]),
         Region::Nodes(tip),
     );
     model.sections[0].kind = SectionKind::Shell {
@@ -378,7 +378,7 @@ fn membrane_strip(type_name: &str) -> (FeMesh, FeModel) {
                 [None, None, Some(0.0), None, None, None],
             ),
         ],
-        LoadKind::ConcentratedForce([force, 0.0, 0.0]),
+        LoadKind::force([force, 0.0, 0.0]),
         Region::Nodes(tip),
     );
     model.sections[0].kind = SectionKind::Membrane {
@@ -448,6 +448,41 @@ fn a_rigid_body_and_its_reference_point_are_written_like_prepomax_does() {
         "{text}"
     );
     assert!(text.contains("*Cload\n101, 3, 1000\n"), "{text}");
+}
+
+/// A force on points is the total: the nodes share it equally, a reference point of a
+/// rigid body takes it whole. Applied to all nodes, each node takes all of it.
+#[test]
+fn a_force_on_points_is_shared_by_the_nodes() {
+    let mut on_nodes = tip_force();
+    on_nodes.region = Region::Nodes(vec![96, 97, 98, 99]);
+    let (mesh, model) = cantilever(on_nodes);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Cload\nInternal_Selection-1_Force-1, 3, -25\n"),
+        "{text}"
+    );
+    // At each node, like PrePoMax's concentrated force, every node takes the whole force.
+    let mut each = tip_force();
+    each.region = Region::Nodes(vec![96, 97, 98, 99]);
+    each.kind = LoadKind::Force {
+        value: [0.0, 0.0, -100.0],
+        each_node: true,
+    };
+    let (mesh, model) = cantilever(each);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Cload\nInternal_Selection-1_Force-1, 3, -100\n"),
+        "{text}"
+    );
+    let mut on_point = tip_force();
+    on_point.region = Region::ReferencePoint("RP-1".into());
+    let (mesh, model) = rigid_tip(Some(on_point), None);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Cload\nInternal_Selection-1_RP-1, 3, -100\n"),
+        "{text}"
+    );
 }
 
 /// A moment at the reference point bends the beam: the reactions at the clamped end balance
@@ -1137,7 +1172,7 @@ fn surface_traction_on_an_edge_spreads_the_total_force_by_length() {
 fn calculix_bends_the_shell_plate_by_a_traction_on_its_edge() {
     let (mesh, mut model) = shell_plate();
     let load = &mut model.steps[0].loads[0];
-    load.kind = LoadKind::SurfaceTraction([0.0, 0.0, -1.0]);
+    load.kind = LoadKind::force([0.0, 0.0, -1.0]);
     load.region = Region::Edges(shell_plate_tip_edge(&mesh));
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Cload"), "{text}");
@@ -1422,7 +1457,7 @@ fn calculix_reads_quadratic_elements_over_two_lines() {
         active: true,
         visible: true,
         region: Region::Nodes(vec![NODE]),
-        kind: LoadKind::ConcentratedForce(FORCE),
+        kind: LoadKind::force(FORCE),
         amplitude: None,
         factor_amplitude: None,
     };
@@ -1492,7 +1527,7 @@ fn calculix_balances_a_surface_traction() {
         active: true,
         visible: true,
         region: Region::Surface("TIP".into()),
-        kind: LoadKind::SurfaceTraction([0.0, -80.0, 0.0]),
+        kind: LoadKind::force([0.0, -80.0, 0.0]),
         amplitude: None,
         factor_amplitude: None,
     };
@@ -1862,7 +1897,7 @@ fn modal_cantilever(damping: Option<ModalDamping>) -> (FeMesh, FeModel) {
 }
 
 /// The cantilever of `kragbalken_c3d20r.inp` in a buckle step, pressed along its axis by
-/// 1 N on each of the 21 nodes of its free end.
+/// 21 N shared by the 21 nodes of its free end.
 fn buckle_analysis() -> (FeMesh, FeModel) {
     let (mesh, mut model) = analysis(
         "kragbalken_c3d20r.inp",
@@ -1871,7 +1906,7 @@ fn buckle_analysis() -> (FeMesh, FeModel) {
             active: true,
             visible: true,
             region: Region::NodeSet("TIP".into()),
-            kind: LoadKind::ConcentratedForce([-1.0, 0.0, 0.0]),
+            kind: LoadKind::force([-21.0, 0.0, 0.0]),
             amplitude: None,
             factor_amplitude: None,
         },
@@ -2150,7 +2185,7 @@ fn deactivated_items_are_left_out_as_comments() {
         visible: true,
         // Not even an empty region stops the export of a deactivated item.
         region: Region::Nodes(Vec::new()),
-        kind: LoadKind::ConcentratedForce([1.0, 0.0, 0.0]),
+        kind: LoadKind::force([1.0, 0.0, 0.0]),
         amplitude: None,
         factor_amplitude: None,
     });
@@ -2335,7 +2370,7 @@ fn two_d_models_write_their_element_types_thickness_and_dofs() {
         ModelSpace::PlaneStress,
         2.5,
         vec![(left, FIX_X)],
-        LoadKind::ConcentratedForce([1.0, 2.0, 3.0]),
+        LoadKind::force([1.0, 2.0, 3.0]),
         Region::Nodes(vec![5]),
     );
     model.steps[0].boundary_conditions[0].kind = BoundaryKind::Displacement([Some(0.0); 6]);
@@ -2376,7 +2411,7 @@ fn calculix_stretches_a_plane_stress_strip() {
         ModelSpace::PlaneStress,
         thickness,
         vec![(nodes_at(&mesh, 0, 0.0), FIX_X), (vec![1], FIX_Y)],
-        LoadKind::SurfaceTraction([force, 0.0, 0.0]),
+        LoadKind::force([force, 0.0, 0.0]),
         Region::Faces(edges_at(&mesh, 0, length)),
     );
     let Some(frd) = run_ccx(
@@ -2465,7 +2500,7 @@ fn calculix_pulls_a_tube_by_its_total_force() {
         ModelSpace::Axisymmetric,
         1.0,
         vec![(nodes_at(&mesh, 1, 0.0), FIX_Y)],
-        LoadKind::SurfaceTraction([0.0, force, 0.0]),
+        LoadKind::force([0.0, force, 0.0]),
         Region::Faces(edges_at(&mesh, 1, height)),
     );
     let Some(frd) = run_ccx("rohr-zug", &write_inp(&mesh, &model, "").unwrap()) else {
@@ -3001,7 +3036,7 @@ fn blocks_model(
         active: true,
         visible: true,
         region: Region::Faces(blocks.b_top.clone()),
-        kind: LoadKind::SurfaceTraction(force),
+        kind: LoadKind::force(force),
         amplitude: None,
         factor_amplitude: None,
     });
@@ -3244,7 +3279,7 @@ fn beam_sections_type_their_elements_and_write_the_normal() {
     let model = line_model(
         &mesh,
         rect_beam(BeamOrientation::Direction([0.0, 1.0, 0.0])),
-        LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+        LoadKind::force([0.0, -100.0, 0.0]),
     );
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
@@ -3305,7 +3340,7 @@ fn automatic_normals_split_a_frame_into_groups() {
     let model = line_model(
         &mesh,
         rect_beam(BeamOrientation::Automatic),
-        LoadKind::ConcentratedForce([100.0, 0.0, 0.0]),
+        LoadKind::force([100.0, 0.0, 0.0]),
     );
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
@@ -3337,7 +3372,7 @@ fn sections_must_fit_their_elements() {
     let mut model = line_model(
         &mesh,
         SectionKind::Solid,
-        LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+        LoadKind::force([0.0, -100.0, 0.0]),
     );
     let error = write_inp(&mesh, &model, "").unwrap_err();
     assert!(
@@ -3370,7 +3405,7 @@ fn trusses_are_written_as_t3d2_with_translations_only() {
     let model = line_model(
         &mesh,
         SectionKind::Truss { area: 50.0 },
-        LoadKind::ConcentratedForce([1000.0, 0.0, 0.0]),
+        LoadKind::force([1000.0, 0.0, 0.0]),
     );
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
@@ -3441,7 +3476,7 @@ fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
         2,
         false,
         rect_beam(BeamOrientation::Automatic),
-        LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+        LoadKind::force([0.0, -100.0, 0.0]),
     );
     // Tied rigidly, the second beam starts at the first one's end node; the node set of a
     // boundary condition on the merged node names the node that stays.
@@ -3502,7 +3537,7 @@ fn calculix_bends_two_beams_tied_at_a_node_like_one() {
         5,
         false,
         rect_beam(BeamOrientation::Automatic),
-        LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+        LoadKind::force([0.0, -100.0, 0.0]),
     );
     let Some(frd) = run_ccx("balken_node_tie", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
@@ -3523,7 +3558,7 @@ fn calculix_hinges_two_beams_at_a_node() {
             5,
             false,
             rect_beam(BeamOrientation::Automatic),
-            LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+            LoadKind::force([0.0, -100.0, 0.0]),
         );
         model.node_ties[0].rotations = rotations;
         let step = &mut model.steps[0];
@@ -3568,7 +3603,7 @@ fn calculix_stretches_two_trusses_tied_at_a_node_like_one() {
         5,
         true,
         SectionKind::Truss { area: 50.0 },
-        LoadKind::ConcentratedForce([1000.0, 0.0, 0.0]),
+        LoadKind::force([1000.0, 0.0, 0.0]),
     );
     // A straight chain of trusses is a mechanism sideways; hold the nodes in the axis.
     let nodes: Vec<NodeId> = (mesh.node_ids().iter().copied())
@@ -3614,7 +3649,7 @@ fn calculix_bends_a_rectangular_beam_like_beam_theory() {
         let model = line_model(
             &mesh,
             rect_beam(BeamOrientation::Automatic),
-            LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+            LoadKind::force([0.0, -100.0, 0.0]),
         );
         let name = if quadratic {
             "balken_b32"
@@ -3649,7 +3684,7 @@ fn calculix_bends_a_pipe_like_beam_theory() {
             },
             ..BeamSection::DEFAULT
         }),
-        LoadKind::ConcentratedForce([0.0, -100.0, 0.0]),
+        LoadKind::force([0.0, -100.0, 0.0]),
     );
     let Some(frd) = run_ccx("rohr_b32r", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
@@ -3667,7 +3702,7 @@ fn calculix_stretches_a_truss_by_f_l_over_e_a() {
     let mut model = line_model(
         &mesh,
         SectionKind::Truss { area: 50.0 },
-        LoadKind::ConcentratedForce([1000.0, 0.0, 0.0]),
+        LoadKind::force([1000.0, 0.0, 0.0]),
     );
     // A straight chain of trusses is a mechanism sideways; hold the nodes in the axis.
     let nodes: Vec<NodeId> = mesh
@@ -5086,12 +5121,12 @@ fn half_shell_plate(angle: f64) -> (FeMesh, FeModel, NodeId) {
         1.0,
         vec![(clamped, [Some(0.0); 6])],
         // The node on the symmetry plane carries half the share of the others.
-        LoadKind::ConcentratedForce([0.0, 0.0, -0.2]),
+        LoadKind::force([0.0, 0.0, -0.2]),
         Region::Nodes(tip.iter().copied().filter(|n| !edge.contains(n)).collect()),
     );
     let mut middle = model.steps[0].loads[0].clone();
     middle.name = "Load-2".into();
-    middle.kind = LoadKind::ConcentratedForce([0.0, 0.0, -0.1]);
+    middle.kind = LoadKind::force([0.0, 0.0, -0.1]);
     middle.region = Region::Nodes(tip.iter().copied().filter(|n| edge.contains(n)).collect());
     model.steps[0].loads.push(middle);
     model.sections[0].kind = SectionKind::Shell {
@@ -5255,7 +5290,7 @@ fn calculix_holds_a_2d_model_in_a_skewed_symmetry_line_alike() {
             1.0,
             // Held in both directions, which a turned system at the corner keeps.
             vec![(left, [Some(0.0), Some(0.0), None, None, None, None])],
-            LoadKind::ConcentratedForce([100.0 * c, 100.0 * s, 0.0]),
+            LoadKind::force([100.0 * c, 100.0 * s, 0.0]),
             Region::Nodes(vec![tip]),
         );
         model.steps[0].boundary_conditions.push(BoundaryCondition {
@@ -5306,13 +5341,7 @@ fn calculix_runs_the_element_types_chosen_for_a_part() {
         let mesh = rectangle(0.0, 10.0, 2.0, 5, 2);
         let fixed = vec![(nodes_at(&mesh, 0, 0.0), FIX_X), (vec![1], FIX_Y)];
         let tip = Region::Faces(edges_at(&mesh, 0, 10.0));
-        let model = plane_model(
-            space,
-            1.0,
-            fixed,
-            LoadKind::SurfaceTraction([100.0, 0.0, 0.0]),
-            tip,
-        );
+        let model = plane_model(space, 1.0, fixed, LoadKind::force([100.0, 0.0, 0.0]), tip);
         (mesh, model)
     };
     cases.push((plane(ModelSpace::PlaneStrain), "PLATE", "CPE8R"));
@@ -6348,7 +6377,7 @@ fn calculix_turns_the_remote_point_of_a_plane_model() {
         ModelSpace::PlaneStress,
         1.0,
         vec![(nodes_at(&mesh, 0, 0.0), [Some(0.0); 6])],
-        LoadKind::ConcentratedForce([0.0, 0.0, 0.0]),
+        LoadKind::force([0.0, 0.0, 0.0]),
         Region::Nodes(vec![1]),
     );
     model.steps[0].loads.clear();
@@ -6391,7 +6420,7 @@ fn calculix_turns_a_deformable_remote_point_of_a_plane_model() {
         ModelSpace::PlaneStress,
         1.0,
         vec![(nodes_at(&mesh, 0, 0.0), [Some(0.0); 6])],
-        LoadKind::ConcentratedForce([0.0, 0.0, 0.0]),
+        LoadKind::force([0.0, 0.0, 0.0]),
         Region::Nodes(vec![1]),
     );
     model.steps[0].loads.clear();

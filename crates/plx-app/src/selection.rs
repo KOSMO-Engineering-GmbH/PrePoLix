@@ -93,16 +93,16 @@ impl<T: Ord + Clone> History<T> {
 /// What the region of the item consists of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Target {
-    /// Boundary conditions and concentrated forces act on nodes.
+    /// Boundary conditions and forces on points act on nodes.
     Nodes,
-    /// Pressure and surface traction act on element faces.
+    /// Pressure and forces act on element faces.
     Faces,
     /// Contacts and ties in 3D models: element faces, or the edges of shells, which
     /// CalculiX takes as faces too.
     Surfaces,
     /// In 2D models they act on the outline: the edges of the 2D elements, stored as faces.
     Edges,
-    /// Edges of 3D parts, e.g. of a shell for a surface traction along it: the element
+    /// Edges of 3D parts, e.g. of a shell for a force along it: the element
     /// edges along the outline, by their end nodes.
     Lines,
     /// A single point, e.g. an end of a path: picked as nodes, but the geometry mode takes

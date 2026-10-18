@@ -373,7 +373,7 @@ fn tip_force(solver: &plx_job::Solver, dir: &Path) -> CheckResult {
     let tip = faces_where(&mesh, |p| p[0] == LENGTH);
     let model = beam_model(
         &mesh,
-        LoadKind::SurfaceTraction([0.0, 0.0, -TIP_FORCE]),
+        LoadKind::force([0.0, 0.0, -TIP_FORCE]),
         Region::Faces(tip),
     );
     let frd = match solve(solver, dir, "Cantilever", &mesh, &model) {

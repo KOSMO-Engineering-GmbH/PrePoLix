@@ -2167,15 +2167,6 @@ fn step_block<'f>(
                 let frame = moving(index).cloned().unwrap_or_default();
                 out = moving_load_text(load, &frame, context)?;
             }
-            LoadKind::ConcentratedForce(force) => {
-                let set = sets.node_set(&load.name, &load.region)?;
-                let _ = writeln!(out, "*Cload{amplitude}");
-                for (dof, value) in (1..).zip(force).take(dofs) {
-                    if value != 0.0 {
-                        let _ = writeln!(out, "{set}, {dof}, {}", number(value));
-                    }
-                }
-            }
             LoadKind::Moment(moment) => {
                 // Moments at a reference point act on the rotation node of its rigid body,
                 // at nodes of beams and shells on their rotations.
@@ -2213,24 +2204,45 @@ fn step_block<'f>(
                     let _ = writeln!(out, "*Cload{amplitude}\n{node}, 1, {}", number(value));
                 }
             }
-            LoadKind::SurfaceTraction(force) => {
+            LoadKind::Force {
+                value: force,
+                each_node,
+            } => {
                 let faces = load.region.faces(sets.mesh);
+                let edges = load.region.edges(sets.mesh);
                 let axisymmetric = space == ModelSpace::Axisymmetric;
-                // On faces by area, on picked edges by length.
-                let nodal = if faces.is_empty() {
-                    let edges = load.region.edges(sets.mesh);
-                    edge_traction_forces(sets.mesh, &edges, force, axisymmetric)
-                } else {
-                    traction_forces(sets.mesh, &faces, force, axisymmetric)
-                };
-                if nodal.is_empty() {
-                    return Err(empty(&load.name, "element faces or edges"));
-                }
                 let _ = writeln!(out, "*Cload{amplitude}");
-                for (node, values) in nodal {
-                    for (dof, value) in (1..).zip(values).take(dofs) {
+                // On points the nodes share the force equally, a reference point takes it
+                // whole: the share at every node of their set. With `each_node` every node
+                // of the region takes the whole force.
+                if each_node || (faces.is_empty() && edges.is_empty()) {
+                    let count = match load.region.reference_point() {
+                        _ if each_node => 1,
+                        Some(_) => 1,
+                        None => load.region.nodes(sets.mesh).len(),
+                    };
+                    let set = sets.node_set(&load.name, &load.region)?;
+                    for (dof, value) in (1..).zip(force).take(dofs) {
                         if value != 0.0 {
-                            let _ = writeln!(out, "{node}, {dof}, {}", number(value));
+                            let share = value / count as f64;
+                            let _ = writeln!(out, "{set}, {dof}, {}", number(share));
+                        }
+                    }
+                } else {
+                    // On faces by area, on picked edges by length.
+                    let nodal = if faces.is_empty() {
+                        edge_traction_forces(sets.mesh, &edges, force, axisymmetric)
+                    } else {
+                        traction_forces(sets.mesh, &faces, force, axisymmetric)
+                    };
+                    if nodal.is_empty() {
+                        return Err(empty(&load.name, "element faces or edges"));
+                    }
+                    for (node, values) in nodal {
+                        for (dof, value) in (1..).zip(values).take(dofs) {
+                            if value != 0.0 {
+                                let _ = writeln!(out, "{node}, {dof}, {}", number(value));
+                            }
                         }
                     }
                 }
