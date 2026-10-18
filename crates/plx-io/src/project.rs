@@ -65,6 +65,8 @@ pub enum ProjectNode {
     Materials(MaterialSet),
     /// A mesh made from a few parameters, such as a box.
     Mesh(Box<MeshBlock>),
+    /// The mesh linked to it, made again finer or coarser by a factor.
+    RefineMesh(Box<RefineMesh>),
     /// Named numbers that value links give to other blocks.
     Parameters(ParameterSet),
     /// A key figure computed from the results of a step.
@@ -86,6 +88,7 @@ impl ProjectNode {
             Self::Analysis(a) => a.id,
             Self::Materials(m) => m.id,
             Self::Mesh(m) => m.id,
+            Self::RefineMesh(r) => r.id,
             Self::Parameters(p) => p.id,
             Self::Measure(m) => m.id,
             Self::Optimizer(o) => o.id,
@@ -100,6 +103,7 @@ impl ProjectNode {
             Self::Analysis(a) => &a.name,
             Self::Materials(m) => &m.name,
             Self::Mesh(m) => &m.name,
+            Self::RefineMesh(r) => &r.name,
             Self::Parameters(p) => &p.name,
             Self::Measure(m) => &m.name,
             Self::Optimizer(o) => &o.name,
@@ -115,6 +119,7 @@ impl ProjectNode {
             Self::Analysis(a) => a.position,
             Self::Materials(m) => m.position,
             Self::Mesh(m) => m.position,
+            Self::RefineMesh(r) => r.position,
             Self::Parameters(p) => p.position,
             Self::Measure(m) => m.position,
             Self::Optimizer(o) => o.position,
@@ -146,18 +151,31 @@ pub struct MeshBlock {
     /// [`plx_model::MeshPrimitive::fingerprint`]; the mesh is out of date once it differs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated: Option<u64>,
-    /// Factor on the elements along each edge, see [`plx_model::MeshPrimitive::refined`];
-    /// an optimizer refines the mesh through it.
-    #[serde(default = "one", skip_serializing_if = "is_one")]
-    pub refinement: f64,
+}
+
+/// A block that makes the mesh linked to it again with a factor on its fineness: the
+/// divisions of a mesh block times the factor, or the element sizes of geometry divided by
+/// it. An optimizer refines a mesh through its factor.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RefineMesh {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    #[serde(default = "one")]
+    pub factor: f64,
+    /// The mesh as last made from the divisions of a mesh block; the mesh of geometry is
+    /// made by the analysis it goes to, and the link brings it again.
+    #[serde(default)]
+    pub mesh: FeMesh,
+    /// Fingerprint of the divisions and the factor the mesh was made from, see
+    /// [`plx_model::MeshPrimitive::fingerprint`]; the mesh is out of date once it differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<u64>,
 }
 
 fn one() -> f64 {
     1.0
-}
-
-fn is_one(value: &f64) -> bool {
-    *value == 1.0
 }
 
 /// A block that computes a key figure from the results of a step another block links to it,
@@ -893,8 +911,18 @@ mod tests {
             mesh: primitive.generate(space, "Box"),
             generated: Some(primitive.fingerprint(space)),
             primitive: primitive.clone(),
-            refinement: 1.5,
         })));
+        let refined = primitive.refined(1.5);
+        saved
+            .nodes
+            .push(ProjectNode::RefineMesh(Box::new(RefineMesh {
+                id: 10,
+                name: "Refine Mesh".into(),
+                position: [100.0, 0.0],
+                factor: 1.5,
+                mesh: refined.generate(space, "Box"),
+                generated: Some(refined.fingerprint(space)),
+            })));
         let parameters = ParameterSet {
             id: 6,
             name: "Parameters".into(),
@@ -967,27 +995,34 @@ mod tests {
         assert!(text.contains(&format!("format:{PROJECT_FORMAT}")));
         assert!(!text.contains("analyses:"), "{text}");
         let project = read_project(&path).unwrap();
-        assert_eq!(project.nodes.len(), 7);
-        match &project.nodes[6] {
+        assert_eq!(project.nodes.len(), 8);
+        match &project.nodes[7] {
             ProjectNode::File(read) => assert_eq!(read, &file),
             other => panic!("{other:?}"),
         }
-        match &project.nodes[4] {
+        match &project.nodes[5] {
             ProjectNode::MeshExport(read) => assert_eq!(read, &export),
             other => panic!("{other:?}"),
         }
-        match &project.nodes[5] {
+        match &project.nodes[6] {
             ProjectNode::Campbell(read) => assert_eq!(**read, campbell),
             other => panic!("{other:?}"),
         }
-        match &project.nodes[3] {
+        match &project.nodes[4] {
             ProjectNode::Parameters(read) => assert_eq!(read, &parameters),
+            other => panic!("{other:?}"),
+        }
+        match &project.nodes[3] {
+            ProjectNode::RefineMesh(block) => {
+                assert_eq!(block.factor, 1.5);
+                assert_eq!(block.generated, Some(refined.fingerprint(space)));
+                assert!(block.mesh.element_count() > 40);
+            }
             other => panic!("{other:?}"),
         }
         match &project.nodes[2] {
             ProjectNode::Mesh(block) => {
                 assert_eq!(block.primitive, primitive);
-                assert_eq!(block.refinement, 1.5);
                 assert_eq!(block.generated, Some(primitive.fingerprint(space)));
                 assert_eq!(block.mesh.element_count(), 40);
                 assert_eq!(block.mesh.surfaces.len(), 6);

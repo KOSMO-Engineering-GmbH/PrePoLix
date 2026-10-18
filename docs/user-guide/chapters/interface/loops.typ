@@ -13,27 +13,22 @@ is done. Two optimizers are there:
 
 Add one with #menu("Project", "Add Optimizer"). Then make the loop:
 
-+ Drag the pin of its #ui("Value") row to the number it varies: #ui("Refine") of an analysis
-  with imported geometry or of a mesh block for a mesh convergence, any number of a mesh block
-  for a study. The wire is violet and dashed and runs below the blocks, so that the loop can
-  be seen.
++ Drag the pin of its #ui("Value") row to the number it varies: the #ui("Factor") of a Refine
+  Mesh block (@refine-mesh) for a mesh convergence, any number of a mesh block or a factor for
+  a study. The wire is violet and dashed and runs below the blocks, so that the loop can be
+  seen.
 + Drag the value pin of a Measure block of the results on that mesh to its #ui("Measure")
   row.
 
-An analysis with imported geometry has a #ui("Refine") row under #ui("Mesh"). Every element
-size of its mesh setup is divided by this factor when the geometry is meshed: the max. and
-min. element size of the meshing parameters, those of Meshing Parameters items and the local
-mesh sizes; the sizes as set in the mesh setup stay. Once it changes, the mesh is out of date,
-and #ui("Update Project") meshes the geometry again before it solves. Regions picked on the
-geometry are found on each new mesh.
+A mesh convergence refines the mesh a Refine Mesh block gives: put one between the mesh and
+the analyses that solve on it. A box or rectangle is meshed anew by the block; imported
+geometry is meshed anew by the analysis that takes the refined mesh, with every element size
+divided by the factor, before it solves. Regions picked on the geometry or on the sides of a
+box are found on each new mesh.
 
-#screenshot("optimizer-geometry.png", [A mesh convergence on a plate with a hole, imported
-  from a STEP file: the optimizer varies Refine of the analysis and reads the largest von Mises
-  stress; it converged after two meshes])
-
-#screenshot("optimizer-loop.png", [A mesh convergence: the optimizer Convergence varies Refine
-  of the box (dashed wire) and reads the largest von Mises stress of the step Load, which the
-  analyses Thermal and Structural compute on that mesh])
+#screenshot("optimizer-loop.png", [A mesh convergence: the optimizer Convergence varies the
+  factor of Refine Mesh (dashed wire), which refines the box for the analysis Fine, and reads
+  the largest displacement of its step; it converged after two meshes])
 
 #ui("Update Project") then runs the loop of every optimizer that is not up to date, each
 iteration a whole update: the mesh is made anew, the analyses are solved, the measure is
@@ -54,8 +49,8 @@ value (study):
 
 #fields(
   [Optimizer], [#ui("Mesh convergence") or #ui("Parameter study").],
-  [Start refinement], [The refinement of the first iteration; 1 meshes the divisions of the
-    mesh block, or the element sizes of the geometry, as they are.],
+  [Start refinement], [The factor of the first iteration; 1 meshes the divisions of the mesh
+    block, or the element sizes of the geometry, as they are.],
   [Factor per step], [The refinement grows by this factor from one iteration to the next. In
     3D the elements grow about by its cube.],
   [Tolerance], [The relative change of the measure below which the mesh has converged.],

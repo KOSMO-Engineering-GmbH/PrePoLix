@@ -69,10 +69,10 @@ impl OptimizerEditor {
                     .show(ui, |ui| self.form(ui));
                 ui.weak(match self.kind {
                     OptimizerKind::MeshConvergence { .. } => {
-                        "Link its value to Refine of a mesh block and the value of a Measure \
-                         block of the results on that mesh to its Measure row. Update Project \
-                         refines the mesh by the factor until the measure changes less than \
-                         the tolerance."
+                        "Link its value to the Factor of a Refine Mesh block and the value of \
+                         a Measure block of the results on that mesh to its Measure row. \
+                         Update Project refines the mesh by the factor until the measure \
+                         changes less than the tolerance."
                     }
                     OptimizerKind::ParameterStudy { .. } => {
                         "Link its value to a parameter of a mesh block and the value of a \

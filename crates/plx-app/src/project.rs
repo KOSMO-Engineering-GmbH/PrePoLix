@@ -46,6 +46,7 @@ enum Kind {
     Analysis,
     Materials,
     Mesh,
+    RefineMesh,
     Parameters,
     Measure,
     Optimizer,
@@ -66,6 +67,7 @@ impl Kind {
             Self::Analysis => "analysis",
             Self::Materials => "materials block",
             Self::Mesh => "mesh block",
+            Self::RefineMesh => "refine mesh block",
             Self::Parameters => "parameters block",
             Self::Measure => "measure block",
             Self::Optimizer => "optimizer",
@@ -102,6 +104,8 @@ enum Block {
     Materials(Box<MaterialsBlock>),
     /// A structured mesh made from a few parameters.
     Mesh(Box<MeshBlock>),
+    /// The mesh linked to it made again with a factor on its fineness.
+    RefineMesh(Box<RefineBlock>),
     /// Named numbers that value links give to other blocks.
     Parameters(ParametersBlock),
     /// A key figure computed from the results of a step linked to it.
@@ -212,8 +216,76 @@ struct MeshBlock {
     units: UnitSystem,
     primitive: MeshPrimitive,
     generated: Option<u64>,
-    /// Factor on the divisions, see [`MeshPrimitive::refined`].
-    refinement: f64,
+}
+
+/// A refine mesh block: the factor, what it refines, and the mesh it gives with the
+/// fingerprint of what that was made from.
+struct RefineBlock {
+    model: LinkedModel,
+    factor: f64,
+    /// What the link of its Mesh row brings, found by [`ProjectApp::sync_links`].
+    input: Option<RefineInput>,
+    /// Fingerprint of the divisions its mesh was made from, see [`MeshPrimitive::fingerprint`].
+    generated: Option<u64>,
+    /// Fingerprint of the geometry and mesh it gave as last taken, with its factor.
+    taken: Option<u64>,
+}
+
+/// What a refine mesh block makes its mesh from.
+enum RefineInput {
+    /// The parameters of a mesh block, times the factors of the refine mesh blocks between:
+    /// the block makes the mesh with its divisions refined.
+    Primitive {
+        primitive: MeshPrimitive,
+        space: ModelSpace,
+        factor: f64,
+    },
+    /// Geometry with its mesh setup: the analysis the mesh goes to meshes it again, its
+    /// element sizes divided by the factor.
+    Geometry { space: ModelSpace, refinement: f64 },
+    /// A mesh it cannot make again, with the name of where it comes from.
+    Fixed(String),
+}
+
+impl RefineBlock {
+    /// What it meshes when it refines the parameters of a mesh block.
+    fn meshed(&self) -> Option<(MeshPrimitive, ModelSpace)> {
+        match &self.input {
+            Some(RefineInput::Primitive {
+                primitive,
+                space,
+                factor,
+            }) => Some((primitive.refined(factor * self.factor), *space)),
+            _ => None,
+        }
+    }
+
+    /// Makes its mesh from the parameters of the mesh block it refines; returns the number
+    /// of elements, or why it cannot be made.
+    fn generate(&mut self) -> Result<usize, String> {
+        let (primitive, space) = match &self.input {
+            Some(RefineInput::Geometry { .. }) => {
+                return Err("geometry is meshed by the analysis the mesh goes to".into());
+            }
+            Some(RefineInput::Fixed(source)) => {
+                return Err(format!("the mesh of {source} cannot be made again"));
+            }
+            None => return Err("no mesh is linked to it".into()),
+            Some(RefineInput::Primitive { .. }) => self.meshed().ok_or("no mesh")?,
+        };
+        if let Some(problem) = primitive.problem(space) {
+            return Err(problem);
+        }
+        let mesh = primitive.generate(space, &primitive.label().to_uppercase());
+        let count = mesh.element_count();
+        self.generated = Some(primitive.fingerprint(space));
+        self.model = LinkedModel {
+            mesh,
+            ..Default::default()
+        };
+        self.model.fe.properties.space = space;
+        Ok(count)
+    }
 }
 
 /// A parameters block: its numbers.
@@ -365,9 +437,29 @@ impl Node {
             units,
             primitive,
             generated,
-            refinement: 1.0,
         };
         Self::new(id, name, Block::Mesh(Box::new(block)))
+    }
+
+    /// A refine mesh block with this factor, holding `mesh` made from `generated`.
+    fn refine_block(
+        id: u64,
+        name: String,
+        factor: f64,
+        mesh: plx_mesh::FeMesh,
+        generated: Option<u64>,
+    ) -> Self {
+        let block = RefineBlock {
+            model: LinkedModel {
+                mesh,
+                ..Default::default()
+            },
+            factor,
+            input: None,
+            generated,
+            taken: None,
+        };
+        Self::new(id, name, Block::RefineMesh(Box::new(block)))
     }
 
     /// A mesh export block writing to `path`, which it wrote with `written`.
@@ -410,6 +502,7 @@ impl Node {
             Block::Analysis(_) => Kind::Analysis,
             Block::Materials(_) => Kind::Materials,
             Block::Mesh(_) => Kind::Mesh,
+            Block::RefineMesh(_) => Kind::RefineMesh,
             Block::Parameters(_) => Kind::Parameters,
             Block::Measure(_) => Kind::Measure,
             Block::Optimizer(_) => Kind::Optimizer,
@@ -457,6 +550,20 @@ impl Node {
     fn as_mesh_mut(&mut self) -> Option<&mut MeshBlock> {
         match &mut self.block {
             Block::Mesh(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    fn as_refine(&self) -> Option<&RefineBlock> {
+        match &self.block {
+            Block::RefineMesh(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    fn as_refine_mut(&mut self) -> Option<&mut RefineBlock> {
+        match &mut self.block {
+            Block::RefineMesh(r) => Some(r),
             _ => None,
         }
     }
@@ -573,6 +680,12 @@ impl Node {
         match &self.block {
             Block::Analysis(a) => Some(a.space),
             Block::Mesh(m) => Some(m.space),
+            Block::RefineMesh(r) => match &r.input {
+                Some(
+                    RefineInput::Primitive { space, .. } | RefineInput::Geometry { space, .. },
+                ) => Some(*space),
+                _ => None,
+            },
             Block::File(f) => f.space,
             _ => None,
         }
@@ -590,7 +703,9 @@ impl Node {
             Block::Measure(m) => m.units,
             Block::Optimizer(o) => o.units,
             Block::File(f) => f.units,
-            Block::MeshExport(_) | Block::Campbell(_) => UnitSystem::default(),
+            Block::MeshExport(_) | Block::Campbell(_) | Block::RefineMesh(_) => {
+                UnitSystem::default()
+            }
         }
     }
 
@@ -660,24 +775,45 @@ impl Node {
         }
     }
 
-    /// The state of a mesh block's mesh: out of date once its parameters changed.
+    /// The state of the mesh of a mesh block or a refine mesh block: out of date once its
+    /// parameters or its factor changed. A refine mesh block that refines geometry gives it
+    /// as it is, to be meshed by the analysis it goes to.
     fn mesh_state(&self) -> CellState {
+        if let Some(refine) = self.as_refine() {
+            return match &refine.input {
+                None | Some(RefineInput::Fixed(_)) => CellState::Missing,
+                _ if refine.model.mesh.element_count() == 0 => CellState::OutOfDate,
+                Some(RefineInput::Geometry { .. }) => CellState::UpToDate,
+                Some(RefineInput::Primitive { .. }) => {
+                    let made = refine.meshed().map(|(p, space)| p.fingerprint(space));
+                    if made.is_some() && made == refine.generated {
+                        CellState::UpToDate
+                    } else {
+                        CellState::OutOfDate
+                    }
+                }
+            };
+        }
         let Some(block) = self.as_mesh() else {
             return CellState::Missing;
         };
         if block.model.mesh.element_count() == 0 {
             CellState::Missing
-        } else if Some(block.meshed().fingerprint(block.space)) == block.generated {
+        } else if Some(block.primitive.fingerprint(block.space)) == block.generated {
             CellState::UpToDate
         } else {
             CellState::OutOfDate
         }
     }
 
-    /// Makes a mesh block's mesh from its parameters; returns the number of elements, or
-    /// why it cannot be made.
+    /// Makes the mesh of a mesh block or a refine mesh block from its parameters; returns
+    /// the number of elements, or why it cannot be made.
     fn generate(&mut self) -> Result<usize, String> {
-        self.as_mesh_mut().ok_or("not a mesh block")?.generate()
+        match &mut self.block {
+            Block::Mesh(m) => m.generate(),
+            Block::RefineMesh(r) => r.generate(),
+            _ => Err("not a mesh block".into()),
+        }
     }
 
     /// A block read from the project file.
@@ -697,7 +833,7 @@ impl Node {
             }
             ProjectNode::Mesh(block) => {
                 let block = *block;
-                let mut node = Self::mesh_block(
+                Self::mesh_block(
                     block.id,
                     block.name,
                     block.space,
@@ -705,11 +841,16 @@ impl Node {
                     block.primitive,
                     block.mesh,
                     block.generated,
-                );
-                if let Some(mesh) = node.as_mesh_mut() {
-                    mesh.refinement = block.refinement;
-                }
-                node
+                )
+            }
+            ProjectNode::RefineMesh(block) => {
+                let block = *block;
+                let factor = if block.factor.is_finite() && block.factor > 0.0 {
+                    block.factor
+                } else {
+                    1.0
+                };
+                Self::refine_block(block.id, block.name, factor, block.mesh, block.generated)
             }
             ProjectNode::Parameters(set) => {
                 let block = ParametersBlock {
@@ -785,7 +926,18 @@ impl Node {
                 primitive: m.primitive.clone(),
                 mesh: m.model.mesh.clone(),
                 generated: m.generated,
-                refinement: m.refinement,
+            })),
+            // The mesh of geometry is not kept: the link brings it again.
+            Block::RefineMesh(r) => ProjectNode::RefineMesh(Box::new(file::RefineMesh {
+                id,
+                name,
+                position,
+                factor: r.factor,
+                mesh: match r.generated {
+                    Some(_) => r.model.mesh.clone(),
+                    None => Default::default(),
+                },
+                generated: r.generated,
             })),
             Block::Parameters(p) => ProjectNode::Parameters(file::ParameterSet {
                 id,
@@ -879,8 +1031,16 @@ impl Node {
                     units: m.units,
                     primitive: m.primitive.clone(),
                     generated: m.generated,
-                    refinement: m.refinement,
                 }))
+            }
+            Block::RefineMesh(r) => {
+                return Some(Self::refine_block(
+                    id,
+                    name,
+                    r.factor,
+                    Default::default(),
+                    None,
+                ));
             }
             Block::Parameters(p) => Block::Parameters(ParametersBlock {
                 units: p.units,
@@ -953,6 +1113,7 @@ impl Node {
             },
             Block::Materials(m) => Some(m.model.data()),
             Block::Mesh(m) => Some(m.model.data()),
+            Block::RefineMesh(r) => Some(r.model.data()),
             Block::MeshExport(e) => Some(e.model.data()),
             Block::File(f) => Some(f.model.data()),
             Block::Parameters(_) | Block::Measure(_) | Block::Optimizer(_) | Block::Campbell(_) => {
@@ -980,35 +1141,18 @@ impl Node {
         }
     }
 
-    /// The refinement of its mesh: of a mesh block, or of the geometry an analysis meshes;
-    /// `None` for other blocks and an analysis without geometry.
+    /// The factor of a refine mesh block; `None` for other blocks.
     fn refinement(&self) -> Option<f64> {
-        match &self.block {
-            Block::Mesh(m) => Some(m.refinement),
-            Block::Analysis(_) => self.link_data()?.geometry.map(|g| g.refinement),
-            _ => None,
-        }
+        self.as_refine().map(|r| r.factor)
     }
 
-    /// Sets the refinement of its mesh; the mesh is out of date once it changes.
+    /// Sets the factor of a refine mesh block; its mesh is out of date once it changes.
     fn set_refinement(&mut self, value: f64) {
-        if !(value.is_finite() && value > 0.0) {
-            return;
-        }
-        match &mut self.block {
-            Block::Mesh(m) => m.refinement = value,
-            Block::Analysis(analysis) => {
-                if let Some(window) = &mut analysis.window {
-                    window.set_refinement(value);
-                } else if let Some(geometry) =
-                    (analysis.data.as_mut()).and_then(|d| d.geometry.as_mut())
-                    && geometry.refinement != value
-                {
-                    geometry.refinement = value;
-                    self.refresh_closed();
-                }
-            }
-            _ => {}
+        if let Some(refine) = self.as_refine_mut()
+            && value.is_finite()
+            && value > 0.0
+        {
+            refine.factor = value;
         }
     }
 
@@ -1035,15 +1179,10 @@ impl Node {
 }
 
 impl MeshBlock {
-    /// What it meshes: its primitive with the divisions refined.
-    fn meshed(&self) -> MeshPrimitive {
-        self.primitive.refined(self.refinement)
-    }
-
     /// Makes its mesh from its parameters; returns the number of elements, or why it cannot
     /// be made.
     fn generate(&mut self) -> Result<usize, String> {
-        let primitive = self.meshed();
+        let primitive = self.primitive.clone();
         if let Some(problem) = primitive.problem(self.space) {
             return Err(problem);
         }
@@ -1096,6 +1235,8 @@ enum Action {
     AddMaterials(egui::Pos2),
     /// A new mesh block meshing the primitive at the position.
     AddMesh(egui::Pos2, MeshPrimitive),
+    /// A new refine mesh block at the position.
+    AddRefineMesh(egui::Pos2),
     /// A new mesh export block at the position.
     AddMeshExport(egui::Pos2),
     /// A new Campbell block at the position.
@@ -1121,7 +1262,7 @@ enum Action {
     ResetLoop(u64),
     /// The value of a parameter of a parameters block, by its index, changed in its block.
     SetParameter(u64, usize, f64),
-    /// The refinement of a mesh block changed in its block.
+    /// The factor of a refine mesh block changed in its block.
     SetRefinement(u64, f64),
     /// Make the mesh of a mesh block anew.
     Generate(u64),
@@ -1435,6 +1576,25 @@ impl ProjectApp {
         id
     }
 
+    /// Adds a refine mesh block with the factor 1; returns its id.
+    fn add_refine_mesh(&mut self, position: egui::Pos2) -> u64 {
+        let id = self.next_id();
+        let name = self.unique_name("Refine Mesh");
+        self.nodes.push(Node::refine_block(
+            id,
+            name.clone(),
+            1.0,
+            Default::default(),
+            None,
+        ));
+        self.graph.insert_node(position, id);
+        self.output.push(format!(
+            "{name} created: drag the mesh of a mesh block or of an analysis to its Mesh row, \
+             and its mesh on to analyses."
+        ));
+        id
+    }
+
     /// Adds a parameters block with one length; returns its id.
     fn add_parameters(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
@@ -1645,9 +1805,8 @@ impl ProjectApp {
         }
     }
 
-    /// Computes the values of measure blocks whose results or definition changed, on worker
-    /// threads, and takes the values computed.
-    fn evaluate_measures(&mut self) {
+    /// Takes the values the workers of measure blocks computed; returns whether one came.
+    fn poll_measures(&mut self) -> bool {
         let done: Vec<(u64, u64, Result<f64, String>)> = (self.measuring.iter())
             .filter_map(|(&id, (key, receiver))| match receiver.try_recv() {
                 Ok(result) => Some((id, *key, result)),
@@ -1657,6 +1816,7 @@ impl ProjectApp {
                 }
             })
             .collect();
+        let came = !done.is_empty();
         for (id, key, result) in done {
             self.measuring.remove(&id);
             let Some(node) = self.node(id) else {
@@ -1687,6 +1847,12 @@ impl ProjectApp {
             };
             self.output.push(line);
         }
+        came
+    }
+
+    /// Computes the values of measure blocks whose results or definition changed, on worker
+    /// threads; [`ProjectApp::poll_measures`] takes them.
+    fn evaluate_measures(&mut self) {
         let measures: Vec<u64> = (self.nodes.iter())
             .filter(|n| n.kind() == Kind::Measure)
             .map(|n| n.id)
@@ -1742,8 +1908,9 @@ impl ProjectApp {
             .push(Node::new(id, name.clone(), Block::Optimizer(block)));
         self.graph.insert_node(position, id);
         self.output.push(format!(
-            "{name} created: drag its value to Refine of a mesh block and the value of a Measure \
-             block to its Measure row; Update Project then runs the loop."
+            "{name} created: drag its value to the Factor of a Refine Mesh block or a parameter \
+             of a mesh block, and the value of a Measure block to its Measure row; Update \
+             Project then runs the loop."
         ));
         id
     }
@@ -1842,35 +2009,55 @@ impl ProjectApp {
     }
 
     /// How many elements the meshes an optimizer varies would have at `value`: of a mesh
-    /// block exactly, of the geometry of an analysis estimated from its mesh now, its element
-    /// sizes scaling with the refinement. `None` when it varies no mesh.
+    /// block or a refine mesh block refining one exactly; of geometry a refine mesh block
+    /// refines estimated from the meshes of the analyses it goes to, their element sizes
+    /// scaling with the factor. `None` when it varies no mesh.
     fn elements_at(&self, id: u64, value: f64) -> Option<u64> {
         (self.feedback_of(id).into_iter())
             .filter_map(|link| {
                 let node = self.nodes.iter().find(|n| n.id == link.target)?;
                 let key = links::parameter_key(link)?;
-                if node.kind() == Kind::Analysis {
-                    return (key == REFINEMENT)
-                        .then(|| estimated_elements(node, value))
-                        .flatten();
+                if let Some(refine) = node.as_refine() {
+                    return match refine.input.as_ref()? {
+                        RefineInput::Primitive {
+                            primitive, factor, ..
+                        } => Some(primitive.refined(factor * value).element_count()),
+                        RefineInput::Geometry { refinement, .. } => (self.meshed_by(node.id))
+                            .filter_map(|n| estimated_elements(n, refinement * value))
+                            .max(),
+                        RefineInput::Fixed(_) => None,
+                    };
                 }
-                let mesh = node.as_mesh()?;
-                let (mut primitive, mut refinement) = (mesh.primitive.clone(), mesh.refinement);
-
-                if key == REFINEMENT {
-                    refinement = value;
-                } else {
-                    primitive.set_value(key, value);
-                }
-                Some(primitive.refined(refinement).element_count())
+                let mut primitive = node.as_mesh()?.primitive.clone();
+                primitive.set_value(key, value);
+                Some(primitive.element_count())
             })
             .max()
     }
 
-    /// The elements of the meshes an optimizer varies, as they are now.
+    /// The analyses that take the mesh of the block `id` and mesh its geometry themselves.
+    fn meshed_by(&self, id: u64) -> impl Iterator<Item = &Node> {
+        (self.links.iter())
+            .filter(move |l| l.source == id && l.item.first().is_some_and(|c| c == links::MESH))
+            .filter_map(|l| self.nodes.iter().find(|n| n.id == l.target))
+            .filter(|n| n.kind() == Kind::Analysis)
+    }
+
+    /// The elements of the meshes an optimizer varies, as they are now: of geometry, those of
+    /// the analyses that meshed it.
     fn loop_elements(&self, id: u64) -> Option<u64> {
         (self.feedback_of(id).into_iter())
             .filter_map(|link| self.nodes.iter().find(|n| n.id == link.target))
+            .flat_map(|node| {
+                let geometry = node
+                    .as_refine()
+                    .is_some_and(|r| matches!(r.input, Some(RefineInput::Geometry { .. })));
+                if geometry {
+                    self.meshed_by(node.id).collect()
+                } else {
+                    vec![node]
+                }
+            })
             .filter_map(Node::link_data)
             .map(|d| d.mesh.element_count() as u64)
             .max()
@@ -2021,8 +2208,8 @@ impl ProjectApp {
                 &[links::LOOP, "Value"],
                 format!("Value {}", self.shown_loop_value(node.id, optimizer.value)),
                 NodeIcon::Setup,
-                "The value it gives: drag it to Refine or another number of a mesh block. The \
-                 wire is dashed, as it closes the loop.",
+                "The value it gives: drag it to the Factor of a Refine Mesh block or a number \
+                 of a mesh block. The wire is dashed, as it closes the loop.",
             )
         };
         vec![measure, what, progress, value]
@@ -2055,7 +2242,8 @@ impl ProjectApp {
         let name = self.name_of(id);
         if self.objective_of(id).is_none() || self.feedback_of(id).is_empty() {
             self.output.push(format!(
-                "{name} cannot run: link its value to a parameter of a mesh block and the value \
+                "{name} cannot run: link its value to the Factor of a Refine Mesh block or a \
+                 parameter of a mesh block, and the value \
                  of a Measure block to its Measure row."
             ));
             return;
@@ -2845,6 +3033,7 @@ impl ProjectApp {
                         self.output.push(line);
                     }
                 }
+                self.sync_due = true;
             }
         }
     }
@@ -2911,6 +3100,8 @@ impl ProjectApp {
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 return self.edit_mesh(id);
             }
+            // Its factor is edited in its block.
+            Some(Kind::RefineMesh) => return,
             Some(Kind::Parameters) => return self.edit_parameters(id),
             Some(Kind::Measure) => return self.edit_measure(id),
             Some(Kind::Optimizer) => return self.edit_optimizer(id),
@@ -4079,10 +4270,12 @@ impl ProjectApp {
                         self.measure_state(n.id),
                         self.measuring.contains_key(&n.id),
                     ),
+                    (Kind::RefineMesh, _) => {
+                        refine_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
+                    }
                     (Kind::Analysis, Some(status)) => block_rows(
                         status,
                         fe,
-                        n.refinement(),
                         &n.expanded,
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                         bundles.get(&n.id).map_or(&[][..], Vec::as_slice),
@@ -4102,6 +4295,7 @@ impl ProjectApp {
                         .unwrap_or_default(),
                     kind: n.kind(),
                     space: n.space().unwrap_or_default(),
+                    has_space: n.space().is_some(),
                     steps: (fe.into_iter().flat_map(|fe| &fe.steps))
                         .map(|s| s.name.clone())
                         .collect(),
@@ -4851,6 +5045,13 @@ impl ProjectApp {
     fn sync_links(&mut self, ctx: &egui::Context) {
         self.poll_restoring();
         self.refresh_files(ctx);
+        // A new value of a measure goes to the optimizer that waits for it.
+        if !self.measuring.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+            if self.poll_measures() {
+                self.sync_due = true;
+            }
+        }
         // Results that went out of date, or up to date again, change what the analyses that
         // take them are: however that came about, the links pass it on.
         if self.freshness() != self.synced_freshness {
@@ -4864,6 +5065,10 @@ impl ProjectApp {
         self.evaluate_measures();
         let ids: Vec<u64> = self.nodes.iter().map(|n| n.id).collect();
         for target in links::order(&ids, &self.links) {
+            if (self.nodes.iter()).any(|n| n.id == target && n.kind() == Kind::RefineMesh) {
+                take_refine_input(&mut self.nodes, &self.links, target);
+                continue;
+            }
             let to_target: Vec<Link> = (self.links.iter())
                 .filter(|l| l.target == target)
                 .cloned()
@@ -5416,7 +5621,7 @@ impl ProjectApp {
                 })
                 .map(|l| l.target)
                 .collect(),
-            Action::SetRefinement(id, _) | Action::Split(id, _) => vec![*id],
+            Action::Split(id, _) => vec![*id],
             // The analysis it continues takes its steps.
             Action::Merge(id) => (self.links.iter())
                 .filter(|l| l.target == *id && links::is_state(l))
@@ -5424,6 +5629,8 @@ impl ProjectApp {
                 .collect(),
             Action::AddMaterials(_)
             | Action::AddMesh(..)
+            | Action::AddRefineMesh(_)
+            | Action::SetRefinement(..)
             | Action::AddMeshExport(_)
             | Action::AddCampbell(_)
             | Action::AddFile(_)
@@ -5476,6 +5683,9 @@ impl ProjectApp {
                 }
                 self.sync_due = true;
             }
+            Action::AddRefineMesh(pos) => {
+                self.add_refine_mesh(pos);
+            }
             Action::AddMeshExport(pos) => {
                 self.add_mesh_export(pos);
             }
@@ -5511,6 +5721,8 @@ impl ProjectApp {
                 if let Some(mesh) = self.node(id).and_then(Node::as_mesh_mut) {
                     mesh.primitive = primitive;
                 }
+                // Refine mesh blocks after it refine the new parameters.
+                self.sync_due = true;
             }
             Action::Open(id, view) => self.open_window(ctx, id, view),
             Action::Solve(id) => self.solve_chain(id),
@@ -5644,7 +5856,7 @@ impl ProjectApp {
         let what = match kind {
             Kind::Analysis => "with its model and results",
             Kind::Materials => "with its materials",
-            Kind::Mesh => "with its mesh",
+            Kind::Mesh | Kind::RefineMesh => "with its mesh",
             Kind::Parameters => "with its parameters",
             Kind::Measure => "with its value",
             Kind::Optimizer => "with its iterations",
@@ -6112,6 +6324,8 @@ struct BlockView {
     name: String,
     kind: Kind,
     space: ModelSpace,
+    /// Whether the data it gives has a model space, `space`.
+    has_space: bool,
     /// Its steps, to split it after one, and the analysis it continues, to merge into.
     steps: Vec<String>,
     continues: Option<String>,
@@ -6120,6 +6334,7 @@ struct BlockView {
     open: bool,
     /// What a mesh block meshes, and the units its parameters are shown in.
     primitive: Option<MeshPrimitive>,
+    /// The factor of a refine mesh block.
     refinement: f64,
     /// The numbers of a parameters block.
     parameters: Vec<Parameter>,
@@ -6133,7 +6348,6 @@ struct BlockView {
 fn block_rows(
     status: &AnalysisStatus,
     fe: Option<&plx_model::FeModel>,
-    refinement: Option<f64>,
     expanded: &BTreeSet<Vec<String>>,
     incoming: &[(Vec<String>, String)],
     bundles: &[Bundle],
@@ -6227,28 +6441,6 @@ fn block_rows(
     }
     rows.push(geometry);
     rows.push(cell(links::MESH, NodeIcon::Mesh, status.mesh, true));
-    // The mesh of geometry can be refined as a whole, by a value link too.
-    if refinement.is_some() {
-        let path = vec![PARAMETERS.to_owned(), REFINEMENT.to_owned()];
-        rows.push(Row {
-            text: "Refine".to_owned(),
-            depth: 1,
-            icon: NodeIcon::Mesh,
-            state: None,
-            expander: None,
-            input: true,
-            output: false,
-            linked_from: from(&path),
-            collection: false,
-            partial: false,
-            widget: Some(RowWidget::Refinement),
-            tip: "Refine: every element size of the mesh setup is divided by this factor when \
-                  the geometry is meshed; the sizes as set stay. An optimizer refines the mesh \
-                  through it; 1 meshes with the sizes as they are."
-                .to_owned(),
-            path,
-        });
-    }
     let setup = vec![links::SETUP.to_owned()];
     let setup_open = expanded.contains(&setup);
     let mut row = cell(links::SETUP, NodeIcon::Setup, status.setup, true);
@@ -6497,15 +6689,20 @@ fn material_rows(fe: &plx_model::FeModel, expanded: &BTreeSet<Vec<String>>) -> V
     rows
 }
 
-/// Makes the meshes of the mesh blocks among `nodes` that are out of date anew, of those in
-/// `only` when it is given; returns whether it made any, and a line on each.
+/// Makes the meshes of the mesh blocks and refine mesh blocks among `nodes` that are out of
+/// date anew, of those in `only` when it is given; returns whether it made any, and a line on
+/// each.
 fn generate_stale_meshes(nodes: &mut [Node], only: Option<&[u64]>) -> (bool, Vec<String>) {
     let mut lines = Vec::new();
     let mut made = false;
-    for node in (nodes.iter_mut())
-        .filter(|n| n.kind() == Kind::Mesh && only.is_none_or(|ids| ids.contains(&n.id)))
-    {
-        if node.mesh_state() == CellState::UpToDate {
+    for node in (nodes.iter_mut()).filter(|n| only.is_none_or(|ids| ids.contains(&n.id))) {
+        let stale = match node.kind() {
+            Kind::Mesh => node.mesh_state() != CellState::UpToDate,
+            // One without a mesh to refine has nothing to make.
+            Kind::RefineMesh => node.mesh_state() == CellState::OutOfDate,
+            _ => false,
+        };
+        if !stale {
             continue;
         }
         lines.push(match node.generate() {
@@ -6519,12 +6716,14 @@ fn generate_stale_meshes(nodes: &mut [Node], only: Option<&[u64]>) -> (bool, Vec
     (made, lines)
 }
 
-/// The mesh blocks before the analysis `id` whose mesh is out of date: what takes its mesh
-/// from them, directly or through other analyses, holds a mesh that is not the block's.
+/// The mesh blocks and refine mesh blocks before the analysis `id` whose mesh is out of
+/// date: what takes its mesh from them, directly or through other analyses, holds a mesh
+/// that is not the block's.
 fn stale_meshes(nodes: &[Node], links: &[Link], id: u64) -> Vec<String> {
     (links::upstream(links, id).into_iter())
         .filter_map(|source| nodes.iter().find(|n| n.id == source))
-        .filter(|n| n.kind() == Kind::Mesh && n.mesh_state() != CellState::UpToDate)
+        .filter(|n| matches!(n.kind(), Kind::Mesh | Kind::RefineMesh))
+        .filter(|n| n.mesh_state() != CellState::UpToDate)
         .map(|n| n.name.clone())
         .collect()
 }
@@ -6601,10 +6800,6 @@ fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
         );
         rows.push(row(param.key, param.label, RowWidget::Param(*param), tip));
     }
-    let tip = "Refine: a factor on the elements along each edge, rounded. An optimizer \
-               refines the mesh through it; 1 meshes the divisions as they are."
-        .to_owned();
-    rows.push(row(REFINEMENT, "Refine", RowWidget::Refinement, tip));
     let tip = match primitive {
         MeshPrimitive::Box { .. } => "Element type of the hexahedra".to_owned(),
         MeshPrimitive::Rectangle { .. } => format!(
@@ -6615,6 +6810,183 @@ fn mesh_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     };
     rows.push(row("element", "Element", RowWidget::Element, tip));
     rows
+}
+
+/// Brings what the refine mesh block `id` refines up to date with the block linked to
+/// its Mesh row. The parameters of a mesh block it meshes itself, with its factor on the
+/// divisions; geometry it gives on with the element sizes divided by its factor, for the
+/// analysis the mesh goes to to mesh it.
+fn take_refine_input(nodes: &mut [Node], links: &[Link], id: u64) {
+    let Some((taken, own_factor)) = (nodes.iter().find(|n| n.id == id))
+        .and_then(Node::as_refine)
+        .map(|r| (r.taken, r.factor))
+    else {
+        return;
+    };
+    let link = links
+        .iter()
+        .find(|l| l.target == id && l.item.first().is_some_and(|c| c == links::MESH));
+    let mut copy = None;
+    let input = match link.and_then(|l| nodes.iter().find(|n| n.id == l.source)) {
+        None => None,
+        Some(source) => match &source.block {
+            Block::Mesh(m) => Some(RefineInput::Primitive {
+                primitive: m.primitive.clone(),
+                space: m.space,
+                factor: 1.0,
+            }),
+            Block::RefineMesh(r) => match &r.input {
+                Some(RefineInput::Primitive {
+                    primitive,
+                    space,
+                    factor,
+                }) => Some(RefineInput::Primitive {
+                    primitive: primitive.clone(),
+                    space: *space,
+                    factor: factor * r.factor,
+                }),
+                None => Some(RefineInput::Fixed(source.name.clone())),
+                Some(RefineInput::Fixed(name)) => Some(RefineInput::Fixed(name.clone())),
+                Some(RefineInput::Geometry { .. }) => None,
+            },
+            _ => None,
+        }
+        .or_else(|| {
+            // An analysis loading in its window is taken once it has loaded.
+            let data = source.link_data()?;
+            Some(match data.geometry {
+                Some(geometry) if data.mesh.element_count() > 0 => {
+                    let mut print = plx_mesh::Fnv::new();
+                    let path = [links::MESH.to_owned()];
+                    print.add(&links::fingerprint(data, &path).to_le_bytes());
+                    print.add(&own_factor.to_bits().to_le_bytes());
+                    let print = print.finish();
+                    copy = (taken != Some(print)).then(|| (print, links::MeshCopy::of(data)));
+                    RefineInput::Geometry {
+                        space: source.space().unwrap_or_default(),
+                        refinement: geometry.refinement,
+                    }
+                }
+                _ => RefineInput::Fixed(source.name.clone()),
+            })
+        }),
+    };
+    if link.is_some() && input.is_none() {
+        return;
+    }
+    let Some(refine) = (nodes.iter_mut().find(|n| n.id == id)).and_then(Node::as_refine_mut) else {
+        return;
+    };
+    match &input {
+        Some(RefineInput::Geometry { space, refinement }) => {
+            if let Some((print, mut copy)) = copy {
+                if let Some(geometry) = &mut copy.geometry {
+                    geometry.refinement = refinement * refine.factor;
+                }
+                refine.model.data_mut().take_mesh(copy);
+                refine.model.fe.properties.space = *space;
+                refine.taken = Some(print);
+                refine.generated = None;
+            }
+        }
+        Some(RefineInput::Primitive { .. }) => {
+            let fresh = refine.generated.is_none();
+            refine.input = input;
+            refine.taken = None;
+            // The first mesh is made at once, so that it can be linked on.
+            if fresh {
+                let _ = refine.generate();
+            }
+            return;
+        }
+        None | Some(RefineInput::Fixed(_)) => {
+            refine.model = LinkedModel::default();
+            refine.generated = None;
+            refine.taken = None;
+        }
+    }
+    refine.input = input;
+}
+
+/// The rows of a refine mesh block: the mesh it takes and gives, with its state, and the
+/// factor, which a value link may give.
+fn refine_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
+    let state = node.mesh_state();
+    let Some(block) = node.as_refine() else {
+        return Vec::new();
+    };
+    let linked = |path: &[String]| {
+        (incoming.iter())
+            .find(|(slot, _)| slot.as_slice() == path)
+            .map(|(_, source)| source.clone())
+    };
+    let mesh = &block.model.mesh;
+    let count = mesh.element_count();
+    let mut tip = "Mesh: drag the mesh of a mesh block or of an analysis that meshes geometry \
+                   here; drag the pin on the right to the Mesh row of an analysis for the \
+                   refined mesh."
+        .to_owned();
+    match &block.input {
+        None => {}
+        Some(RefineInput::Fixed(source)) => tip.push_str(&format!(
+            "\nThe mesh of {source} has no parameters or geometry to mesh it again with."
+        )),
+        Some(RefineInput::Geometry { .. }) => tip.push_str(
+            "\nIt refines geometry: every element size of the mesh setup is divided by the \
+             factor, and the analysis the mesh goes to meshes it with them when it is solved.",
+        ),
+        Some(RefineInput::Primitive { .. }) => {
+            tip.push_str(&format!("\nMesh: {}", state.text()));
+            if state == CellState::OutOfDate {
+                tip.push_str(": Update Project or Generate Mesh makes it again");
+            }
+            if let Some(problem) = (block.meshed()).and_then(|(p, space)| p.problem(space)) {
+                tip.push_str(&format!("\nIt cannot be made: {problem}"));
+            }
+            if count > 0 {
+                tip.push_str(&format!(
+                    "\n{count} elements, the divisions times the factor, rounded."
+                ));
+            }
+        }
+    }
+    let path = vec![links::MESH.to_owned()];
+    let factor = vec![PARAMETERS.to_owned(), REFINEMENT.to_owned()];
+    vec![
+        Row {
+            text: links::MESH.to_owned(),
+            depth: 0,
+            icon: NodeIcon::Mesh,
+            state: (block.input.is_some()).then_some(state),
+            expander: None,
+            input: true,
+            output: count > 0,
+            linked_from: linked(&path),
+            collection: false,
+            partial: false,
+            widget: None,
+            tip,
+            path,
+        },
+        Row {
+            text: "Factor".to_owned(),
+            depth: 0,
+            icon: NodeIcon::Mesh,
+            state: None,
+            expander: None,
+            input: true,
+            output: false,
+            linked_from: linked(&factor),
+            collection: false,
+            partial: false,
+            widget: Some(RowWidget::Refinement),
+            tip: "Factor: the divisions of a mesh block are multiplied by it, rounded, and the \
+                  element sizes of geometry divided by it; 1 leaves the mesh as it is. Drop \
+                  the value of an optimizer here to refine the mesh in its loop."
+                .to_owned(),
+            path: factor,
+        },
+    ]
 }
 
 /// Why `item` of the block `source` cannot go to `slot` of the block `target`; `None`
@@ -6647,10 +7019,15 @@ fn refusal(
             with_article(kind(slot)),
         ));
     }
+    // A refine mesh block takes the model space of the mesh it refines.
+    let target_space = match target_node.kind() {
+        Kind::RefineMesh => None,
+        _ => target_node.space(),
+    };
     // Data of a model goes only between blocks of the same model space; materials and
     // the other blocks without one take it from any.
     if links::DataType::of(item).is_some_and(links::DataType::has_space)
-        && let (Some(a), Some(b)) = (source_node.space(), target_node.space())
+        && let (Some(a), Some(b)) = (source_node.space(), target_space)
         && a != b
     {
         return Some(format!(
@@ -6668,6 +7045,26 @@ fn refusal(
     let first = slot.first().map(String::as_str);
     if first == Some(links::MEASURE) {
         return None;
+    }
+    if target_node.kind() == Kind::RefineMesh && first == Some(links::MESH) {
+        let remeshed = matches!(source_node.kind(), Kind::Mesh | Kind::RefineMesh)
+            || source_node
+                .link_data()
+                .is_some_and(|d| d.geometry.is_some());
+        if !remeshed {
+            return Some(format!(
+                "{to} makes a mesh again from the parameters of a mesh block or from \
+                 geometry, and the mesh of {from} has neither."
+            ));
+        }
+    }
+    let refines_geometry = (source_node.as_refine())
+        .is_some_and(|r| matches!(r.input, Some(RefineInput::Geometry { .. })));
+    if refines_geometry && target_node.kind() == Kind::MeshExport {
+        return Some(format!(
+            "{from} refines geometry, which the analysis its mesh goes to meshes; link the \
+             Mesh of that analysis to {to}."
+        ));
     }
     if first == Some(links::ANALYSIS) {
         return (source_node.kind() != Kind::Analysis || target_node.kind() != Kind::Campbell)
@@ -6727,7 +7124,7 @@ fn refusal(
 fn parameter_label(nodes: &[Node], id: u64, slot: &[String]) -> String {
     let key = slot.get(1).map_or("", String::as_str);
     if key == REFINEMENT {
-        return "Refine".into();
+        return "Factor".into();
     }
     (nodes.iter().find(|n| n.id == id))
         .and_then(Node::as_mesh)
@@ -7092,8 +7489,7 @@ fn measure_regions(data: &links::Data) -> BTreeMap<String, Vec<plx_mesh::NodeId>
     regions
 }
 
-/// The key of the refinement of a mesh block, a parameter beside those of its primitive,
-/// and of the mesh of an analysis' geometry.
+/// The key of the factor of a refine mesh block, the parameter row it takes numbers at.
 const REFINEMENT: &str = "refinement";
 
 /// How many elements the geometry of an analysis would mesh at the refinement `value`: its
@@ -7305,6 +7701,7 @@ enum BlockKind {
     Analysis,
     Materials,
     Mesh(MeshPrimitive),
+    RefineMesh,
     Parameters,
     Measure,
     Optimizer,
@@ -7319,6 +7716,7 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::Materials,
         BlockKind::Mesh(MeshPrimitive::default_box()),
         BlockKind::Mesh(MeshPrimitive::default_rectangle()),
+        BlockKind::RefineMesh,
         BlockKind::Parameters,
         BlockKind::Measure,
         BlockKind::Optimizer,
@@ -7350,6 +7748,14 @@ impl BlockKind {
                 };
                 ("Mesh", primitive.label(), keywords, mesh_tip(primitive))
             }
+            Self::RefineMesh => (
+                "Mesh",
+                "Refine Mesh",
+                "finer coarser factor divisions element size convergence optimizer",
+                "Adds a block that makes the mesh linked to it again, finer or coarser by a \
+                 factor: the divisions of a mesh block times the factor, or the element sizes \
+                 of geometry divided by it. An optimizer refines a mesh through its factor.",
+            ),
             Self::Parameters => (
                 "Parameters",
                 "Parameters",
@@ -7409,6 +7815,7 @@ impl BlockKind {
             Self::Analysis => "New Analysis …",
             Self::Materials => "Add Materials",
             Self::Mesh(primitive) => primitive.label(),
+            Self::RefineMesh => "Refine Mesh",
             Self::Parameters => "Add Parameters",
             Self::Measure => "Add Measure",
             Self::Optimizer => "Add Optimizer",
@@ -7424,6 +7831,7 @@ impl BlockKind {
             Self::Analysis => Action::New(pos),
             Self::Materials => Action::AddMaterials(pos),
             Self::Mesh(primitive) => Action::AddMesh(pos, primitive.clone()),
+            Self::RefineMesh => Action::AddRefineMesh(pos),
             Self::Parameters => Action::AddParameters(pos),
             Self::Measure => Action::AddMeasure(pos),
             Self::Optimizer => Action::AddOptimizer(pos),
@@ -7830,6 +8238,11 @@ impl SnarlViewer<u64> for Viewer {
                 paint_space(ui.painter(), rect, block.space, ui.visuals().text_color());
                 icon.on_hover_text(format!("Model space: {}", block.space.label()));
             }
+            Kind::RefineMesh => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Mesh, ink);
+                icon.on_hover_text("Makes the mesh linked to it again, finer or coarser");
+            }
             Kind::Materials => {
                 let ink = ui.visuals().text_color();
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Materials, ink);
@@ -7891,6 +8304,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Analysis => "Double-click opens the analysis in its own window.",
             Kind::Materials => "Double-click edits the materials.",
             Kind::Mesh => "Double-click edits the size and division of the mesh.",
+            Kind::RefineMesh => "Its factor makes the mesh finer or coarser.",
             Kind::MeshExport => "Double-click chooses the file to write.",
             Kind::Parameters => "Double-click adds, renames or removes parameters.",
             Kind::Measure => "Double-click chooses what it measures.",
@@ -8045,7 +8459,7 @@ impl SnarlViewer<u64> for Viewer {
         {
             // The type of the pin, and the model space of what it carries where it has one.
             let space = (self.block(id))
-                .filter(|b| data.has_space() && matches!(b.kind, Kind::Analysis | Kind::Mesh))
+                .filter(|b| data.has_space() && b.has_space)
                 .map_or(String::new(), |b| format!(", {}", b.space.label()));
             tip.push_str(&format!("\nPin: {}{space}.", capitalized(data.label())));
         }
@@ -8254,7 +8668,7 @@ impl SnarlViewer<u64> for Viewer {
             .map(|b| b.kind)
         {
             Some(Kind::Materials) => default.fill(crate::style::materials_header()),
-            Some(Kind::Mesh) => default.fill(crate::style::mesh_header()),
+            Some(Kind::Mesh | Kind::RefineMesh) => default.fill(crate::style::mesh_header()),
             Some(Kind::Parameters) => default.fill(crate::style::parameters_header()),
             Some(Kind::Measure) => default.fill(crate::style::measure_header()),
             Some(Kind::Optimizer) => default.fill(crate::style::optimizer_header()),
@@ -8641,10 +9055,10 @@ fn node_menu(
             entry(ui, "Read Again", Action::ReadFile(id));
         } else if kind == Kind::Campbell {
             entry(ui, "Open Diagram …", Action::Open(id, None));
-        } else {
+        } else if kind != Kind::RefineMesh {
             entry(ui, "Edit …", Action::Open(id, None));
         }
-        if kind == Kind::Mesh {
+        if matches!(kind, Kind::Mesh | Kind::RefineMesh) {
             entry(ui, "Generate Mesh", Action::Generate(id));
         }
         if kind == Kind::Optimizer {
@@ -8746,7 +9160,8 @@ const PARAMETERS_TIP: &str = "Adds a block of named numbers: drag the pin of one
 const MEASURE_TIP: &str = "Adds a block that computes a key figure from the results of a \
                            step linked to it, such as the largest von Mises stress, the \
                            displacement of a node or an eigenfrequency.";
-const OPTIMIZER_TIP: &str = "Adds a loop: it gives values to a parameter of a mesh block, has \
+const OPTIMIZER_TIP: &str = "Adds a loop: it gives values to the factor of a Refine Mesh block \
+                             or a parameter of a mesh block, has \
                              the analyses solved and reads a Measure block, until the mesh \
                              has converged or every value of a study is solved.";
 const MATERIALS_TIP: &str = "Adds a block of materials kept in the project: analyses link \
@@ -8945,7 +9360,6 @@ mod tests {
             primitive: MeshPrimitive::default_box(),
             mesh: Default::default(),
             generated: None,
-            refinement: 1.0,
         };
         let mut node = Node::read(ProjectNode::Mesh(Box::new(block)));
         assert_eq!(node.kind(), Kind::Mesh);
@@ -8963,8 +9377,9 @@ mod tests {
         let params: Vec<String> = (rows[1..].iter()).map(|row| row.path.join("/")).collect();
         assert_eq!(params[0], "Parameters/x");
         assert_eq!(params[6], "Parameters/nx");
-        assert_eq!(params[9], "Parameters/refinement");
         assert_eq!(params.last().unwrap(), "Parameters/element");
+        // The factor is a block of its own.
+        assert!(!params.iter().any(|p| p.ends_with(REFINEMENT)));
         let (numbers, element) = rows[1..].split_at(rows.len() - 2);
         assert!(
             numbers
@@ -8972,13 +9387,6 @@ mod tests {
                 .all(|r| r.widget.is_some() && r.input && !r.output)
         );
         assert!(!element[0].input && !element[0].output);
-        // A refinement of 1.5 makes 15 x 3 x 3 elements.
-        node.as_mesh_mut().unwrap().refinement = 1.5;
-        assert_eq!(node.mesh_state(), CellState::OutOfDate);
-        assert_eq!(node.generate(), Ok(135));
-        node.as_mesh_mut().unwrap().refinement = 1.0;
-        assert_eq!(node.mesh_state(), CellState::OutOfDate);
-        assert_eq!(node.generate(), Ok(40));
         // What the rows edit: the count of elements along X and the element type.
         let primitive = &mut node.as_mesh_mut().unwrap().primitive;
         assert!(primitive.set("nx", plx_model::ParamValue::Count(20)));
@@ -8999,8 +9407,107 @@ mod tests {
         assert_eq!(node.mesh_state(), CellState::UpToDate);
     }
 
+    /// A box mesh block, made, with the id 2.
+    fn made_box() -> Node {
+        let mut node = Node::mesh_block(
+            2,
+            "Box".into(),
+            ModelSpace::ThreeD,
+            plx_model::UnitSystem::MmTonSC,
+            MeshPrimitive::default_box(),
+            Default::default(),
+            None,
+        );
+        assert_eq!(node.generate(), Ok(40));
+        node
+    }
+
+    fn mesh_link(source: u64, target: u64) -> Link {
+        Link {
+            source,
+            target,
+            item: vec![links::MESH.to_owned()],
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn the_mesh_of_geometry_is_refined_as_a_whole() {
+    fn a_refine_mesh_block_refines_the_divisions_of_a_mesh_block() {
+        let mut nodes = vec![
+            made_box(),
+            Node::refine_block(4, "Refine Mesh".into(), 1.0, Default::default(), None),
+            Node::analysis(1, "Analysis-1".into(), ProjectAnalysis::default()),
+        ];
+        assert_eq!(nodes[1].kind(), Kind::RefineMesh);
+        // Nothing linked: nothing to give.
+        assert_eq!(nodes[1].mesh_state(), CellState::Missing);
+        let rows = refine_rows(&nodes[1], &[]);
+        assert!(rows[0].input && !rows[0].output);
+        let links = [mesh_link(2, 4), mesh_link(4, 1)];
+        // Linked, it makes its mesh at once, so that it can be linked on.
+        take_refine_input(&mut nodes, &links, 4);
+        assert_eq!(nodes[1].mesh_state(), CellState::UpToDate);
+        assert_eq!(nodes[1].link_data().unwrap().mesh.element_count(), 40);
+        assert_eq!(nodes[1].space(), Some(ModelSpace::ThreeD));
+        // The mesh row takes and gives a mesh, the factor takes numbers.
+        let rows = refine_rows(&nodes[1], &[]);
+        assert!(rows[0].input && rows[0].output);
+        assert_eq!(rows[1].path, [PARAMETERS, REFINEMENT]);
+        assert!(rows[1].input && matches!(rows[1].widget, Some(RowWidget::Refinement)));
+        assert_eq!(
+            value_kind(&nodes, 4, &rows[1].path),
+            Some(ValueKind::Factor)
+        );
+        // A factor of 1.5 makes 15 x 3 x 3 elements; the analysis after it is out of date
+        // until the block makes them.
+        nodes[1].set_refinement(1.5);
+        assert_eq!(nodes[1].mesh_state(), CellState::OutOfDate);
+        assert_eq!(stale_meshes(&nodes, &links, 1), ["Refine Mesh"]);
+        let (made, lines) = generate_stale_meshes(&mut nodes, None);
+        assert!(made, "{lines:?}");
+        assert_eq!(nodes[1].link_data().unwrap().mesh.element_count(), 135);
+        assert!(stale_meshes(&nodes, &links, 1).is_empty());
+        // The mesh block keeps its own divisions.
+        assert_eq!(nodes[0].link_data().unwrap().mesh.element_count(), 40);
+        // New divisions of the mesh block are refined too.
+        let primitive = &mut nodes[0].as_mesh_mut().unwrap().primitive;
+        assert!(primitive.set("nx", plx_model::ParamValue::Count(20)));
+        take_refine_input(&mut nodes, &links, 4);
+        assert_eq!(nodes[1].mesh_state(), CellState::OutOfDate);
+        generate_stale_meshes(&mut nodes, None);
+        assert_eq!(
+            nodes[1].link_data().unwrap().mesh.element_count(),
+            30 * 3 * 3
+        );
+        // It keeps its mesh in the project file, up to date when read back.
+        let written = nodes[1].written([1.0, 2.0]).unwrap();
+        let mut read = vec![nodes.remove(0), Node::read(written)];
+        assert_eq!(read[1].mesh_state(), CellState::Missing);
+        take_refine_input(&mut read, &links, 4);
+        assert_eq!(read[1].refinement(), Some(1.5));
+        assert_eq!(read[1].mesh_state(), CellState::UpToDate);
+        // A second block refines the refined divisions: 1.5 * 2 = 3 times as fine.
+        read.push(Node::refine_block(
+            5,
+            "Finer".into(),
+            2.0,
+            Default::default(),
+            None,
+        ));
+        let chain = [mesh_link(2, 4), mesh_link(4, 5)];
+        take_refine_input(&mut read, &chain, 5);
+        assert_eq!(
+            read[2].link_data().unwrap().mesh.element_count(),
+            60 * 6 * 6
+        );
+        // Unlinked, it gives nothing.
+        take_refine_input(&mut read, &[], 4);
+        assert_eq!(read[1].mesh_state(), CellState::Missing);
+        assert_eq!(read[1].link_data().unwrap().mesh.element_count(), 0);
+    }
+
+    #[test]
+    fn a_refine_mesh_block_divides_the_element_sizes_of_geometry() {
         let geometry = plx_model::Geometry {
             source: "block.step".into(),
             brep: "shapes".into(),
@@ -9026,31 +9533,66 @@ mod tests {
             mesh_inputs,
             ..Default::default()
         };
-        let mut node = Node::read(ProjectNode::Analysis(Box::new(data)));
-        assert_eq!(node.refinement(), Some(1.0));
-        assert_eq!(node.status().unwrap().mesh, CellState::UpToDate);
-        // A Refine row below the mesh takes a value link.
+        let mut nodes = vec![
+            Node::read(ProjectNode::Analysis(Box::new(data.clone()))),
+            Node::refine_block(4, "Refine Mesh".into(), 2.0, Default::default(), None),
+            Node::read(ProjectNode::Analysis(Box::new(ProjectAnalysis {
+                id: 5,
+                name: "Fine".into(),
+                ..data
+            }))),
+        ];
+        // An analysis has no Refine row of its own.
         let rows = block_rows(
-            node.status().unwrap(),
+            nodes[0].status().unwrap(),
             None,
-            node.refinement(),
             &BTreeSet::new(),
             &[],
             &[],
             None,
         );
-        let refine = rows.iter().find(|r| r.text == "Refine").unwrap();
-        assert_eq!(refine.path, [PARAMETERS, REFINEMENT]);
-        assert!(refine.input && matches!(refine.widget, Some(RowWidget::Refinement)));
-        // Twice as fine: the mesh is out of date, about 2^3 times the elements.
-        assert_eq!(estimated_elements(&node, 2.0), Some(320));
-        node.set_refinement(2.0);
-        assert_eq!(node.refinement(), Some(2.0));
-        assert_eq!(node.status().unwrap().mesh, CellState::OutOfDate);
-        assert_eq!(estimated_elements(&node, 2.0), Some(40));
-        // An analysis without geometry has no Refine row.
-        (node.as_analysis_mut().unwrap().data.as_mut().unwrap()).geometry = None;
-        assert_eq!(node.refinement(), None);
+        assert!(!rows.iter().any(|r| r.path.contains(&REFINEMENT.to_owned())));
+        assert_eq!(nodes[0].refinement(), None);
+        let links = [mesh_link(3, 4), mesh_link(4, 5)];
+        assert_eq!(
+            refusal(&nodes, &[], 3, &links[0].item, 4, &links[0].item),
+            None
+        );
+        take_refine_input(&mut nodes, &links, 4);
+        // It gives the geometry with the sizes divided by its factor; the analysis the mesh
+        // goes to meshes it, so its mesh is out of date there.
+        assert_eq!(nodes[1].mesh_state(), CellState::UpToDate);
+        let given = nodes[1].link_data().unwrap();
+        assert_eq!(given.geometry.unwrap().refinement, 2.0);
+        let print = links::fingerprint(given, &links[1].item);
+        let copy = links::MeshCopy::of(given);
+        let mut analysis = nodes[2].closed_model_mut().unwrap();
+        analysis.take_mesh(copy);
+        nodes[2].refresh_closed();
+        assert_eq!(nodes[2].status().unwrap().mesh, CellState::OutOfDate);
+        // Twice as fine: about 2^3 times the elements of the mesh at the sizes as set.
+        assert_eq!(estimated_elements(&nodes[0], 2.0), Some(320));
+        assert_eq!(estimated_elements(&nodes[2], 2.0), Some(40));
+        // A new factor gives a new mesh to the links.
+        nodes[1].set_refinement(3.0);
+        take_refine_input(&mut nodes, &links, 4);
+        let given = nodes[1].link_data().unwrap();
+        assert_eq!(given.geometry.unwrap().refinement, 3.0);
+        assert_ne!(links::fingerprint(given, &links[1].item), print);
+        // It cannot go to a mesh export block: the analysis makes the mesh.
+        nodes.push(Node::mesh_export(6, "Export".into(), String::new(), None));
+        let why = refusal(&nodes, &links, 4, &links[0].item, 6, &links[0].item).unwrap();
+        assert!(why.contains("refines geometry"), "{why}");
+        // A mesh without geometry or parameters cannot be made again.
+        let read = ProjectAnalysis {
+            id: 7,
+            name: "Read".into(),
+            mesh: MeshPrimitive::default_box().generate(space, "Solid-1"),
+            ..Default::default()
+        };
+        nodes.push(Node::read(ProjectNode::Analysis(Box::new(read))));
+        let why = refusal(&nodes, &[], 7, &links[0].item, 4, &links[0].item).unwrap();
+        assert!(why.contains("neither"), "{why}");
     }
 
     #[test]
@@ -9165,7 +9707,6 @@ mod tests {
             primitive: MeshPrimitive::default_box(),
             mesh: Default::default(),
             generated: None,
-            refinement: 1.0,
         };
         let mut nodes = vec![
             Node::read(ProjectNode::Mesh(Box::new(block))),
@@ -9209,7 +9750,6 @@ mod tests {
                 primitive: MeshPrimitive::default_box(),
                 mesh: Default::default(),
                 generated: None,
-                refinement: 1.0,
             })))
         };
         let mut nodes = vec![block(1, "Box"), block(2, "Box-2")];
@@ -9335,15 +9875,7 @@ mod tests {
         let node = Node::analysis(1, "Detail".into(), data);
         let status = node.status().unwrap();
         let global = |fe: &plx_model::FeModel, incoming: &[(Vec<String>, String)]| {
-            let rows = block_rows(
-                status,
-                Some(fe),
-                None,
-                &BTreeSet::new(),
-                incoming,
-                &[],
-                None,
-            );
+            let rows = block_rows(status, Some(fe), &BTreeSet::new(), incoming, &[], None);
             rows.into_iter().find(|r| r.path == [links::GLOBAL_RESULTS])
         };
         // A general model has none; a submodel has an input for the global results.
@@ -9405,7 +9937,6 @@ mod tests {
             primitive: MeshPrimitive::default_box(),
             mesh: Default::default(),
             generated: None,
-            refinement: 1.0,
         };
         let mut source = Node::read(ProjectNode::Mesh(Box::new(block)));
         source.generate().unwrap();

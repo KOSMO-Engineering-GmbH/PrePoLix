@@ -12,7 +12,7 @@ use crate::ValueKind;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum OptimizerKind {
     /// Refines a mesh by a factor until the measure changes less than `tolerance` from one
-    /// iteration to the next. Its value is the refinement of a mesh block.
+    /// iteration to the next. Its value is the factor of a refine mesh block.
     MeshConvergence {
         /// Refinement of the first iteration.
         start: f64,
