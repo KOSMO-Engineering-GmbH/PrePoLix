@@ -85,8 +85,6 @@ pub enum TreeItem {
     Component(usize, usize),
     /// A hot spot definition of the current results, by index.
     HotSpot(usize),
-    /// The global model drawn around the results of a submodel.
-    GlobalModel,
 }
 
 /// Selection shared by the three trees; an item is selected in one view only.
@@ -232,8 +230,6 @@ pub struct TreeResponse {
     pub findings: Option<Vec<Finding>>,
     /// Show the results on a plane, by index, or none.
     pub plane_result: Option<Option<usize>>,
-    /// The global model around a submodel was shown, hidden or drawn otherwise.
-    pub global_model: bool,
 }
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
@@ -1216,45 +1212,6 @@ impl Tree<'_> {
                         &mut tree.response,
                     );
                 });
-            }
-            if let Some(global) = &mut model.global {
-                tree.global_model(ui, global);
-            }
-        });
-    }
-
-    /// The global model around the results of a submodel, shown and drawn as chosen.
-    fn global_model(&mut self, ui: &mut Ui, global: &mut crate::model::GlobalModel) {
-        use crate::model::GlobalDisplay;
-        let item = TreeItem::GlobalModel;
-        let (_, response, changed) = self.row(
-            ui,
-            None,
-            Some(&mut global.visible),
-            TreeIcon::Part,
-            item,
-            "Global Model",
-        );
-        self.response.global_model |= changed;
-        let tip = format!(
-            "The results of the global model the submodel reads, without the {} elements \
-             inside the submodel and behind it where they overlap, deformed by the same scale \
-             and coloured in the same legend. Right-click to draw it whole and see-through \
-             instead.",
-            global.removed
-        );
-        let response = response.on_hover_text(tip);
-        response.context_menu(|ui| {
-            for (display, label) in [
-                (GlobalDisplay::Results, "Show Results"),
-                (GlobalDisplay::Transparent, "Transparent"),
-            ] {
-                if ui.radio(global.display == display, label).clicked() {
-                    global.display = display;
-                    global.visible = true;
-                    self.response.global_model = true;
-                    ui.close();
-                }
             }
         });
     }

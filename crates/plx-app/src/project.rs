@@ -135,6 +135,9 @@ struct AnalysisBlock {
     solving: bool,
     /// The revision of its open window as last seen, see [`AnalysisWindow::revision`].
     seen: Option<u64>,
+    /// Its links were not brought up to date because its window was busy: they are once it
+    /// is idle.
+    sync_missed: bool,
 }
 
 /// The model data a block that is no analysis gives to links or takes from them, in the form
@@ -336,6 +339,7 @@ impl Node {
             upstream: Default::default(),
             solving: false,
             seen: None,
+            sync_missed: false,
         };
         Self::new(id, name, Block::Analysis(Box::new(block)))
     }
@@ -1235,6 +1239,9 @@ pub struct ProjectApp {
     warned: BTreeSet<String>,
     /// When the files of the file blocks were last looked at for changes.
     files_checked: Option<Instant>,
+    /// Whether the solution and results of each analysis were up to date as the links last
+    /// took them, see [`ProjectApp::freshness`].
+    synced_freshness: Vec<(u64, CellState, CellState)>,
 }
 
 impl ProjectApp {
@@ -1301,6 +1308,7 @@ impl ProjectApp {
             history: Default::default(),
             restoring: HashMap::new(),
             files_checked: None,
+            synced_freshness: Vec::new(),
             warned: BTreeSet::new(),
         };
         if app.settings.updates.check_at_startup && app.updater.installation().checks_at_startup() {
@@ -4787,6 +4795,11 @@ impl ProjectApp {
     fn sync_links(&mut self, ctx: &egui::Context) {
         self.poll_restoring();
         self.refresh_files(ctx);
+        // Results that went out of date, or up to date again, change what the analyses that
+        // take them are: however that came about, the links pass it on.
+        if self.freshness() != self.synced_freshness {
+            self.sync_due = true;
+        }
         if !self.sync_due {
             return;
         }
@@ -4825,16 +4838,38 @@ impl ProjectApp {
             let incoming = self.incoming(target);
             upstream.stale_meshes = self.stale_meshes(target);
             if let Some(node) = self.node(target) {
-                if let Some(analysis) = node.as_analysis_mut() {
-                    analysis.upstream = upstream.clone();
+                let Block::Analysis(analysis) = &mut node.block else {
+                    continue;
+                };
+                // A busy window takes nothing now; what it would miss waits for it.
+                if let Some(window) = &analysis.window
+                    && (window.busy().is_some() || window.model().is_none())
+                {
+                    analysis.sync_missed = true;
+                    continue;
                 }
-                match node.window_mut() {
-                    Some(window) => window.set_links(incoming, upstream),
+                analysis.upstream = upstream.clone();
+                match &mut analysis.window {
+                    Some(window) => {
+                        window.set_links(incoming, upstream);
+                        // Analyses after it in this pass see its state as it is now.
+                        if let Some(status) = window.status() {
+                            analysis.status = Some(status);
+                        }
+                    }
                     None => node.refresh_closed(),
                 }
             }
         }
+        self.synced_freshness = self.freshness();
         ctx.request_repaint();
+    }
+
+    /// Per analysis, the state of its solution and results as its block shows them.
+    fn freshness(&self) -> Vec<(u64, CellState, CellState)> {
+        (self.nodes.iter())
+            .filter_map(|n| n.status().map(|s| (n.id, s.solution, s.results)))
+            .collect()
     }
 
     /// What links fill in `target`, and from where it continues and where others continue
@@ -5723,6 +5758,11 @@ impl ProjectApp {
             // The block shows the state live.
             if let Some(status) = window.status() {
                 analysis.status = Some(status);
+            }
+            // A window that missed a pass of the links takes it once it is idle.
+            if analysis.sync_missed && window.busy().is_none() && window.model().is_some() {
+                analysis.sync_missed = false;
+                changed = true;
             }
             if let Some(model) = window.model() {
                 analysis.space = model.fe.properties.space;

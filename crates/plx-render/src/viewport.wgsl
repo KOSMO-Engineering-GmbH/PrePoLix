@@ -17,8 +17,6 @@ struct Globals {
     clip_options: vec4<f32>,
     // Colour of the wireframe of the undeformed shape in rgb.
     wireframe: vec4<f32>,
-    // x: depth offset of parts drawn behind the others, in normalized depth units.
-    behind: vec4<f32>,
     palette: array<vec4<f32>, 26>,
 };
 
@@ -77,33 +75,14 @@ const SPECULAR: f32 = 0.6;
 const SPECULAR_POWER: f32 = 100.0;
 const LIGHT_INTENSITY: f32 = 0.4;
 
-// Entry points cannot call each other; both surface shaders share this.
-fn surface_vertex(in: SurfaceIn) -> SurfaceOut {
+@vertex
+fn vs_surface(in: SurfaceIn) -> SurfaceOut {
     var out: SurfaceOut;
     out.position = globals.view_proj * vec4<f32>(in.position, 1.0);
     out.normal = in.normal;
     out.color = in.color;
     out.scalar = in.scalar;
     out.world = in.position;
-    return out;
-}
-
-@vertex
-fn vs_surface(in: SurfaceIn) -> SurfaceOut {
-    return surface_vertex(in);
-}
-
-// Parts drawn behind the others, such as the global model around a submodel, are pushed
-// away from the viewer: where their surfaces meet those of other parts, the others show.
-// Only the depth changes, so the section plane cuts them where they lie.
-fn pushed_back(position: vec4<f32>) -> vec4<f32> {
-    return vec4<f32>(position.xy, position.z + globals.behind.x * position.w, position.w);
-}
-
-@vertex
-fn vs_surface_behind(in: SurfaceIn) -> SurfaceOut {
-    var out = surface_vertex(in);
-    out.position = pushed_back(out.position);
     return out;
 }
 
@@ -117,27 +96,11 @@ fn contour_color(t: f32) -> vec3<f32> {
     return globals.palette[band].rgb;
 }
 
-// Opacity of the surfaces of transparent parts.
-const TRANSPARENT_OPACITY: f32 = 0.25;
-
 @fragment
-fn fs_surface(in: SurfaceOut) -> @location(0) vec4<f32> {
+fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     if clipped(in.world) {
         discard;
     }
-    return vec4<f32>(shade(in), 1.0);
-}
-
-// Surfaces of transparent parts, such as the global model around a submodel.
-@fragment
-fn fs_transparent_surface(in: SurfaceOut) -> @location(0) vec4<f32> {
-    if clipped(in.world) {
-        discard;
-    }
-    return vec4<f32>(shade(in), TRANSPARENT_OPACITY);
-}
-
-fn shade(in: SurfaceOut) -> vec3<f32> {
     var color = in.color;
     if globals.contour.x > 0.0 {
         color = contour_color(in.scalar);
@@ -157,7 +120,7 @@ fn shade(in: SurfaceOut) -> vec3<f32> {
         specular += LIGHT_INTENSITY * pow(max(dot(n, h), 0.0), SPECULAR_POWER);
     }
     let shaded = color * (AMBIENT + DIFFUSE * diffuse) + vec3<f32>(SPECULAR * specular);
-    return clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 
 struct EdgeOut {
@@ -195,27 +158,6 @@ const MESH_EDGE_OPACITY: f32 = 0.4;
 @vertex
 fn vs_mesh_edge(in: SurfaceIn) -> EdgeOut {
     return edge_vertex(in.position, vec4<f32>(0.0, 0.0, 0.0, MESH_EDGE_OPACITY));
-}
-
-@vertex
-fn vs_edge_behind(in: SurfaceIn) -> EdgeOut {
-    var out = edge_vertex(in.position, vec4<f32>(in.color, in.scalar));
-    out.position = pushed_back(out.position);
-    return out;
-}
-
-@vertex
-fn vs_wireframe_behind(in: SurfaceIn) -> EdgeOut {
-    var out = edge_vertex(in.position, vec4<f32>(globals.wireframe.rgb, in.scalar));
-    out.position = pushed_back(out.position);
-    return out;
-}
-
-@vertex
-fn vs_mesh_edge_behind(in: SurfaceIn) -> EdgeOut {
-    var out = edge_vertex(in.position, vec4<f32>(0.0, 0.0, 0.0, MESH_EDGE_OPACITY));
-    out.position = pushed_back(out.position);
-    return out;
 }
 
 // One corner of the quad of a wide line segment from `a` to `b`; corners 0 and 2 lie at `a`,
