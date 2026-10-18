@@ -688,6 +688,13 @@ impl Gmsh {
         self.call(|e| unsafe { (self.api.mesh_generate)(dim, e) })
     }
 
+    /// Takes the triangulation OpenCASCADE makes of each face, with the deflections of the
+    /// options `Mesh.StlLinearDeflection` and `Mesh.StlAngularDeflection`, as the mesh of the
+    /// faces. Its triangles may be long and thin, so it is for display only.
+    pub fn import_stl(&self) -> Result<(), GmshError> {
+        self.call(|e| unsafe { (self.api.mesh_import_stl)(e) })
+    }
+
     pub fn set_order(&self, order: i32) -> Result<(), GmshError> {
         self.call(|e| unsafe { (self.api.mesh_set_order)(order, e) })
     }
