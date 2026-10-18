@@ -290,12 +290,12 @@ fn shell_plate() -> (FeMesh, FeModel) {
     let mesh = rectangle(0.0, length, width, 20, 2);
     let tip = nodes_at(&mesh, 0, length);
     assert_eq!(tip.len(), 5);
-    let force = -1.0 / tip.len() as f64;
+    // A force on points is shared by their nodes.
     let mut model = plane_model(
         ModelSpace::ThreeD,
         1.0,
         vec![(nodes_at(&mesh, 0, 0.0), [Some(0.0); 6])],
-        LoadKind::force([0.0, 0.0, force]),
+        LoadKind::force([0.0, 0.0, -1.0]),
         Region::Nodes(tip),
     );
     model.sections[0].kind = SectionKind::Shell {
@@ -366,7 +366,6 @@ fn membrane_strip(type_name: &str) -> (FeMesh, FeModel) {
     let (length, width) = (100.0, 10.0);
     let mesh = linear_rectangle(length, width, 20, 2, type_name == "M3D3");
     let tip = nodes_at(&mesh, 0, length);
-    let force = 1.0 / tip.len() as f64;
     let mut model = plane_model(
         ModelSpace::ThreeD,
         1.0,
@@ -378,7 +377,7 @@ fn membrane_strip(type_name: &str) -> (FeMesh, FeModel) {
                 [None, None, Some(0.0), None, None, None],
             ),
         ],
-        LoadKind::force([force, 0.0, 0.0]),
+        LoadKind::force([1.0, 0.0, 0.0]),
         Region::Nodes(tip),
     );
     model.sections[0].kind = SectionKind::Membrane {
@@ -5120,8 +5119,8 @@ fn half_shell_plate(angle: f64) -> (FeMesh, FeModel, NodeId) {
         ModelSpace::ThreeD,
         1.0,
         vec![(clamped, [Some(0.0); 6])],
-        // The node on the symmetry plane carries half the share of the others.
-        LoadKind::force([0.0, 0.0, -0.2]),
+        // The node on the symmetry plane carries half the share of the two others.
+        LoadKind::force([0.0, 0.0, -0.4]),
         Region::Nodes(tip.iter().copied().filter(|n| !edge.contains(n)).collect()),
     );
     let mut middle = model.steps[0].loads[0].clone();
