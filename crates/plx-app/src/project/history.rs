@@ -65,6 +65,9 @@ fn same_data(a: Option<&ProjectNode>, b: Option<&ProjectNode>) -> bool {
             a.units == b.units && a.kind == b.kind && a.history.len() == b.history.len()
         }
         (Some(ProjectNode::MeshExport(a)), Some(ProjectNode::MeshExport(b))) => a.path == b.path,
+        (Some(ProjectNode::File(a)), Some(ProjectNode::File(b))) => {
+            a.path == b.path && a.units == b.units
+        }
         (Some(ProjectNode::Campbell(a)), Some(ProjectNode::Campbell(b))) => a.setup == b.setup,
         _ => false,
     }

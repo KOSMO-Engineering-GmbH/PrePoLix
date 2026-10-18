@@ -111,6 +111,32 @@ and their solutions are out of date.
 
 #screenshot("mesh-block-result.png", [The box held at X- and pressed on Z+, solved])
 
+=== File <file-block>
+
+A file block reads a file from outside the project and gives what it holds to analyses: the
+results of a CalculiX run (`.frd`), the mesh of a CalculiX input file (`.inp`) or geometry
+(STEP, IGES, BREP, STL). Add it with #menu("Project", "Add File ...") or from the picker; a
+dialog asks for the file at once. Its rows depend on the file:
+
+- results: #ui("Results") with a row per step of the file, whose pins link like the steps of
+  an analysis, for example to the #ui("Global results") row of a submodel (@submodel);
+- an input file: #ui("Mesh"), to link to the #ui("Mesh") row of analyses;
+- geometry: #ui("Geometry"), to link to the #ui("Geometry") row of analyses.
+
+#screenshot("file-block.png", [The results of a CalculiX run made elsewhere drive a submodel])
+
+The #ui("File") row holds the path: type it, or double-click the block or use
+#ui("Choose File ...") in its context menu. A relative path starts at the folder of the project
+file. The block reads the file in the background and reads it again whenever it changes on
+disk; #ui("Read Again") in the context menu reads it at once. The symbol of the first row shows
+the state: a green tick once the file is read, a dash while no file is chosen or it is missing,
+and an error when it could not be read, with the reason in the tooltip and the output pane.
+A linked analysis is out of date when the file changes, and #ui("Update Project") solves it
+again with the new data. The file is never written to; deleting the block leaves it as it is.
+
+#limitation[Results of a file serve as global results of submodels only. Eigenmodes of a
+frequency step cannot be linked, as the `.frd` file does not hold them.]
+
 === Parameters <parameters-block>
 
 A Parameters block holds named numbers that other blocks take through *value links*, so that

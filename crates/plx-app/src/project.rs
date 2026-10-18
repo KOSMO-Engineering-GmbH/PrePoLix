@@ -51,6 +51,7 @@ enum Kind {
     Optimizer,
     MeshExport,
     Campbell,
+    File,
 }
 
 impl Kind {
@@ -70,6 +71,7 @@ impl Kind {
             Self::Optimizer => "optimizer",
             Self::MeshExport => "mesh export block",
             Self::Campbell => "Campbell block",
+            Self::File => "file block",
         }
     }
 }
@@ -111,6 +113,8 @@ enum Block {
     /// A sweep of the analysis linked to it over the rotational speed, with its Campbell
     /// diagram.
     Campbell(CampbellBlock),
+    /// A file outside the project read as a source: geometry, a mesh or results.
+    File(Box<FileBlock>),
 }
 
 /// An analysis: its data, or the window that holds them while it is open.
@@ -246,6 +250,55 @@ struct ExportBlock {
     error: Option<String>,
 }
 
+/// What a file block reads, by the extension of its file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileKind {
+    /// CAD geometry: STEP, IGES, BREP or STL.
+    Geometry,
+    /// The mesh of a CalculiX input file.
+    Mesh,
+    /// The results of each step of a CalculiX results file.
+    Results,
+}
+
+impl FileKind {
+    fn of(path: &str) -> Option<Self> {
+        let path = Path::new(path.trim());
+        let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+        match extension.as_str() {
+            "inp" => Some(Self::Mesh),
+            "frd" => Some(Self::Results),
+            _ if plx_mesher::is_cad_file(path) => Some(Self::Geometry),
+            _ => None,
+        }
+    }
+}
+
+/// A file block: the file, what was read from it and the fingerprint of the file then.
+struct FileBlock {
+    model: LinkedModel,
+    path: String,
+    /// The unit system the numbers of an input file and the lengths of geometry are in.
+    units: UnitSystem,
+    /// The model space of the mesh read, for links that need the same.
+    space: Option<ModelSpace>,
+    /// The steps of a results file: the name of each row with its number in the file.
+    steps: Vec<(String, u32)>,
+    /// Fingerprint of the file as last read, see [`file_print`], and why that read failed.
+    read: Option<u64>,
+    error: Option<String>,
+    /// The file being read on a worker thread, with its fingerprint.
+    reading: Option<(u64, Receiver<Result<FileRead, String>>)>,
+}
+
+/// What a worker read from the file of a file block.
+struct FileRead {
+    model: LinkedModel,
+    space: Option<ModelSpace>,
+    steps: Vec<(String, u32)>,
+    summary: String,
+}
+
 /// A Campbell block: its sweep and diagram, and the fingerprint of the analysis linked to it
 /// as last found by [`ProjectApp::sync_links`], see [`crate::campbell::sweep_fingerprint`].
 struct CampbellBlock {
@@ -324,6 +377,21 @@ impl Node {
         Self::new(id, name, Block::MeshExport(Box::new(block)))
     }
 
+    /// A file block reading `path`, in `units`.
+    fn file_block(id: u64, name: String, path: String, units: UnitSystem) -> Self {
+        let block = FileBlock {
+            model: LinkedModel::default(),
+            path,
+            units,
+            space: None,
+            steps: Vec::new(),
+            read: None,
+            error: None,
+            reading: None,
+        };
+        Self::new(id, name, Block::File(Box::new(block)))
+    }
+
     /// A Campbell block with its sweep and diagram.
     fn campbell_block(id: u64, name: String, window: CampbellWindow) -> Self {
         let block = CampbellBlock {
@@ -343,6 +411,7 @@ impl Node {
             Block::Optimizer(_) => Kind::Optimizer,
             Block::MeshExport(_) => Kind::MeshExport,
             Block::Campbell(_) => Kind::Campbell,
+            Block::File(_) => Kind::File,
         }
     }
 
@@ -444,6 +513,20 @@ impl Node {
         }
     }
 
+    fn as_file(&self) -> Option<&FileBlock> {
+        match &self.block {
+            Block::File(f) => Some(f),
+            _ => None,
+        }
+    }
+
+    fn as_file_mut(&mut self) -> Option<&mut FileBlock> {
+        match &mut self.block {
+            Block::File(f) => Some(f),
+            _ => None,
+        }
+    }
+
     fn as_campbell(&self) -> Option<&CampbellBlock> {
         match &self.block {
             Block::Campbell(c) => Some(c),
@@ -486,6 +569,7 @@ impl Node {
         match &self.block {
             Block::Analysis(a) => Some(a.space),
             Block::Mesh(m) => Some(m.space),
+            Block::File(f) => f.space,
             _ => None,
         }
     }
@@ -501,6 +585,7 @@ impl Node {
             Block::Parameters(p) => p.units,
             Block::Measure(m) => m.units,
             Block::Optimizer(o) => o.units,
+            Block::File(f) => f.units,
             Block::MeshExport(_) | Block::Campbell(_) => UnitSystem::default(),
         }
     }
@@ -551,6 +636,24 @@ impl Node {
         std::fs::write(&file, text).map_err(|e| format!("{} not written: {e}", file.display()))?;
         export.written = Some(print);
         Ok(file)
+    }
+
+    /// The state of a file block's data: missing without a file, out of date while the file
+    /// changed since it was read; `base` is the folder of the project file.
+    fn file_state(&self, base: Option<&Path>) -> CellState {
+        let Some(file) = self.as_file() else {
+            return CellState::Missing;
+        };
+        if file.reading.is_some() {
+            return CellState::Running;
+        }
+        let print = file_print(&export_file(&file.path, base));
+        match print {
+            None => CellState::Missing,
+            Some(_) if file.error.is_some() => CellState::Failed,
+            Some(print) if Some(print) == file.read => CellState::UpToDate,
+            Some(_) => CellState::OutOfDate,
+        }
     }
 
     /// The state of a mesh block's mesh: out of date once its parameters changed.
@@ -633,6 +736,7 @@ impl Node {
                 Self::new(block.id, block.name, Block::Optimizer(optimizer))
             }
             ProjectNode::MeshExport(e) => Self::mesh_export(e.id, e.name, e.path, e.written),
+            ProjectNode::File(f) => Self::file_block(f.id, f.name, f.path, f.units),
             ProjectNode::Campbell(block) => {
                 let block = *block;
                 let window = CampbellWindow::saved(
@@ -714,6 +818,14 @@ impl Node {
                 path: e.path.clone(),
                 written: e.written,
             }),
+            // It keeps only the path: the file is read again.
+            Block::File(f) => ProjectNode::File(file::FileSource {
+                id,
+                name,
+                position,
+                path: f.path.clone(),
+                units: f.units,
+            }),
             // It keeps no model: the link brings it again.
             Block::Campbell(c) => {
                 let window = c.window.as_ref()?;
@@ -788,6 +900,7 @@ impl Node {
             Block::MeshExport(e) => {
                 return Some(Self::mesh_export(id, name, e.path.clone(), None));
             }
+            Block::File(f) => return Some(Self::file_block(id, name, f.path.clone(), f.units)),
             Block::Campbell(c) => {
                 let setup = c.window.as_ref()?.setup().clone();
                 let window = CampbellWindow::saved(setup, Vec::new(), None, None);
@@ -837,6 +950,7 @@ impl Node {
             Block::Materials(m) => Some(m.model.data()),
             Block::Mesh(m) => Some(m.model.data()),
             Block::MeshExport(e) => Some(e.model.data()),
+            Block::File(f) => Some(f.model.data()),
             Block::Parameters(_) | Block::Measure(_) | Block::Optimizer(_) | Block::Campbell(_) => {
                 None
             }
@@ -982,6 +1096,10 @@ enum Action {
     AddMeshExport(egui::Pos2),
     /// A new Campbell block at the position.
     AddCampbell(egui::Pos2),
+    /// A new file block at the position.
+    AddFile(egui::Pos2),
+    /// Read the file of a file block again.
+    ReadFile(u64),
     /// The file a mesh export block writes to was edited in its block.
     SetExportPath(u64, String),
     /// Write the file of a mesh export block now.
@@ -1115,6 +1233,8 @@ pub struct ProjectApp {
     restoring: HashMap<PathBuf, Option<Receiver<Result<PathBuf, String>>>>,
     /// Problems of links already reported in the output, each once.
     warned: BTreeSet<String>,
+    /// When the files of the file blocks were last looked at for changes.
+    files_checked: Option<Instant>,
 }
 
 impl ProjectApp {
@@ -1180,6 +1300,7 @@ impl ProjectApp {
             sync_due: true,
             history: Default::default(),
             restoring: HashMap::new(),
+            files_checked: None,
             warned: BTreeSet::new(),
         };
         if app.settings.updates.check_at_startup && app.updater.installation().checks_at_startup() {
@@ -2184,6 +2305,155 @@ impl ProjectApp {
         id
     }
 
+    /// Adds a file block and asks for its file; returns its id.
+    fn add_file(&mut self, position: egui::Pos2) -> u64 {
+        let id = self.next_id();
+        let name = self.unique_name("File");
+        let units = self.settings.new_model.units;
+        self.nodes
+            .push(Node::file_block(id, name.clone(), String::new(), units));
+        self.graph.insert_node(position, id);
+        self.output.push(format!(
+            "{name} created: choose a results file (.frd), an input file (.inp) or geometry \
+             (STEP, IGES, BREP, STL) and drag what it reads to an analysis."
+        ));
+        self.choose_source_file(id);
+        id
+    }
+
+    /// Asks for the file a file block reads.
+    fn choose_source_file(&mut self, id: u64) {
+        let base = self.export_base();
+        let Some(file) = self
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .and_then(Node::as_file)
+        else {
+            return;
+        };
+        let current = export_file(&file.path, base.as_deref());
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("File to Read")
+            .add_filter(
+                "Results, input files and geometry",
+                &[
+                    "frd", "inp", "step", "stp", "iges", "igs", "brep", "brp", "stl",
+                ],
+            )
+            .add_filter("CalculiX results (*.frd)", &["frd"])
+            .add_filter("CalculiX input (*.inp)", &["inp"])
+            .add_filter(
+                "Geometry (*.step, *.iges, *.brep, *.stl)",
+                &["step", "stp", "iges", "igs", "brep", "brp", "stl"],
+            );
+        if let Some(dir) = current.parent().filter(|d| d.is_dir()).or(base.as_deref()) {
+            dialog = dialog.set_directory(dir);
+        }
+        let Some(chosen) = dialog.pick_file() else {
+            return;
+        };
+        // A file next to the project is kept relative, so the project can be moved.
+        let shown = match &base {
+            Some(base) => chosen.strip_prefix(base).unwrap_or(&chosen),
+            None => &chosen,
+        };
+        let shown = shown.to_string_lossy().into_owned();
+        self.set_source_path(id, shown);
+    }
+
+    /// Lets a file block read another file.
+    fn set_source_path(&mut self, id: u64, path: String) {
+        if let Some(file) = self.node(id).and_then(Node::as_file_mut) {
+            file.path = path;
+            file.read = None;
+            file.error = None;
+            file.reading = None;
+        }
+        self.files_checked = None;
+    }
+
+    /// Reads the files of the file blocks again where they changed, on worker threads, and
+    /// takes what they read; the links bring it to the analyses.
+    fn refresh_files(&mut self, ctx: &egui::Context) {
+        let base = self.export_base();
+        let look = (self.files_checked).is_none_or(|t| t.elapsed() >= FILE_CHECK_INTERVAL);
+        if look {
+            self.files_checked = Some(Instant::now());
+        }
+        let mut lines = Vec::new();
+        let mut changed = false;
+        for node in &mut self.nodes {
+            let name = node.name.clone();
+            let Some(file) = node.as_file_mut() else {
+                continue;
+            };
+            if let Some((print, receiver)) = &file.reading {
+                let print = *print;
+                match receiver.try_recv() {
+                    Ok(Ok(read)) => {
+                        lines.push(format!("{name}: {}", read.summary));
+                        file.model = read.model;
+                        file.space = read.space;
+                        file.steps = read.steps;
+                        file.error = None;
+                    }
+                    Ok(Err(why)) => {
+                        lines.push(format!("{name}: not read: {why}"));
+                        file.model = LinkedModel::default();
+                        file.steps.clear();
+                        file.error = Some(why);
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        ctx.request_repaint_after(Duration::from_millis(100));
+                        continue;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        file.error = Some("reading it failed".into());
+                    }
+                }
+                file.read = Some(print);
+                file.reading = None;
+                changed = true;
+                continue;
+            }
+            if !look || file.path.trim().is_empty() {
+                continue;
+            }
+            let path = export_file(&file.path, base.as_deref());
+            match file_print(&path) {
+                // Gone: what it gave is gone too.
+                None => {
+                    if file.read.take().is_some() {
+                        lines.push(format!("{name}: {} is missing", path.display()));
+                        file.model = LinkedModel::default();
+                        file.steps.clear();
+                        file.error = None;
+                        changed = true;
+                    }
+                }
+                Some(print) if Some(print) == file.read => {}
+                Some(print) => {
+                    let (sender, receiver) = std::sync::mpsc::channel();
+                    let (units, repaint) = (file.units, ctx.clone());
+                    std::thread::spawn(move || {
+                        let _ = sender.send(read_source(&path, units));
+                        repaint.request_repaint();
+                    });
+                    file.reading = Some((print, receiver));
+                }
+            }
+        }
+        // Looked at again soon, for files changed outside.
+        if self.nodes.iter().any(|n| n.as_file().is_some()) {
+            ctx.request_repaint_after(FILE_CHECK_INTERVAL);
+        }
+        self.output.extend(lines);
+        if changed {
+            self.sync_due = true;
+        }
+    }
+
     /// Adds a Campbell block; returns its id.
     fn add_campbell(&mut self, position: egui::Pos2) -> u64 {
         let window = CampbellWindow::new(&plx_model::FeModel::default());
@@ -2626,6 +2896,10 @@ impl ProjectApp {
             Some(Kind::MeshExport) => {
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
                 return self.choose_export_file(id);
+            }
+            Some(Kind::File) => {
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                return self.choose_source_file(id);
             }
             Some(Kind::Campbell) => {
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
@@ -3729,6 +4003,7 @@ impl ProjectApp {
                         base.as_deref(),
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                     ),
+                    (Kind::File, _) => file_rows(n, base.as_deref()),
                     (Kind::Parameters, _) => parameter_rows(n),
                     (Kind::Optimizer, _) => self.optimizer_rows(n, &incoming),
                     (Kind::Campbell, _) => campbell_rows(
@@ -3759,7 +4034,10 @@ impl ProjectApp {
                 BlockView {
                     id: n.id,
                     name: n.name.clone(),
-                    export_path: (n.as_export()).map_or_else(String::new, |e| e.path.clone()),
+                    export_path: (n.as_export().map(|e| &e.path))
+                        .or(n.as_file().map(|f| &f.path))
+                        .cloned()
+                        .unwrap_or_default(),
                     kind: n.kind(),
                     space: n.space().unwrap_or_default(),
                     steps: (fe.into_iter().flat_map(|fe| &fe.steps))
@@ -4508,6 +4786,7 @@ impl ProjectApp {
     /// something changed, in the order of the links so that a chain is done in one go.
     fn sync_links(&mut self, ctx: &egui::Context) {
         self.poll_restoring();
+        self.refresh_files(ctx);
         if !self.sync_due {
             return;
         }
@@ -4629,6 +4908,61 @@ impl ProjectApp {
         let data = source.link_data();
         let path = &link.item;
         match path.first().map(String::as_str) {
+            Some(links::RESULTS) if source.as_file().is_some() => {
+                let file = source.as_file()?;
+                let step = path.get(1)?;
+                let &(_, global) = file.steps.iter().find(|(name, _)| name == step)?;
+                if file.reading.is_some() || file.error.is_some() || file.read.is_none() {
+                    upstream.missing_results.push(source.name.clone());
+                    return None;
+                }
+                let usage = links::ResultsUse::of(link)?;
+                if usage == links::ResultsUse::Modes {
+                    return None;
+                }
+                if usage != links::ResultsUse::Submodel
+                    && target.link_data()?.mesh.input_fingerprint()
+                        != file.model.mesh.input_fingerprint()
+                {
+                    let line = format!(
+                        "{} cannot take the {} of {}: the meshes differ. Temperatures are \
+                         taken node by node.",
+                        target.name,
+                        links::label(&link.item),
+                        source.name
+                    );
+                    if self.warned.insert(line.clone()) {
+                        self.output.push(line);
+                    }
+                    return None;
+                }
+                // A copy named after the file as it was read, so that a changed file makes
+                // the target out of date.
+                let base = self.export_base();
+                let original = export_file(&file.path, base.as_deref());
+                let name = original.file_name()?.to_owned();
+                let dir = (self.settings.solver.work_dir())
+                    .join(crate::analysis::job_name(&self.project_name()))
+                    .join(crate::analysis::job_name(&target.name))
+                    .join(format!(
+                        "File-{}-{:016x}",
+                        crate::analysis::job_name(&source.name),
+                        file.read.unwrap_or_default()
+                    ));
+                let copy = dir.join(name);
+                if !copy.is_file()
+                    && let Err(why) = std::fs::create_dir_all(&dir)
+                        .and_then(|_| std::fs::copy(&original, &copy).map(|_| ()))
+                {
+                    let line = format!("{}: {} not copied: {why}", source.name, original.display());
+                    if self.warned.insert(line.clone()) {
+                        self.output.push(line);
+                    }
+                    upstream.missing_results.push(source.name.clone());
+                    return None;
+                }
+                Some(Payload::Results(global, copy))
+            }
             Some(links::RESULTS) => {
                 let step = path.get(1)?;
                 let Some(bound) = source.bound_results() else {
@@ -4951,10 +5285,14 @@ impl ProjectApp {
                 }
             }
         }
-        // Those with results made from data that changed since are solved again too.
+        // Those with results made from data that changed since are solved again too; a
+        // file block is read, not solved.
         sources.retain(|s| {
-            (self.nodes.iter())
-                .any(|n| n.id == *s && (n.bound_results().is_none() || n.results_out_of_date()))
+            (self.nodes.iter()).any(|n| {
+                n.id == *s
+                    && n.kind() == Kind::Analysis
+                    && (n.bound_results().is_none() || n.results_out_of_date())
+            })
         });
         sources.push(id);
         let chain = links::order(&sources, &self.links);
@@ -4976,6 +5314,7 @@ impl ProjectApp {
             | Action::Toggle(..)
             | Action::Generate(_)
             | Action::ExportNow(_)
+            | Action::ReadFile(_)
             | Action::RunLoop(_) => return None,
             Action::Link { target, .. } => vec![*target],
             Action::Unlink { source, target } => (self.links.iter())
@@ -4995,6 +5334,7 @@ impl ProjectApp {
             | Action::AddMesh(..)
             | Action::AddMeshExport(_)
             | Action::AddCampbell(_)
+            | Action::AddFile(_)
             | Action::AddParameters(_)
             | Action::AddMeasure(_)
             | Action::AddOptimizer(_)
@@ -5050,10 +5390,22 @@ impl ProjectApp {
             Action::AddCampbell(pos) => {
                 self.add_campbell(pos);
             }
+            Action::AddFile(pos) => {
+                self.add_file(pos);
+            }
+            Action::ReadFile(id) => {
+                if let Some(file) = self.node(id).and_then(Node::as_file_mut) {
+                    file.read = None;
+                    file.error = None;
+                }
+                self.files_checked = None;
+            }
             Action::SetExportPath(id, path) => {
                 if let Some(export) = self.node(id).and_then(Node::as_export_mut) {
                     export.path = path;
                     export.error = None;
+                } else if self.node(id).and_then(Node::as_file_mut).is_some() {
+                    self.set_source_path(id, path);
                 }
             }
             Action::ExportNow(id) => {
@@ -5204,6 +5556,7 @@ impl ProjectApp {
             Kind::Measure => "with its value",
             Kind::Optimizer => "with its iterations",
             Kind::MeshExport => "(the file it wrote stays)",
+            Kind::File => "(the file it reads stays)",
             Kind::Campbell => "with its diagram",
         };
         let users = (self.links.iter())
@@ -6316,6 +6669,224 @@ fn with_article(word: &str) -> String {
 
 /// The file a relative export path names: next to the project file, or in the working folder
 /// while the project has none.
+/// How often the files of file blocks are looked at for changes.
+const FILE_CHECK_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// What tells a change of a file: its path, size and time of modification; `None` when it is
+/// not there.
+fn file_print(path: &Path) -> Option<u64> {
+    let metadata = std::fs::metadata(path).ok().filter(|m| m.is_file())?;
+    let mut hash = plx_mesh::Fnv::new();
+    hash.add_str(&path.to_string_lossy());
+    hash.add(&metadata.len().to_le_bytes());
+    if let Ok(time) = metadata.modified()
+        && let Ok(since) = time.duration_since(std::time::UNIX_EPOCH)
+    {
+        hash.add(&since.as_nanos().to_le_bytes());
+    }
+    Some(hash.finish())
+}
+
+/// Reads the file of a file block: CAD geometry with lengths in `units`, the mesh of an input
+/// file whose numbers are in `units`, or the mesh and steps of a results file.
+fn read_source(path: &Path, units: UnitSystem) -> Result<FileRead, String> {
+    let text = path.to_string_lossy();
+    let kind = FileKind::of(&text).ok_or_else(|| {
+        format!(
+            "{} is no results file (.frd), input file (.inp) or geometry",
+            path.display()
+        )
+    })?;
+    let mut model = LinkedModel::default();
+    model.fe.properties.units = units;
+    match kind {
+        FileKind::Geometry => {
+            let import = plx_mesher::import_cad_files(&[path.to_path_buf()], units)
+                .map_err(|e| e.to_string())?;
+            model.geometry = Some(import.geometry);
+            Ok(FileRead {
+                model,
+                space: None,
+                steps: Vec::new(),
+                summary: format!("geometry read from {}", path.display()),
+            })
+        }
+        FileKind::Mesh => {
+            let loaded = crate::model::load(path, units)?;
+            let mesh = loaded.model.mesh;
+            let space = ModelSpace::of_mesh(&mesh);
+            let summary = format!(
+                "{} nodes and {} elements read from {}",
+                mesh.node_count(),
+                mesh.element_count(),
+                path.display()
+            );
+            model.fe.properties.space = space;
+            model.mesh = mesh;
+            Ok(FileRead {
+                model,
+                space: Some(space),
+                steps: Vec::new(),
+                summary,
+            })
+        }
+        FileKind::Results => {
+            let import = plx_io::frd::read_frd(path).map_err(|e| e.to_string())?;
+            let mut steps = Vec::new();
+            for increment in &import.increments {
+                if steps.iter().any(|(_, n)| *n == increment.step) {
+                    continue;
+                }
+                let name = format!("Step-{}", increment.step);
+                // The rows take the kind of their step, for what their results can be used.
+                let has = |field: &str| increment.fields.iter().any(|f| f.name == field);
+                let mut step = match increment.kind {
+                    plx_results::AnalysisKind::Frequency => plx_model::Step::new_frequency(&name),
+                    _ if has("NDTEMP") && !has("DISP") => plx_model::Step::new_heat_transfer(&name),
+                    _ => plx_model::Step::new_static(&name),
+                };
+                // The eigenmodes are kept in a file of their own that it has not.
+                if let plx_model::StepKind::Frequency(frequency) = &mut step.kind {
+                    frequency.storage = false;
+                }
+                model.fe.steps.push(step);
+                steps.push((name, increment.step));
+            }
+            if steps.is_empty() {
+                return Err(format!("{} holds no results", path.display()));
+            }
+            let mesh = import.mesh;
+            let space = ModelSpace::of_mesh(&mesh);
+            let summary = format!(
+                "{} step(s) of results on {} nodes read from {}",
+                steps.len(),
+                mesh.node_count(),
+                path.display()
+            );
+            model.fe.properties.space = space;
+            model.mesh = mesh;
+            Ok(FileRead {
+                model,
+                space: Some(space),
+                steps,
+                summary,
+            })
+        }
+    }
+}
+
+/// The rows of a file block: the file, then what it gives: its geometry, its mesh or the
+/// results of each step.
+fn file_rows(node: &Node, base: Option<&Path>) -> Vec<Row> {
+    let state = node.file_state(base);
+    let Some(file) = node.as_file() else {
+        return Vec::new();
+    };
+    let row = |path: Vec<String>, text: String, icon, state, output, tip: String| Row {
+        path,
+        text,
+        depth: 0,
+        icon,
+        state,
+        expander: None,
+        input: false,
+        output,
+        linked_from: None,
+        collection: false,
+        partial: false,
+        widget: None,
+        tip,
+    };
+    let mut status = match state {
+        CellState::Missing if file.path.trim().is_empty() => "no file is chosen".to_owned(),
+        CellState::Missing => "the file is missing".to_owned(),
+        CellState::Running => "being read".to_owned(),
+        CellState::Failed => format!("not read: {}", file.error.as_deref().unwrap_or("")),
+        CellState::OutOfDate => "the file changed and is read again".to_owned(),
+        _ => "read".to_owned(),
+    };
+    let mut path_row = row(
+        vec![PARAMETERS.to_owned(), "File".to_owned()],
+        "File".to_owned(),
+        NodeIcon::Export,
+        None,
+        false,
+        "The file to read: CalculiX results (.frd), a CalculiX input file (.inp) or geometry \
+         (STEP, IGES, BREP, STL). A relative path starts at the folder of the project file. \
+         It is read again whenever it changes. Double-click the block to choose it."
+            .to_owned(),
+    );
+    path_row.widget = Some(RowWidget::ExportPath);
+    let ready = state == CellState::UpToDate;
+    let mut rows = Vec::new();
+    match FileKind::of(&file.path) {
+        Some(FileKind::Geometry) => {
+            status.push_str(". Drag it to the Geometry row of an analysis to link it.");
+            rows.push(row(
+                vec![links::GEOMETRY.to_owned()],
+                links::GEOMETRY.to_owned(),
+                NodeIcon::Geometry,
+                Some(state),
+                ready,
+                format!("Geometry: {status}"),
+            ));
+        }
+        Some(FileKind::Mesh) => {
+            let mesh = &file.model.mesh;
+            if ready {
+                status.push_str(&format!(
+                    ": {} nodes, {} elements, {} node sets and {} surfaces. Drag it to the \
+                     Mesh row of an analysis to link it.",
+                    mesh.node_count(),
+                    mesh.element_count(),
+                    mesh.node_sets.len(),
+                    mesh.surfaces.len()
+                ));
+            }
+            rows.push(row(
+                vec![links::MESH.to_owned()],
+                links::MESH.to_owned(),
+                NodeIcon::Mesh,
+                Some(state),
+                ready,
+                format!("Mesh: {status}"),
+            ));
+        }
+        Some(FileKind::Results) => {
+            rows.push(row(
+                vec![links::RESULTS.to_owned()],
+                links::RESULTS.to_owned(),
+                NodeIcon::Results,
+                Some(state),
+                false,
+                format!("Results: {status}"),
+            ));
+            for (name, number) in &file.steps {
+                let step = file.model.fe.steps.iter().find(|s| &s.name == name);
+                let mut step_row = row(
+                    vec![links::RESULTS.to_owned(), name.clone()],
+                    name.clone(),
+                    step.map_or(NodeIcon::Results, |s| {
+                        NodeIcon::StepType(StepGlyph::from(&s.kind))
+                    }),
+                    None,
+                    ready,
+                    format!(
+                        "Results of step {number} of the file: drag them to the Global results \
+                         row of a submodel, or to the Temperatures of a step of an analysis \
+                         with the same mesh"
+                    ),
+                );
+                step_row.depth = 1;
+                rows.push(step_row);
+            }
+        }
+        None => {}
+    }
+    rows.push(path_row);
+    rows
+}
+
 fn export_file(path: &str, base: Option<&Path>) -> PathBuf {
     let path = Path::new(path.trim());
     match base {
@@ -6639,6 +7210,7 @@ enum BlockKind {
     Optimizer,
     Campbell,
     MeshExport,
+    File,
 }
 
 fn block_kinds() -> Vec<BlockKind> {
@@ -6652,6 +7224,7 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::Optimizer,
         BlockKind::Campbell,
         BlockKind::MeshExport,
+        BlockKind::File,
     ]
 }
 
@@ -6711,6 +7284,16 @@ impl BlockKind {
                 "Adds a block that writes the mesh linked to it to a CalculiX input file when \
                  the project is updated, after the analyses, optimizers and blocks before it.",
             ),
+            Self::File => (
+                "File",
+                "File",
+                "import read external frd results inp mesh step iges brep stl geometry \
+                 submodel global",
+                "Adds a block that reads a file outside the project: the results of each step \
+                 of a results file (.frd), for the global results of a submodel or \
+                 temperatures, the mesh of an input file (.inp), or geometry (STEP, IGES, \
+                 BREP, STL). It reads the file again when it changes.",
+            ),
         };
         node_picker::Entry {
             category,
@@ -6731,6 +7314,7 @@ impl BlockKind {
             Self::Optimizer => "Add Optimizer",
             Self::MeshExport => "Add Mesh Export",
             Self::Campbell => "Add Campbell",
+            Self::File => "Add File …",
         }
     }
 
@@ -6745,6 +7329,7 @@ impl BlockKind {
             Self::Optimizer => Action::AddOptimizer(pos),
             Self::MeshExport => Action::AddMeshExport(pos),
             Self::Campbell => Action::AddCampbell(pos),
+            Self::File => Action::AddFile(pos),
         }
     }
 }
@@ -7173,6 +7758,16 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Results, ink);
                 icon.on_hover_text("Sweeps an analysis over the rotational speed");
             }
+            Kind::File => {
+                let ink = ui.visuals().text_color();
+                let glyph = match FileKind::of(&block.export_path) {
+                    Some(FileKind::Geometry) => NodeIcon::Geometry,
+                    Some(FileKind::Mesh) => NodeIcon::Mesh,
+                    _ => NodeIcon::Results,
+                };
+                node_icons::paint(ui.painter(), rect.min, glyph, ink);
+                icon.on_hover_text("Reads a file outside the project for analyses to link");
+            }
         }
         let text = egui::RichText::new(&block.name).strong();
         let label = ui.add(
@@ -7199,6 +7794,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Measure => "Double-click chooses what it measures.",
             Kind::Optimizer => "Double-click sets what it varies and shows its iterations.",
             Kind::Campbell => "Double-click opens its Campbell diagram and the sweep.",
+            Kind::File => "Double-click chooses the file to read.",
         };
         // The name takes the clicks of the header, so it opens the block's menu too.
         label.on_hover_text(tip).context_menu(|ui| {
@@ -7538,6 +8134,7 @@ impl SnarlViewer<u64> for Viewer {
             Some(Kind::Optimizer) => default.fill(crate::style::optimizer_header()),
             Some(Kind::MeshExport) => default.fill(crate::style::export_header()),
             Some(Kind::Campbell) => default.fill(crate::style::optimizer_header()),
+            Some(Kind::File) => default.fill(crate::style::mesh_header()),
             _ => default,
         }
     }
@@ -7913,6 +8510,9 @@ fn node_menu(
         if kind == Kind::MeshExport {
             entry(ui, "Export Now", Action::ExportNow(id));
             entry(ui, "Choose File …", Action::Open(id, None));
+        } else if kind == Kind::File {
+            entry(ui, "Choose File …", Action::Open(id, None));
+            entry(ui, "Read Again", Action::ReadFile(id));
         } else if kind == Kind::Campbell {
             entry(ui, "Open Diagram …", Action::Open(id, None));
         } else {
@@ -8531,6 +9131,48 @@ mod tests {
         };
         let back = refusal(&nodes, &[link], 2, &path(&["Mesh"]), 3, &path(&["Mesh"]));
         assert!(back.is_some());
+    }
+
+    #[test]
+    fn a_file_block_gives_the_results_of_each_step_of_its_file() {
+        let frd = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/kragbalken_c3d8.frd");
+        let read = read_source(&frd, UnitSystem::default()).unwrap();
+        assert_eq!(read.steps, [("Step-1".to_owned(), 1)]);
+        assert_eq!(read.model.fe.steps[0].name, "Step-1");
+        assert!(read.model.mesh.node_count() > 0);
+        let path = frd.to_string_lossy().into_owned();
+        let mut node = Node::file_block(1, "File".into(), path.clone(), UnitSystem::default());
+        assert_eq!(node.file_state(None), CellState::OutOfDate, "not read yet");
+        let file = node.as_file_mut().unwrap();
+        (file.model, file.steps, file.space) = (read.model, read.steps, read.space);
+        file.read = file_print(&frd);
+        assert_eq!(node.file_state(None), CellState::UpToDate);
+        let rows = file_rows(&node, None);
+        let step = rows
+            .iter()
+            .find(|r| r.path == ["Results", "Step-1"])
+            .unwrap();
+        assert!(step.output && !step.input);
+        // The project file keeps only its path.
+        match node.written([1.0, 2.0]) {
+            Some(ProjectNode::File(written)) => assert_eq!(written.path, path),
+            other => panic!("{other:?}"),
+        }
+        // A submodel takes them as its global results.
+        let mut model = plx_model::FeModel::default();
+        model.properties.kind = plx_model::ModelKind::Submodel;
+        model.steps.push(plx_model::Step::new_static("Step-1"));
+        let data = ProjectAnalysis {
+            model,
+            ..Default::default()
+        };
+        let nodes = [node, Node::analysis(2, "Detail".into(), data)];
+        let global = [links::GLOBAL_RESULTS.to_owned()];
+        let item = ["Results".to_owned(), "Step-1".to_owned()];
+        assert_eq!(refusal(&nodes, &[], 1, &item, 2, &global), None);
+        // Other files say what it reads.
+        let error = read_source(Path::new("notes.txt"), UnitSystem::default()).err();
+        assert!(error.is_some_and(|e| e.contains("no results file")));
     }
 
     #[test]

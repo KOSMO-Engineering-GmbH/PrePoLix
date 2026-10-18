@@ -184,7 +184,8 @@ linked in the schematic (@results-links):
   submodel boundary conditions takes them, or the first step; the link also sets the global
   step of the boundary condition. Each step can take the results of another global step at its
   own #ui("Global results") input under #ui("Setup") > #ui("Steps"). Dropping results there
-  makes an analysis a submodel too.
+  makes an analysis a submodel too. Global results computed elsewhere come from a file block
+  (@file-block) that reads their `.frd` file; its steps link the same way.
 
   #screenshot("submodel-global-results.png", [The results of Step-1 of the global analysis
     linked to the Global results row of the submodel])

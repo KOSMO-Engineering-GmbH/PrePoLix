@@ -75,6 +75,8 @@ pub enum ProjectNode {
     MeshExport(MeshExport),
     /// A sweep of an analysis over the rotational speed, with its Campbell diagram.
     Campbell(Box<CampbellBlock>),
+    /// A file outside the project read as a source: geometry, a mesh or results.
+    File(FileSource),
 }
 
 impl ProjectNode {
@@ -89,6 +91,7 @@ impl ProjectNode {
             Self::Optimizer(o) => o.id,
             Self::MeshExport(e) => e.id,
             Self::Campbell(c) => c.id,
+            Self::File(f) => f.id,
         }
     }
 
@@ -102,6 +105,7 @@ impl ProjectNode {
             Self::Optimizer(o) => &o.name,
             Self::MeshExport(e) => &e.name,
             Self::Campbell(c) => &c.name,
+            Self::File(f) => &f.name,
         }
     }
 
@@ -116,6 +120,7 @@ impl ProjectNode {
             Self::Optimizer(o) => o.position,
             Self::MeshExport(e) => e.position,
             Self::Campbell(c) => c.position,
+            Self::File(f) => f.position,
         }
     }
 }
@@ -211,6 +216,24 @@ pub struct ParameterSet {
     #[serde(default)]
     pub units: plx_model::UnitSystem,
     pub parameters: Vec<plx_model::Parameter>,
+}
+
+/// A block that reads a file outside the project for analyses to link: geometry (STEP,
+/// IGES, BREP, STL), a mesh (`.inp`) or the results of each step of a results file (`.frd`).
+/// It keeps only the path: the file is read again when the project is opened and whenever
+/// it changes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FileSource {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The file; a relative path is taken from the folder of the project file.
+    #[serde(default)]
+    pub path: String,
+    /// The unit system the numbers of an input file and the lengths of geometry are in.
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
 }
 
 /// A block that writes the mesh linked to it to a file when the project is updated. It keeps
@@ -923,6 +946,14 @@ mod tests {
         saved
             .nodes
             .push(ProjectNode::Campbell(Box::new(campbell.clone())));
+        let file = FileSource {
+            id: 9,
+            name: "Global results".into(),
+            position: [500.0, 20.0],
+            path: "results/global.frd".into(),
+            units: plx_model::UnitSystem::MmTonSC,
+        };
+        saved.nodes.push(ProjectNode::File(file.clone()));
         saved.links.push(Link {
             source: 3,
             target: 1,
@@ -936,7 +967,11 @@ mod tests {
         assert!(text.contains(&format!("format:{PROJECT_FORMAT}")));
         assert!(!text.contains("analyses:"), "{text}");
         let project = read_project(&path).unwrap();
-        assert_eq!(project.nodes.len(), 6);
+        assert_eq!(project.nodes.len(), 7);
+        match &project.nodes[6] {
+            ProjectNode::File(read) => assert_eq!(read, &file),
+            other => panic!("{other:?}"),
+        }
         match &project.nodes[4] {
             ProjectNode::MeshExport(read) => assert_eq!(read, &export),
             other => panic!("{other:?}"),
