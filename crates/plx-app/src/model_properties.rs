@@ -373,6 +373,7 @@ mod tests {
             solids,
             faces: 2,
             edges: 0,
+            topology: Default::default(),
         };
         Model::geometry_view(std::path::Path::new("flaechen.brep"), display)
     }

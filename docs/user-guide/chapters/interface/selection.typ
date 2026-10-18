@@ -20,7 +20,7 @@ The #ui("...") button next to a field makes it the target of clicks in the 3D vi
 pressed while it is active. Dialogs with two regions (master and slave) use one #ui("...")
 button per region to switch between them.
 
-=== Selection window
+=== Selection window <selection-window>
 
 While a dialog picks, the #ui("Selection") window opens next to it and decides what a click
 selects.
@@ -38,6 +38,9 @@ selects.
   element numbers.
 
 Modes that do not fit the region are disabled, for example #ui("Node") for a pressure load.
+On the Geometry tab, for mesh setup items such as a Local Mesh Size, the window offers only the
+geometry based modes, as the geometry has no mesh yet; #ui("All") and #ui("Invert") act on the
+faces of the visible parts.
 #ui("Undo") takes back the last pick, #ui("Clear") empties the selection, #ui("All") and
 #ui("Invert") act on the visible items.
 

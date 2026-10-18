@@ -14,6 +14,7 @@ mod contacts;
 mod exploded;
 mod features;
 mod field_output_dialog;
+mod geometry_selection;
 mod gizmo;
 mod help;
 mod history_output_dialog;
