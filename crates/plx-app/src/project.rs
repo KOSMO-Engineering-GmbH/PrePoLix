@@ -127,6 +127,8 @@ struct AnalysisBlock {
     upstream: crate::status::Upstream,
     /// Solved in the background, its window closed.
     solving: bool,
+    /// The revision of its open window as last seen, see [`AnalysisWindow::revision`].
+    seen: Option<u64>,
 }
 
 /// The model data a block that is no analysis gives to links or takes from them, in the form
@@ -278,6 +280,7 @@ impl Node {
             space,
             upstream: Default::default(),
             solving: false,
+            seen: None,
         };
         Self::new(id, name, Block::Analysis(Box::new(block)))
     }
@@ -465,6 +468,15 @@ impl Node {
     /// The state of an analysis' cells, as last found.
     fn status(&self) -> Option<&AnalysisStatus> {
         self.as_analysis()?.status.as_ref()
+    }
+
+    /// The state of an analysis' cells found now, for decisions: an open window may have
+    /// taken what links brought in this frame.
+    fn current_status(&self) -> Option<AnalysisStatus> {
+        match self.window() {
+            Some(window) => window.current_status(),
+            None => self.status().cloned(),
+        }
     }
 
     /// The model space shown in the header of the block, of an analysis or a mesh block.
@@ -1091,8 +1103,8 @@ pub struct ProjectApp {
     /// Fingerprint of the geometry or mesh a link last copied into its target, by target and
     /// path: copied again once the source's differs.
     applied: HashMap<(u64, Vec<String>), u64>,
-    /// When links last brought their targets up to date, and whether they have to again now.
-    last_sync: Option<Instant>,
+    /// Whether links have to bring their targets up to date: something changed that they
+    /// may take.
     sync_due: bool,
     /// Global results being written for submodels, by the folder they are written to;
     /// `None` once writing failed.
@@ -1161,7 +1173,6 @@ impl ProjectApp {
             monitor: Monitor::default(),
             startup_import: Vec::new(),
             applied: HashMap::new(),
-            last_sync: None,
             sync_due: true,
             restoring: HashMap::new(),
             warned: BTreeSet::new(),
@@ -2687,7 +2698,9 @@ impl ProjectApp {
         }
         analysis.data = window.data();
         analysis.window = None;
+        analysis.seen = None;
         node.refresh_closed();
+        self.sync_due = true;
         true
     }
 
@@ -2943,7 +2956,7 @@ impl ProjectApp {
     fn update_project(&mut self) {
         // Mesh blocks first: what links their meshes takes the new one before it is found
         // out of date, so the update goes on once the links are brought up to date.
-        if self.generate_meshes() {
+        if self.generate_meshes() || self.sync_due {
             self.update_after_sync = true;
             return;
         }
@@ -2958,7 +2971,7 @@ impl ProjectApp {
             let after_source = (self.links.iter()).any(|l| {
                 l.target == id && links::is_results(l) && self.update_queue.contains(&l.source)
             });
-            match &node.status() {
+            match &node.current_status() {
                 Some(status) if (status.needs_solve() || after_source) && status.solvable() => {
                     self.update_queue.push_back(node.id)
                 }
@@ -4454,17 +4467,14 @@ impl ProjectApp {
         self.sync_due = true;
     }
 
-    /// Brings what the analyses take through links up to date with their sources: often
-    /// enough to look live, in the order of the links so that a chain is done in one go.
+    /// Brings what the analyses take through links up to date with their sources once
+    /// something changed, in the order of the links so that a chain is done in one go.
     fn sync_links(&mut self, ctx: &egui::Context) {
         self.poll_restoring();
-        let due = self.sync_due
-            || (self.last_sync).is_none_or(|t| t.elapsed() > Duration::from_millis(300));
-        if !due {
+        if !self.sync_due {
             return;
         }
         self.sync_due = false;
-        self.last_sync = Some(Instant::now());
         self.apply_values();
         self.evaluate_measures();
         let ids: Vec<u64> = self.nodes.iter().map(|n| n.id).collect();
@@ -4508,7 +4518,7 @@ impl ProjectApp {
                 }
             }
         }
-        ctx.request_repaint_after(Duration::from_millis(300));
+        ctx.request_repaint();
     }
 
     /// What links fill in `target`, and from where it continues and where others continue
@@ -5222,6 +5232,7 @@ impl ProjectApp {
         let mut requests = Vec::new();
         let mut closing = Vec::new();
         let mut settings = None;
+        let mut changed = false;
         for node in &mut self.nodes {
             let (id, name) = (node.id, &node.name);
             let Block::Analysis(analysis) = &mut node.block else {
@@ -5257,6 +5268,12 @@ impl ProjectApp {
             if window.settings() != &self.settings {
                 settings = Some(window.settings().clone());
             }
+            // What links take from it follows its changes.
+            let revision = window.revision();
+            if revision != analysis.seen {
+                analysis.seen = revision;
+                changed = true;
+            }
             // The block shows the state live.
             if let Some(status) = window.status() {
                 analysis.status = Some(status);
@@ -5264,6 +5281,9 @@ impl ProjectApp {
             if let Some(model) = window.model() {
                 analysis.space = model.fe.properties.space;
             }
+        }
+        if changed {
+            self.sync_due = true;
         }
         if let Some(settings) = settings {
             self.settings = settings;

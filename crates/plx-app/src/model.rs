@@ -119,6 +119,9 @@ pub struct Model {
     checks: std::sync::Mutex<Option<Checks>>,
     /// What the user changed, to undo and redo it.
     pub history: crate::undo::History,
+    /// Counts the changes of the FE model, the meshing settings and the mesh, see
+    /// [`crate::undo::record`]; the project brings its links up to date when it changes.
+    pub revision: u64,
     /// Shell and membrane sections whose elements are drawn as the solid of their
     /// thickness and offset, see [`Model::shell_sections`]; empty draws them as surfaces.
     pub thick_shells: Vec<plx_model::Section>,
@@ -556,6 +559,7 @@ impl Model {
             checks: Default::default(),
             cad_index: Default::default(),
             history: Default::default(),
+            revision: 0,
             thick_shells: Vec::new(),
         };
         let meshes = model.render_meshes();
@@ -625,6 +629,7 @@ impl Model {
         let mut fresh = Self::new(&self.path, mesh);
         std::mem::swap(&mut self.mesh, &mut fresh.mesh);
         self.history.mesh_replaced(std::mem::take(&mut fresh.mesh));
+        self.revision += 1;
         self.parts = fresh.parts;
         self.skins = fresh.skins;
         self.origin = fresh.origin;

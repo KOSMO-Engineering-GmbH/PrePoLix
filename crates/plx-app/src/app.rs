@@ -98,9 +98,10 @@ struct Workbench {
     upstream: crate::status::Upstream,
     /// A linked item was double-clicked: where it comes from, with its path.
     linked_prompt: Option<(Vec<String>, String)>,
-    /// The state of the analysis' cells and when it was found; finding it takes the
-    /// fingerprints of mesh and model, so it is not done in every frame.
-    status: Option<(std::time::Instant, crate::status::AnalysisStatus)>,
+    /// The state of the analysis' cells and the revision of the analysis it was found for;
+    /// finding it takes the fingerprints of mesh and model, so it is found again only when
+    /// the analysis changed.
+    status: Option<(u64, crate::status::AnalysisStatus)>,
     /// Open dialog of the model properties.
     model_dialog: Option<ModelPropertiesDialog>,
     viewport: Viewport,
@@ -660,9 +661,15 @@ impl AnalysisWindow {
         self.workbench.output.push(line);
     }
 
-    /// The state of the analysis' cells, found again at most twice a second.
+    /// The state of the analysis' cells, found again when the analysis changed.
     pub fn status(&mut self) -> Option<crate::status::AnalysisStatus> {
         self.workbench.cached_status()
+    }
+
+    /// Changes whenever the data of the analysis changes as the project sees it; `None`
+    /// while it loads.
+    pub fn revision(&self) -> Option<u64> {
+        self.workbench.revision()
     }
 
     /// The state of the cells found now, not as last found: right after a run, the one
@@ -3482,16 +3489,31 @@ impl Workbench {
         ))
     }
 
-    /// The state of the cells as last found, found again when older than half a second.
+    /// The state of the cells as last found, found again when the analysis changed.
     fn cached_status(&mut self) -> Option<crate::status::AnalysisStatus> {
-        let fresh = (self.status.as_ref())
-            .filter(|(at, _)| at.elapsed() < std::time::Duration::from_millis(500));
-        if let Some((_, status)) = fresh {
+        let revision = self.revision()?;
+        if let Some((seen, status)) = &self.status
+            && *seen == revision
+        {
             return Some(status.clone());
         }
         let status = self.status()?;
-        self.status = Some((std::time::Instant::now(), status.clone()));
+        self.status = Some((revision, status.clone()));
         Some(status)
+    }
+
+    /// What tells a change of the analysis: of its FE model, meshing settings and mesh by
+    /// [`Model::revision`], of the refinement its geometry is meshed with and of the
+    /// results it keeps.
+    fn revision(&self) -> Option<u64> {
+        let model = self.model.as_ref()?;
+        let mut hash = plx_mesh::Fnv::new();
+        hash.add(&model.revision.to_le_bytes());
+        let refinement = model.geometry.as_ref().map(|g| g.refinement.to_bits());
+        hash.add_debug(&refinement);
+        let kept = (model.bound_results.as_ref()).map(|b| (b.input, b.stored_size()));
+        hash.add_debug(&kept);
+        Some(hash.finish())
     }
 
     /// Ansys Workbench's Update: the project meshes the parts whose mesh is out of date,
