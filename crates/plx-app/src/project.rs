@@ -72,6 +72,15 @@ impl Kind {
     }
 }
 
+/// Whether a solve started.
+enum Start {
+    Started,
+    /// Not now: its window is busy or still loading.
+    Later,
+    /// Not at all; the output tells why.
+    Refused,
+}
+
 /// A block of the schematic: its name, the rows of it that are open, and what it is with
 /// the data of that kind.
 struct Node {
@@ -1071,10 +1080,10 @@ pub struct ProjectApp {
     /// analysis failed meanwhile.
     export_queue: Vec<u64>,
     update_failed: bool,
-    /// Analyses solved without their window, running and done, for the solution monitor.
+    /// The solves of the analyses, running and done, for the solution monitor.
     solves: Vec<BackgroundSolve>,
-    /// Analyses solved in their open window, for the solution monitor.
-    window_runs: Vec<u64>,
+    /// Analyses Solve Again asked for: solved even if their results are up to date.
+    forced: BTreeSet<u64>,
     /// The solution monitor, with the analysis whose output it shows and its filter.
     monitor: Monitor,
     /// Files given on the command line, imported into the first analysis once it is open.
@@ -1148,7 +1157,7 @@ impl ProjectApp {
             export_queue: Vec::new(),
             update_failed: false,
             solves: Vec::new(),
-            window_runs: Vec::new(),
+            forced: BTreeSet::new(),
             monitor: Monitor::default(),
             startup_import: Vec::new(),
             applied: HashMap::new(),
@@ -2606,18 +2615,6 @@ impl ProjectApp {
             }
             None => return,
         }
-        // Solved in the background: the window opens with the new results.
-        if let Some(solve) = (self.solves.iter_mut()).find(|s| s.id == id && s.active()) {
-            if !solve.open_when_done {
-                let line = format!(
-                    "{} is being solved; its window opens once the solve is done.",
-                    solve.name
-                );
-                self.output.push(line);
-            }
-            solve.open_when_done = true;
-            return;
-        }
         let path = self.model_path();
         let folder = crate::analysis::job_name(&self.project_name());
         let (render_state, settings) = (self.render_state.clone(), self.settings.clone());
@@ -2997,20 +2994,13 @@ impl ProjectApp {
             let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) else {
                 continue;
             };
-            let outcome = match (background, node.window_mut()) {
-                (Some(solve), _) if solve.active() => {
+            let outcome = match background {
+                Some(solve) if solve.active() => {
                     self.updating.push(id);
                     continue;
                 }
-                (Some(solve), _) => solve.outcome(),
-                (None, Some(window)) => {
-                    if window.waiting() || window.solving() || window.is_running() {
-                        self.updating.push(id);
-                        continue;
-                    }
-                    None
-                }
-                (None, None) => None,
+                Some(solve) => solve.outcome(),
+                None => None,
             };
             // Done: solved, or stopped by an error the monitor shows.
             let failed = matches!(outcome, Some(Outcome::Failed | Outcome::Stopped))
@@ -3074,38 +3064,43 @@ impl ProjectApp {
             let ready = self.update_queue.iter().position(|&id| {
                 !(self.links.iter()).any(|l| l.target == id && l.source != id && busy(l.source))
             });
-            let Some(id) = ready.and_then(|index| self.update_queue.remove(index)) else {
+            let Some(index) = ready else {
                 return;
             };
-            if self.start_solve(ctx, id) {
-                self.updating.push(id);
+            let Some(id) = self.update_queue.remove(index) else {
+                return;
+            };
+            match self.start_solve(ctx, id) {
+                Start::Started => self.updating.push(id),
+                Start::Refused => {}
+                Start::Later => {
+                    // Its window is still busy: tried again in the next frame.
+                    self.update_queue.insert(index, id);
+                    return;
+                }
             }
         }
     }
 
-    /// Starts solving the analysis: in its window if it is open, else in the background
-    /// from the project's data. Returns whether it started.
-    fn start_solve(&mut self, ctx: &egui::Context, id: u64) -> bool {
+    /// Starts solving a copy of the analysis' data: of the project's, or of its open
+    /// window's.
+    fn start_solve(&mut self, ctx: &egui::Context, id: u64) -> Start {
         let incoming = self.incoming(id);
         let path = self.model_path();
         let mut work_dir = self.settings.solver.work_dir();
         work_dir.push(crate::analysis::job_name(&self.project_name()));
         let settings = self.settings.solver.clone();
+        let force = self.forced.remove(&id);
         let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) else {
-            return false;
+            return Start::Refused;
         };
-        if let Some(window) = node.window_mut() {
-            window.solve_when_loaded();
-            self.solves.retain(|s| s.id != id);
-            self.window_runs.retain(|&run| run != id);
-            self.window_runs.push(id);
-            self.monitor.show(id);
-            return true;
-        }
         let name = node.name.clone();
         let Some(analysis) = node.as_analysis_mut() else {
-            return false;
+            return Start::Refused;
         };
+        if analysis.window.as_ref().is_some_and(|w| w.busy().is_some()) {
+            return Start::Later;
+        }
         if !analysis.upstream.is_ready() {
             // Update Project could not bring them up to date: the old data is not solved.
             let upstream = &analysis.upstream;
@@ -3130,22 +3125,37 @@ impl ProjectApp {
             }
             self.output
                 .push(format!("{name} not solved: {}.", reasons.join("; ")));
-            return false;
+            return Start::Refused;
         }
-        let Some(data) = analysis.data.clone() else {
-            return false;
+        let data = match &mut analysis.window {
+            Some(window) => window.data(),
+            None => analysis.data.clone(),
+        };
+        let Some(data) = data else {
+            return Start::Later;
+        };
+        let data = ProjectAnalysis {
+            id,
+            name: name.clone(),
+            ..data
         };
         work_dir.push(crate::analysis::job_name(&name));
         analysis.solving = true;
         node.refresh_closed();
-        let solve =
-            BackgroundSolve::start(ctx, path, data, settings, work_dir, incoming.continuation);
+        let solve = BackgroundSolve::start(
+            ctx,
+            path,
+            data,
+            settings,
+            work_dir,
+            incoming.continuation,
+            force,
+        );
         // A run of the same analysis before is replaced in the monitor.
         self.solves.retain(|s| s.id != id);
-        self.window_runs.retain(|&run| run != id);
         self.solves.push(solve);
         self.monitor.show(id);
-        true
+        Start::Started
     }
 
     /// Polls the background solves and puts what a finished one made into its analysis.
@@ -3157,12 +3167,12 @@ impl ProjectApp {
                 finished.push(solve.id);
             }
         }
+        let mut lost = Vec::new();
         for id in finished {
             let Some(solve) = self.solves.iter_mut().find(|s| s.id == id) else {
                 continue;
             };
             let solved = solve.take_solved();
-            let open = std::mem::take(&mut solve.open_when_done);
             // What running the executable found out about it is kept.
             let probed = solve.solver();
             let (detected, keywords) = (probed.detected.clone(), probed.keywords.clone());
@@ -3177,27 +3187,59 @@ impl ProjectApp {
             let Some(node) = self.node(id) else {
                 continue;
             };
+            let name = node.name.clone();
             let Some(analysis) = node.as_analysis_mut() else {
                 continue;
             };
             analysis.solving = false;
-            if let (Some(solved), Some(data)) = (solved, &mut analysis.data) {
-                if let Some((mesh, mesh_inputs)) = solved.meshed {
-                    data.mesh = mesh;
-                    data.mesh_inputs = mesh_inputs;
-                    // Reference points at the centre of a selection follow the new mesh.
-                    data.model.update_reference_points(&data.mesh);
+            let Some(mut solved) = solved else {
+                continue;
+            };
+            // What the solve made belongs to the mesh it started from: a mesh made or linked
+            // meanwhile keeps the analysis out of date instead.
+            let mesh = match (&analysis.window, &analysis.data) {
+                (Some(window), _) => window.model().map(|m| m.mesh.fingerprint()),
+                (None, Some(data)) => Some(data.mesh.fingerprint()),
+                (None, None) => None,
+            };
+            if solved.mesh_print.is_some() && mesh != solved.mesh_print {
+                if solved.meshed.is_some() || solved.results.is_some() {
+                    lost.push(format!(
+                        "{name}: the mesh changed while it was solved; its new results are not \
+                         kept. Solve it again."
+                    ));
                 }
-                if let Some(results) = solved.results {
-                    data.results = Some(results);
+                solved.meshed = None;
+                solved.results = None;
+            }
+            match (&mut analysis.window, &mut analysis.data) {
+                (Some(window), _) => window.take_solved(solved),
+                (None, Some(data)) => {
+                    if let Some((mesh, mesh_inputs)) = solved.meshed {
+                        data.mesh = mesh;
+                        data.mesh_inputs = mesh_inputs;
+                        // Reference points at the centre of a selection follow the new mesh.
+                        data.model.update_reference_points(&data.mesh);
+                    }
+                    if let Some(mut results) = solved.results {
+                        // What was defined on the results before goes over to the new ones;
+                        // what refers to nodes or elements only if the mesh stayed the same.
+                        let previous = (data.results.as_mut()).and_then(|r| r.settings.take());
+                        results.settings = previous.map(|mut settings| {
+                            if settings.mesh != Some(data.mesh.fingerprint()) {
+                                settings.without_mesh_references();
+                            }
+                            settings
+                        });
+                        data.results = Some(results);
+                    }
                 }
+                (None, None) => {}
             }
             node.refresh_closed();
             self.sync_due = true;
-            if open {
-                self.open_window(ctx, id, None);
-            }
         }
+        self.output.extend(lost);
     }
 
     /// Stops Update Project: nothing more is started, and what runs is stopped.
@@ -3215,11 +3257,8 @@ impl ProjectApp {
         self.update_queue.clear();
         self.export_queue.clear();
         self.update_failed = false;
-        for id in std::mem::take(&mut self.updating) {
-            if let Some(window) = self.node(id).and_then(Node::window_mut) {
-                window.stop_solve();
-            }
-        }
+        self.updating.clear();
+        self.forced.clear();
         for solve in &mut self.solves {
             solve.stop();
         }
@@ -3232,14 +3271,13 @@ impl ProjectApp {
             solve.stop();
         }
         self.solves.clear();
-        self.window_runs.clear();
+        self.forced.clear();
         self.update_queue.clear();
         self.export_queue.clear();
         self.updating.clear();
     }
 
-    /// The lines of the solution monitor's list: the analyses solved in the background and
-    /// in their windows, then those queued.
+    /// The lines of the solution monitor's list: the analyses solved, then those queued.
     fn monitor_rows(&self) -> Vec<MonitorRow> {
         let mut rows: Vec<MonitorRow> = (self.solves.iter())
             .map(|solve| MonitorRow {
@@ -3251,30 +3289,6 @@ impl ProjectApp {
                 active: solve.active(),
             })
             .collect();
-        for &id in &self.window_runs {
-            let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
-                continue;
-            };
-            let Some(window) = node.window() else {
-                continue;
-            };
-            let updating = self.updating.contains(&id);
-            let run = window.run();
-            let state = match run {
-                Some(run) if run.is_running() => "running".to_owned(),
-                _ if updating => "preparing".to_owned(),
-                Some(run) => crate::analysis::Analysis::status_text(run.status()).to_owned(),
-                None => "not solved".to_owned(),
-            };
-            rows.push(MonitorRow {
-                id,
-                name: format!("{} (window)", node.name),
-                state,
-                seconds: run.map(|r| r.seconds()),
-                progress: run.filter(|r| r.is_running()).and_then(|r| r.progress()),
-                active: updating || window.is_running(),
-            });
-        }
         for &id in &self.update_queue {
             rows.push(MonitorRow {
                 id,
@@ -3299,13 +3313,9 @@ impl ProjectApp {
         let (mut pick, mut stop, mut stop_all, mut open_analysis, mut clear) =
             (None, None, false, None, false);
         let output: Vec<String> = match selected {
-            Some(id) => match (self.solves.iter()).find(|s| s.id == id) {
-                Some(solve) => solve.output().into_iter().map(str::to_owned).collect(),
-                None => (self.nodes.iter().find(|n| n.id == id))
-                    .and_then(|n| n.window()?.run())
-                    .map(|run| run.output().to_vec())
-                    .unwrap_or_default(),
-            },
+            Some(id) => (self.solves.iter().find(|s| s.id == id))
+                .map(|solve| solve.output().into_iter().map(str::to_owned).collect())
+                .unwrap_or_default(),
             None => Vec::new(),
         };
         ui.horizontal(|ui| {
@@ -3437,8 +3447,6 @@ impl ProjectApp {
         }
         if clear {
             self.solves.retain(BackgroundSolve::active);
-            let updating = self.updating.clone();
-            self.window_runs.retain(|id| updating.contains(id));
         }
         if let Some(id) = open_analysis {
             self.open_window(
@@ -3455,11 +3463,9 @@ impl ProjectApp {
     /// Stops the solve of one analysis; a queued one is taken out of the queue.
     fn stop_solve(&mut self, id: u64) {
         self.update_queue.retain(|&queued| queued != id);
+        self.forced.remove(&id);
         if let Some(solve) = (self.solves.iter_mut()).find(|s| s.id == id && s.active()) {
             solve.stop();
-        }
-        if let Some(window) = self.node(id).and_then(Node::window_mut) {
-            window.stop_solve();
         }
     }
 
@@ -4493,14 +4499,12 @@ impl ProjectApp {
             let incoming = self.incoming(target);
             upstream.stale_meshes = self.stale_meshes(target);
             if let Some(node) = self.node(target) {
+                if let Some(analysis) = node.as_analysis_mut() {
+                    analysis.upstream = upstream.clone();
+                }
                 match node.window_mut() {
                     Some(window) => window.set_links(incoming, upstream),
-                    None => {
-                        if let Some(analysis) = node.as_analysis_mut() {
-                            analysis.upstream = upstream;
-                        }
-                        node.refresh_closed();
-                    }
+                    None => node.refresh_closed(),
                 }
             }
         }
@@ -5226,6 +5230,10 @@ impl ProjectApp {
             let Some(window) = &mut analysis.window else {
                 continue;
             };
+            // The window shows the project's solve of its analysis.
+            if let Some(solve) = self.solves.iter().rev().find(|s| s.id == id) {
+                window.show_run(solve);
+            }
             let mut builder = egui::ViewportBuilder::default()
                 .with_title(format!("{name} - {project} - PrePoLix"))
                 .with_app_id("prepolix")
@@ -5269,7 +5277,13 @@ impl ProjectApp {
                 Request::Save(save_as) => self.save(save_as),
                 Request::SaveWithoutResults => self.save_without_results(),
                 Request::OpenProject(path) => self.open(ctx, path),
-                Request::SolveChain => self.solve_chain(id),
+                Request::SolveChain(force) => {
+                    if force {
+                        self.forced.insert(id);
+                    }
+                    self.solve_chain(id);
+                }
+                Request::StopSolve => self.stop_solve(id),
                 Request::OpenAnalysis(name) => {
                     if let Some(source) = self.nodes.iter().find(|n| n.name == name) {
                         let source = source.id;

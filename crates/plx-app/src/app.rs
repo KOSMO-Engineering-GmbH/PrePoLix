@@ -7,7 +7,7 @@ use plx_model::UnitSystem;
 use plx_render::StandardView;
 use plx_results::hot_spot::{HotSpot, HotSpotPath};
 
-use crate::analysis::{Analysis, MonitorEvent};
+use crate::analysis::{Analysis, MonitorEvent, RunView};
 use crate::animation::{AnimationKind, ColorLimits, Playback};
 use crate::animation_export::{self, Format};
 use crate::contact_search::{ContactSearchDialog, SearchResult};
@@ -65,9 +65,12 @@ pub enum Request {
     SaveWithoutResults,
     /// Open this project file instead of the open project.
     OpenProject(PathBuf),
-    /// Solve the analyses this one takes global results from and have none yet, then this
-    /// one.
-    SolveChain,
+    /// Solve the analyses this one takes results or states from and that have none or old
+    /// ones, then this one: Solve, or Solve Again with `true`, which runs CalculiX even if
+    /// the results are up to date.
+    SolveChain(bool),
+    /// Stop the solve of this analysis.
+    StopSolve,
     /// Open the analysis of this name, which a linked item comes from.
     OpenAnalysis(String),
     /// Stop taking the item at this path from another analysis; the analysis keeps its
@@ -86,9 +89,6 @@ struct Workbench {
     /// Folder of the project in the work directory; each analysis of the project runs in a
     /// folder of its own in it.
     project_folder: String,
-    /// Solve meshes the parts whose mesh is out of date first; the analysis starts once
-    /// they are meshed.
-    solve_after_meshing: bool,
     /// What the window asks of the project window.
     requests: Vec<Request>,
     /// What the analysis takes from other analyses of the project; the window shows it but
@@ -172,7 +172,13 @@ struct Workbench {
     /// The tree selection whose region is highlighted.
     /// `None` until it is computed, so a dialog's highlight is cleared once it closes.
     highlighted: Option<TreeSelection>,
+    /// The last Check Model run of the window.
     analysis: Option<Analysis>,
+    /// The last solve of the analysis, which the project runs; shown in the Analysis tab.
+    project_run: Option<RunView>,
+    /// The project's solve just brought new results: they take over what was defined on
+    /// the results before, once they are restored.
+    carry_to_restored: Option<plx_results::ResultsSettings>,
     /// Results being bound to or restored from the project file of the model at this path.
     bound_work: Option<(PathBuf, std::sync::mpsc::Receiver<BoundWork>)>,
     /// What was defined on the results before the analysis ran again, for its new results
@@ -244,8 +250,6 @@ pub struct AnalysisWindow {
     loading: Option<PathBuf>,
     /// Files to import once the analysis is loaded.
     import_when_loaded: Vec<PathBuf>,
-    /// Whether to solve once the analysis is loaded, for Update Project.
-    solve_when_loaded: bool,
     /// The workspace to switch to once the analysis is loaded.
     show_when_loaded: Option<Show>,
 }
@@ -258,7 +262,6 @@ impl AnalysisWindow {
                 settings_window: None,
                 analysis_name: name.to_owned(),
                 project_folder: String::new(),
-                solve_after_meshing: false,
                 requests: Vec::new(),
                 incoming: Default::default(),
                 upstream: Default::default(),
@@ -301,6 +304,8 @@ impl AnalysisWindow {
                 history_plot: None,
                 highlighted: None,
                 analysis: None,
+                project_run: None,
+                carry_to_restored: None,
                 bound_work: None,
                 carried_settings: None,
                 solver_findings: Vec::new(),
@@ -331,7 +336,6 @@ impl AnalysisWindow {
             load_events: channel(),
             loading: None,
             import_when_loaded: Vec::new(),
-            solve_when_loaded: false,
             show_when_loaded: None,
         }
     }
@@ -483,14 +487,73 @@ impl AnalysisWindow {
         self.workbench.view_command = Some(ViewCommand::Fit);
     }
 
-    /// Whether the window is still loading, or has an import or a solve to start once loaded.
-    pub fn waiting(&self) -> bool {
-        self.loading.is_some() || self.solve_when_loaded || !self.import_when_loaded.is_empty()
+    /// Shows the project's solve of the analysis in the Analysis tab, as far as it got.
+    pub fn show_run(&mut self, solve: &crate::solution_monitor::BackgroundSolve) {
+        let workbench = &mut self.workbench;
+        let run = match &mut workbench.project_run {
+            Some(run) if run.started == Some(solve.started()) => run,
+            _ => {
+                // A new solve: the output below the 3D view shows it, not an older Check
+                // Model.
+                if !(workbench.analysis.as_ref()).is_some_and(Analysis::is_running) {
+                    workbench.analysis = None;
+                }
+                if solve.active() {
+                    workbench.analysis_tab = true;
+                }
+                workbench.status = None;
+                workbench.project_run.insert(RunView {
+                    started: Some(solve.started()),
+                    ..Default::default()
+                })
+            }
+        };
+        if run.active != solve.active() {
+            workbench.status = None;
+        }
+        run.active = solve.active();
+        run.state = solve.state_text();
+        run.seconds = solve.seconds();
+        run.progress = solve.progress();
+        let output = solve.output();
+        if output.len() < run.lines.len() {
+            run.lines.clear();
+        }
+        let from = run.lines.len();
+        run.lines
+            .extend(output[from..].iter().map(|l| (*l).to_owned()));
     }
 
-    /// Solves the analysis as soon as it is loaded.
-    pub fn solve_when_loaded(&mut self) {
-        self.solve_when_loaded = true;
+    /// The project's solve is done: the analysis takes the mesh it made and the results it
+    /// kept, which open on the Results tab, and what CalculiX reported.
+    pub fn take_solved(&mut self, solved: crate::solution_monitor::Solved) {
+        let workbench = &mut self.workbench;
+        workbench.solver_findings = solved.findings;
+        let Some(model) = &mut workbench.model else {
+            return;
+        };
+        if let Some((mesh, mesh_inputs)) = solved.meshed {
+            model.set_mesh(mesh);
+            model.mesh_inputs = mesh_inputs;
+            model.fe.update_reference_points(&model.mesh);
+            workbench.after_parts_changed();
+            workbench.view_command = Some(ViewCommand::Fit);
+        }
+        let Some(results) = solved.results else {
+            workbench.status = None;
+            return;
+        };
+        // What was defined on the results before goes over to the new ones.
+        let path = workbench.model.as_ref().map(|m| m.path.clone());
+        let previous = path.and_then(|p| workbench.previous_settings(&p));
+        let Some(model) = &mut workbench.model else {
+            return;
+        };
+        model.bound_results = Some(results);
+        model.bound_results_file = None;
+        workbench.carry_to_restored = previous;
+        workbench.status = None;
+        workbench.open_bound_results();
     }
 
     /// Opens the analysis of the project at `path` in the window, built on a worker thread.
@@ -531,24 +594,9 @@ impl AnalysisWindow {
         self.workbench.model.as_ref()
     }
 
+    /// Whether a Check Model run of the window runs.
     pub fn is_running(&self) -> bool {
         (self.workbench.analysis.as_ref()).is_some_and(Analysis::is_running)
-    }
-
-    /// The last CalculiX run of the window, for the project's solution monitor.
-    pub fn run(&self) -> Option<&Analysis> {
-        self.workbench.analysis.as_ref()
-    }
-
-    /// Stops a Solve: kills CalculiX, and a solve waiting for its mesh does not start.
-    pub fn stop_solve(&mut self) {
-        let workbench = &mut self.workbench;
-        workbench.solve_after_meshing = false;
-        self.solve_when_loaded = false;
-        if let Some(analysis) = (workbench.analysis.as_mut()).filter(|a| a.is_running()) {
-            analysis.kill();
-            workbench.output.push("Analysis killed".into());
-        }
     }
 
     /// What keeps the window from closing or its data from being taken: work on a worker
@@ -560,22 +608,12 @@ impl AnalysisWindow {
         } else if workbench.meshing.is_some() {
             Some("it is meshing")
         } else if self.is_running() {
-            Some("its analysis is running")
+            Some("its model check is running")
         } else if workbench.bound_work.is_some() {
             Some("it is keeping its result")
         } else {
             None
         }
-    }
-
-    /// Whether a Solve is under way: meshing, running or keeping the result.
-    pub fn solving(&self) -> bool {
-        let workbench = &self.workbench;
-        workbench.solve_after_meshing
-            || (workbench.analysis.as_ref()).is_some_and(|a| a.open_when_done && !a.bound)
-            || workbench.bound_work.is_some()
-            || workbench.meshing.is_some()
-            || self.loading.is_some()
     }
 
     /// The data of the analysis as the project saves it; the results keep what was defined
@@ -1003,21 +1041,14 @@ impl AnalysisWindow {
     /// analysis in the tree.
     fn solve_tools(&mut self, ui: &mut egui::Ui) {
         let workbench = &mut self.workbench;
-        let running = workbench
-            .analysis
-            .as_ref()
-            .is_some_and(Analysis::is_running);
+        let running = workbench.running();
         let meshing = workbench.meshing.is_some();
         let can_solve = workbench.model.is_some() && !running && !meshing && self.loading.is_none();
         if icons::button(ui, Icon::Solve, SOLVE_TIP, can_solve, false).clicked() {
-            workbench.solve(ui.ctx(), false);
+            workbench.solve();
         }
-        let stoppable = running || workbench.solve_after_meshing;
-        if icons::button(ui, Icon::Stop, "Stop the analysis", stoppable, false).clicked() {
-            workbench.solve_after_meshing = false;
-            if let Some(analysis) = &mut workbench.analysis {
-                analysis.kill();
-            }
+        if icons::button(ui, Icon::Stop, "Stop the analysis", running, false).clicked() {
+            workbench.stop();
         }
         let tip = "Monitor: the output of CalculiX in the Analysis tab below the 3D view";
         let shown = workbench.analysis_tab;
@@ -1370,9 +1401,6 @@ impl AnalysisWindow {
                     (self.workbench.model.as_ref()).is_some_and(|m| m.bound_results.is_some());
                 self.workbench.pinned_view = (bound && view != TreeView::Results).then_some(view);
             }
-            if std::mem::take(&mut self.solve_when_loaded) {
-                self.workbench.solve(&ctx, true);
-            }
         }
         // Under the System theme, the operating system may switch between light and dark.
         crate::style::sync(&ctx);
@@ -1523,7 +1551,7 @@ impl AnalysisWindow {
         self.workbench.material_library_window(&ctx);
         self.workbench.mesh_setup_window(&ctx);
         self.workbench.mesh_item_window(&ctx);
-        self.workbench.poll_meshing(&ctx);
+        self.workbench.poll_meshing();
         self.workbench.field_output_window(&ctx);
         self.workbench.history_output_window(&ctx);
         self.workbench.hot_spot_dialog_window(&ctx);
@@ -1565,13 +1593,9 @@ impl AnalysisWindow {
     }
 }
 
-/// What a worker binding or restoring bound results sends back.
-enum BoundWork {
-    /// The results file and the files bound.
-    Bound(PathBuf, Result<Box<plx_io::project::BoundResults>, String>),
-    /// The analysis, the directory and the results file written there.
-    Restored(String, PathBuf, Result<PathBuf, String>),
-}
+/// What a worker restoring bound results sends back: the analysis, the directory and the
+/// results file written there.
+struct BoundWork(String, PathBuf, Result<PathBuf, String>);
 
 fn saved_camera(saved: plx_results::saved_view::SavedCamera) -> plx_render::Camera {
     plx_render::Camera {
@@ -1929,6 +1953,8 @@ impl Workbench {
                         .stick_to_bottom(true),
                     &self.output,
                 );
+            } else if let Some(run) = &mut self.project_run {
+                event = run.monitor(ui, &self.analysis_name);
             } else if let Some(analysis) = &mut self.analysis {
                 event = analysis.monitor(ui);
             } else {
@@ -1936,8 +1962,10 @@ impl Workbench {
             }
         });
         crate::style::open_tab(ui, selected_tab);
-        if let MonitorEvent::OpenResults = event {
-            self.open_analysis_results();
+        match event {
+            MonitorEvent::OpenResults => self.open_bound_results(),
+            MonitorEvent::Stop => self.stop(),
+            MonitorEvent::None => {}
         }
     }
 
@@ -3058,7 +3086,7 @@ impl Workbench {
         self.mesh_failure.clear();
     }
 
-    fn poll_meshing(&mut self, ctx: &egui::Context) {
+    fn poll_meshing(&mut self) {
         let Some(result) = self.meshing.as_ref().and_then(MeshingJob::poll) else {
             return;
         };
@@ -3069,7 +3097,6 @@ impl Workbench {
         let Some(model) = self.model.as_mut() else {
             return;
         };
-        let solve = std::mem::take(&mut self.solve_after_meshing);
         match result {
             Ok(generated) => {
                 let had_mesh = model.mesh.element_count() > 0;
@@ -3086,9 +3113,6 @@ impl Workbench {
                 self.results_changed = true;
                 if !had_mesh {
                     self.view_command = Some(ViewCommand::Fit);
-                }
-                if solve {
-                    self.solve(ctx, false);
                 }
             }
             Err(error) => {
@@ -3267,7 +3291,7 @@ impl Workbench {
     }
 
     fn analysis_menu(&mut self, ui: &mut egui::Ui) {
-        let running = self.analysis.as_ref().is_some_and(Analysis::is_running);
+        let running = self.running();
         let can_start = self.setup_model().is_some() && !running && self.meshing.is_none();
         let solve = egui::Button::new("Solve").shortcut_text("F5");
         if ui
@@ -3275,26 +3299,23 @@ impl Workbench {
             .on_hover_text(SOLVE_TIP)
             .clicked()
         {
-            self.solve(ui.ctx(), false);
+            self.solve();
         }
         if ui
             .add_enabled(can_start, egui::Button::new("Solve Again"))
             .on_hover_text("Runs CalculiX even if the results are up to date.")
             .clicked()
         {
-            self.start_analysis(false, true);
+            self.requests.push(Request::SolveChain(true));
         }
         if ui
             .add_enabled(can_start, egui::Button::new("Check Model"))
             .clicked()
         {
-            self.start_analysis(true, false);
+            self.check_model();
         }
-        if ui.add_enabled(running, egui::Button::new("Stop")).clicked()
-            && let Some(analysis) = &mut self.analysis
-        {
-            analysis.kill();
-            self.solve_after_meshing = false;
+        if ui.add_enabled(running, egui::Button::new("Stop")).clicked() {
+            self.stop();
         }
         if ui.button("Monitor").clicked() {
             self.analysis_tab = true;
@@ -3343,19 +3364,6 @@ impl Workbench {
         }
     }
 
-    /// Opens the results of the last run and binds them to the project, once per run.
-    fn open_analysis_results(&mut self) {
-        let Some(path) = self.analysis.as_ref().and_then(Analysis::results) else {
-            return;
-        };
-        // Results of a new run take over what was defined on those of the run before.
-        if self.analysis.as_ref().is_some_and(|a| !a.bound) {
-            self.carried_settings = self.previous_settings(&path).map(|s| (path.clone(), s));
-        }
-        self.open_results = Some(path);
-        self.bind_results();
-    }
-
     /// What was defined on the results before those at `path` came: on the open bound
     /// results, on open results at that path, or saved with the bound results.
     fn previous_settings(&self, path: &std::path::Path) -> Option<plx_results::ResultsSettings> {
@@ -3385,57 +3393,6 @@ impl Workbench {
         Some(settings)
     }
 
-    /// Binds the results of the finished analysis to the project: its input, results and
-    /// history output files are saved with the project from now on.
-    fn bind_results(&mut self) {
-        if self.bound_work.is_some() {
-            return;
-        }
-        let Some(analysis) = (self.analysis.as_mut()).filter(|a| !a.is_running() && !a.bound)
-        else {
-            return;
-        };
-        let Some(frd) = analysis.results() else {
-            return;
-        };
-        // A result removed from the project is not bound again until the next run.
-        analysis.bound = true;
-        // A killed run's results stop somewhere in it: they can be looked at, but are not
-        // kept as the solution of the model.
-        if !matches!(
-            analysis.status(),
-            plx_job::JobStatus::Completed | plx_job::JobStatus::FailedWithResults
-        ) {
-            self.output.push(format!(
-                "Results of {} not kept: the run did not finish.",
-                self.analysis_name
-            ));
-            return;
-        }
-        let with_errors = analysis.status() == plx_job::JobStatus::FailedWithResults;
-        let input = analysis.input;
-        let Some(model) = &self.model else {
-            return;
-        };
-        // Compressing large results takes seconds: done beside the GUI.
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let files = ["inp", "frd", "dat"].map(|e| frd.with_extension(e));
-        let name = self.analysis_name.clone();
-        std::thread::spawn(move || {
-            let bound = plx_io::project::bind_results(&name, &files, with_errors)
-                .map(|mut bound| {
-                    // What was solved, to tell when the results are out of date.
-                    bound.input = Some(input);
-                    Box::new(bound)
-                })
-                .map_err(|e| e.to_string());
-            let _ = sender.send(BoundWork::Bound(frd, bound));
-        });
-        self.output
-            .push(format!("Keeping the results of {} …", self.analysis_name));
-        self.bound_work = Some((model.path.clone(), receiver));
-    }
-
     /// Opens the results bound to the project, written into the work directory first.
     fn open_bound_results(&mut self) {
         if self.bound_work.is_some() {
@@ -3457,7 +3414,7 @@ impl Workbench {
         std::thread::spawn(move || {
             let restored =
                 plx_io::project::restore_results(&bound, &dir).map_err(|e| e.to_string());
-            let _ = sender.send(BoundWork::Restored(bound.analysis, dir, restored));
+            let _ = sender.send(BoundWork(bound.analysis, dir, restored));
         });
         self.bound_work = Some((model.path.clone(), receiver));
     }
@@ -3481,30 +3438,19 @@ impl Workbench {
         // The model may have been closed or replaced meanwhile.
         let model = (self.model.as_mut()).filter(|m| m.path == *path);
         self.bound_work = None;
+        let carried = self.carry_to_restored.take();
         match (work, model) {
-            (BoundWork::Bound(frd, Ok(bound)), Some(model)) => {
-                self.output.push(format!(
-                    "Results of {} kept: {} of files, {} in the project file once it is saved",
-                    bound.analysis,
-                    file_size(bound.size()),
-                    file_size(bound.stored_size())
-                ));
-                model.bound_results = Some(*bound);
-                // The open results whose settings are saved with them.
-                model.bound_results_file = Some(frd);
-            }
-            (BoundWork::Restored(analysis, dir, Ok(file)), Some(model)) => {
+            (BoundWork(analysis, dir, Ok(file)), Some(model)) => {
                 self.output.push(format!(
                     "Results of {analysis} restored to {}",
                     dir.display()
                 ));
                 model.bound_results_file = Some(file.clone());
+                // New results of a solve take over what was defined on those before.
+                self.carried_settings = carried.map(|settings| (file.clone(), settings));
                 self.open_results = Some(file);
             }
-            (BoundWork::Bound(_, Err(error)), _) => {
-                self.output.push(format!("Results not kept: {error}"));
-            }
-            (BoundWork::Restored(_, _, Err(error)), _) => {
+            (BoundWork(_, _, Err(error)), _) => {
                 self.output
                     .push(format!("Kept results not restored: {error}"));
             }
@@ -3532,7 +3478,7 @@ impl Workbench {
             &model.mesh_inputs,
             model.bound_results.as_ref(),
             &self.upstream,
-            self.analysis.as_ref().is_some_and(Analysis::is_running),
+            (self.project_run.as_ref()).is_some_and(|r| r.active),
         ))
     }
 
@@ -3548,85 +3494,33 @@ impl Workbench {
         Some(status)
     }
 
-    /// Ansys Workbench's Update: meshes the parts whose mesh is out of date, then solves if
-    /// the results are missing or out of date, and keeps the new results. What is up to
-    /// date stays as it is. `by_project` when Update Project started it, after it brought
-    /// what the analysis takes from other blocks up to date.
-    fn solve(&mut self, ctx: &egui::Context, by_project: bool) {
-        if self.meshing.is_some() || self.analysis.as_ref().is_some_and(Analysis::is_running) {
-            return;
+    /// Ansys Workbench's Update: the project meshes the parts whose mesh is out of date,
+    /// then solves if the results are missing or out of date, and keeps the new results.
+    /// What the analysis takes from other analyses is made first.
+    fn solve(&mut self) {
+        self.requests.push(Request::SolveChain(false));
+    }
+
+    /// Stops the project's solve of the analysis, or a Check Model run.
+    fn stop(&mut self) {
+        if (self.project_run.as_ref()).is_some_and(|r| r.active) {
+            self.requests.push(Request::StopSolve);
         }
-        let Some(status) = self.status() else {
-            return;
-        };
-        // A submodel needs the results of its global model, a mesh taken from a mesh block
-        // the block's current mesh: the project makes them first, then solves this one.
-        let upstream = &self.upstream;
-        if !upstream.is_ready() {
-            let mut why = Vec::new();
-            if !upstream.missing_results.is_empty() {
-                why.push(format!(
-                    "{} has no results yet",
-                    upstream.missing_results.join(", ")
-                ));
-            }
-            if !upstream.stale_results.is_empty() {
-                why.push(format!(
-                    "the results of {} are out of date",
-                    upstream.stale_results.join(", ")
-                ));
-            }
-            if !upstream.stale_meshes.is_empty() {
-                why.push(format!(
-                    "the mesh of {} is out of date",
-                    upstream.stale_meshes.join(", ")
-                ));
-            }
-            if by_project {
-                // The project could not make them: solving now would solve the old mesh or
-                // fail on the missing results.
-                self.output.push(format!(
-                    "{} not solved: {}.",
-                    self.analysis_name,
-                    why.join("; ")
-                ));
-            } else {
-                let why = why.join("; ");
-                let mut chars = why.chars();
-                let why: String = (chars.next().into_iter())
-                    .flat_map(char::to_uppercase)
-                    .chain(chars)
-                    .collect();
-                self.output
-                    .push(format!("{why}: the project makes it first."));
-                self.requests.push(Request::SolveChain);
-            }
-            return;
-        }
-        let has_geometry = (self.model.as_ref()).is_some_and(|m| m.geometry.is_some());
-        let remesh = match status.mesh {
-            crate::status::CellState::Missing if has_geometry => Some(None),
-            crate::status::CellState::OutOfDate => Some(Some(status.stale_parts.clone())),
-            _ => None,
-        };
-        if let Some(parts) = remesh {
-            self.solve_after_meshing = true;
-            self.generate_mesh(ctx, parts);
-            return;
-        }
-        self.solve_after_meshing = false;
-        if status.needs_solve() {
-            self.start_analysis(false, true);
-        } else {
-            self.output.push(format!(
-                "{} is up to date; nothing to solve.",
-                self.analysis_name
-            ));
+        if let Some(analysis) = (self.analysis.as_mut()).filter(|a| a.is_running()) {
+            analysis.kill();
+            self.output.push("Model check killed".into());
         }
     }
 
-    fn start_analysis(&mut self, check_model: bool, keep_results: bool) {
-        if self.analysis.as_ref().is_some_and(Analysis::is_running) {
+    /// Whether the project solves the analysis or a Check Model runs.
+    fn running(&self) -> bool {
+        (self.project_run.as_ref()).is_some_and(|r| r.active)
+            || (self.analysis.as_ref()).is_some_and(Analysis::is_running)
+    }
+
+    /// Check Model: CalculiX checks the input file of the analysis without solving it.
+    fn check_model(&mut self) {
+        if self.running() {
             return;
         }
         if self.setup_model().is_none() {
@@ -3653,13 +3547,12 @@ impl Workbench {
             &self.settings.solver,
             model,
             default_solver,
-            check_model,
+            true,
             name,
             &work_dir,
             &self.incoming.continuation,
         ) {
             Ok(mut analysis) => {
-                analysis.open_when_done = keep_results && !check_model;
                 // Problems the checks found go into the monitor first, so that an abort is
                 // explained even before CalculiX says anything.
                 for finding in
@@ -3671,15 +3564,8 @@ impl Workbench {
                         finding.detail
                     ));
                 }
-                self.output.push(format!(
-                    "{} started: {}",
-                    if check_model {
-                        "Model check"
-                    } else {
-                        "Analysis"
-                    },
-                    work_dir.display()
-                ));
+                self.output
+                    .push(format!("Model check started: {}", work_dir.display()));
                 self.solver_findings.clear();
                 // CalculiX skips keywords it does not know with only a warning; tested on
                 // the executable while it already runs.
@@ -3702,6 +3588,7 @@ impl Workbench {
                     self.solver_findings.push(finding);
                 }
                 self.analysis = Some(analysis);
+                self.project_run = None;
                 // The run's output shows below the 3D view, which stays free for results.
                 self.analysis_tab = true;
             }
@@ -3709,10 +3596,11 @@ impl Workbench {
         }
     }
 
-    /// Polls the running analysis.
+    /// Polls the running Check Model.
     fn run_analysis(&mut self, ctx: &egui::Context) {
-        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
-            self.solve(ctx, false);
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5)) && !self.running()
+        {
+            self.solve();
         }
         let Some(analysis) = &mut self.analysis else {
             return;
@@ -3742,24 +3630,6 @@ impl Workbench {
                     );
                 }
             }
-        }
-        // Solve keeps and opens the results of its run once it ends.
-        let done = !analysis.is_running() && analysis.open_when_done && !analysis.bound;
-        let with_results = analysis.results().is_some()
-            && matches!(
-                analysis.status(),
-                plx_job::JobStatus::Completed | plx_job::JobStatus::FailedWithResults
-            );
-        // Results being restored or kept go first; those of this run are kept after them.
-        if done && self.bound_work.is_some() {
-            return;
-        }
-        if done {
-            analysis.open_when_done = false;
-            if with_results {
-                self.open_analysis_results();
-            }
-            return;
         }
         if analysis.is_running() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));

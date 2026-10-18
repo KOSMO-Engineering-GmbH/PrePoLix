@@ -1,7 +1,8 @@
-//! Solving from the project window, as Ansys Workbench's Update Project does: an analysis
-//! whose window is closed is meshed and solved in the background from the project's data,
-//! without opening its window, and the project window's solution monitor shows the runs
-//! with their CalculiX output.
+//! Solving from the project, as Ansys Workbench's Update Project does: every solve, from
+//! Update Project or from Solve in an analysis window, meshes and solves a copy of the
+//! analysis' data in the background, and the project window's solution monitor shows the
+//! runs with their CalculiX output. An open window shows the run in its Analysis tab and
+//! takes the new mesh and results once it is done.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -31,6 +32,8 @@ enum Stage {
 
 struct Loaded {
     model: Model,
+    /// Fingerprint of the mesh it started from.
+    mesh_print: u64,
     solver: Solver,
     default_solver: EquationSolver,
     findings: Vec<Finding>,
@@ -64,9 +67,14 @@ pub struct Solved {
     /// meshed the geometry first.
     pub meshed: Option<(plx_mesh::FeMesh, std::collections::BTreeMap<String, u64>)>,
     pub results: Option<BoundResults>,
+    /// Problems CalculiX reported when the run failed.
+    pub findings: Vec<Finding>,
+    /// Fingerprint of the mesh the solve started from: what it made belongs to the
+    /// analysis only while its mesh is still that one.
+    pub mesh_print: Option<u64>,
 }
 
-/// An analysis meshed and solved without its window.
+/// An analysis meshed and solved from a copy of its data.
 pub struct BackgroundSolve {
     pub id: u64,
     pub name: String,
@@ -85,8 +93,10 @@ pub struct BackgroundSolve {
     finished: Option<f32>,
     meshed: bool,
     results: Option<BoundResults>,
-    /// The analysis' window opens once the solve is done: asked for while it ran.
-    pub open_when_done: bool,
+    findings: Vec<Finding>,
+    mesh_print: Option<u64>,
+    /// Runs CalculiX even if the results are up to date: Solve Again.
+    force: bool,
 }
 
 impl BackgroundSolve {
@@ -99,6 +109,7 @@ impl BackgroundSolve {
         solver: Solver,
         work_dir: PathBuf,
         continuation: Continuation,
+        force: bool,
     ) -> Self {
         let name = data.name.clone();
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -125,8 +136,10 @@ impl BackgroundSolve {
             } else {
                 Vec::new()
             };
+            let mesh_print = model.mesh.fingerprint();
             let _ = sender.send(Loaded {
                 model,
+                mesh_print,
                 solver: probed,
                 default_solver,
                 findings,
@@ -134,10 +147,7 @@ impl BackgroundSolve {
             ctx.request_repaint();
         });
         Self {
-            before: vec![format!(
-                "{name}: solving in the background in {}",
-                work_dir.display()
-            )],
+            before: vec![format!("{name}: solving in {}", work_dir.display())],
             id: data.id,
             name,
             stage: Stage::Loading(receiver),
@@ -152,7 +162,9 @@ impl BackgroundSolve {
             finished: None,
             meshed: false,
             results: None,
-            open_when_done: false,
+            findings: Vec::new(),
+            mesh_print: None,
+            force,
         }
     }
 
@@ -182,6 +194,11 @@ impl BackgroundSolve {
             Stage::Keeping(_) => "keeping results",
             Stage::Done(outcome) => outcome.text(),
         }
+    }
+
+    /// When it started, which tells it from the next solve of the same analysis.
+    pub fn started(&self) -> Instant {
+        self.started
     }
 
     pub fn seconds(&self) -> f32 {
@@ -222,8 +239,12 @@ impl BackgroundSolve {
         let meshed = (self.meshed.then(|| self.model.take()).flatten())
             .map(|model| (model.mesh.clone(), model.mesh_inputs.clone()));
         self.meshed = false;
-        let results = self.results.take();
-        (meshed.is_some() || results.is_some()).then_some(Solved { meshed, results })
+        Some(Solved {
+            meshed,
+            results: self.results.take(),
+            findings: std::mem::take(&mut self.findings),
+            mesh_print: self.mesh_print.take(),
+        })
     }
 
     fn finish(&mut self, outcome: Outcome) {
@@ -244,11 +265,13 @@ impl BackgroundSolve {
                 Ok(loaded) => {
                     let Loaded {
                         model,
+                        mesh_print,
                         solver,
                         default_solver,
                         findings,
                     } = loaded;
                     self.model = Some(model);
+                    self.mesh_print = Some(mesh_print);
                     self.solver = solver;
                     self.default_solver = default_solver;
                     self.mesh_or_run(ctx, findings);
@@ -317,8 +340,8 @@ impl BackgroundSolve {
         }
     }
 
-    /// Meshes the geometry first if the mesh is missing or out of date, as Solve in the
-    /// analysis window does; else starts CalculiX.
+    /// Meshes the geometry first if the mesh is missing or out of date; else starts
+    /// CalculiX.
     fn mesh_or_run(&mut self, ctx: &egui::Context, findings: Vec<Finding>) {
         let Some(model) = &self.model else {
             return;
@@ -350,7 +373,7 @@ impl BackgroundSolve {
             self.stage = Stage::Meshing(MeshingJob::start(geometry, parts, ctx));
             return;
         }
-        if !status.needs_solve() {
+        if !status.needs_solve() && !self.force {
             self.before
                 .push(format!("{} is up to date; nothing to solve.", self.name));
             return self.finish(Outcome::Solved);
@@ -358,7 +381,7 @@ impl BackgroundSolve {
         self.run(findings);
     }
 
-    /// Writes the input file and starts CalculiX, as Solve in the analysis window does.
+    /// Writes the input file and starts CalculiX.
     fn run(&mut self, findings: Vec<Finding>) {
         let Some(model) = &self.model else {
             return;
@@ -410,13 +433,14 @@ impl BackgroundSolve {
             && let Some(model) = &self.model
         {
             let findings = plx_model::diagnose_solver_output(analysis.output(), &model.mesh);
-            for finding in &findings {
+            for finding in (findings.iter()).filter(|f| f.item == plx_model::ModelItem::Analysis) {
                 self.after.push(format!(
                     "Possible cause: {}. {}",
                     finding.problem.title(),
                     finding.problem.fix()
                 ));
             }
+            self.findings = findings;
         }
         let results = analysis
             .results()
@@ -507,6 +531,7 @@ mod tests {
             solver.clone(),
             work_dir.clone(),
             Continuation::default(),
+            false,
         );
         assert_eq!(solve.state_text(), "preparing");
         finish(&mut solve, &ctx);
@@ -541,11 +566,13 @@ mod tests {
             solver,
             work_dir,
             Continuation::default(),
+            false,
         );
         finish(&mut again, &ctx);
         assert_eq!(again.outcome(), Some(Outcome::Solved));
         assert!(again.output().iter().any(|l| l.contains("up to date")));
-        assert!(again.take_solved().is_none());
+        let again = again.take_solved().expect("done");
+        assert!(again.meshed.is_none() && again.results.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -560,11 +587,13 @@ mod tests {
             Solver::default(),
             dir.clone(),
             Continuation::default(),
+            false,
         );
         solve.stop();
         assert!(!solve.active());
         assert_eq!(solve.outcome(), Some(Outcome::Stopped));
-        assert!(solve.take_solved().is_none());
+        let kept = solve.take_solved().expect("done");
+        assert!(kept.meshed.is_none() && kept.results.is_none());
         // What the worker still sends is not taken any more.
         solve.poll(&ctx);
         assert_eq!(solve.outcome(), Some(Outcome::Stopped));
