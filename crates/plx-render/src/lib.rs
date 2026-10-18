@@ -9,7 +9,7 @@ mod section;
 mod shell;
 
 pub use camera::{Camera, StandardView};
-pub use fe::{part_color, part_render_mesh, wireframe_edges};
+pub use fe::{mesh_wireframe, part_color, part_render_mesh, wireframe_edges};
 pub use mesh::{RenderMesh, Vertex};
 pub use renderer::{COLOR_FORMAT, ContourPalette, DisplayOptions, ViewportRenderer};
 pub use section::{

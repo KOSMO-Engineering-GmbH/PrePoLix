@@ -178,20 +178,6 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
         | TreeItem::HistorySet(_)
         | TreeItem::HistoryField(..)
         | TreeItem::HistoryComponent(..) => {}
-        TreeItem::GlobalModel => {
-            let Some(global) = &model.global else {
-                return;
-            };
-            let view = global.model.results.as_ref();
-            let increment = view.and_then(|v| v.increments.get(global.increment));
-            rows.push(("File", global.model.path.display().to_string()));
-            if let Some(increment) = increment {
-                rows.push(("Step", increment.step.to_string()));
-                rows.push(("Increment", increment.increment.to_string()));
-            }
-            rows.push(("Elements", global.model.mesh.element_count().to_string()));
-            rows.push(("Cut away", format!("{} elements", global.removed)));
-        }
         TreeItem::Model => {
             rows.push(("File", model.path.display().to_string()));
             rows.push(("Load time", format!("{} ms", model.load_time.as_millis())));
