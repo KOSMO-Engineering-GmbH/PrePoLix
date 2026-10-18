@@ -172,7 +172,7 @@ fn segment_in_box(
     Some((t0, t1))
 }
 
-fn bounds(coords: &[[f64; 3]], nodes: &[usize]) -> ([f64; 3], [f64; 3]) {
+pub(crate) fn bounds(coords: &[[f64; 3]], nodes: &[usize]) -> ([f64; 3], [f64; 3]) {
     let mut low = [f64::INFINITY; 3];
     let mut high = [f64::NEG_INFINITY; 3];
     for &n in nodes {
@@ -185,7 +185,7 @@ fn bounds(coords: &[[f64; 3]], nodes: &[usize]) -> ([f64; 3], [f64; 3]) {
 }
 
 /// A solid element split into tetrahedra, by mesh node indices.
-fn tetrahedra(shape: ElementShape, n: &[usize]) -> Option<Vec<[usize; 4]>> {
+pub(crate) fn tetrahedra(shape: ElementShape, n: &[usize]) -> Option<Vec<[usize; 4]>> {
     let tets = |list: &[[usize; 4]]| list.iter().map(|t| t.map(|i| n[i])).collect();
     Some(match shape {
         ElementShape::Tet4 => vec![[n[0], n[1], n[2], n[3]]],
@@ -217,7 +217,7 @@ fn tetrahedra(shape: ElementShape, n: &[usize]) -> Option<Vec<[usize; 4]>> {
 }
 
 /// A shell or 2D element split into triangles, by mesh node indices.
-fn triangles(shape: ElementShape, n: &[usize]) -> Option<Vec<[usize; 3]>> {
+pub(crate) fn triangles(shape: ElementShape, n: &[usize]) -> Option<Vec<[usize; 3]>> {
     let tris = |list: &[[usize; 3]]| list.iter().map(|t| t.map(|i| n[i])).collect();
     Some(match shape {
         ElementShape::Tri3 => vec![[n[0], n[1], n[2]]],
@@ -228,7 +228,11 @@ fn triangles(shape: ElementShape, n: &[usize]) -> Option<Vec<[usize; 3]>> {
     })
 }
 
-fn in_tetrahedron(coords: &[[f64; 3]], t: &[usize; 4], p: [f64; 3]) -> Option<Vec<(usize, f64)>> {
+pub(crate) fn in_tetrahedron(
+    coords: &[[f64; 3]],
+    t: &[usize; 4],
+    p: [f64; 3],
+) -> Option<Vec<(usize, f64)>> {
     let a = coords[t[0]];
     let (e1, e2, e3) = (
         sub(coords[t[1]], a),
@@ -252,7 +256,11 @@ fn in_tetrahedron(coords: &[[f64; 3]], t: &[usize; 4], p: [f64; 3]) -> Option<Ve
         .then(|| (0..4).map(|k| (t[k], weights[k].max(0.0))).collect())
 }
 
-fn in_triangle(coords: &[[f64; 3]], t: &[usize; 3], p: [f64; 3]) -> Option<Vec<(usize, f64)>> {
+pub(crate) fn in_triangle(
+    coords: &[[f64; 3]],
+    t: &[usize; 3],
+    p: [f64; 3],
+) -> Option<Vec<(usize, f64)>> {
     let a = coords[t[0]];
     let (e1, e2) = (sub(coords[t[1]], a), sub(coords[t[2]], a));
     let normal = cross(e1, e2);

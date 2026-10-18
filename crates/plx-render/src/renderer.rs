@@ -62,6 +62,8 @@ struct GpuMesh {
     wireframe_edges: Option<GpuBuffer>,
     wide_edges: Option<GpuBuffer>,
     visible: bool,
+    /// Surfaces seen through, drawn after everything else without their mesh edges.
+    transparent: bool,
 }
 
 /// What the viewport draws besides the shaded surfaces.
@@ -124,6 +126,7 @@ pub struct ViewportRenderer {
     bind_group: wgpu::BindGroup,
     background_pipeline: wgpu::RenderPipeline,
     surface_pipeline: wgpu::RenderPipeline,
+    transparent_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
     wireframe_pipeline: wgpu::RenderPipeline,
     mesh_edge_pipeline: wgpu::RenderPipeline,
@@ -257,6 +260,24 @@ impl ViewportRenderer {
             ),
             None,
         );
+        // Transparent surfaces leave the depth buffer to the opaque ones behind them.
+        let transparent_pipeline = pipeline(
+            "viewport transparent surfaces",
+            "vs_surface",
+            "fs_transparent_surface",
+            &[Some(vertex_layout.clone())],
+            wgpu::PrimitiveTopology::TriangleList,
+            depth_state(
+                false,
+                wgpu::CompareFunction::Less,
+                wgpu::DepthBiasState {
+                    constant: SURFACE_BIAS_CONSTANT,
+                    slope_scale: EDGE_OFFSET_PX,
+                    clamp: 0.0,
+                },
+            ),
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+        );
         let edge_pipeline = pipeline(
             "viewport edges",
             "vs_edge",
@@ -324,6 +345,7 @@ impl ViewportRenderer {
             bind_group,
             background_pipeline,
             surface_pipeline,
+            transparent_pipeline,
             edge_pipeline,
             wireframe_pipeline,
             mesh_edge_pipeline,
@@ -371,6 +393,16 @@ impl ViewportRenderer {
             && part.visible != visible
         {
             part.visible = visible;
+            self.drawn = None;
+        }
+    }
+
+    /// Draws the surfaces of a part see-through, or opaque again.
+    pub fn set_part_transparent(&mut self, index: usize, transparent: bool) {
+        if let Some(part) = self.parts.get_mut(index)
+            && part.transparent != transparent
+        {
+            part.transparent = transparent;
             self.drawn = None;
         }
     }
@@ -493,8 +525,10 @@ impl ViewportRenderer {
                     .filter(|(_, visible, _)| *visible)
                     .map(|(p, _, whole)| (p, whole))
             };
+            // Opaque meshes drawn whole.
+            let solid = || visible().filter(|(p, whole)| *whole && !p.transparent);
             pass.set_pipeline(&self.surface_pipeline);
-            for (part, _) in visible().filter(|(_, whole)| *whole) {
+            for (part, _) in solid() {
                 if let (Some(vertices), Some(triangles)) = (&part.vertices, &part.triangles) {
                     pass.set_vertex_buffer(0, vertices.buffer.slice(..));
                     pass.set_index_buffer(triangles.buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -503,7 +537,7 @@ impl ViewportRenderer {
             }
             if options.mesh_edges {
                 pass.set_pipeline(&self.mesh_edge_pipeline);
-                for (part, _) in visible().filter(|(_, whole)| *whole) {
+                for (part, _) in solid() {
                     if let (Some(vertices), Some(edges)) = (&part.vertices, &part.mesh_edges) {
                         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
                         pass.set_index_buffer(edges.buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -530,6 +564,15 @@ impl ViewportRenderer {
             {
                 pass.set_vertex_buffer(0, lines.buffer.slice(..));
                 pass.draw(0..6, 0..lines.count / 2);
+            }
+            // Last, so that what lies behind them shows through.
+            pass.set_pipeline(&self.transparent_pipeline);
+            for (part, _) in visible().filter(|(p, whole)| *whole && p.transparent) {
+                if let (Some(vertices), Some(triangles)) = (&part.vertices, &part.triangles) {
+                    pass.set_vertex_buffer(0, vertices.buffer.slice(..));
+                    pass.set_index_buffer(triangles.buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..triangles.count, 0, 0..1);
+                }
             }
         }
         queue.submit([encoder.finish()]);
@@ -587,6 +630,7 @@ fn upload(device: &wgpu::Device, mesh: &RenderMesh) -> GpuMesh {
             vertex,
         ),
         visible: true,
+        transparent: false,
     }
 }
 

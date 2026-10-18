@@ -96,11 +96,27 @@ fn contour_color(t: f32) -> vec3<f32> {
     return globals.palette[band].rgb;
 }
 
+// Opacity of the surfaces of transparent parts.
+const TRANSPARENT_OPACITY: f32 = 0.25;
+
 @fragment
-fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+fn fs_surface(in: SurfaceOut) -> @location(0) vec4<f32> {
     if clipped(in.world) {
         discard;
     }
+    return vec4<f32>(shade(in), 1.0);
+}
+
+// Surfaces of transparent parts, such as the global model around a submodel.
+@fragment
+fn fs_transparent_surface(in: SurfaceOut) -> @location(0) vec4<f32> {
+    if clipped(in.world) {
+        discard;
+    }
+    return vec4<f32>(shade(in), TRANSPARENT_OPACITY);
+}
+
+fn shade(in: SurfaceOut) -> vec3<f32> {
     var color = in.color;
     if globals.contour.x > 0.0 {
         color = contour_color(in.scalar);
@@ -120,7 +136,7 @@ fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0
         specular += LIGHT_INTENSITY * pow(max(dot(n, h), 0.0), SPECULAR_POWER);
     }
     let shaded = color * (AMBIENT + DIFFUSE * diffuse) + vec3<f32>(SPECULAR * specular);
-    return vec4<f32>(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    return clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 struct EdgeOut {

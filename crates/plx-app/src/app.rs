@@ -182,6 +182,8 @@ struct Workbench {
     carry_to_restored: Option<plx_results::ResultsSettings>,
     /// Results being bound to or restored from the project file of the model at this path.
     bound_work: Option<(PathBuf, std::sync::mpsc::Receiver<BoundWork>)>,
+    /// The global model of a submodel being read and cut, for the results at this path.
+    global_work: Option<(PathBuf, std::sync::mpsc::Receiver<GlobalWork>)>,
     /// What was defined on the results before the analysis ran again, for its new results
     /// at this path.
     carried_settings: Option<(PathBuf, plx_results::ResultsSettings)>,
@@ -308,6 +310,7 @@ impl AnalysisWindow {
                 project_run: None,
                 carry_to_restored: None,
                 bound_work: None,
+                global_work: None,
                 carried_settings: None,
                 solver_findings: Vec::new(),
                 findings_window: None,
@@ -1571,6 +1574,7 @@ impl AnalysisWindow {
         self.workbench.sync_result_features();
         self.workbench.run_analysis(&ctx);
         self.workbench.poll_bound_results(&ctx);
+        self.workbench.poll_global_results(&ctx);
         if let Some(path) = self.workbench.open_results.take() {
             self.workbench.results_asked = Some(path.clone());
             self.open_results(path, &ctx);
@@ -1603,6 +1607,9 @@ impl AnalysisWindow {
 /// What a worker restoring bound results sends back: the analysis, the directory and the
 /// results file written there.
 struct BoundWork(String, PathBuf, Result<PathBuf, String>);
+
+/// The global model of a submodel, read and cut on a worker thread.
+type GlobalWork = Result<Box<model::GlobalModel>, String>;
 
 fn saved_camera(saved: plx_results::saved_view::SavedCamera) -> plx_render::Camera {
     plx_render::Camera {
@@ -1862,6 +1869,7 @@ impl Workbench {
                         }
                     }
                     self.evaluate_hot_spots();
+                    self.load_global_results();
                 } else {
                     self.tree.selected = None;
                     self.editor = None;
@@ -2189,6 +2197,9 @@ impl Workbench {
                 part.visible = visible;
             }
             self.viewport.set_part_visible(index, visible);
+        }
+        if response.global_model {
+            self.results_changed = true;
         }
         if !response.contours.is_empty() {
             for (index, contours) in response.contours {
@@ -3462,6 +3473,94 @@ impl Workbench {
                     .push(format!("Kept results not restored: {error}"));
             }
             (_, None) => {}
+        }
+    }
+
+    /// Reads the results of the global model of a submodel and cuts away where the
+    /// submodel lies, to draw them around the shown results of the submodel.
+    fn load_global_results(&mut self) {
+        let Some(fe) = self.model.as_ref().map(|m| &m.fe) else {
+            return;
+        };
+        let Some(path) = (fe.properties.submodel_input()).filter(|_| fe.uses_global_results())
+        else {
+            return;
+        };
+        let Some(results) = self.results.get(self.current_result) else {
+            return;
+        };
+        // The global step the first active submodel boundary condition reads.
+        let step = (fe.steps.iter().filter(|s| s.active))
+            .flat_map(|s| &s.boundary_conditions)
+            .find_map(|bc| match bc.kind {
+                plx_model::BoundaryKind::Submodel { step, .. } if bc.active => Some(step),
+                _ => None,
+            })
+            .unwrap_or(1);
+        if !path.is_file() {
+            self.output.push(format!(
+                "Global model not shown: its results {} are missing.",
+                path.display()
+            ));
+            return;
+        }
+        let (path, units, submodel) = (
+            path.to_path_buf(),
+            self.import_units(),
+            results.mesh.clone(),
+        );
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let cut = model::load(&path, units).and_then(|loaded| {
+                model::GlobalModel::cut(loaded.model, &submodel, step)
+                    .map(Box::new)
+                    .ok_or_else(|| format!("{} holds no results", path.display()))
+            });
+            let _ = sender.send(cut);
+        });
+        self.global_work = Some((results.path.clone(), receiver));
+    }
+
+    /// Draws the global model of a submodel around its results once it is read.
+    fn poll_global_results(&mut self, ctx: &egui::Context) {
+        let Some((path, receiver)) = &self.global_work else {
+            return;
+        };
+        let work = match receiver.try_recv() {
+            Ok(work) => work,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.global_work = None;
+                return;
+            }
+        };
+        let path = path.clone();
+        self.global_work = None;
+        match work {
+            Ok(mut global) => {
+                let Some(results) = self.results.iter_mut().find(|m| m.path == path) else {
+                    return;
+                };
+                // Results read again keep how the global model was drawn.
+                if let Some(old) = &results.global {
+                    global.visible = old.visible;
+                    global.display = old.display;
+                }
+                if let Some(view) = &mut global.model.results {
+                    view.units = results.results.as_ref().map_or(view.units, |v| v.units);
+                }
+                self.output.push(format!(
+                    "Global model shown around the submodel, without the {} elements where \
+                     the submodel lies",
+                    global.removed
+                ));
+                results.global = Some(global);
+                self.results_changed = true;
+            }
+            Err(error) => self.output.push(format!("Global model not shown: {error}")),
         }
     }
 
@@ -6204,6 +6303,9 @@ impl Workbench {
             self.update_contour();
             return;
         };
+        if !frame_only {
+            model.update_global_range();
+        }
         let frame = model
             .results
             .as_ref()
@@ -6217,9 +6319,9 @@ impl Workbench {
             Some(frame) => self
                 .frame_cache
                 .entry(frame)
-                .or_insert_with(|| model.render_meshes()),
+                .or_insert_with(|| model.scene_meshes()),
             None => {
-                fresh = model.render_meshes();
+                fresh = model.scene_meshes();
                 &fresh
             }
         };
@@ -6227,6 +6329,17 @@ impl Workbench {
         for (index, (part, mesh)) in model.parts.iter_mut().zip(meshes).enumerate() {
             part.bounds = mesh.bounds();
             self.viewport.set_part_visible(index, part.visible);
+        }
+        // The global model around a submodel follows its parts.
+        let transparent =
+            (model.global.as_ref()).is_some_and(|g| g.display == model::GlobalDisplay::Transparent);
+        if let Some(global) = &mut model.global {
+            let around = meshes.get(model.parts.len()..).unwrap_or_default();
+            global.bounds = (around.iter().filter_map(RenderMesh::bounds))
+                .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)));
+        }
+        for index in model.parts.len()..meshes.len() {
+            self.viewport.set_part_transparent(index, transparent);
         }
         if model.explosion.is_shown()
             && let Some(bounds) = model.visible_bounds()

@@ -120,6 +120,9 @@ pub struct ResultsView {
     pub plain_nodes: Vec<bool>,
     /// The plane result shown alone, by index in the features of the results.
     pub plane_result: Option<usize>,
+    /// Range of the values drawn beside the results, such as the global model around a
+    /// submodel, for the field and component named: the legend takes it in.
+    pub beside: Option<(String, String, (f32, f32))>,
     /// Unit system of the values, PrePoMax's results unit system: that of the FE model the
     /// results belong to; the legend shows units after it.
     pub units: UnitSystem,
@@ -226,6 +229,7 @@ impl ResultsView {
             section_range: None,
             plain_nodes: Vec::new(),
             plane_result: None,
+            beside: None,
             units: UnitSystem::default(),
             model_size: bounds.map_or(1.0, model_size),
             deformation_peaks: Vec::new(),
@@ -986,7 +990,14 @@ impl ResultsView {
 
     /// Range of a component over the results and all transformed copies.
     fn component_range(&self, field: &Field, component: usize) -> Option<(f32, f32)> {
-        let mut range = self.range_of(&field.components.get(component)?.values);
+        let shown = field.components.get(component)?;
+        let mut range = self.range_of(&shown.values);
+        if let Some((name, beside_component, (low, high))) = &self.beside
+            && *name == field.name
+            && *beside_component == shown.name
+        {
+            range = Some(range.map_or((*low, *high), |(a, b)| (a.min(*low), b.max(*high))));
+        }
         let mut rotations: Vec<DMat3> = Vec::new();
         for instance in self.instances().iter().skip(1) {
             let q = instance.matrix3;
@@ -1565,6 +1576,26 @@ mod tests {
         assert_eq!(range(&view), Some((1.0, 2.0)));
         assert_eq!(view.maximum().map(|m| m.1), Some(2.0));
         assert!(view.shown_values().unwrap()[2].is_nan(), "drawn grey");
+    }
+
+    #[test]
+    fn the_legend_takes_in_the_values_drawn_beside_the_results() {
+        let disp = [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [9.0, 0.0, 0.0]];
+        let mut view = ResultsView::new(
+            vec![increment(1, 1, AnalysisKind::Static, &disp)],
+            Some(([0.0; 3], [10.0; 3])),
+        );
+        view.component = 0; // U1
+        let range = |v: &ResultsView| v.legend().map(|l| (l.min, l.max));
+        let (field, component) = view
+            .current()
+            .map(|(f, c)| (f.name.clone(), c.name.clone()))
+            .unwrap();
+        // The global model around a submodel, for the shown component only.
+        view.beside = Some((field.clone(), component, (-3.0, 4.0)));
+        assert_eq!(range(&view), Some((-3.0, 9.0)));
+        view.beside = Some((field, "U2".into(), (-3.0, 40.0)));
+        assert_eq!(range(&view), Some((1.0, 9.0)));
     }
 
     #[test]

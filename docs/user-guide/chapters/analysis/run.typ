@@ -192,6 +192,20 @@ linked in the schematic (@results-links):
   no results yet. PrePoLix copies the global results next to the input file and writes
   `*SUBMODEL` and `*BOUNDARY, SUBMODEL`.
 
+The #ui("Results") tab of the submodel shows the global model around it as a part of its own,
+#ui("Global Model") under #ui("Parts"), read from the global results the submodel took. Where
+the submodel lies, the global elements are cut away, so the two do not overlap; a global element
+the submodel reaches into goes as a whole, which can leave a small gap at the cut. The global
+model shows the result chosen for the submodel at the global increment the submodel follows,
+deformed by the same scale and coloured in the same legend, whose range takes in the global
+values. Its check box hides it; its context menu draws it #ui("Transparent") instead: whole,
+see-through and without results, with the submodel inside it.
+
+#screenshot("submodel-global-model.png", [Results of a submodel at the clamped end of a beam,
+  with the global model around it in the same legend])
+
+#screenshot("submodel-global-transparent.png", [The same global model drawn transparent])
+
 Removing the link leaves the analysis a submodel whose #ui("Global results") row waits for a new
 one. #ui("Model Properties") makes it a general model again.
 
