@@ -47,11 +47,11 @@ pub const VALUE: &str = "Value";
 pub const PARAMETERS: &str = "Parameters";
 /// The row of a measure block that takes the results of a step.
 pub const MEASURE: &str = "Measure";
-/// The value an optimizer gives, `["Loop", "Value"]`: a value link that may lead back to the
-/// optimizer, the feedback of its loop.
+/// The inputs of a parameter study, `["Loop", column]`: value links that lead back to the
+/// blocks before the study, the feedback of its loop.
 pub const LOOP: &str = "Loop";
-/// The row of an optimizer that takes the value of a measure.
-pub const OBJECTIVE: &str = "Objective";
+/// The outputs of a parameter study, `["Outputs", column]`, which take numbers.
+pub const OUTPUTS: &str = "Outputs";
 /// The row of a Campbell block that takes the setup of an analysis, whose model it sweeps.
 pub const ANALYSIS: &str = "Analysis";
 
@@ -131,23 +131,15 @@ pub fn is_results(link: &Link) -> bool {
     link.item.first().is_some_and(|c| c == RESULTS)
 }
 
-/// Whether the link gives a number to a parameter, or to an optimizer.
+/// Whether the link gives a number to a parameter, or to a study.
 pub fn is_value(link: &Link) -> bool {
     link.item.first().is_some_and(|c| c == VALUE || c == LOOP)
 }
 
-/// Whether the link is the feedback of an optimizer's loop: it gives the optimizer's value
-/// to the blocks before it, and is left out of the order of the blocks.
+/// Whether the link is the feedback of a study: it gives an input of the study to the blocks
+/// before it, and is left out of the order of the blocks.
 pub fn is_feedback(link: &Link) -> bool {
     link.item.first().is_some_and(|c| c == LOOP)
-}
-
-/// The key of the parameter a value link sets.
-pub fn parameter_key(link: &Link) -> Option<&str> {
-    match slot(link) {
-        [cell, key] if cell == PARAMETERS => Some(key),
-        _ => None,
-    }
 }
 
 /// The exposed parameters of a block that value links give, by key, with the block each
@@ -951,9 +943,9 @@ pub enum DataType {
     Setup,
     /// The results of a step, also where a row takes them: the State row, a measure.
     Results,
-    /// A number: a parameter, the value of a measure, the objective of an optimizer.
+    /// A number: a parameter, the value of a measure, an output of a study.
     Number,
-    /// The value an optimizer gives in its loop.
+    /// An input a study gives.
     Loop,
     /// A whole analysis, to sweep.
     Analysis,
@@ -968,7 +960,7 @@ impl DataType {
             SETUP if is_step_input(path) => Self::Results,
             SETUP => Self::Setup,
             RESULTS | STATE | MEASURE | GLOBAL_RESULTS => Self::Results,
-            VALUE | PARAMETERS | OBJECTIVE => Self::Number,
+            VALUE | PARAMETERS | OUTPUTS => Self::Number,
             LOOP => Self::Loop,
             ANALYSIS => Self::Analysis,
             _ => return None,
@@ -1006,10 +998,11 @@ pub fn compatible(item: &[String], slot: &[String]) -> bool {
         Some(VALUE) => {
             item.len() == 2
                 && (matches!(slot, [cell, _] if cell == PARAMETERS || cell == VALUE)
-                    || matches!(slot, [cell] if cell == OBJECTIVE))
+                    || matches!(slot, [cell, ..] if cell == OUTPUTS && slot.len() <= 2))
         }
+        // The Inputs row of a study adds a column, the row of a column gives it.
         Some(LOOP) => {
-            item.len() == 2 && matches!(slot, [cell, _] if cell == PARAMETERS || cell == VALUE)
+            item.len() <= 2 && matches!(slot, [cell, _] if cell == PARAMETERS || cell == VALUE)
         }
         Some(STATE) | None => false,
         Some(_) => match (item, slot) {
@@ -1477,9 +1470,9 @@ mod tests {
     }
 
     #[test]
-    fn the_feedback_of_a_loop_is_left_out_of_the_order() {
-        // Optimizer 4 varies mesh block 1, analysis 2 solves on it, measure 3 reads it and the
-        // optimizer reads the measure.
+    fn the_feedback_of_a_study_is_left_out_of_the_order() {
+        // Study 4 varies mesh block 1, analysis 2 solves on it, measure 3 reads it and the
+        // study reads the measure.
         let link = |source, target, item: &[&str], slot: &[&str]| Link {
             source,
             target,
@@ -1488,28 +1481,28 @@ mod tests {
             ..Default::default()
         };
         let links = vec![
-            link(4, 1, &["Loop", "Value"], &["Parameters", "refinement"]),
+            link(4, 1, &["Loop", "Lx"], &["Parameters", "refinement"]),
             link(1, 2, &["Mesh"], &[]),
             link(2, 3, &["Results", "Step-1"], &["Measure"]),
-            link(3, 4, &["Value", "Result"], &["Objective"]),
+            link(3, 4, &["Value", "Result"], &["Outputs", "Stress"]),
         ];
         assert!(is_feedback(&links[0]) && is_value(&links[0]));
         assert!(!is_feedback(&links[3]) && is_value(&links[3]));
         assert_eq!(order(&[4, 3, 2, 1], &links), [1, 2, 3, 4]);
         assert_eq!(upstream(&links, 1), Vec::<u64>::new());
         assert!(!makes_cycle(&links, 3, 4));
-        // The value of an optimizer goes to parameters, that of a measure to an optimizer.
+        // The inputs of a study go to parameters, numbers to its outputs; the Inputs and
+        // Outputs rows add columns.
         assert!(compatible(
-            &path(&["Loop", "Value"]),
+            &path(&["Loop", "Lx"]),
             &path(&["Parameters", "nx"])
         ));
-        assert!(!compatible(
-            &path(&["Loop", "Value"]),
-            &path(&["Objective"])
-        ));
+        assert!(compatible(&path(&["Loop"]), &path(&["Parameters", "nx"])));
+        assert!(!compatible(&path(&["Loop", "Lx"]), &path(&["Outputs"])));
+        assert!(compatible(&path(&["Value", "Result"]), &path(&["Outputs"])));
         assert!(compatible(
             &path(&["Value", "Result"]),
-            &path(&["Objective"])
+            &path(&["Outputs", "Stress"])
         ));
     }
 

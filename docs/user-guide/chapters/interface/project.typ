@@ -213,8 +213,8 @@ the others: click the amber circular arrow of a block (or the blue question mark
 every block it takes data from, directly or through others, the way #ui("Update Project") does:
 mesh blocks make their meshes anew, analyses are solved in the order of their links, Campbell
 blocks sweep and mesh export blocks write their files. Blocks that are neither the clicked one
-nor upstream of it stay as they are. Clicking the arrow of an optimizer runs its loop
-(@optimization-loops). The symbols cannot be clicked while an update is under way. The output pane ends
+nor upstream of it stay as they are. Clicking the arrow of a parameter study solves its design points
+(@parameter-study). The symbols cannot be clicked while an update is under way. The output pane ends
 with #ui("<block> updated").
 
 #screenshot("update-block-hover.png", [Hovering the out-of-date symbol of

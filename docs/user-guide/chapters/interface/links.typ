@@ -30,16 +30,16 @@ The colour of a wire tells its kind, the row tells where it acts:
     further steps of the same CalculiX run (@state-links).],
   [Value (violet)], [A number of the target, such as the edge length of a mesh block, takes
     the value of a parameter (@parameters-block). Like a reference, it is then the same
-    number. The value of an optimizer goes back to the blocks before it as a dashed wire, the
-    feedback of its loop (@optimization-loops).],
+    number. An input of a parameter study goes back to the blocks before it as a dashed
+    wire (@parameter-study).],
 )
 
 A block thus reads from top to bottom: where it starts (#ui("State")), what it is (the blue
 rows of the definition), what it uses (the orange inputs of its steps in the setup) and what it
 produces (#ui("Results"), with pins on the right only).
 
-Each pin has a type: geometry, mesh, setup, results, a number, the value of an optimizer's
-loop, or a whole analysis. Pins of model data also have the model space of their block (3D, 2D
+Each pin has a type: geometry, mesh, setup, results, a number, an input of a parameter
+study, or a whole analysis. Pins of model data also have the model space of their block (3D, 2D
 plane stress, 2D plane strain or axisymmetric); the tooltip of a row names both. While a wire is
 dragged, the pins it can end at get a ring and all others fade. Hovering over a faded pin says
 why the link cannot be made there.

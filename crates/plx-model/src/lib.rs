@@ -23,13 +23,13 @@ pub mod library;
 mod measure;
 mod mesh_set;
 mod moving_load;
-mod optimizer;
 mod parameter;
 mod primitive;
 mod properties;
 mod region;
 mod remote;
 mod section;
+mod study;
 mod symmetry;
 pub mod units;
 mod validity;
@@ -60,7 +60,6 @@ pub use library::MaterialLibrary;
 pub use measure::{Extreme, MeasureKind, MeasureRegion};
 pub use mesh_set::{MeshSet, SetKind};
 pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel, load_stations};
-pub use optimizer::{Iteration, Next, OptimizerKind, Outcome};
 pub use parameter::{Parameter, ValueKind};
 pub use primitive::{MAX_PRIMITIVE_ELEMENTS, MeshPrimitive, Param, ParamSlot, ParamValue};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
@@ -70,6 +69,7 @@ pub use section::{
     BeamOrientation, BeamProfile, BeamSection, Section, SectionKind, line_tangent, membrane_type,
     unit_thickness,
 };
+pub use study::{DesignPoint, PointRun, PointState, StudyColumn, StudyTable};
 pub use symmetry::{SymmetryError, SymmetryPlane, symmetry_dofs, symmetry_plane};
 pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, STORED, UnitSystem};
 pub use validity::{Invalid, ModelItem};
@@ -89,8 +89,8 @@ use serde::{Deserialize, Serialize};
 /// Format 7 drops the fixed boundary condition, a displacement holding all degrees of freedom
 /// at zero takes its place. Format 8 drops the concentrated force and the surface traction for
 /// the force, which acts on faces, edges or points and optionally at each node. Format 9 gives
-/// numbers a physical quantity and replaces the optimizer by the parameter study.
-pub const PROJECT_FORMAT: u32 = 9;
+/// numbers a physical quantity, format 10 replaces the optimizer by the parameter study.
+pub const PROJECT_FORMAT: u32 = 10;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
