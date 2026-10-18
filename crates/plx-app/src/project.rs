@@ -1998,6 +1998,7 @@ impl ProjectApp {
         // A renamed column, input or not, with its old and new name; a removed one.
         let mut renamed = None;
         let mut removed = None;
+        let mut added = None;
         let Some(study) = self.node(id).and_then(Node::as_study_mut) else {
             return;
         };
@@ -2010,6 +2011,7 @@ impl ProjectApp {
                 value,
             } => table.set_input(point, column, value),
             StudyEdit::AddPoint => table.add_point(),
+            StudyEdit::AddRows { rows, replace } => added = Some(table.add_rows(rows, replace)),
             StudyEdit::Duplicate(point) => table.duplicate(point),
             StudyEdit::RemovePoint(point) => table.remove_point(point),
             StudyEdit::SetCurrent(point) if point < table.points.len() => table.current = point,
@@ -2065,6 +2067,10 @@ impl ProjectApp {
         if let Some((input, name)) = removed {
             self.links.retain(|l| !column_link(l, input, &name));
         }
+        if let Some(added) = added {
+            let name = self.name_of(id);
+            self.output.push(format!("{name}: {added} points added."));
+        }
         self.sync_due = true;
     }
 
@@ -2082,7 +2088,7 @@ impl ProjectApp {
                 .map(|c| (c.name.clone(), c.kind))
                 .collect(),
             outputs: (table.outputs.iter())
-                .map(|c| (c.name.clone(), String::new()))
+                .map(|c| (c.name.clone(), self.output_shown(id, &c.name, 0.0).1))
                 .collect(),
             points: (table.points.iter())
                 .map(|point| PointView {
@@ -2090,17 +2096,12 @@ impl ProjectApp {
                     outputs: (table.outputs.iter().enumerate())
                         .map(|(i, column)| {
                             (point.outputs.get(i).copied().flatten())
-                                .map_or_else(String::new, |v| {
-                                    self.shown_output(id, &column.name, v)
-                                })
+                                .map(|v| self.output_shown(id, &column.name, v).0)
                         })
                         .collect(),
                     state: point.state(study.body, table.outputs.len()),
-                    time: match point.run {
-                        PointRun::NotSolved => String::new(),
-                        _ => format!("{:.1} s", point.seconds),
-                    },
-                    elements: point.elements.map_or_else(String::new, |e| e.to_string()),
+                    seconds: (point.run != PointRun::NotSolved).then_some(point.seconds),
+                    elements: point.elements,
                 })
                 .collect(),
             current: table.current,
@@ -2131,18 +2132,41 @@ impl ProjectApp {
 
     /// An output of a study as text, in the units of its source.
     fn shown_output(&self, id: u64, name: &str, value: f64) -> String {
+        let (value, unit) = self.output_shown(id, name, value);
+        format!("{} {unit}", crate::results::format_value(value as f32))
+            .trim()
+            .to_owned()
+    }
+
+    /// An output of a study as its source shows it: the number and its unit.
+    fn output_shown(&self, id: u64, name: &str, value: f64) -> (f64, String) {
         let source = (self.output_link(id, name))
             .and_then(|link| Some((self.nodes.iter().find(|n| n.id == link.source)?, link)));
+        let quantity = |quantity, units: UnitSystem| {
+            (
+                units.shown(value, quantity),
+                units.unit(quantity).to_owned(),
+            )
+        };
         match source {
             Some((node, _)) if node.as_measure().is_some() => {
                 let measure = node.as_measure().expect("a measure");
-                crate::measure::shown(&measure.kind, value, measure.units)
+                let units = measure.units;
+                match measure.kind.field() {
+                    ("FREQ", _) => quantity(plx_model::Quantity::Frequency, units),
+                    (field, component) => (
+                        crate::results::shown_field_value(value, field, component, units),
+                        crate::results::field_unit(field, component, units).unwrap_or_default(),
+                    ),
+                }
             }
-            Some((node, link)) => match value_kind(&self.nodes, node.id, &link.item) {
-                Some(kind) => crate::study::shown(kind, value, node.units()),
-                None => crate::results::format_value(value as f32),
-            },
-            None => crate::results::format_value(value as f32),
+            Some((node, link)) => {
+                match value_kind(&self.nodes, node.id, &link.item).and_then(ValueKind::quantity) {
+                    Some(q) => quantity(q, node.units()),
+                    None => (value, String::new()),
+                }
+            }
+            None => (value, String::new()),
         }
     }
 
@@ -8540,6 +8564,11 @@ impl Viewer {
         if let RowWidget::Exposed(key) = widget {
             let name = (exposed.iter().find(|e| e.key == key)).map_or("", |e| e.name.as_str());
             let mut text = name.to_owned();
+            let studies: Vec<(u64, String)> = (self.nodes.iter())
+                .filter(|n| n.kind == Kind::Study)
+                .map(|n| (n.id, n.name.clone()))
+                .collect();
+            let linked = row.linked_from.is_some();
             label.context_menu(|ui| {
                 ui.label("Name");
                 let edit = ui.text_edit_singleline(&mut text);
@@ -8548,6 +8577,34 @@ impl Viewer {
                     ui.close();
                 }
                 ui.separator();
+                let add = |ui: &mut egui::Ui| {
+                    for (study, name) in &studies {
+                        if ui.button(name).clicked() {
+                            return Some(*study);
+                        }
+                    }
+                    None
+                };
+                let tip = if studies.is_empty() {
+                    "Add a parameter study to the project first."
+                } else if linked {
+                    "Its value comes from a link already; remove it first."
+                } else {
+                    "Makes it an input of the study: a column of its table."
+                };
+                let menu = ui.add_enabled_ui(!studies.is_empty() && !linked, |ui| {
+                    ui.menu_button("Add to Study", add).inner.flatten()
+                });
+                menu.response.on_hover_text(tip);
+                if let Some(study) = menu.inner {
+                    self.actions.push(Action::Link {
+                        source: study,
+                        item: vec![links::LOOP.to_owned()],
+                        target: id,
+                        slot: row.path.clone(),
+                    });
+                    ui.close();
+                }
                 if ui.button("Remove Parameter").clicked() {
                     self.actions.push(Action::Unexpose(id, key));
                     ui.close();

@@ -102,6 +102,49 @@ impl DesignPoint {
     }
 }
 
+/// How the fill helper makes the values of an input.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FillRule {
+    /// The value of the current point.
+    Current,
+    /// These values, one or more.
+    List(Vec<f64>),
+    /// `count` values from `from` to `to`, evenly spaced.
+    Range { from: f64, to: f64, count: usize },
+}
+
+impl FillRule {
+    /// Its values, `current` the value of the current point.
+    pub fn values(&self, current: f64) -> Vec<f64> {
+        match self {
+            Self::Current => vec![current],
+            Self::List(values) => values.clone(),
+            Self::Range { from, to, count } => match count {
+                0 => Vec::new(),
+                1 => vec![*from],
+                n => (0..*n)
+                    .map(|i| from + (to - from) * i as f64 / (n - 1) as f64)
+                    .collect(),
+            },
+        }
+    }
+
+    /// Whether it varies the input.
+    pub fn varies(&self) -> bool {
+        !matches!(self, Self::Current)
+    }
+}
+
+/// How the fill helper combines the values of the inputs into points.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FillMode {
+    /// Every combination of the values.
+    #[default]
+    Grid,
+    /// One input varied at a time, the others at the current point.
+    OneAtATime,
+}
+
 /// The columns and points of a study, with the operations of its table.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct StudyTable {
@@ -281,6 +324,93 @@ impl StudyTable {
         rows
     }
 
+    /// The inputs of the points the fill helper makes, each value cleaned to the kind of its
+    /// input and without repeats.
+    pub fn fill_rows(&self, rules: &[FillRule], mode: FillMode) -> Vec<Vec<f64>> {
+        let current = (self.current().map(|p| p.inputs.clone()))
+            .unwrap_or_else(|| vec![0.0; self.inputs.len()]);
+        let values: Vec<Vec<f64>> = (self.inputs.iter().enumerate())
+            .map(|(i, column)| {
+                let rule = rules.get(i).unwrap_or(&FillRule::Current);
+                let at = current.get(i).copied().unwrap_or(0.0);
+                let values = rule.values(at);
+                match column.kind {
+                    Some(kind) => values.into_iter().map(|v| kind.clean(v)).collect(),
+                    None => values,
+                }
+            })
+            .collect();
+        let mut rows: Vec<Vec<f64>> = Vec::new();
+        match mode {
+            FillMode::Grid => {
+                if values.iter().any(Vec::is_empty) {
+                    return Vec::new();
+                }
+                rows.push(Vec::new());
+                for column in &values {
+                    rows = (rows.iter())
+                        .flat_map(|row| {
+                            column.iter().map(move |&v| {
+                                let mut row = row.clone();
+                                row.push(v);
+                                row
+                            })
+                        })
+                        .collect();
+                }
+            }
+            FillMode::OneAtATime => {
+                for (i, column) in values.iter().enumerate() {
+                    if !rules.get(i).is_some_and(FillRule::varies) {
+                        continue;
+                    }
+                    for &v in column {
+                        let mut row = current.clone();
+                        row[i] = v;
+                        rows.push(row);
+                    }
+                }
+            }
+        }
+        let mut unique: Vec<Vec<f64>> = Vec::new();
+        for row in rows {
+            if !unique.contains(&row) {
+                unique.push(row);
+            }
+        }
+        unique
+    }
+
+    /// Adds points with these inputs, not solved, but none with the inputs of a point there
+    /// already; `replace` first removes all points but the current one, which becomes DP 0.
+    /// Returns how many were added.
+    pub fn add_rows(&mut self, rows: Vec<Vec<f64>>, replace: bool) -> usize {
+        if replace && self.current < self.points.len() {
+            let current = self.points.swap_remove(self.current);
+            self.points = vec![current];
+            self.current = 0;
+        }
+        let mut added = 0;
+        for mut inputs in rows {
+            inputs.resize(self.inputs.len(), 0.0);
+            for (value, column) in inputs.iter_mut().zip(&self.inputs) {
+                if let Some(kind) = column.kind {
+                    *value = kind.clean(*value);
+                }
+            }
+            if self.points.iter().any(|p| p.inputs == inputs) {
+                continue;
+            }
+            self.points.push(DesignPoint {
+                inputs,
+                outputs: vec![None; self.outputs.len()],
+                ..Default::default()
+            });
+            added += 1;
+        }
+        added
+    }
+
     /// How many points are in each state: up to date, failed, and all.
     pub fn summary(&self, body: Option<u64>) -> (usize, usize, usize) {
         let states = self
@@ -333,5 +463,42 @@ mod tests {
         assert_eq!(table.points.len(), 2);
         table.remove_point(1);
         assert_eq!(table.points.len(), 1);
+    }
+
+    #[test]
+    fn the_fill_helper_makes_grids_and_one_at_a_time() {
+        let mut table = StudyTable::default();
+        table.add_input("Force", None, 10.0);
+        table.add_input("Count", Some(ValueKind::Count), 2.0);
+        let range = FillRule::Range {
+            from: 1.0,
+            to: 3.0,
+            count: 3,
+        };
+        assert_eq!(range.values(0.0), [1.0, 2.0, 3.0]);
+        let count = FillRule::List(vec![1.4, 2.0, 4.0]);
+        let grid = table.fill_rows(&[range.clone(), count.clone()], FillMode::Grid);
+        assert_eq!(grid.len(), 9);
+        assert_eq!(grid[1], [1.0, 2.0]);
+        let one = table.fill_rows(&[range, count], FillMode::OneAtATime);
+        assert_eq!(
+            one,
+            [
+                vec![1.0, 2.0],
+                vec![2.0, 2.0],
+                vec![3.0, 2.0],
+                vec![10.0, 1.0],
+                vec![10.0, 2.0],
+                vec![10.0, 4.0]
+            ]
+        );
+        // The current point is not added again.
+        assert_eq!(table.add_rows(one.clone(), false), 5);
+        assert_eq!(table.add_rows(one, false), 0);
+        table.current = 2;
+        assert_eq!(table.add_rows(vec![vec![5.0, 1.0]], true), 1);
+        assert_eq!(table.current, 0);
+        assert_eq!(table.points[0].inputs, [2.0, 2.0]);
+        assert_eq!(table.points.len(), 2);
     }
 }
