@@ -545,6 +545,36 @@ pub fn restore_results(bound: &BoundResults, dir: &Path) -> Result<PathBuf, Proj
     results.ok_or_else(|| format("the bound results have no results file (.frd)".into()))
 }
 
+/// Writes the bound file named `name`, such as the eigenmodes (`.eig`) of a frequency
+/// step, to `path`; false if the bound results have no such file.
+pub fn restore_file(bound: &BoundResults, name: &str, path: &Path) -> Result<bool, ProjectError> {
+    let Some(file) = bound.files.iter().find(|f| f.name == name) else {
+        return Ok(false);
+    };
+    let format = |message: String| ProjectError::Format {
+        path: path.to_owned(),
+        message,
+    };
+    let compressed = BASE64
+        .decode(&file.data)
+        .map_err(|e| format(format!("bound file {}: {e}", file.name)))?;
+    let mut content = Vec::with_capacity(file.size as usize);
+    DeflateDecoder::new(compressed.as_slice())
+        .read_to_end(&mut content)
+        .map_err(|e| format(format!("bound file {}: {e}", file.name)))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|source| ProjectError::Io {
+            path: dir.to_owned(),
+            source,
+        })?;
+    }
+    std::fs::write(path, content).map_err(|source| ProjectError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    Ok(true)
+}
+
 fn is_results_file(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("frd"))

@@ -4675,10 +4675,17 @@ impl ProjectApp {
                             bound.input.unwrap_or_default()
                         ));
                     let file = dir.join(format!("{job}.eig"));
-                    if !file.is_file()
-                        && (std::fs::create_dir_all(&dir).is_err()
-                            || std::fs::copy(&solved, &file).is_err())
-                    {
+                    // From the source's run, or else from its kept results, as on another
+                    // computer.
+                    let copied = || {
+                        std::fs::create_dir_all(&dir).is_ok()
+                            && std::fs::copy(&solved, &file).is_ok()
+                    };
+                    let name = format!("{job}.eig");
+                    let restored = || {
+                        plx_io::project::restore_file(bound, &name, &file).is_ok_and(|done| done)
+                    };
+                    if !file.is_file() && !copied() && !restored() {
                         upstream.missing_results.push(source.name.clone());
                         return None;
                     }

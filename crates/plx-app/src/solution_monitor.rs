@@ -455,7 +455,8 @@ impl BackgroundSolve {
         };
         // Kept as the analysis window keeps them, beside the GUI.
         let (sender, receiver) = std::sync::mpsc::channel();
-        let files = ["inp", "frd", "dat"].map(|e| frd.with_extension(e));
+        // The eigenmodes of a frequency step go with them, for analyses that take them.
+        let files = ["inp", "frd", "dat", "eig"].map(|e| frd.with_extension(e));
         let (name, input) = (self.name.clone(), analysis.input);
         let with_errors = status == JobStatus::FailedWithResults;
         std::thread::spawn(move || {
