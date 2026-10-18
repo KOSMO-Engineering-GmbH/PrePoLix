@@ -1,8 +1,9 @@
 //! Where one mesh covers another, e.g. a submodel the region of its global model it details.
 //!
-//! An element counts as covered when a point near one of its corners or its centre lies in
-//! the other mesh. The points sit a little inside the element, so an element that only
-//! touches the other mesh at a shared face or edge stays, while one reaching into it goes.
+//! An element counts as covered when its centre and the points near all of its corners lie
+//! in the other mesh. The points sit a little inside the element, so an element lying in the
+//! other mesh up to a shared face or edge is covered, while one only reaching into it is
+//! not: the covered elements can go without leaving a gap.
 
 use plx_mesh::{ElementShape, FeMesh};
 
@@ -41,7 +42,7 @@ pub fn covered_elements(mesh: &FeMesh, by: &FeMesh) -> Vec<bool> {
             };
             std::iter::once(centre)
                 .chain(corners.iter().map(near))
-                .any(|p| grid.contains(p))
+                .all(|p| grid.contains(p))
         })
         .collect()
 }
@@ -210,12 +211,13 @@ mod tests {
     }
 
     #[test]
-    fn elements_reaching_into_the_submodel_are_covered() {
+    fn only_elements_wholly_in_the_submodel_are_covered() {
         // Global: ten unit elements from 0 to 10. Submodel: finer, from 3.5 to 6.
         let global = bar(0.0, 1.0, 10, 1);
         let submodel = bar(3.5, 0.25, 10, 1);
         let covered = covered_elements(&global, &submodel);
-        let expected = [3, 4, 5];
+        // The element from 3 to 4 reaches out of the submodel and stays.
+        let expected = [4, 5];
         for (index, covered) in covered.iter().enumerate() {
             assert_eq!(*covered, expected.contains(&index), "element {}", index + 1);
         }
@@ -223,7 +225,8 @@ mod tests {
 
     #[test]
     fn elements_only_touching_the_submodel_stay() {
-        // The submodel's ends lie on faces of the global elements.
+        // The submodel's ends lie on faces of the global elements: the two between are
+        // covered up to those faces.
         let global = bar(0.0, 1.0, 10, 1);
         let submodel = bar(4.0, 0.5, 4, 1);
         let covered = covered_elements(&global, &submodel);

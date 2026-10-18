@@ -195,8 +195,9 @@ linked in the schematic (@results-links):
 
 The #ui("Results") tab of the submodel shows the global model around it as a part of its own,
 #ui("Global Model") under #ui("Parts"), read from the global results the submodel took. Where
-the submodel lies, the global elements are cut away, so the two do not overlap; a global element
-the submodel reaches into goes as a whole, which can leave a small gap at the cut. The global
+the submodel lies wholly, the global elements are cut away. A global element the submodel only
+reaches into stays, drawn behind the submodel: where the two overlap, the submodel shows, and no
+gap opens at the cut, in the section view too. The global
 model shows the result chosen for the submodel at the global increment the submodel follows,
 deformed by the same scale and coloured in the same legend, whose range takes in the global
 values. Its check box hides it; its context menu draws it #ui("Transparent") instead: whole,
