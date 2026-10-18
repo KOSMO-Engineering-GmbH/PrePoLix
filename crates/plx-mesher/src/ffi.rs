@@ -122,6 +122,7 @@ gmsh_api! {
     field_set_as_background = "gmshModelMeshFieldSetAsBackgroundMesh": fn(c_int, Ierr);
     mesh_generate = "gmshModelMeshGenerate": fn(c_int, Ierr);
     mesh_set_order = "gmshModelMeshSetOrder": fn(c_int, Ierr);
+    mesh_import_stl = "gmshModelMeshImportStl": fn(Ierr);
     mesh_get_nodes = "gmshModelMeshGetNodes": fn(
         *mut *mut usize, *mut usize,
         *mut *mut c_double, *mut usize,

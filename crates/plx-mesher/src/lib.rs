@@ -439,23 +439,104 @@ pub fn tessellate(geometry: &Geometry) -> Result<GeometryDisplay, GmshError> {
             .map(|k| (max[k] - min[k]).powi(2))
             .sum::<f64>()
             .sqrt();
-        let options = MeshOptions {
-            max_size: diagonal / 15.0,
-            min_size: 0.0,
-            elements_per_2pi: 24.0,
-            order: 1,
-            straight_midside_nodes: true,
-            netgen: false,
-            algorithms: Default::default(),
-            quads: false,
+        // The faces take OpenCASCADE's own triangulation, which follows a curved face with
+        // long thin triangles where evenly sized ones would number millions, e.g. along the
+        // small fillets of a long beam. The edges are sampled to the same deflections.
+        let deflection = Deflection {
+            linear: diagonal * 1e-4,
+            angular: std::f64::consts::TAU / 24.0,
         };
-        options.apply(gmsh)?;
-        // A face Gmsh cannot mesh is left out of the display rather than failing the import.
-        if let Err(error) = gmsh.generate(2) {
+        gmsh.set_number("Mesh.StlLinearDeflection", deflection.linear)?;
+        gmsh.set_number("Mesh.StlLinearDeflectionRelative", 0.0)?;
+        gmsh.set_number("Mesh.StlAngularDeflection", deflection.angular)?;
+        // A face that cannot be triangulated is left out of the display rather than failing
+        // the import.
+        if let Err(error) = gmsh.import_stl() {
             log::warn!("Geometry display incomplete: {error}");
         }
-        display_mesh(gmsh, geometry)
+        let mut polylines = BTreeMap::new();
+        for curve in gmsh.entities(1)? {
+            polylines.insert(curve, curve_polyline(gmsh, curve, deflection)?);
+        }
+        display_mesh(gmsh, geometry, &polylines)
     })
+}
+
+/// How far a display triangulation may stray from the geometry: the distance to it, and the
+/// angle between neighbouring segments of a curve.
+#[derive(Clone, Copy)]
+struct Deflection {
+    linear: f64,
+    angular: f64,
+}
+
+/// Points along a curve, split until every segment keeps within the deflection.
+fn curve_polyline(
+    gmsh: &Gmsh,
+    curve: i32,
+    deflection: Deflection,
+) -> Result<Vec<[f64; 3]>, GmshError> {
+    let (min, max) = gmsh.parameter_bounds(1, curve)?;
+    let (Some(&t0), Some(&t1)) = (min.first(), max.first()) else {
+        return Ok(Vec::new());
+    };
+    // A few segments to begin with, so that a closed curve does not start as one point.
+    const START: usize = 8;
+    let mut parameters: Vec<f64> = (0..=START)
+        .map(|i| t0 + (t1 - t0) * i as f64 / START as f64)
+        .collect();
+    let mut points = gmsh.values(1, curve, &parameters)?;
+    // Each round halves every segment that strays too far, until none does.
+    for _ in 0..16 {
+        let middles: Vec<f64> = parameters.windows(2).map(|w| 0.5 * (w[0] + w[1])).collect();
+        let middle_points = gmsh.values(1, curve, &middles)?;
+        let mut split = vec![false; middles.len()];
+        for (i, middle) in middle_points.iter().enumerate() {
+            let (a, b) = (points[i], points[i + 1]);
+            let chord_middle = [0, 1, 2].map(|k| 0.5 * (a[k] + b[k]));
+            // The turn between the halves of the segment.
+            let turn = angle(sub(*middle, a), sub(b, *middle));
+            split[i] =
+                distance(*middle, chord_middle) > deflection.linear || turn > deflection.angular;
+        }
+        if !split.contains(&true) {
+            break;
+        }
+        let mut new_parameters = Vec::with_capacity(parameters.len() * 2);
+        let mut new_points = Vec::with_capacity(points.len() * 2);
+        for i in 0..middles.len() {
+            new_parameters.push(parameters[i]);
+            new_points.push(points[i]);
+            if split[i] {
+                new_parameters.push(middles[i]);
+                new_points.push(middle_points[i]);
+            }
+        }
+        new_parameters.push(t1);
+        new_points.push(points[points.len() - 1]);
+        parameters = new_parameters;
+        points = new_points;
+    }
+    Ok(points)
+}
+
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let d = sub(a, b);
+    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+}
+
+/// Angle between two vectors; zero if one of them has no length.
+fn angle(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let (la, lb) = (distance(a, [0.0; 3]), distance(b, [0.0; 3]));
+    if la == 0.0 || lb == 0.0 {
+        return 0.0;
+    }
+    let cos = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (la * lb);
+    cos.clamp(-1.0, 1.0).acos()
 }
 
 /// Meshes every part of the geometry, one after the other as PrePoMax does. Parts share no
@@ -1508,8 +1589,12 @@ fn calculix_name(label: &str) -> Option<String> {
 /// Builds the display mesh from Gmsh's surface mesh: per solid its faces as triangles and its
 /// edges as lines. Faces outside any solid form one more part each, and so do edges outside
 /// any face.
-fn display_mesh(gmsh: &Gmsh, geometry: &Geometry) -> Result<GeometryDisplay, GmshError> {
-    let coords = node_coords(gmsh)?;
+fn display_mesh(
+    gmsh: &Gmsh,
+    geometry: &Geometry,
+    polylines: &BTreeMap<i32, Vec<[f64; 3]>>,
+) -> Result<GeometryDisplay, GmshError> {
+    let mut coords = node_coords(gmsh)?;
     let surfaces = gmsh.entities(2)?;
     let curves = gmsh.entities(1)?;
     // Parts as (name, faces, edges); the edges of the faces are added below. Every face
@@ -1530,9 +1615,20 @@ fn display_mesh(gmsh: &Gmsh, geometry: &Geometry) -> Result<GeometryDisplay, Gms
     for &surface in &surfaces {
         triangles.insert(surface, gmsh.elements(TRI3, surface)?.1);
     }
+    // The edges get nodes of their own, numbered on after the triangles' nodes.
+    let mut next_tag = coords.keys().max().map_or(1, |&tag| tag + 1);
     let mut segments: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
-    for &curve in &curves {
-        segments.insert(curve, gmsh.elements(LINE2, curve)?.1);
+    for (&curve, points) in polylines {
+        let tags: Vec<usize> = points
+            .iter()
+            .map(|&point| {
+                coords.insert(next_tag, point);
+                next_tag += 1;
+                next_tag - 1
+            })
+            .collect();
+        let nodes = tags.windows(2).flatten().copied().collect();
+        segments.insert(curve, nodes);
     }
 
     let mut mesh = FeMesh::default();

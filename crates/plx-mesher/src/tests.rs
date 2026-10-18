@@ -593,6 +593,46 @@ fn box_and_lines() -> Geometry {
 }
 
 #[test]
+fn a_long_thin_round_bar_is_displayed_with_few_triangles() {
+    if !gmsh_available() {
+        return;
+    }
+    // A bar 6000 long and 5 thick, the size of the fillets along a beam: triangles as wide as
+    // long would number hundreds of thousands, and the import would take minutes.
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        let rectangle = gmsh.add_rectangle([0.0; 3], [6000.0, 5.0], 0.0)?;
+        gmsh.revolve(
+            &[(2, rectangle)],
+            [0.0; 3],
+            [1.0, 0.0, 0.0],
+            std::f64::consts::TAU,
+        )?;
+        gmsh.remove_only(&[(2, rectangle)])?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    let geometry = Geometry {
+        source: "stab.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters::default(),
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+    };
+    let display = tessellate(&geometry).unwrap();
+    let triangles = display
+        .entities
+        .iter()
+        .filter(|e| matches!(e, CadEntity::Face(_)))
+        .count();
+    assert!((10..5000).contains(&triangles), "{triangles} triangles");
+    // Every face and every edge is shown.
+    let shown: BTreeSet<CadEntity> = display.entities.iter().copied().collect();
+    assert_eq!(shown.len(), display.faces + display.edges);
+}
+
+#[test]
 fn edges_outside_faces_are_meshed_as_line_parts() {
     if !gmsh_available() {
         return;
