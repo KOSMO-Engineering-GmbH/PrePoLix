@@ -150,6 +150,17 @@ pub fn parameter_key(link: &Link) -> Option<&str> {
     }
 }
 
+/// The exposed parameters of a block that value links give, by key, with the block each
+/// comes from, of the paths links fill in it (see [`Incoming::paths`]).
+pub fn linked_parameters(paths: &[(Vec<String>, String)]) -> Vec<(u32, String)> {
+    (paths.iter())
+        .filter_map(|(path, source)| match path.as_slice() {
+            [cell, key] if cell == PARAMETERS => Some((key.parse().ok()?, source.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Whether the link makes its target continue from the state after a step of the source.
 pub fn is_state(link: &Link) -> bool {
     link.item.first().is_some_and(|c| c == STATE)
@@ -994,10 +1005,12 @@ pub fn compatible(item: &[String], slot: &[String]) -> bool {
         // A number goes to a parameter; whether its kind fits, the blocks tell.
         Some(VALUE) => {
             item.len() == 2
-                && (matches!(slot, [cell, _] if cell == PARAMETERS)
+                && (matches!(slot, [cell, _] if cell == PARAMETERS || cell == VALUE)
                     || matches!(slot, [cell] if cell == OBJECTIVE))
         }
-        Some(LOOP) => item.len() == 2 && matches!(slot, [cell, _] if cell == PARAMETERS),
+        Some(LOOP) => {
+            item.len() == 2 && matches!(slot, [cell, _] if cell == PARAMETERS || cell == VALUE)
+        }
         Some(STATE) | None => false,
         Some(_) => match (item, slot) {
             ([a], [b]) if b == ANALYSIS => a == SETUP,

@@ -308,6 +308,9 @@ pub struct MaterialSet {
     pub units: plx_model::UnitSystem,
     #[serde(default)]
     pub materials: Vec<plx_model::Material>,
+    /// Fields of the materials exposed as parameters, which value links set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exposed: Vec<plx_model::Exposed>,
 }
 
 /// An analysis of a project: what a whole project was before projects held several, with
@@ -438,7 +441,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
 
 /// The oldest format that can still be opened. While PrePoLix is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 8;
+pub const FIRST_PROJECT_FORMAT: u32 = 9;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]
@@ -724,6 +727,14 @@ mod tests {
                 part: "EALL".into(),
                 type_name: "C3D20".into(),
             }],
+            exposed: vec![plx_model::Exposed {
+                key: 1,
+                name: "Steel density".into(),
+                path: plx_model::ValuePath::new(
+                    plx_model::ItemRef::Material("Steel".into()),
+                    plx_model::Field::Density,
+                ),
+            }],
             constraints: Vec::new(),
             ties: vec![Tie {
                 master: Region::Faces(vec![(1, 2)]),
@@ -897,6 +908,14 @@ mod tests {
                 density: Some(7850.0),
                 ..Default::default()
             }],
+            exposed: vec![plx_model::Exposed {
+                key: 1,
+                name: "Steel density".into(),
+                path: plx_model::ValuePath::new(
+                    plx_model::ItemRef::Material("Steel".into()),
+                    plx_model::Field::Density,
+                ),
+            }],
         };
         let mut saved = single(None, &FeMesh::default(), &FeModel::default(), None);
         saved.nodes.push(ProjectNode::Materials(set.clone()));
@@ -930,7 +949,7 @@ mod tests {
             units: plx_model::UnitSystem::MmTonSC,
             parameters: vec![plx_model::Parameter::new(
                 "length",
-                plx_model::ValueKind::Length,
+                plx_model::ValueKind::LENGTH,
                 0.25,
             )],
         };

@@ -13,8 +13,8 @@ use plx_model::{
     AXIS_LABELS, Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition,
     BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CyclicSymmetry,
     DefinedField, DefinedFieldKind, DynamicProcedure, DynamicStep, Elastic, EquationSolver,
-    FeModel, FieldOutput, FrequencyStep, GLOBAL, Hardening, HeatTransferStep, HistoryKind,
-    HistoryOutput, Incrementation, InitialCondition, InitialConditionKind, Load, LoadKind,
+    FeModel, Field, FieldOutput, FrequencyStep, GLOBAL, Hardening, HeatTransferStep, HistoryKind,
+    HistoryOutput, Incrementation, InitialCondition, InitialConditionKind, ItemRef, Load, LoadKind,
     Material, MeshSet, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad,
     NodeTie, OutputDimension, OutputKind, PlasticPoint, Quantity, Region, RemoteBehavior,
     RemoteDisplacement, Section, SectionKind, SensitivityStep, SetKind, StaticStep,
@@ -25,6 +25,7 @@ use plx_model::{
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
 use crate::constraint_dialog::ConstraintDraft;
 use crate::contacts::{self, MasterSlave};
+use crate::expose;
 use crate::icons::{self, Icon};
 use crate::model::{Highlight, Hit, Model};
 use crate::motion_preview::MotionPreview;
@@ -630,9 +631,12 @@ pub(crate) fn face_target(fe: &FeModel) -> Target {
 /// The components of a force; 2D models have none along z.
 fn force_rows(ui: &mut Ui, force: &mut [f64; 3], two_d: bool, units: UnitSystem) {
     let count = if two_d { 2 } else { 3 };
-    for (value, label) in force.iter_mut().zip(["F1", "F2", "F3"]).take(count) {
+    let labels = ["F1", "F2", "F3"].into_iter().zip(Field::VECTOR);
+    for (value, (label, field)) in force.iter_mut().zip(labels).take(count) {
         ui.label(label);
-        ui.add(numeric::quantity(value, units, Quantity::Force).speed(1.0));
+        expose::field(ui, field, |ui| {
+            ui.add(numeric::quantity(value, units, Quantity::Force).speed(1.0))
+        });
         ui.end_row();
     }
 }
@@ -987,6 +991,10 @@ pub struct Editor {
     picker: Picker,
     /// The playing preview of a displacement boundary condition's motion.
     motion: Option<MotionPreview>,
+    /// The expose buttons of its numbers, set up when it is first shown.
+    expose: Option<expose::Scope>,
+    /// The blocks value links give exposed parameters of the model from, by key.
+    linked: Vec<(u32, String)>,
 }
 
 pub enum EditorResult {
@@ -1397,9 +1405,12 @@ fn vector_rows(
     units: UnitSystem,
 ) {
     let count = if two_d { 2 } else { 3 };
-    for (value, label) in vector.iter_mut().zip(labels).take(count) {
+    let labels = labels.into_iter().zip(Field::VECTOR);
+    for (value, (label, field)) in vector.iter_mut().zip(labels).take(count) {
         ui.label(label);
-        ui.add(numeric::quantity(value, units, quantity).speed(1.0));
+        expose::field(ui, field, |ui| {
+            ui.add(numeric::quantity(value, units, quantity).speed(1.0))
+        });
         ui.end_row();
     }
 }
@@ -1631,6 +1642,8 @@ impl Editor {
             error: None,
             picker: Picker::default(),
             motion: None,
+            expose: None,
+            linked: Vec::new(),
         })
     }
 
@@ -1649,6 +1662,8 @@ impl Editor {
             error: None,
             picker: Picker::default(),
             motion: None,
+            expose: None,
+            linked: Vec::new(),
         }
     }
 
@@ -1682,6 +1697,8 @@ impl Editor {
             error: None,
             picker: Picker::default(),
             motion: None,
+            expose: None,
+            linked: Vec::new(),
         })
     }
 
@@ -1788,6 +1805,8 @@ impl Editor {
             error: None,
             picker: Picker::default(),
             motion: None,
+            expose: None,
+            linked: Vec::new(),
         })
     }
 
@@ -1906,6 +1925,126 @@ impl Editor {
         }
     }
 
+    /// Tells the dialog which exposed parameters of the model value links give, by key, and
+    /// from which block.
+    pub fn set_linked(&mut self, linked: Vec<(u32, String)>) {
+        if self.linked != linked {
+            self.linked = linked;
+            self.expose = None;
+        }
+    }
+
+    /// The item as it is in the model, for an item whose numbers can be exposed; `None` for
+    /// a new one.
+    fn original_item(&self, fe: &FeModel) -> Option<ItemRef> {
+        let index = self.index?;
+        let step = |s: usize| fe.steps.get(s).map(|step| step.name.clone());
+        Some(match &self.draft {
+            Draft::Material(_) => ItemRef::Material(fe.materials.get(index)?.name.clone()),
+            Draft::Section(..) => ItemRef::Section(fe.sections.get(index)?.name.clone()),
+            Draft::Step(..) => ItemRef::Step(step(index)?),
+            Draft::BoundaryCondition(s, ..) => ItemRef::BoundaryCondition {
+                name: fe
+                    .steps
+                    .get(*s)?
+                    .boundary_conditions
+                    .get(index)?
+                    .name
+                    .clone(),
+                step: step(*s)?,
+            },
+            Draft::Load(s, ..) => ItemRef::Load {
+                name: fe.steps.get(*s)?.loads.get(index)?.name.clone(),
+                step: step(*s)?,
+            },
+            Draft::InitialCondition(..) => {
+                ItemRef::InitialCondition(fe.initial_conditions.get(index)?.name.clone())
+            }
+            Draft::DefinedField(s, ..) => ItemRef::DefinedField {
+                name: fe.steps.get(*s)?.defined_fields.get(index)?.name.clone(),
+                step: step(*s)?,
+            },
+            _ => return None,
+        })
+    }
+
+    /// The item as the dialog has it now, by its new name, in a model of only that item; for
+    /// an item whose numbers can be exposed.
+    fn draft_item(&self, fe: &FeModel) -> Option<(ItemRef, FeModel)> {
+        let mut model = FeModel::default();
+        let step = |s: usize| {
+            let name = fe.steps.get(s)?.name.clone();
+            Some(Step {
+                kind: fe.steps.get(s)?.kind.clone(),
+                ..Step::new_static(name)
+            })
+        };
+        let item = match &self.draft {
+            Draft::Material(material) => {
+                model.materials.push(material.clone());
+                ItemRef::Material(material.name.clone())
+            }
+            Draft::Section(section, _) => {
+                model.sections.push(section.clone());
+                ItemRef::Section(section.name.clone())
+            }
+            Draft::Step(own, _) => {
+                model.steps.push(own.clone());
+                ItemRef::Step(own.name.clone())
+            }
+            Draft::BoundaryCondition(s, bc, _) => {
+                let mut step = step(*s)?;
+                step.boundary_conditions.push(bc.clone());
+                let item = ItemRef::BoundaryCondition {
+                    step: step.name.clone(),
+                    name: bc.name.clone(),
+                };
+                model.steps.push(step);
+                item
+            }
+            Draft::Load(s, load, _) => {
+                let mut step = step(*s)?;
+                step.loads.push(load.clone());
+                let item = ItemRef::Load {
+                    step: step.name.clone(),
+                    name: load.name.clone(),
+                };
+                model.steps.push(step);
+                item
+            }
+            Draft::InitialCondition(condition, _) => {
+                model.initial_conditions.push(condition.clone());
+                ItemRef::InitialCondition(condition.name.clone())
+            }
+            Draft::DefinedField(s, field, _) => {
+                let mut step = step(*s)?;
+                step.defined_fields.push(field.clone());
+                let item = ItemRef::DefinedField {
+                    step: step.name.clone(),
+                    name: field.name.clone(),
+                };
+                model.steps.push(step);
+                item
+            }
+            _ => return None,
+        };
+        Some((item, model))
+    }
+
+    /// Draws the form with the expose buttons of the numbers that have them.
+    fn exposing_form(&mut self, ui: &mut Ui, model: &Model) {
+        let Some((item, draft)) = self.draft_item(&model.fe) else {
+            return self.form(ui, model);
+        };
+        let mut scope = match self.expose.take() {
+            Some(scope) => scope,
+            None => expose::Scope::new(&model.fe, self.original_item(&model.fe), &self.linked),
+        };
+        scope.available = draft.exposable(&item);
+        scope.show(ui, |ui| self.form(ui, model));
+        self.expose = Some(scope);
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, model: &Model) -> EditorResult {
         let mut result = EditorResult::Open;
         let mut open = true;
@@ -1934,7 +2073,7 @@ impl Editor {
                     egui::Grid::new("item form")
                         .num_columns(2)
                         .spacing([12.0, 6.0])
-                        .show(ui, |ui| self.form(ui, model));
+                        .show(ui, |ui| self.exposing_form(ui, model));
                 }
                 if let Some(error) = &self.error {
                     ui.colored_label(crate::style::error(), error);
@@ -2022,28 +2161,39 @@ impl Editor {
                         // PrePoMax.
                         if model.fe.properties.space.has_thickness() {
                             ui.label("Thickness");
-                            ui.add(
-                                numeric::quantity(&mut section.thickness, units, Quantity::Length)
+                            expose::field(ui, Field::Thickness, |ui| {
+                                ui.add(
+                                    numeric::quantity(
+                                        &mut section.thickness,
+                                        units,
+                                        Quantity::Length,
+                                    )
                                     .range(0.0..=f64::MAX),
-                            );
+                                )
+                            });
                             ui.end_row();
                         }
                     }
                     SectionKind::Truss { area } => {
                         ui.label("Cross-section area");
-                        ui.add(
-                            numeric::quantity(area, units, Quantity::Area).range(0.0..=f64::MAX),
-                        );
+                        expose::field(ui, Field::Area, |ui| {
+                            ui.add(
+                                numeric::quantity(area, units, Quantity::Area)
+                                    .range(0.0..=f64::MAX),
+                            )
+                        });
                         ui.end_row();
                     }
                     SectionKind::Beam(beam) => beam_form(ui, beam, units),
                     SectionKind::Shell { thickness, offset }
                     | SectionKind::Membrane { thickness, offset } => {
                         ui.label("Thickness");
-                        ui.add(
-                            numeric::quantity(thickness, units, Quantity::Length)
-                                .range(0.0..=f64::MAX),
-                        );
+                        expose::field(ui, Field::Thickness, |ui| {
+                            ui.add(
+                                numeric::quantity(thickness, units, Quantity::Length)
+                                    .range(0.0..=f64::MAX),
+                            )
+                        });
                         ui.end_row();
                         ui.label("Offset");
                         ui.add(numeric::drag_value(offset).speed(0.01).range(-1.0..=1.0));
@@ -2106,7 +2256,9 @@ impl Editor {
                 ui.end_row();
                 if let BoundaryKind::Temperature(t) = &mut bc.kind {
                     ui.label("Temperature");
-                    ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0));
+                    expose::field(ui, Field::Value, |ui| {
+                        ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0))
+                    });
                     ui.end_row();
                 }
                 if let BoundaryKind::RemoteDisplacement(remote) = &mut bc.kind {
@@ -2139,7 +2291,12 @@ impl Editor {
                             Quantity::Angle
                         };
                         let field = numeric::quantity(&mut number, units, quantity).speed(0.01);
-                        ui.add_enabled(set, field);
+                        let path = if i < 3 {
+                            Field::VECTOR[i]
+                        } else {
+                            Field::ROTATION[i - 3]
+                        };
+                        expose::field(ui, path, |ui| ui.add_enabled(set, field));
                         *value = set.then_some(number);
                         ui.end_row();
                     }
@@ -2242,11 +2399,15 @@ impl Editor {
                             ui.weak("Moments need a 3D model.");
                             ui.end_row();
                         } else {
-                            for (value, label) in moment.iter_mut().zip(["M1", "M2", "M3"]) {
+                            let labels = ["M1", "M2", "M3"].into_iter().zip(Field::VECTOR);
+                            for (value, (label, field)) in moment.iter_mut().zip(labels) {
                                 ui.label(label);
-                                ui.add(
-                                    numeric::quantity(value, units, Quantity::Moment).speed(1.0),
-                                );
+                                expose::field(ui, field, |ui| {
+                                    ui.add(
+                                        numeric::quantity(value, units, Quantity::Moment)
+                                            .speed(1.0),
+                                    )
+                                });
                                 ui.end_row();
                             }
                         }
@@ -2259,7 +2420,11 @@ impl Editor {
                     }
                     LoadKind::Pressure(pressure) => {
                         ui.label("Pressure");
-                        ui.add(numeric::quantity(pressure, units, Quantity::Pressure).speed(0.1));
+                        expose::field(ui, Field::Value, |ui| {
+                            ui.add(
+                                numeric::quantity(pressure, units, Quantity::Pressure).speed(0.1),
+                            )
+                        });
                         ui.end_row();
                     }
                     LoadKind::Force { value, each_node } => {
@@ -2290,10 +2455,16 @@ impl Editor {
                         ui.end_row();
                         if *by_displacement {
                             ui.label("Shortening");
-                            ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.001));
+                            expose::field(ui, Field::Value, |ui| {
+                                ui.add(
+                                    numeric::quantity(value, units, Quantity::Length).speed(0.001),
+                                )
+                            });
                         } else {
                             ui.label("Force");
-                            ui.add(numeric::quantity(value, units, Quantity::Force).speed(1.0));
+                            expose::field(ui, Field::Value, |ui| {
+                                ui.add(numeric::quantity(value, units, Quantity::Force).speed(1.0))
+                            });
                         }
                         ui.end_row();
                         let mut given = direction.is_some();
@@ -2319,7 +2490,9 @@ impl Editor {
                     }
                     LoadKind::ConcentratedFlux(flux) => {
                         ui.label("Heat flux");
-                        ui.add(numeric::physical(flux, units, Quantity::Power));
+                        expose::field(ui, Field::Value, |ui| {
+                            ui.add(numeric::physical(flux, units, Quantity::Power))
+                        });
                         ui.end_row();
                         ui.label("");
                         ui.weak("The heat flux flows into every node of the region.");
@@ -2327,7 +2500,9 @@ impl Editor {
                     }
                     LoadKind::SurfaceFlux(flux) => {
                         ui.label("Heat flux density");
-                        ui.add(numeric::physical(flux, units, Quantity::HeatFlux));
+                        expose::field(ui, Field::Value, |ui| {
+                            ui.add(numeric::physical(flux, units, Quantity::HeatFlux))
+                        });
                         ui.end_row();
                         ui.label("");
                         ui.weak("Positive: heat flows into the part.");
@@ -2335,33 +2510,43 @@ impl Editor {
                     }
                     LoadKind::BodyFlux(flux) => {
                         ui.label("Heat source");
-                        ui.add(numeric::physical(flux, units, Quantity::PowerPerVolume));
+                        expose::field(ui, Field::Value, |ui| {
+                            ui.add(numeric::physical(flux, units, Quantity::PowerPerVolume))
+                        });
                         ui.end_row();
                     }
                     LoadKind::Film { sink, coefficient } => {
                         ui.label("Sink temperature");
-                        ui.add(numeric::quantity(sink, units, Quantity::Temperature).speed(1.0));
+                        expose::field(ui, Field::Sink, |ui| {
+                            ui.add(numeric::quantity(sink, units, Quantity::Temperature).speed(1.0))
+                        });
                         ui.end_row();
                         ui.label("Film coefficient");
-                        ui.add(
-                            numeric::physical(
-                                coefficient,
-                                units,
-                                Quantity::HeatTransferCoefficient,
+                        expose::field(ui, Field::FilmCoefficient, |ui| {
+                            ui.add(
+                                numeric::physical(
+                                    coefficient,
+                                    units,
+                                    Quantity::HeatTransferCoefficient,
+                                )
+                                .range(0.0..=f64::MAX),
                             )
-                            .range(0.0..=f64::MAX),
-                        );
+                        });
                         ui.end_row();
                     }
                     LoadKind::Gravity(acceleration) => {
                         let count = if two_d { 2 } else { 3 };
-                        for (value, label) in
-                            acceleration.iter_mut().zip(["g1", "g2", "g3"]).take(count)
+                        let labels = ["g1", "g2", "g3"].into_iter().zip(Field::VECTOR);
+                        for (value, (label, field)) in
+                            acceleration.iter_mut().zip(labels).take(count)
                         {
                             ui.label(label);
-                            ui.add(
-                                numeric::quantity(value, units, Quantity::Acceleration).speed(0.1),
-                            );
+                            expose::field(ui, field, |ui| {
+                                ui.add(
+                                    numeric::quantity(value, units, Quantity::Acceleration)
+                                        .speed(0.1),
+                                )
+                            });
                             ui.end_row();
                         }
                         ui.label("");
@@ -2370,9 +2555,12 @@ impl Editor {
                     }
                     LoadKind::Centrifugal { point, axis, speed } => {
                         ui.label("Rotational speed");
-                        ui.add(
-                            numeric::quantity(speed, units, Quantity::RotationalSpeed).speed(1.0),
-                        );
+                        expose::field(ui, Field::Speed, |ui| {
+                            ui.add(
+                                numeric::quantity(speed, units, Quantity::RotationalSpeed)
+                                    .speed(1.0),
+                            )
+                        });
                         ui.end_row();
                         ui.label("");
                         ui.weak(format!(
@@ -2407,15 +2595,19 @@ impl Editor {
                     LoadKind::Moving(moving) => moving_rows(ui, moving, &model.fe, two_d, units),
                     LoadKind::Radiation { sink, emissivity } => {
                         ui.label("Sink temperature");
-                        ui.add(numeric::quantity(sink, units, Quantity::Temperature).speed(1.0));
+                        expose::field(ui, Field::Sink, |ui| {
+                            ui.add(numeric::quantity(sink, units, Quantity::Temperature).speed(1.0))
+                        });
                         ui.end_row();
                         ui.label("Emissivity");
-                        ui.add(
-                            numeric::drag_value(emissivity)
-                                .range(0.0..=1.0)
-                                .speed(0.01)
-                                .max_decimals(4),
-                        );
+                        expose::field(ui, Field::Emissivity, |ui| {
+                            ui.add(
+                                numeric::drag_value(emissivity)
+                                    .range(0.0..=1.0)
+                                    .speed(0.01)
+                                    .max_decimals(4),
+                            )
+                        });
                         ui.end_row();
                         let properties = &model.fe.properties;
                         if properties.absolute_zero.is_none()
@@ -2470,7 +2662,9 @@ impl Editor {
                 match &mut condition.kind {
                     InitialConditionKind::Temperature(t) => {
                         ui.label("Temperature");
-                        ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0));
+                        expose::field(ui, Field::Value, |ui| {
+                            ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0))
+                        });
                         ui.end_row();
                     }
                     InitialConditionKind::Velocity(v) => {
@@ -2492,9 +2686,12 @@ impl Editor {
                             ui.end_row();
                         }
                         ui.label("Rotational speed");
-                        ui.add(
-                            numeric::quantity(speed, units, Quantity::RotationalSpeed).speed(1.0),
-                        );
+                        expose::field(ui, Field::Speed, |ui| {
+                            ui.add(
+                                numeric::quantity(speed, units, Quantity::RotationalSpeed)
+                                    .speed(1.0),
+                            )
+                        });
                         ui.end_row();
                         ui.label("");
                         ui.weak(format!(
@@ -2537,7 +2734,9 @@ impl Editor {
                 match &mut field.kind {
                     DefinedFieldKind::Temperature(t) => {
                         ui.label("Temperature");
-                        ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0));
+                        expose::field(ui, Field::Value, |ui| {
+                            ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0))
+                        });
                         ui.end_row();
                         amplitude_row(
                             ui,
@@ -2888,7 +3087,16 @@ impl Editor {
         }
     }
 
-    pub fn apply(self, fe: &mut FeModel) {
+    pub fn apply(mut self, fe: &mut FeModel) {
+        // The exposed parameters follow the item, under its new name.
+        let exposed = (self.expose.take()).zip(self.draft_item(fe).map(|(item, _)| item));
+        self.apply_draft(fe);
+        if let Some((scope, item)) = exposed {
+            scope.apply(fe, &item);
+        }
+    }
+
+    fn apply_draft(self, fe: &mut FeModel) {
         fn put<T>(items: &mut Vec<T>, index: Option<usize>, item: T) {
             match index.and_then(|i| items.get_mut(i)) {
                 Some(slot) => *slot = item,
@@ -3564,29 +3772,35 @@ fn beam_form(ui: &mut Ui, beam: &mut BeamSection, units: UnitSystem) {
             }
         });
     ui.end_row();
-    let positive = |ui: &mut Ui, label: &str, value: &mut f64| {
+    let positive = |ui: &mut Ui, label: &str, value: &mut f64, field: Option<Field>| {
         ui.label(label);
-        ui.add(numeric::quantity(value, units, Quantity::Length).range(0.0..=f64::MAX));
+        let mut add = |ui: &mut Ui| {
+            ui.add(numeric::quantity(value, units, Quantity::Length).range(0.0..=f64::MAX))
+        };
+        match field {
+            Some(field) => expose::field(ui, field, add),
+            None => add(ui),
+        };
         ui.end_row();
     };
     match &mut beam.profile {
         BeamProfile::Rect { a, b } => {
-            positive(ui, "Thickness in 1-direction (a)", a);
-            positive(ui, "Thickness in 2-direction (b)", b);
+            positive(ui, "Thickness in 1-direction (a)", a, Some(Field::BeamA));
+            positive(ui, "Thickness in 2-direction (b)", b, Some(Field::BeamB));
         }
-        BeamProfile::Circ { radius } => positive(ui, "Radius", radius),
+        BeamProfile::Circ { radius } => positive(ui, "Radius", radius, Some(Field::Radius)),
         BeamProfile::Pipe { radius, thickness } => {
-            positive(ui, "Outer radius", radius);
-            positive(ui, "Wall thickness", thickness);
+            positive(ui, "Outer radius", radius, Some(Field::Radius));
+            positive(ui, "Wall thickness", thickness, Some(Field::Thickness));
         }
         BeamProfile::Box { a, b, t } => {
-            positive(ui, "Width in 1-direction (a)", a);
-            positive(ui, "Width in 2-direction (b)", b);
+            positive(ui, "Width in 1-direction (a)", a, Some(Field::BeamA));
+            positive(ui, "Width in 2-direction (b)", b, Some(Field::BeamB));
             let [t1, t2, t3, t4] = t;
-            positive(ui, "Wall thickness at +1", t1);
-            positive(ui, "Wall thickness at +2", t2);
-            positive(ui, "Wall thickness at -1", t3);
-            positive(ui, "Wall thickness at -2", t4);
+            positive(ui, "Wall thickness at +1", t1, None);
+            positive(ui, "Wall thickness at +2", t2, None);
+            positive(ui, "Wall thickness at -1", t3, None);
+            positive(ui, "Wall thickness at -2", t4, None);
         }
     }
     if beam.profile.needs_reduced_integration() {
@@ -3644,10 +3858,12 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     let mut has_density = material.density.is_some();
     ui.checkbox(&mut has_density, "Density");
     let mut density = material.density.unwrap_or(0.0);
-    ui.add_enabled(
-        has_density,
-        numeric::physical(&mut density, units, Quantity::Density),
-    );
+    expose::field(ui, Field::Density, |ui| {
+        ui.add_enabled(
+            has_density,
+            numeric::physical(&mut density, units, Quantity::Density),
+        )
+    });
     material.density = has_density.then_some(density);
     ui.end_row();
     let mut elastic = material.elastic.is_some();
@@ -3658,39 +3874,47 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
         poisson: 0.0,
     });
     ui.label("    Young's modulus");
-    ui.add_enabled(
-        elastic,
-        numeric::physical(&mut values.young, units, Quantity::Pressure),
-    );
+    expose::field(ui, Field::Young, |ui| {
+        ui.add_enabled(
+            elastic,
+            numeric::physical(&mut values.young, units, Quantity::Pressure),
+        )
+    });
     ui.end_row();
     ui.label("    Poisson's ratio");
-    ui.add_enabled(
-        elastic,
-        numeric::drag_value(&mut values.poisson)
-            .range(0.0..=0.5)
-            .speed(0.01)
-            .max_decimals(4),
-    );
+    expose::field(ui, Field::Poisson, |ui| {
+        ui.add_enabled(
+            elastic,
+            numeric::drag_value(&mut values.poisson)
+                .range(0.0..=0.5)
+                .speed(0.01)
+                .max_decimals(4),
+        )
+    });
     ui.end_row();
     material.elastic = elastic.then_some(values);
     plastic_rows(ui, material, units);
     creep_rows(ui, material, units);
-    for (label, value, quantity) in [
+    for (label, value, quantity, field) in [
         (
             "Thermal conductivity",
             &mut material.conductivity,
             Quantity::ThermalConductivity,
+            Field::Conductivity,
         ),
         (
             "Specific heat",
             &mut material.specific_heat,
             Quantity::SpecificHeat,
+            Field::SpecificHeat,
         ),
     ] {
         let mut set = value.is_some();
         ui.checkbox(&mut set, label);
         let mut number = value.unwrap_or(0.0);
-        ui.add_enabled(set, numeric::physical(&mut number, units, quantity));
+        expose::field(ui, field, |ui| {
+            ui.add_enabled(set, numeric::physical(&mut number, units, quantity))
+        });
         *value = set.then_some(number);
         ui.end_row();
     }
@@ -3699,14 +3923,16 @@ fn material_form(ui: &mut Ui, material: &mut Material, units: UnitSystem) {
     ui.end_row();
     let mut expansion = material.expansion.unwrap_or_default();
     ui.label("    Expansion coefficient");
-    ui.add_enabled(
-        expands,
-        numeric::physical(
-            &mut expansion.coefficient,
-            units,
-            Quantity::ThermalExpansion,
-        ),
-    );
+    expose::field(ui, Field::Expansion, |ui| {
+        ui.add_enabled(
+            expands,
+            numeric::physical(
+                &mut expansion.coefficient,
+                units,
+                Quantity::ThermalExpansion,
+            ),
+        )
+    });
     ui.end_row();
     ui.label("    Reference temperature");
     ui.add_enabled(
@@ -4410,7 +4636,9 @@ fn frequency_form(
     ui.end_row();
     solver_row(ui, &mut settings.solver, true);
     ui.label("Number of eigenfrequencies");
-    ui.add(numeric::drag_value(&mut settings.num_frequencies).range(1..=10_000));
+    expose::field(ui, Field::Modes, |ui| {
+        ui.add(numeric::drag_value(&mut settings.num_frequencies).range(1..=10_000))
+    });
     ui.end_row();
     for (label, bound) in [
         ("Lower frequency bound", &mut settings.lower_frequency),
@@ -4569,14 +4797,39 @@ fn increments_form(ui: &mut Ui, settings: &mut StaticStep, units: UnitSystem, me
         numeric::drag_value(&mut settings.max_increments).range(1..=1_000_000),
     );
     ui.end_row();
-    for (label, value, enabled) in [
-        ("Time period", &mut settings.time_period, custom),
-        ("Initial increment", &mut settings.initial_increment, custom),
-        ("Min. increment", &mut settings.min_increment, automatic),
-        ("Max. increment", &mut settings.max_increment, automatic),
+    for (label, value, enabled, field) in [
+        (
+            "Time period",
+            &mut settings.time_period,
+            custom,
+            Some(Field::TimePeriod),
+        ),
+        (
+            "Initial increment",
+            &mut settings.initial_increment,
+            custom,
+            Some(Field::InitialIncrement),
+        ),
+        (
+            "Min. increment",
+            &mut settings.min_increment,
+            automatic,
+            None,
+        ),
+        (
+            "Max. increment",
+            &mut settings.max_increment,
+            automatic,
+            None,
+        ),
     ] {
         ui.label(label);
-        ui.add_enabled(enabled, numeric::physical(value, units, Quantity::Time));
+        let mut add =
+            |ui: &mut Ui| ui.add_enabled(enabled, numeric::physical(value, units, Quantity::Time));
+        match field {
+            Some(field) => expose::field(ui, field, add),
+            None => add(ui),
+        };
         ui.end_row();
     }
 }
@@ -5044,6 +5297,8 @@ mod tests {
             error: None,
             picker: Picker::default(),
             motion: None,
+            expose: None,
+            linked: Vec::new(),
         }
         .apply(&mut fe);
         assert_eq!(fe.steps[0].loads[0].factor_amplitude, None);

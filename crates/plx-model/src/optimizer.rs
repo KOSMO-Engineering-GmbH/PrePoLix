@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn a_study_runs_the_values_that_are_left() {
         let kind = OptimizerKind::ParameterStudy {
-            kind: ValueKind::Length,
+            kind: ValueKind::LENGTH,
             values: vec![0.1, 0.2, 0.3],
         };
         assert_eq!(

@@ -587,6 +587,16 @@ impl AnalysisWindow {
         self.workbench.model.as_ref()
     }
 
+    /// The FE model of the analysis, for the project window to set its exposed parameters;
+    /// a change shows like one the user made.
+    pub fn fe_mut(&mut self) -> Option<&mut plx_model::FeModel> {
+        let workbench = &mut self.workbench;
+        let model = workbench.model.as_mut()?;
+        workbench.results_changed = true;
+        workbench.symbols_shown = None;
+        Some(&mut model.fe)
+    }
+
     /// Whether a Check Model run of the window runs.
     pub fn is_running(&self) -> bool {
         (self.workbench.analysis.as_ref()).is_some_and(Analysis::is_running)
@@ -5015,6 +5025,7 @@ impl Workbench {
         let (Some(editor), Some(model)) = (&mut self.editor, &mut self.model) else {
             return;
         };
+        editor.set_linked(crate::links::linked_parameters(&self.incoming.paths));
         match editor.show(ctx, model) {
             EditorResult::Open => {}
             EditorResult::Ok => {
