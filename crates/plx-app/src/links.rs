@@ -666,6 +666,9 @@ pub fn fingerprint(data: Data, path: &[String]) -> u64 {
         }
         [cell] if cell == MESH => {
             hash.add(&data.mesh.input_fingerprint().to_le_bytes());
+            // A refine mesh block gives geometry to mesh with other sizes.
+            let refinement = data.geometry.map(|g| g.refinement.to_bits());
+            hash.add_debug(&refinement);
             hash.add_debug(data.mesh_inputs);
             hash.add_debug(&data.fe.mesh_sets);
             hash.add_debug(&data.fe.element_types);

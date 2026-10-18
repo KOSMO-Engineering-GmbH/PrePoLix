@@ -61,12 +61,11 @@ space; several analyses can share one mesh block.
 Its parameters are rows of the block under #ui("Mesh"), like the inputs of a Blender node:
 #ui("X"), #ui("Y"), #ui("Z") of the corner it starts at and the edge lengths #ui("Lx"),
 #ui("Ly"), #ui("Lz") in the block's units, the numbers of elements #ui("nx"), #ui("ny"),
-#ui("nz") as whole numbers, #ui("Refine") and the #ui("Element") type. Click a field to type a
-value, or drag it; a rectangle has no Z rows. Once a parameter changes, the #ui("Mesh") row
-shows the mesh out of date. #ui("Refine") is a factor on the numbers of elements along every
-edge, rounded: 2 doubles them, 1 meshes them as they are. An optimizer refines a mesh through
-it. The violet pins on the left of the numbers take a value from a Parameters block
-(@parameters-block).
+#ui("nz") as whole numbers and the #ui("Element") type. Click a field to type a value, or drag
+it; a rectangle has no Z rows. Once a parameter changes, the #ui("Mesh") row shows the mesh out
+of date. The violet pins on the left of the numbers take a value from a Parameters block
+(@parameters-block). To make the mesh finer or coarser as a whole, put a Refine Mesh block
+after it (@refine-mesh).
 
 Its sides are node sets and surfaces at once, named after the axis and the side they lie on:
 #ui("X-") at the smallest X, #ui("X+") at the largest, then #ui("Y-"), #ui("Y+") and, for a
@@ -111,6 +110,41 @@ and their solutions are out of date.
 
 #screenshot("mesh-block-result.png", [The box held at X- and pressed on Z+, solved])
 
+=== Refine Mesh <refine-mesh>
+
+A Refine Mesh block makes the mesh linked to it again, finer or coarser by a factor, and gives
+the new mesh on. Add it with #menu("Project", "Add Mesh", "Refine Mesh"), drag the
+#ui("Mesh") of a mesh block or of an analysis with imported geometry to the pin on the left of
+its #ui("Mesh") row, and drag the pin on the right of that row to the #ui("Mesh") row of the
+analyses that are to use the refined mesh. The mesh it refines stays as it is.
+
+#screenshot("refine-mesh.png", [A box refined by 1.5 for the analysis Fine: the Factor takes the
+  dashed wire of an optimizer, which refines the mesh in its loop])
+
+#fields(
+  [Mesh], [Left pin: the mesh to refine. Right pin: the refined mesh, with its state.],
+  [Factor], [How much finer the mesh is: 2 twice as fine, 0.5 half as fine, 1 as it is. Type
+    or drag it in place, or drop the value of a Parameters block or of an optimizer on its pin
+    (@optimization-loops).],
+)
+
+What the factor does depends on where the mesh comes from:
+
+- From a mesh block (Box, Rectangle): the numbers of elements along every edge are multiplied
+  by the factor and rounded, so a box of 10 x 2 x 2 elements refined by 1.5 has 15 x 3 x 3. The
+  block makes this mesh itself: once the factor or the mesh block changes, its #ui("Mesh") row
+  is out of date and #ui("Update Project") or #ui("Generate Mesh") in its context menu makes it
+  again.
+- From an analysis with imported geometry: it gives the geometry with its mesh setup on, every
+  element size divided by the factor (the max. and min. element size of the meshing
+  parameters, those of Meshing Parameters items and the local mesh sizes). The analysis that
+  takes it meshes the geometry with these sizes when it is solved; the sizes as set in the mesh
+  setup stay. Its mesh can therefore not go to a Mesh Export block: export the mesh of the
+  analysis that meshed it.
+
+Refine Mesh blocks can follow each other; their factors multiply. A mesh read from an input
+file has no parameters or geometry to mesh it again with, and the link is refused.
+
 === File <file-block>
 
 A file block reads a file from outside the project and gives what it holds to analyses: the
@@ -147,11 +181,11 @@ spot. Add it with #menu("Project", "Add Parameters"); it starts with one length.
   box: the row of the box is read-only, in violet, and follows the parameter])
 
 Each parameter is a row with its value, typed or dragged in place, and a violet pin on the
-right. Drag the pin to the pin on the left of a number of a mesh block (#ui("X") to #ui("nz"),
-#ui("Refine")). The number then takes the value of the parameter: it is shown in violet and
-read-only, and when the parameter changes the mesh is out of date, so #ui("Update Project")
-meshes and solves again. A value link joins like with like: a length goes to a length, a count
-to a number of elements, a factor to #ui("Refine"); otherwise the output pane says why it was
+right. Drag the pin to the pin on the left of a number of a mesh block (#ui("X") to #ui("nz"))
+or to the #ui("Factor") of a Refine Mesh block. The number then takes the value of the
+parameter: it is shown in violet and read-only, and when the parameter changes the mesh is out
+of date, so #ui("Update Project") meshes and solves again. A value link joins like with like: a length goes to a length, a count
+to a number of elements, a factor to #ui("Factor"); otherwise the output pane says why it was
 refused. Right-click the pin to remove the link; the number keeps its last value.
 
 A double-click on the block opens its editor:
