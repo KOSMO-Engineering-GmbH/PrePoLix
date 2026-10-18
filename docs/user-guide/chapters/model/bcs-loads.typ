@@ -108,11 +108,9 @@ Loads are created like boundary conditions, with #ui("Create ...") on #ui("Loads
 #screenshot("selection.png", [Force on the end face of a plate])
 
 #fields(
-  [Force], [The default load: a *total* force `F1`, `F2`, `F3` on faces, along edges with
-    #ui("Apply to") #ui("Edges") (@traction-edges), or on points with #ui("Apply to")
-    #ui("Points") (@force-points). When the input file is written it is distributed to the
-    nodes (`*CLOAD`): by the face areas or edge lengths and the element shape functions, on
-    points in equal shares. With #ui("Apply to all nodes") the whole force acts at every node
+  [Force], [The default load: a *total* force `F1`, `F2`, `F3` on whatever the region holds,
+    faces, edges or points (@force-region). When the input file is written it is distributed
+    to the nodes (`*CLOAD`). With #ui("Apply to all nodes") the whole force acts at every node
     of the region instead, as a concentrated force in CalculiX; it is off by default.],
   [Moment], [`M1`, `M2`, `M3` at the reference point of a rigid body (@rigid-body) or at every
     node of beams and shells, which have rotations. 3D models only.],
@@ -136,39 +134,35 @@ In 2D models face loads act on element edges. In axisymmetric models forces act 
 circumference.
 
 #limitation[Line loads (force per length) are not available in the dialogs; a
-#ui("Force") along edges takes the total force (@traction-edges). Bolt pre-tension:
+#ui("Force") along edges takes the total force (@force-region). Bolt pre-tension:
 @pre-tension. Defined temperature fields: @defined-fields. They can be added with the keyword
 editor (@keyword-editor).]
 
-=== Force along edges <traction-edges>
+=== What a force acts on <force-region>
 
-In 3D models a #ui("Force") can act along edges instead of faces, for example on
-the free edge of a shell or a membrane, or along an edge of a solid. Choose #ui("Apply to")
-#ui("Edges") in the load dialog; the #ui("Selection") window then picks edges:
+A #ui("Force") picks its region like a boundary condition: in the #ui("Selection") window
+#ui("Faces, edges and points") takes the face, edge or corner point under the click, and
+#ui("Region") can also be a node set, a surface or the #ui("Reference Point") of a rigid body
+(@rigid-body). The force is always the total and is distributed to the nodes when the input file
+is written:
 
 #fields(
-  [Edges], [A click picks the edge nearest to it, from corner to corner. On a mesh created from
-    the geometry it picks the edge of the geometry, which is kept when the part is remeshed.],
-  [Edge angle], [The chain of edges through the click, continued while it bends by less than
-    the angle.],
+  [Faces], [By the face areas and the element shape functions. In 2D models the faces are the
+    edges of the outline.],
+  [Edges], [By the edge lengths, as the consistent nodal forces of a constant line load: on
+    quadratic elements an edge's end nodes take 1/6 and its midside node 4/6 of the edge's
+    share. Useful on the free edge of a shell or a membrane.],
+  [Points, nodes, node sets], [In equal shares, so a single node, such as the tip of a beam,
+    takes all of it. Nodes picked with the mesh based modes count as points.],
+  [Reference point], [The whole force acts on the rigid body.],
 )
 
-#key("Shift") adds edges, #key("Ctrl") removes them, and a box selects the edges inside it. The
-field below the region shows the number of element edges. When the input file is written the
-total force is distributed to the nodes of the edges by their length, as the consistent nodal
-forces of a constant line load: on quadratic elements an edge's end nodes take 1/6 and its
-midside node 4/6 of the edge's share.
+When a selection mixes them, faces come before edges and edges before points: only the faces of a
+selection of faces and edges carry the force.
 
 #screenshot("surface-traction-edge.png", [Force of 100 N along the free edge of a shell plate])
 
-=== Force on points <force-points>
-
-With #ui("Apply to") #ui("Points") the #ui("Selection") window picks nodes or vertices, or a
-#ui("Reference Point") of a rigid body (@rigid-body). The force is still the total: the
-picked nodes share it equally, so a single node, such as the tip of a beam, takes all of it. On a
-reference point the whole force acts on the rigid body.
-
-#screenshot("force-points.png", [Force dialog with Apply to Points])
+#screenshot("force-dialog.png", [Force dialog with the Selection window])
 
 == Hiding symbols <hide-symbols>
 
