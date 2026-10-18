@@ -3553,8 +3553,8 @@ impl Workbench {
                     view.units = results.results.as_ref().map_or(view.units, |v| v.units);
                 }
                 self.output.push(format!(
-                    "Global model shown around the submodel, without the {} elements where \
-                     the submodel lies",
+                    "Global model shown around the submodel, without the {} elements inside \
+                     the submodel",
                     global.removed
                 ));
                 results.global = Some(global);
@@ -6338,8 +6338,10 @@ impl Workbench {
             global.bounds = (around.iter().filter_map(RenderMesh::bounds))
                 .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)));
         }
+        // Global elements reaching into the submodel stay, behind it, so that no gap opens.
         for index in model.parts.len()..meshes.len() {
             self.viewport.set_part_transparent(index, transparent);
+            self.viewport.set_part_behind(index, !transparent);
         }
         if model.explosion.is_shown()
             && let Some(bounds) = model.visible_bounds()

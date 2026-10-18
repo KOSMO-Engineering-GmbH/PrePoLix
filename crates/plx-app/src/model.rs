@@ -144,7 +144,7 @@ pub struct GlobalModel {
     pub increment: usize,
     pub visible: bool,
     pub display: GlobalDisplay,
-    /// Elements cut away where the submodel lies.
+    /// Elements cut away inside the submodel.
     pub removed: usize,
     /// Bounds as last drawn, in render coordinates.
     pub bounds: Option<(Vec3, Vec3)>,

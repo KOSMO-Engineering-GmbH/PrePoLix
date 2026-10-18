@@ -1238,8 +1238,9 @@ impl Tree<'_> {
         self.response.global_model |= changed;
         let tip = format!(
             "The results of the global model the submodel reads, without the {} elements \
-             where the submodel lies, deformed by the same scale and coloured in the same \
-             legend. Right-click to draw it whole and see-through instead.",
+             inside the submodel and behind it where they overlap, deformed by the same scale \
+             and coloured in the same legend. Right-click to draw it whole and see-through \
+             instead.",
             global.removed
         );
         let response = response.on_hover_text(tip);

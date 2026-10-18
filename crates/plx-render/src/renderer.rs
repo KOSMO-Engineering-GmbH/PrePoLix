@@ -17,6 +17,9 @@ const EDGE_OFFSET_PX: f32 = 1.5;
 /// Constant part of the surface depth bias, in steps of the depth buffer: covers the rounding
 /// between a line and the triangle it lies on where the face is seen head on.
 const SURFACE_BIAS_CONSTANT: i32 = 2;
+/// How far the surfaces and edges of parts drawn behind the others are pushed away from the
+/// viewer, in pixels: where they meet the surfaces of other parts, those show in front.
+const BEHIND_PX: f32 = 4.0;
 /// Width of [`RenderMesh::wide_edges`] in pixels, as PrePoMax draws a selected part's outline.
 pub const WIDE_EDGE_PX: f32 = 3.0;
 
@@ -45,6 +48,8 @@ struct Globals {
     clip_options: [f32; 4],
     /// Colour of the wireframe of the undeformed shape in rgb.
     wireframe: [f32; 4],
+    /// x: depth offset of parts drawn behind the others, in normalized depth units.
+    behind: [f32; 4],
     palette: [[f32; 4]; PALETTE_SLOTS as usize],
 }
 
@@ -64,6 +69,18 @@ struct GpuMesh {
     visible: bool,
     /// Surfaces seen through, drawn after everything else without their mesh edges.
     transparent: bool,
+    /// Drawn a little away from the viewer, so that the other parts show in front where they
+    /// overlap.
+    behind: bool,
+}
+
+/// The pipelines of the surfaces and lines of a part, either as they lie or pushed behind
+/// the other parts.
+struct PartPipelines {
+    surface: wgpu::RenderPipeline,
+    edge: wgpu::RenderPipeline,
+    wireframe: wgpu::RenderPipeline,
+    mesh_edge: wgpu::RenderPipeline,
 }
 
 /// What the viewport draws besides the shaded surfaces.
@@ -125,11 +142,9 @@ pub struct ViewportRenderer {
     globals: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     background_pipeline: wgpu::RenderPipeline,
-    surface_pipeline: wgpu::RenderPipeline,
+    front: PartPipelines,
+    behind: PartPipelines,
     transparent_pipeline: wgpu::RenderPipeline,
-    edge_pipeline: wgpu::RenderPipeline,
-    wireframe_pipeline: wgpu::RenderPipeline,
-    mesh_edge_pipeline: wgpu::RenderPipeline,
     wide_edge_pipeline: wgpu::RenderPipeline,
     parts: Vec<GpuMesh>,
     /// Section faces of the parts, drawn while the section view is on.
@@ -243,23 +258,6 @@ impl ViewportRenderer {
             depth_state(false, wgpu::CompareFunction::Always, Default::default()),
             None,
         );
-        let surface_pipeline = pipeline(
-            "viewport surfaces",
-            "vs_surface",
-            "fs_surface",
-            &[Some(vertex_layout.clone())],
-            wgpu::PrimitiveTopology::TriangleList,
-            depth_state(
-                true,
-                wgpu::CompareFunction::Less,
-                wgpu::DepthBiasState {
-                    constant: SURFACE_BIAS_CONSTANT,
-                    slope_scale: EDGE_OFFSET_PX,
-                    clamp: 0.0,
-                },
-            ),
-            None,
-        );
         // Transparent surfaces leave the depth buffer to the opaque ones behind them.
         let transparent_pipeline = pipeline(
             "viewport transparent surfaces",
@@ -278,34 +276,45 @@ impl ViewportRenderer {
             ),
             Some(wgpu::BlendState::ALPHA_BLENDING),
         );
-        let edge_pipeline = pipeline(
-            "viewport edges",
-            "vs_edge",
-            "fs_edge",
-            &[Some(vertex_layout.clone())],
-            wgpu::PrimitiveTopology::LineList,
-            depth_state(false, wgpu::CompareFunction::LessEqual, Default::default()),
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-        );
-        let wireframe_pipeline = pipeline(
-            "viewport wireframe",
-            "vs_wireframe",
-            "fs_edge",
-            &[Some(vertex_layout.clone())],
-            wgpu::PrimitiveTopology::LineList,
-            depth_state(false, wgpu::CompareFunction::LessEqual, Default::default()),
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-        );
-        // Mesh edges index the surface vertices and take their colour from the shader.
-        let mesh_edge_pipeline = pipeline(
-            "viewport mesh edges",
-            "vs_mesh_edge",
-            "fs_edge",
-            &[Some(vertex_layout)],
-            wgpu::PrimitiveTopology::LineList,
-            depth_state(false, wgpu::CompareFunction::LessEqual, Default::default()),
-            Some(wgpu::BlendState::ALPHA_BLENDING),
-        );
+        // `suffix` picks the vertex shaders: "" as the parts lie, "_behind" pushed back.
+        let part_pipelines = |suffix: &str| {
+            let line = |label: &str, vs: &str| {
+                pipeline(
+                    label,
+                    &format!("{vs}{suffix}"),
+                    "fs_edge",
+                    &[Some(vertex_layout.clone())],
+                    wgpu::PrimitiveTopology::LineList,
+                    depth_state(false, wgpu::CompareFunction::LessEqual, Default::default()),
+                    Some(wgpu::BlendState::ALPHA_BLENDING),
+                )
+            };
+            PartPipelines {
+                surface: pipeline(
+                    "viewport surfaces",
+                    &format!("vs_surface{suffix}"),
+                    "fs_surface",
+                    &[Some(vertex_layout.clone())],
+                    wgpu::PrimitiveTopology::TriangleList,
+                    depth_state(
+                        true,
+                        wgpu::CompareFunction::Less,
+                        wgpu::DepthBiasState {
+                            constant: SURFACE_BIAS_CONSTANT,
+                            slope_scale: EDGE_OFFSET_PX,
+                            clamp: 0.0,
+                        },
+                    ),
+                    None,
+                ),
+                edge: line("viewport edges", "vs_edge"),
+                wireframe: line("viewport wireframe", "vs_wireframe"),
+                // Mesh edges index the surface vertices and take their colour from the shader.
+                mesh_edge: line("viewport mesh edges", "vs_mesh_edge"),
+            }
+        };
+        let front = part_pipelines("");
+        let behind = part_pipelines("_behind");
         // Wide lines are quads: one instance per segment reads both end vertices of the line
         // list, the vertex shader spreads them across the screen.
         let vertex_size = std::mem::size_of::<Vertex>() as u64;
@@ -344,11 +353,9 @@ impl ViewportRenderer {
             globals,
             bind_group,
             background_pipeline,
-            surface_pipeline,
+            front,
+            behind,
             transparent_pipeline,
-            edge_pipeline,
-            wireframe_pipeline,
-            mesh_edge_pipeline,
             wide_edge_pipeline,
             parts: Vec::new(),
             sections: Vec::new(),
@@ -393,6 +400,16 @@ impl ViewportRenderer {
             && part.visible != visible
         {
             part.visible = visible;
+            self.drawn = None;
+        }
+    }
+
+    /// Draws a part behind the others where they overlap, or as it lies again.
+    pub fn set_part_behind(&mut self, index: usize, behind: bool) {
+        if let Some(part) = self.parts.get_mut(index)
+            && part.behind != behind
+        {
+            part.behind = behind;
             self.drawn = None;
         }
     }
@@ -473,6 +490,14 @@ impl ViewportRenderer {
                 options.wireframe[2],
                 0.0,
             ],
+            behind: [
+                BEHIND_PX
+                    * camera.pixel_size(self.targets.width as f32, self.targets.height as f32)
+                    / camera.depth_range(),
+                0.0,
+                0.0,
+                0.0,
+            ],
             palette: palette(options.contour),
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
@@ -516,58 +541,60 @@ impl ViewportRenderer {
                 .iter()
                 .zip(&self.parts)
                 .filter(|_| self.clip.is_some())
-                .map(|(section, part)| (section, part.visible, true));
+                .map(|(section, part)| (section, part.visible, true, part.behind));
             let visible = || {
                 self.parts
                     .iter()
-                    .map(|p| (p, p.visible, !sections_only))
+                    .map(|p| (p, p.visible, !sections_only, p.behind))
                     .chain(sections.clone())
-                    .filter(|(_, visible, _)| *visible)
-                    .map(|(p, _, whole)| (p, whole))
+                    .filter(|(_, visible, _, _)| *visible)
+                    .map(|(p, _, whole, behind)| (p, whole, behind))
             };
+            let pipelines = |behind: bool| if behind { &self.behind } else { &self.front };
             // Opaque meshes drawn whole.
-            let solid = || visible().filter(|(p, whole)| *whole && !p.transparent);
-            pass.set_pipeline(&self.surface_pipeline);
-            for (part, _) in solid() {
+            let solid = || visible().filter(|(p, whole, _)| *whole && !p.transparent);
+            for (part, _, behind) in solid() {
                 if let (Some(vertices), Some(triangles)) = (&part.vertices, &part.triangles) {
+                    pass.set_pipeline(&pipelines(behind).surface);
                     pass.set_vertex_buffer(0, vertices.buffer.slice(..));
                     pass.set_index_buffer(triangles.buffer.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..triangles.count, 0, 0..1);
                 }
             }
             if options.mesh_edges {
-                pass.set_pipeline(&self.mesh_edge_pipeline);
-                for (part, _) in solid() {
+                for (part, _, behind) in solid() {
                     if let (Some(vertices), Some(edges)) = (&part.vertices, &part.mesh_edges) {
+                        pass.set_pipeline(&pipelines(behind).mesh_edge);
                         pass.set_vertex_buffer(0, vertices.buffer.slice(..));
                         pass.set_index_buffer(edges.buffer.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..edges.count, 0, 0..1);
                     }
                 }
             }
-            pass.set_pipeline(&self.wireframe_pipeline);
-            for (part, _) in visible().filter(|(_, whole)| *whole) {
+            for (part, _, behind) in visible().filter(|(_, whole, _)| *whole) {
                 if let Some(lines) = &part.wireframe_edges {
+                    pass.set_pipeline(&pipelines(behind).wireframe);
                     pass.set_vertex_buffer(0, lines.buffer.slice(..));
                     pass.draw(0..lines.count, 0..1);
                 }
             }
-            pass.set_pipeline(&self.edge_pipeline);
-            for (part, _) in visible() {
+            for (part, _, behind) in visible() {
                 if let Some(lines) = &part.feature_edges {
+                    pass.set_pipeline(&pipelines(behind).edge);
                     pass.set_vertex_buffer(0, lines.buffer.slice(..));
                     pass.draw(0..lines.count, 0..1);
                 }
             }
             pass.set_pipeline(&self.wide_edge_pipeline);
-            for lines in visible().filter_map(|(p, whole)| p.wide_edges.as_ref().filter(|_| whole))
+            for lines in
+                visible().filter_map(|(p, whole, _)| p.wide_edges.as_ref().filter(|_| whole))
             {
                 pass.set_vertex_buffer(0, lines.buffer.slice(..));
                 pass.draw(0..6, 0..lines.count / 2);
             }
             // Last, so that what lies behind them shows through.
             pass.set_pipeline(&self.transparent_pipeline);
-            for (part, _) in visible().filter(|(p, whole)| *whole && p.transparent) {
+            for (part, _, _) in visible().filter(|(p, whole, _)| *whole && p.transparent) {
                 if let (Some(vertices), Some(triangles)) = (&part.vertices, &part.triangles) {
                     pass.set_vertex_buffer(0, vertices.buffer.slice(..));
                     pass.set_index_buffer(triangles.buffer.slice(..), wgpu::IndexFormat::Uint32);
@@ -631,6 +658,7 @@ fn upload(device: &wgpu::Device, mesh: &RenderMesh) -> GpuMesh {
         ),
         visible: true,
         transparent: false,
+        behind: false,
     }
 }
 
