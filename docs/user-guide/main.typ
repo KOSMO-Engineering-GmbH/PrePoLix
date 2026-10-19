@@ -15,7 +15,7 @@
 #include "chapters/interface/project.typ"
 #include "chapters/interface/links.typ"
 #include "chapters/interface/sources.typ"
-#include "chapters/interface/loops.typ"
+#include "chapters/interface/study.typ"
 #include "chapters/interface/main-window.typ"
 #include "chapters/interface/files.typ"
 #include "chapters/interface/undo.typ"

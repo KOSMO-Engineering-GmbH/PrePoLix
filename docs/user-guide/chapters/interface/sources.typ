@@ -119,13 +119,13 @@ its #ui("Mesh") row, and drag the pin on the right of that row to the #ui("Mesh"
 analyses that are to use the refined mesh. The mesh it refines stays as it is.
 
 #screenshot("refine-mesh.png", [A box refined by 1.5 for the analysis Fine: the Factor takes the
-  dashed wire of an optimizer, which refines the mesh in its loop])
+  dashed wire of a parameter study, which varies it])
 
 #fields(
   [Mesh], [Left pin: the mesh to refine. Right pin: the refined mesh, with its state.],
   [Factor], [How much finer the mesh is: 2 twice as fine, 0.5 half as fine, 1 as it is. Type
-    or drag it in place, or drop the value of a Parameters block or of an optimizer on its pin
-    (@optimization-loops).],
+    or drag it in place, or drop the value of a Parameters block or an input of a parameter study on its pin
+    (@parameter-study).],
 )
 
 What the factor does depends on where the mesh comes from:
@@ -234,8 +234,8 @@ Exposing a number does not change the analysis: only a new value makes it out of
 === Measure <measure-block>
 
 A Measure block computes one key figure from the results of a step: the largest von Mises
-stress, the displacement of a node, a total force or an eigenfrequency. It is the number an
-optimizer reads, and a quick way to see the figure that matters without opening the results.
+stress, the displacement of a node, a total force or an eigenfrequency. It is the number a
+parameter study reads, and a quick way to see the figure that matters without opening the results.
 Add it with #menu("Project", "Add Measure"); it starts with the largest von Mises stress.
 
 #screenshot("measure-blocks.png", [Two Measure blocks: the lowest temperature of the thermal
@@ -255,7 +255,7 @@ last row, the value in its units with the state of the value:
 The value is computed anew in the background whenever the results or its definition change,
 and the output pane prints it ("Max stress: Maximum of STRESS MISES = 8.6 MPa"). The project
 file keeps the value, so a reopened project shows it at once. The pin on the right of the
-value row gives it to an optimizer (@optimization-loops).
+value row gives it to a parameter study (@parameter-study).
 
 #screenshot("measure-editor.png", [The editor of a Measure block])
 
@@ -276,7 +276,7 @@ A double-click on the block opens its editor:
     linked: a node set of its mesh or model, or the region of a boundary condition or load,
     such as #ui("Displacement_Rotation-1 (boundary condition)"). The region is found on the mesh the results
     were solved on, so a region picked on geometry or on the sides of a mesh block follows
-    every new mesh of an optimization loop.],
+    every new mesh of a parameter study.],
   [Node], [For a value at a node: its number.],
   [Set], [For a history output: the set of the history output, as written to the `.dat` file;
     a list of the sets of the linked results.],

@@ -174,8 +174,9 @@ pub fn materials_header() -> Color32 {
         Color32::from_rgb(236, 222, 204)
     }
 }
-/// Header band of a mesh block in the project schematic: a muted green-grey.
-pub fn optimizer_header() -> Color32 {
+/// Header band of a parameter study and a Campbell block in the project schematic: a muted
+/// violet.
+pub fn study_header() -> Color32 {
     if dark() {
         Color32::from_rgb(58, 50, 96)
     } else {

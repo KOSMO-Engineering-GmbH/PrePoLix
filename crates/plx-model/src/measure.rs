@@ -1,6 +1,6 @@
 //! A key figure taken from the results of a step, as a Measure block of the project schematic
 //! computes it: the largest von Mises stress in a region, the displacement of a node, a total
-//! force, an eigenfrequency. An optimizer reads it.
+//! force, an eigenfrequency. A parameter study reads it.
 
 use serde::{Deserialize, Serialize};
 

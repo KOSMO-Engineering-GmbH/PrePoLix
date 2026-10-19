@@ -71,8 +71,9 @@ pub enum ProjectNode {
     Parameters(ParameterSet),
     /// A key figure computed from the results of a step.
     Measure(MeasureBlock),
-    /// A loop that gives values to a parameter until a measure says it is done.
-    Optimizer(OptimizerBlock),
+    /// A table of design points, each a set of values it gives to other blocks and the
+    /// numbers it read back once they were solved.
+    Study(StudyBlock),
     /// A sink that writes the mesh it takes to a file.
     MeshExport(MeshExport),
     /// A sweep of an analysis over the rotational speed, with its Campbell diagram.
@@ -91,7 +92,7 @@ impl ProjectNode {
             Self::RefineMesh(r) => r.id,
             Self::Parameters(p) => p.id,
             Self::Measure(m) => m.id,
-            Self::Optimizer(o) => o.id,
+            Self::Study(o) => o.id,
             Self::MeshExport(e) => e.id,
             Self::Campbell(c) => c.id,
             Self::File(f) => f.id,
@@ -106,7 +107,7 @@ impl ProjectNode {
             Self::RefineMesh(r) => &r.name,
             Self::Parameters(p) => &p.name,
             Self::Measure(m) => &m.name,
-            Self::Optimizer(o) => &o.name,
+            Self::Study(o) => &o.name,
             Self::MeshExport(e) => &e.name,
             Self::Campbell(c) => &c.name,
             Self::File(f) => &f.name,
@@ -122,7 +123,7 @@ impl ProjectNode {
             Self::RefineMesh(r) => r.position,
             Self::Parameters(p) => p.position,
             Self::Measure(m) => m.position,
-            Self::Optimizer(o) => o.position,
+            Self::Study(o) => o.position,
             Self::MeshExport(e) => e.position,
             Self::Campbell(c) => c.position,
             Self::File(f) => f.position,
@@ -155,7 +156,7 @@ pub struct MeshBlock {
 
 /// A block that makes the mesh linked to it again with a factor on its fineness: the
 /// divisions of a mesh block times the factor, or the element sizes of geometry divided by
-/// it. An optimizer refines a mesh through its factor.
+/// it. A parameter study refines a mesh through its factor.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RefineMesh {
     pub id: u64,
@@ -198,28 +199,19 @@ pub struct MeasureBlock {
     pub evaluated: Option<u64>,
 }
 
-/// A block that runs a loop: it gives a value to a parameter of the blocks before a measure,
-/// has them solved and reads the measure, until it is done.
+/// A parameter study: the numbers it gives to other blocks and reads back, as columns of a
+/// table of design points, each solved in turn.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub struct OptimizerBlock {
+pub struct StudyBlock {
     pub id: u64,
     pub name: String,
     #[serde(default)]
     pub position: [f32; 2],
+    /// The unit system its inputs are shown in; they are stored in SI units.
     #[serde(default)]
     pub units: plx_model::UnitSystem,
-    pub kind: plx_model::OptimizerKind,
-    /// The value it gives now, stored in SI units.
-    pub value: f64,
-    /// The iterations of its last run.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub history: Vec<plx_model::Iteration>,
-    /// How its last run ended, and the fingerprint of the measure it ended on: up to date
-    /// while the measure is.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub report: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub done: Option<u64>,
+    #[serde(default)]
+    pub table: plx_model::StudyTable,
 }
 
 /// A block of named numbers, which value links give to other blocks: the size of a mesh
@@ -441,7 +433,7 @@ pub fn save_project(path: &Path, project: &Project) -> Result<(), ProjectError> 
 
 /// The oldest format that can still be opened. While PrePoLix is being designed, a new
 /// format is not converted: older projects are refused.
-pub const FIRST_PROJECT_FORMAT: u32 = 9;
+pub const FIRST_PROJECT_FORMAT: u32 = 10;
 
 /// The format of a project file, read before the rest, which depends on it.
 #[derive(Deserialize)]

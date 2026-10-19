@@ -61,9 +61,7 @@ fn same_data(a: Option<&ProjectNode>, b: Option<&ProjectNode>) -> bool {
         (Some(ProjectNode::Measure(a)), Some(ProjectNode::Measure(b))) => {
             a.units == b.units && a.kind == b.kind
         }
-        (Some(ProjectNode::Optimizer(a)), Some(ProjectNode::Optimizer(b))) => {
-            a.units == b.units && a.kind == b.kind && a.history.len() == b.history.len()
-        }
+        (Some(ProjectNode::Study(a)), Some(ProjectNode::Study(b))) => a == b,
         (Some(ProjectNode::MeshExport(a)), Some(ProjectNode::MeshExport(b))) => a.path == b.path,
         (Some(ProjectNode::File(a)), Some(ProjectNode::File(b))) => {
             a.path == b.path && a.units == b.units
@@ -299,7 +297,7 @@ impl ProjectApp {
         self.mesh_block = None;
         self.parameter_set = None;
         self.measure_editor = None;
-        self.optimizer_editor = None;
+        self.study_editor = None;
         self.rename = None;
         self.confirm_delete = None;
         let mut removed = Vec::new();

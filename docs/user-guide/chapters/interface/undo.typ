@@ -28,7 +28,7 @@ their settings and the view are not part of the history either.]
 The project window has its own #menu("Edit", "Undo") (#key("Ctrl+Z")) and #menu("Edit", "Redo")
 (#key("Ctrl+Shift+Z") or #key("Ctrl+Y")) for the schematic: blocks added, copied, deleted or
 renamed, blocks moved, links drawn or removed, and what is entered in the dialogs of the blocks
-(parameters, measures, optimizers, mesh and material blocks, new analyses). A deleted block comes
+(parameters, measures, parameter studies, mesh and material blocks, new analyses). A deleted block comes
 back with its links and everything it held. The output pane notes each undo and redo; the last
 100 changes can be undone, and the history starts empty for each project opened or created.
 
