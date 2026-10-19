@@ -3,6 +3,7 @@
 mod camera;
 pub mod contour;
 mod fe;
+pub mod glyphs;
 mod mesh;
 mod renderer;
 mod section;

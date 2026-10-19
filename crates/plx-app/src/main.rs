@@ -5,6 +5,7 @@ mod analysis;
 mod animation;
 mod animation_export;
 mod app;
+mod arrows;
 mod cad_selection;
 mod campbell;
 mod color_scale_dialog;

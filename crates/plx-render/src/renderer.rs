@@ -61,6 +61,7 @@ struct GpuMesh {
     mesh_edges: Option<GpuBuffer>,
     wireframe_edges: Option<GpuBuffer>,
     wide_edges: Option<GpuBuffer>,
+    glyphs: Option<GpuBuffer>,
     visible: bool,
 }
 
@@ -526,6 +527,13 @@ impl ViewportRenderer {
                 }
             }
             pass.set_pipeline(&self.wide_edge_pipeline);
+            // Arrows are wide lines too, so that their colours read over the surfaces.
+            for (part, _) in visible().filter(|(_, whole)| *whole) {
+                if let Some(lines) = &part.glyphs {
+                    pass.set_vertex_buffer(0, lines.buffer.slice(..));
+                    pass.draw(0..6, 0..lines.count / 2);
+                }
+            }
             for lines in visible().filter_map(|(p, whole)| p.wide_edges.as_ref().filter(|_| whole))
             {
                 pass.set_vertex_buffer(0, lines.buffer.slice(..));
@@ -584,6 +592,12 @@ fn upload(device: &wgpu::Device, mesh: &RenderMesh) -> GpuMesh {
             "part wide edges",
             bytemuck::cast_slice(&mesh.wide_edges),
             mesh.wide_edges.len(),
+            vertex,
+        ),
+        glyphs: buffer(
+            "part glyphs",
+            bytemuck::cast_slice(&mesh.glyphs),
+            mesh.glyphs.len(),
             vertex,
         ),
         visible: true,

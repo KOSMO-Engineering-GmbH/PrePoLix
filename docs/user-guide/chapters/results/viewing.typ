@@ -47,6 +47,9 @@ to the results. Results of an analysis run from PrePoLix always have it.
   [Show Undeformed], [Draws the undeformed outline behind the deformed shape.],
   [Color levels], [Number of colour bands (2 to 24). The #ui("...") button next to it opens the
     colour scale (@color-scale).],
+  [Display], [#ui("Contour") or #ui("Arrows") along the directions of the shown field
+    (@arrows). For a tensor field such as `STRESS` the box next to it picks the principal
+    direction: #ui("Max"), #ui("Mid") or #ui("Min"); #ui("...") holds the arrow options.],
   [Transformations], [Symmetries and patterns (@transformations).],
   [Step, Increment], [The displayed increment, with buttons for the first, previous, next and
     last increment.],
@@ -62,6 +65,37 @@ The legend shows the field, the unit and the range in nine colour bands from blu
 with its frequency or buckling factor, and the deformation scale factor. Labels mark the node with
 the maximum (and optionally the minimum) value. Legend, info block and labels can be dragged.
 Which of them appear is set under #menu("Tools", "Settings ...", "Post-processing").
+
+== Arrows <arrows>
+
+#ui("Display") > #ui("Arrows") in the results toolbar draws arrows along the directions of the
+shown field over the surface: a vector field such as `DISP`, `FORC` or `FLUX` gives its own
+direction, a tensor field such as `STRESS` or `TOSTRAIN` the principal direction picked next to
+it. The arrows take the colours of the shown component and its legend, so `STRESS` with
+#ui("PRINCIPAL_MAX") and the #ui("Max") direction shows how the load runs through the part, its
+force flow, coloured by the tension it carries. While the arrows are coloured, the surfaces
+turn grey. A principal direction has no sign, so it is drawn as a stroke without a head. The
+legend names what the arrows show. A scalar field has no directions and is drawn as contours;
+the choice comes back with the next vector or tensor field.
+
+#screenshot("arrows-principal.png", [Arrows along the Max principal direction of `STRESS` in a
+  plate with a hole under tension, coloured by `PRINCIPAL_MAX`])
+
+#fields(
+  [Number of arrows], [About this many arrows, spread evenly over the surface whatever the mesh
+    density (default 2000). Both sides of a thin wall get their own.],
+  [Length], [Length of the longest arrow relative to the spacing of the arrows (default 0.8).],
+  [Length by magnitude], [Arrows are as long as the magnitude of the vector or the principal
+    value, the largest one at full length; otherwise all are equally long.],
+  [Arrows in contour colors], [On by default; off, the arrows are black over the colour
+    contours.],
+)
+
+Mirrored and patterned copies (@transformations) show the arrows too, turned with the copy.
+Parts without colour contours (@color-contours) get no arrows. Arrows and their options are
+kept with the results of a project (@bind-result).
+
+#limitation[Arrows sit on the outer surface; section faces (@section-view) have none.]
 
 == Color scale <color-scale>
 

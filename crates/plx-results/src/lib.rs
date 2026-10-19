@@ -5,6 +5,7 @@
 //! `NaN`.
 
 mod derived;
+pub mod display;
 pub mod equation;
 pub mod field_output;
 pub mod history_output;

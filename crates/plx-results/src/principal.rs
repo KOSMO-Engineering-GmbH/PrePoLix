@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use crate::{FieldRank, Increment, principal_values};
 
 /// Which principal value of a tensor, and so which principal direction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Principal {
+    #[default]
     Max,
     Mid,
     Min,

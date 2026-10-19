@@ -6458,6 +6458,77 @@ struct ToolBarResponse {
     color_scale: bool,
 }
 
+/// The representation of the shown field: contours, or arrows of its directions with the
+/// principal direction of a tensor field and the arrow options. Returns whether anything
+/// changed.
+fn display_controls(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
+    use plx_results::display::Representation;
+    let before = view.vector_display.clone();
+    let field = view.current().map(|(f, _)| f.rank);
+    let directional = field.is_some_and(|rank| rank != plx_results::FieldRank::Scalar);
+    let display = &mut view.vector_display;
+    ui.label("Display");
+    let shown = if directional {
+        display.representation
+    } else {
+        Representation::Contour
+    };
+    ui.add_enabled_ui(directional, |ui| {
+        egui::ComboBox::from_id_salt("representation")
+            .selected_text(shown.label())
+            .width(80.0)
+            .show_ui(ui, |ui| {
+                for choice in Representation::ALL {
+                    ui.selectable_value(&mut display.representation, choice, choice.label());
+                }
+            })
+            .response
+            .on_disabled_hover_text("Arrows need a vector or tensor field, such as DISP or STRESS")
+    });
+    let tensor = field.is_some_and(|rank| rank.is_tensor());
+    if tensor && shown != Representation::Contour {
+        egui::ComboBox::from_id_salt("principal direction")
+            .selected_text(display.principal.label())
+            .width(50.0)
+            .show_ui(ui, |ui| {
+                for choice in plx_results::Principal::ALL {
+                    ui.selectable_value(&mut display.principal, choice, choice.label());
+                }
+            })
+            .response
+            .on_hover_text("Principal direction the arrows follow");
+    }
+    if shown == Representation::Arrows {
+        let arrows = &mut display.arrows;
+        ui.menu_button("…", |ui| {
+            use plx_results::display::ArrowOptions;
+            ui.horizontal(|ui| {
+                ui.label("Number of arrows");
+                ui.add(
+                    numeric::drag_value(&mut arrows.count)
+                        .range(ArrowOptions::MIN_COUNT..=ArrowOptions::MAX_COUNT)
+                        .speed(20.0),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Length");
+                ui.add(
+                    numeric::drag_value(&mut arrows.length)
+                        .range(0.1..=5.0)
+                        .speed(0.02),
+                )
+                .on_hover_text("Length of the longest arrow relative to the arrow spacing");
+            });
+            ui.checkbox(&mut arrows.by_magnitude, "Length by magnitude");
+            ui.checkbox(&mut arrows.colored, "Arrows in contour colors")
+                .on_hover_text("Otherwise the arrows are black over the contours");
+        })
+        .response
+        .on_hover_text("Arrow options");
+    }
+    view.vector_display != before
+}
+
 /// PrePoMax's results tool bar: deformation, colour bands, transformations and the increment
 /// with its navigation buttons.
 fn results_tool_bar(
@@ -6541,6 +6612,8 @@ fn results_tool_bar(
         color_scale = (ui.button("…"))
             .on_hover_text("Color scale: spectrum and limits")
             .clicked();
+        ui.separator();
+        changed |= display_controls(ui, view);
         ui.separator();
         let tip = "Transformations: symmetries and patterns";
         transformations = icons::button(ui, Icon::Transformation, tip, true, transformed).clicked();

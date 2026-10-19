@@ -5,6 +5,7 @@ use crate::sound::ModeSound;
 use glam::{DAffine3, DMat3};
 use plx_mesh::FeMesh;
 use plx_model::{ColorScale, Quantity, UnitSystem};
+use plx_results::display::Representation;
 use plx_results::field_output::{self, FieldOutput};
 use plx_results::history_output::{self, HistoryOutput, HistorySet};
 use plx_results::transformation::{self, Transformation};
@@ -122,6 +123,8 @@ pub struct ResultsView {
     pub plain_nodes: Vec<bool>,
     /// The plane result shown alone, by index in the features of the results.
     pub plane_result: Option<usize>,
+    /// Arrows over the contours and their options.
+    pub vector_display: plx_results::display::VectorDisplay,
     /// Unit system of the values, PrePoMax's results unit system: that of the FE model the
     /// results belong to; the legend shows units after it.
     pub units: UnitSystem,
@@ -229,6 +232,7 @@ impl ResultsView {
             section_range: None,
             plain_nodes: Vec::new(),
             plane_result: None,
+            vector_display: Default::default(),
             units: UnitSystem::default(),
             model_size: bounds.map_or(1.0, model_size),
             deformation_peaks: Vec::new(),
@@ -290,6 +294,22 @@ impl ResultsView {
         Some((field, field.components.get(self.component)?))
     }
 
+    /// The representation drawn for the shown field: contours alone for a scalar field.
+    pub fn representation(&self) -> Representation {
+        match self.current() {
+            Some((field, _)) if self.superposition.is_none() => self.vector_display.shown(field),
+            _ => Representation::Contour,
+        }
+    }
+
+    /// Where arrows take their directions from, while the representation needs them.
+    pub fn vector_source(&self) -> Option<plx_results::VectorSource> {
+        if self.representation() == Representation::Contour {
+            return None;
+        }
+        self.vector_display.source(self.current()?.0)
+    }
+
     /// Switches to another increment, keeping field and component by name where possible.
     pub fn select_increment(&mut self, index: usize) {
         let names = self
@@ -329,6 +349,7 @@ impl ResultsView {
                 show_undeformed: Some(self.show_undeformed),
                 levels: Some(self.color_scale.levels),
                 color_scale: Some(self.color_scale.clone()),
+                vector_display: Some(self.vector_display.clone()),
                 ..Default::default()
             },
             ..Default::default()
@@ -360,6 +381,9 @@ impl ResultsView {
         self.follow_default_deformation();
         self.user_scale = view.user_scale.unwrap_or(self.user_scale);
         self.show_undeformed = view.show_undeformed.unwrap_or(self.show_undeformed);
+        if let Some(display) = &view.vector_display {
+            self.vector_display = display.clone();
+        }
         match &view.color_scale {
             Some(scale) => self.color_scale = scale.clone(),
             None => self.color_scale.levels = view.levels.unwrap_or(self.color_scale.levels),
@@ -1146,9 +1170,14 @@ impl ResultsView {
             .filter(|u| !u.is_empty() && u != "/")
             .map(|u| format!("\nUnit: {u}"))
             .unwrap_or_default();
+        // What the arrows show, as their colours come from the component.
+        let arrows = self
+            .vector_source()
+            .map(|source| format!("\nArrows: {}", source.label()))
+            .unwrap_or_default();
         Some(Legend {
             title: format!(
-                "{}: {}{unit}\n{scope}",
+                "{}: {}{unit}\n{scope}{arrows}",
                 name(&field.name),
                 name(&component.name)
             ),

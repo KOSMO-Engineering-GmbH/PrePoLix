@@ -27,6 +27,8 @@ pub struct RenderMesh {
     /// Lines drawn [`WIDE_EDGE_PX`](crate::renderer::WIDE_EDGE_PX) wide over everything
     /// else, such as the outline of a selected part.
     pub wide_edges: Vec<Vertex>,
+    /// Arrows of a vector field as line lists, drawn as wide lines over the surfaces.
+    pub glyphs: Vec<Vertex>,
 }
 
 impl RenderMesh {
@@ -41,6 +43,7 @@ impl RenderMesh {
             .extend(other.mesh_edges.into_iter().map(|index| base + index));
         self.wireframe_edges.extend(other.wireframe_edges);
         self.wide_edges.extend(other.wide_edges);
+        self.glyphs.extend(other.glyphs);
     }
 
     pub fn bounds(&self) -> Option<(Vec3, Vec3)> {
