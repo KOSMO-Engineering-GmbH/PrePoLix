@@ -1228,6 +1228,9 @@ impl FeModel {
         let mut fixed: HashMap<(NodeId, usize), (usize, f64)> = HashMap::new();
         // Symmetry planes that are no coordinate planes, by boundary condition.
         let mut skewed: Vec<(usize, SymmetryPlane)> = Vec::new();
+        // Whether a boundary condition moves something: remote displacements and those of
+        // reference points hold no nodes of the mesh, so `fixed` does not see them.
+        let mut moved = false;
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
             // A step leaves out what it cannot take, as the input file does.
             if !bc.active
@@ -1235,6 +1238,12 @@ impl FeModel {
                 || bc.region.missing_reference(mesh).is_some()
             {
                 continue;
+            }
+            if let BoundaryKind::Displacement(values)
+            | BoundaryKind::RemoteDisplacement(crate::RemoteDisplacement { values, .. }) =
+                &bc.kind
+            {
+                moved |= values.iter().any(|v| v.is_some_and(|v| v != 0.0));
             }
             let values: Vec<(usize, f64)> = match bc.kind {
                 BoundaryKind::Displacement(values) => (values.iter().enumerate())
@@ -1463,7 +1472,7 @@ impl FeModel {
                     ));
                 }
             }
-            let displaced = fixed.values().any(|&(_, v)| v != 0.0);
+            let displaced = moved || fixed.values().any(|&(_, v)| v != 0.0);
             // A Dynamic step may start from an initial velocity instead of a load.
             let started = matches!(step.kind, StepKind::Dynamic(_))
                 && (self.initial_conditions.iter()).any(|c| c.active && c.kind.is_velocity());
@@ -3115,6 +3124,46 @@ mod tests {
             found.contains(&(ModelItem::Part(0), Problem::RigidBodyMotion)),
             "{found:?}"
         );
+    }
+
+    #[test]
+    fn a_moving_remote_or_reference_point_displacement_is_a_load() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        model.steps[0].loads.clear();
+        let no_load = |model: &FeModel| {
+            problems(&check(model, &mesh)).contains(&(ModelItem::Step(0), Problem::NoLoad))
+        };
+        assert!(no_load(&model));
+        // A remote displacement holds no nodes of the mesh itself.
+        let mut values = [Some(0.0); 6];
+        model.steps[0].boundary_conditions.push(BoundaryCondition {
+            name: "Remote_Displacement-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(vec![2, 3, 6, 7]),
+            kind: BoundaryKind::RemoteDisplacement(crate::RemoteDisplacement::new(values)),
+            amplitude: None,
+        });
+        assert!(no_load(&model));
+        values[1] = Some(-0.001);
+        model.steps[0].boundary_conditions[1].kind =
+            BoundaryKind::RemoteDisplacement(crate::RemoteDisplacement::new(values));
+        assert!(!no_load(&model));
+        // Neither does a displacement of a reference point.
+        model
+            .reference_points
+            .push(ReferencePoint::new("RP-1", [1.0, 0.5, 0.5]));
+        let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+        body.region = Region::Nodes(vec![2, 3, 6, 7]);
+        model.constraints.push(Constraint::RigidBody(body));
+        let bc = &mut model.steps[0].boundary_conditions[1];
+        bc.region = Region::ReferencePoint("RP-1".into());
+        bc.kind = BoundaryKind::Displacement([None, None, None, None, None, Some(0.0)]);
+        assert!(no_load(&model));
+        model.steps[0].boundary_conditions[1].kind =
+            BoundaryKind::Displacement([None, None, None, None, None, Some(0.01)]);
+        assert!(!no_load(&model));
     }
 
     #[test]
