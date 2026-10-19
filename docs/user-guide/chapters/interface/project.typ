@@ -120,9 +120,14 @@ the state of another analysis (@data-links).
     one step.],
   [#ui("Merge into <analysis>")], [Only for an analysis that continues another one from its last step:
     gives its steps back to that analysis and removes itself (@split-merge).],
-  [Rename ...], [Gives the analysis a new name. Names are unique within a project.],
-  [Duplicate], [Adds a copy of the analysis, named "Copy of ...".],
-  [Delete ...], [Removes the analysis from the project after asking. An open window closes.
+  [Compact View (#key("H"))], [Shows only the header and the rows with a wire
+    (@frames-notes); #ui("Show All Rows") shows the rest again.],
+  [Frame Blocks (#key("Ctrl+J"))], [Puts the block, or the selected blocks it is one of, in a
+    new frame; #ui("Remove from Frame") (#key("Alt+P")) takes it out.],
+  [Rename ... (#key("F2"))], [Gives the analysis a new name. Names are unique within a project.],
+  [Duplicate (#key("Shift+D"))], [Adds a copy of the analysis, named "Copy of ...". A copy
+    of a block in a frame goes into the same frame.],
+  [Delete ... (#key("X"))], [Removes the analysis from the project after asking. An open window closes.
     Links to and from it are removed; analyses that took items from it keep their copies.],
 )
 
@@ -143,6 +148,52 @@ properties first (@new-analysis).
 #screenshot("node-picker.png", [All blocks after a double-click or right-click (left) and the search for
   "mesh" (right)])
 
+==== Frames, notes and compact blocks <frames-notes>
+
+Large schematics stay readable with three things borrowed from Blender's node editor:
+
+- A *frame* is a named, tinted rectangle around a group of blocks, such as "Load cases" or
+  "Thermal chain". Select the blocks and press #key("Ctrl+J"), or choose
+  #ui("Frame Blocks") in the context menu of a block: the frame is drawn around them and its
+  label is ready to be typed. The frame follows its blocks and grows when one moves out;
+  drag the frame itself to move it with all its blocks. A block dragged and dropped onto a
+  frame joins it; #key("Alt+P") or #ui("Remove from Frame") takes it out again. Double-click
+  the label to rename the frame, and right-click the frame for its #ui("Color") or to
+  #ui("Remove Frame"), which leaves its blocks where they are. A double-click into the frame
+  below its label searches the blocks to add, as on the empty background.
+- A *note* is a block with a text and no pins (#menu("Project", "Add Note"), or "note" in
+  the block search). Click its text to write; it is kept once you click elsewhere, and
+  #key("Ctrl+Z") undoes the whole edit.
+- A *compact* block shows only its header and the rows a wire ends at, so the wires stay
+  but the rows in between are gone. Click the triangle at the left of its header or press
+  #key("H"); a double-click on the header of a compact block opens it again.
+
+Frames, notes and compact blocks are saved with the project, and undo and redo cover them.
+
+#screenshot("schematic-frames.png", [Two frames, a note and a compact analysis that shows only
+  its linked rows])
+
+#screenshot("frame-menu.png", [The context menu of a frame with its colours])
+
+==== Keys of the schematic <schematic-keys>
+
+While the mouse pointer is over the schematic and no text field is being edited, these keys
+work as in Blender. They act on the selected blocks, or on the block under the pointer when
+none is selected. Select blocks with #key("Shift") and a click, or drag a rectangle with
+#key("Shift") held; #key("Ctrl") and a click removes a block from the selection. The
+#menu("Edit") menu lists them for the selected blocks.
+
+#fields(
+  [#key("Shift+A")], [Searches the blocks to add at the pointer (@block-search).],
+  [#key("X"), #key("Delete")], [Deletes the blocks after asking; #key("Enter") agrees.],
+  [#key("Shift+D")], [Duplicates the blocks.],
+  [#key("H")], [Shows the blocks compact, or in full if they all are compact.],
+  [#key("Ctrl+J")], [Puts the blocks in a new frame.],
+  [#key("Alt+P")], [Takes the blocks out of their frame.],
+  [#key("F2")], [Renames the block.],
+  [#key("Home")], [Fits all blocks and frames into the view.],
+)
+
 === Menus and toolbar of the project window
 
 #screenshot("project-menu-f5.png", [Project menu; #key("F5") starts Update Project])
@@ -161,6 +212,9 @@ properties first (@new-analysis).
     (@materials-block).],
   [Project > Add Mesh], [Adds a block that meshes a box or a rectangle for analyses to link
     (@mesh-block).],
+  [Project > Add Note], [Adds a note, a text without pins (@frames-notes).],
+  [Edit > Duplicate, Delete, Compact View, Frame Blocks, Remove from Frame], [Work on the
+    selected blocks, as their keys do (@schematic-keys).],
   [Project > Show All Blocks (#key("Home"))], [Fits all blocks of the schematic into the
     view.],
   [Project > Update Project (#key("F5"))], [Solves every analysis that is not up to date

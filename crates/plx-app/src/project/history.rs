@@ -28,6 +28,8 @@ struct Kept {
 struct Snapshot {
     blocks: Vec<Kept>,
     links: Vec<Link>,
+    frames: Vec<file::Frame>,
+    compact: BTreeSet<u64>,
 }
 
 impl Snapshot {
@@ -35,6 +37,8 @@ impl Snapshot {
     /// on their own.
     fn same(&self, other: &Self) -> bool {
         self.links == other.links
+            && self.frames == other.frames
+            && self.compact == other.compact
             && self.blocks.len() == other.blocks.len()
             && (self.blocks.iter().zip(&other.blocks)).all(|(a, b)| {
                 a.id == b.id
@@ -67,6 +71,7 @@ fn same_data(a: Option<&ProjectNode>, b: Option<&ProjectNode>) -> bool {
             a.path == b.path && a.units == b.units
         }
         (Some(ProjectNode::Campbell(a)), Some(ProjectNode::Campbell(b))) => a.setup == b.setup,
+        (Some(ProjectNode::Note(a)), Some(ProjectNode::Note(b))) => a.text == b.text,
         _ => false,
     }
 }
@@ -121,7 +126,7 @@ impl History {
 
 impl ProjectApp {
     /// The positions of the blocks in the schematic.
-    fn positions(&self) -> Vec<(u64, [f32; 2])> {
+    pub(super) fn positions(&self) -> Vec<(u64, [f32; 2])> {
         let mut positions: Vec<(u64, [f32; 2])> = (self.graph.nodes_pos_ids())
             .map(|(_, pos, id)| (*id, [pos.x, pos.y]))
             .collect();
@@ -159,6 +164,8 @@ impl ProjectApp {
         Snapshot {
             blocks,
             links: self.links.clone(),
+            frames: self.frames.clone(),
+            compact: self.compact.clone(),
         }
     }
 
@@ -167,7 +174,15 @@ impl ProjectApp {
     pub(super) fn checkpoint(&mut self, rewritten: &[u64]) {
         match self.history.pending.take() {
             None => {
-                let snapshot = self.snapshot(rewritten);
+                let mut snapshot = self.snapshot(rewritten);
+                // Blocks moved but not noted yet, as they are dragged, go back with the change.
+                for kept in &mut snapshot.blocks {
+                    if let Some((_, pos)) =
+                        (self.history.positions.iter()).find(|(id, _)| *id == kept.id)
+                    {
+                        kept.position = *pos;
+                    }
+                }
                 self.history.pending = Some(snapshot);
             }
             Some(mut pending) => {
@@ -299,7 +314,8 @@ impl ProjectApp {
         self.measure_editor = None;
         self.study_editor = None;
         self.rename = None;
-        self.confirm_delete = None;
+        self.confirm_delete.clear();
+        self.frame_label = None;
         let mut removed = Vec::new();
         for id in gone {
             if let Some(node) = self.detach(id) {
@@ -364,6 +380,8 @@ impl ProjectApp {
         removed.retain(|n| !nodes.iter().any(|kept| kept.id == n.id));
         self.nodes = nodes;
         self.links = before.links;
+        self.frames = before.frames;
+        self.compact = before.compact;
         self.applied.clear();
         self.sync_due = true;
         self.history.positions = self.positions();

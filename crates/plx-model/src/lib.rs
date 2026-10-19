@@ -90,7 +90,8 @@ use serde::{Deserialize, Serialize};
 /// at zero takes its place. Format 8 drops the concentrated force and the surface traction for
 /// the force, which acts on faces, edges or points and optionally at each node. Format 9 gives
 /// numbers a physical quantity, format 10 replaces the optimizer by the parameter study.
-pub const PROJECT_FORMAT: u32 = 10;
+/// Format 11 adds notes, frames and compact blocks to the schematic; format 10 reads as it is.
+pub const PROJECT_FORMAT: u32 = 11;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
