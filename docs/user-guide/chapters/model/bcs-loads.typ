@@ -8,13 +8,16 @@ the types the step accepts. In the 3D view, supports are drawn as cones (transla
 plates (rotations).
 
 #screenshot("boundary-condition.png", [Support holding a face in all directions])
+#screenshot("bc-2d-reference-point.png", [`UR3` on the reference point of a plane model])
 
 #fields(
   [Displacement/Rotation], [Prescribed values for the ticked components `U1`, `U2`, `U3`
     (length) and `UR1`, `UR2`, `UR3` (angle in radians). Unticked components are free. A new
     one holds all components at zero, a fixed support; in 2D only `U1` and `U2` are shown.
     Rotations act on nodes of beams and shells only; solid nodes have none, so zero rotations
-    there change nothing.],
+    there change nothing. On a reference point of a rigid body (@rigid-body) in a 2D plane
+    stress or plane strain model, `UR3` is shown too: it prescribes the rotation about z of the
+    point and so of the rigid body (axisymmetric models have no rotation).],
   [Remote Displacement], [Moves the selection with a point at its centre or elsewhere, rigidly or
     as a mean (@remote-displacement).],
   [Temperature], [Prescribed temperature (heat transfer, coupled and uncoupled steps).],
