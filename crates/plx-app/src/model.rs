@@ -98,6 +98,9 @@ pub struct Model {
     geometry_index: std::sync::OnceLock<crate::geometry_selection::GeometryIndex>,
     /// Hot spots defined on a results file, with their values.
     pub hot_spots: crate::hot_spots::HotSpots,
+    /// Keys of the features of these results that come from the FE model, see
+    /// [`FeModel::add_missing_features`]; the others were made on the results.
+    pub inherited_features: Vec<String>,
     /// Plots of result paths shown in the 3D view.
     pub path_plots: Vec<crate::path_plot::PathPlot>,
     /// Faces and parts drawn in the highlight colour.
@@ -467,6 +470,7 @@ impl Model {
                 .map(|part| part.name.clone())
                 .collect(),
             mesh: Some(self.mesh.fingerprint()),
+            inherited_features: self.inherited_features.clone(),
             ..view.settings()
         })
         .map(|mut settings| {
@@ -494,6 +498,7 @@ impl Model {
         self.fe.planes = settings.planes.clone();
         self.fe.result_paths = settings.result_paths.clone();
         self.fe.result_planes = settings.result_planes.clone();
+        self.inherited_features = settings.inherited_features.clone();
         self.hot_spots.definitions = settings.hot_spots.clone();
         let view = &settings.view;
         for part in &mut self.parts {
@@ -579,6 +584,7 @@ impl Model {
             geometry_topology: Default::default(),
             geometry_index: Default::default(),
             hot_spots: Default::default(),
+            inherited_features: Vec::new(),
             path_plots: Vec::new(),
             highlight: Highlight::default(),
             clip: None,

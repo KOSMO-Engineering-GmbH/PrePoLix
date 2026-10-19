@@ -451,24 +451,57 @@ impl FeModel {
         self.planes.iter().find(|p| p.name == name)
     }
 
+    /// The keys of the features that results take over from the FE model, see
+    /// [`FeModel::add_missing_features`].
+    pub fn feature_keys(&self) -> Vec<String> {
+        let points = self
+            .reference_points
+            .iter()
+            .map(|r| format!("RP:{}", r.name));
+        let systems = self
+            .coordinate_systems
+            .iter()
+            .map(|c| format!("CS:{}", c.name));
+        let planes = self.planes.iter().map(|p| format!("Plane:{}", p.name));
+        points.chain(systems).chain(planes).collect()
+    }
+
     /// Copies the features of another model that this one lacks, e.g. those of the FE model
-    /// into its results.
-    pub fn add_missing_features(&mut self, other: &FeModel) {
+    /// into its results; returns the keys of those copied.
+    pub fn add_missing_features(&mut self, other: &FeModel) -> Vec<String> {
+        let mut added = Vec::new();
         for point in &other.reference_points {
             if self.reference_point(&point.name).is_none() {
                 self.reference_points.push(point.clone());
+                added.push(format!("RP:{}", point.name));
             }
         }
         for system in &other.coordinate_systems {
             if self.coordinate_system(&system.name).is_none() {
                 self.coordinate_systems.push(system.clone());
+                added.push(format!("CS:{}", system.name));
             }
         }
         for plane in &other.planes {
             if self.plane(&plane.name).is_none() {
                 self.planes.push(plane.clone());
+                added.push(format!("Plane:{}", plane.name));
             }
         }
+        added
+    }
+
+    /// Removes the features that were taken over from an FE model (`inherited` are their
+    /// keys) and are no longer in `current`, the FE model now; features made on the
+    /// results stay.
+    pub fn drop_removed_features(&mut self, inherited: &[String], current: &FeModel) {
+        let keys = current.feature_keys();
+        let gone = |key: String| inherited.contains(&key) && !keys.contains(&key);
+        self.reference_points
+            .retain(|r| !gone(format!("RP:{}", r.name)));
+        self.coordinate_systems
+            .retain(|c| !gone(format!("CS:{}", c.name)));
+        self.planes.retain(|p| !gone(format!("Plane:{}", p.name)));
     }
 
     /// Recomputes the positions of reference points defined by a coordinate system or a
@@ -749,6 +782,24 @@ mod tests {
         assert!((0..3).all(|k| (p[k] - [-1.0, 0.0, 0.0][k]).abs() < 1e-12));
         let back = cs.local(p).unwrap();
         assert!((back[0] - 2.0).abs() < 1e-12 && (back[1].to_degrees() - 90.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn results_lose_features_the_fe_model_dropped_but_keep_their_own() {
+        let mut fe = FeModel::default();
+        fe.reference_points
+            .push(ReferencePoint::new("RP-1", [0.0; 3]));
+        let mut results = FeModel::default();
+        let inherited = results.add_missing_features(&fe);
+        assert_eq!(inherited, ["RP:RP-1"]);
+        results
+            .reference_points
+            .push(ReferencePoint::new("Mine", [1.0; 3]));
+        // The reference point is deleted from the FE model before the next solve.
+        fe.reference_points.clear();
+        results.drop_removed_features(&inherited, &fe);
+        let names: Vec<_> = results.reference_points.iter().map(|r| &r.name).collect();
+        assert_eq!(names, ["Mine"]);
     }
 
     #[test]

@@ -1614,6 +1614,26 @@ struct BoundWork(String, PathBuf, Result<PathBuf, String>);
 /// The global results of a submodel, read on a worker thread.
 type GlobalWork = Result<Box<model::GlobalModel>, String>;
 
+/// Drops the features of saved results settings that came from the FE model and are gone
+/// from `current`.
+fn drop_removed_features(
+    settings: &mut plx_results::ResultsSettings,
+    current: &plx_model::FeModel,
+) {
+    let mut fe = plx_model::FeModel {
+        reference_points: std::mem::take(&mut settings.reference_points),
+        coordinate_systems: std::mem::take(&mut settings.coordinate_systems),
+        planes: std::mem::take(&mut settings.planes),
+        ..plx_model::FeModel::default()
+    };
+    fe.drop_removed_features(&settings.inherited_features, current);
+    let kept = fe.feature_keys();
+    settings.inherited_features.retain(|key| kept.contains(key));
+    settings.reference_points = fe.reference_points;
+    settings.coordinate_systems = fe.coordinate_systems;
+    settings.planes = fe.planes;
+}
+
 fn saved_camera(saved: plx_results::saved_view::SavedCamera) -> plx_render::Camera {
     plx_render::Camera {
         target: glam::Vec3::from_array(saved.target),
@@ -1797,8 +1817,28 @@ impl Workbench {
                     // The Results tab shows the results of the analysis: new results, e.g.
                     // of another run, replace those shown.
                     let previous = (!self.results.is_empty()).then_some(0);
-                    if let Some(old) = previous.map(|i| &self.results[i].fe) {
-                        model.fe.add_missing_features(old);
+                    // Features taken over from the FE model are not kept when it lost them.
+                    let features = self.model.as_ref().map(|project| {
+                        let mut features = project.fe.clone();
+                        features.convert_features(&plx_model::convert::Conversion::new(
+                            plx_model::STORED,
+                            model.units(),
+                        ));
+                        features
+                    });
+                    let current = features.clone().unwrap_or_default();
+                    if let Some(index) = previous {
+                        let (old, inherited) = (&self.results[index].fe, &self.results[index]);
+                        let mut old = old.clone();
+                        if features.is_some() {
+                            old.drop_removed_features(&inherited.inherited_features, &current);
+                        }
+                        let kept = old.feature_keys();
+                        model.inherited_features = (inherited.inherited_features.iter())
+                            .filter(|key| kept.contains(key))
+                            .cloned()
+                            .collect();
+                        model.fe.add_missing_features(&old);
                         model.fe.result_paths = old.result_paths.clone();
                         model.fe.result_planes = old.result_planes.clone();
                     }
@@ -1807,6 +1847,9 @@ impl Workbench {
                     let carried = (self.carried_settings.take())
                         .filter(|(path, _)| *path == model.path)
                         .map(|(_, mut settings)| {
+                            if features.is_some() {
+                                drop_removed_features(&mut settings, &current);
+                            }
                             if settings.mesh != Some(model.mesh.fingerprint()) {
                                 let changes = settings.without_mesh_references();
                                 (self.output).extend(changes.into_iter().map(|change| {
@@ -1839,15 +1882,14 @@ impl Workbench {
                         }
                         rebuild = true;
                     }
-                    if let Some(project) = &self.model {
+                    if let Some(features) = &features {
                         // Results are stored in the units they show; the FE model in SI ones.
-                        let mut features = project.fe.clone();
-                        let shown = model.units();
-                        features.convert_features(&plx_model::convert::Conversion::new(
-                            plx_model::STORED,
-                            shown,
-                        ));
-                        model.fe.add_missing_features(&features);
+                        let added = model.fe.add_missing_features(features);
+                        for key in added {
+                            if !model.inherited_features.contains(&key) {
+                                model.inherited_features.push(key);
+                            }
+                        }
                     }
                     // Results read again, e.g. after the analysis ran once more, keep their
                     // colour scale.
@@ -6986,6 +7028,22 @@ fn results_workspace(pinned: &mut Option<TreeView>) -> TreeView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn carried_settings_lose_reference_points_deleted_from_the_fe_model() {
+        let mut settings = plx_results::ResultsSettings {
+            reference_points: vec![
+                plx_model::ReferencePoint::new("RP-1", [0.0; 3]),
+                plx_model::ReferencePoint::new("Mine", [1.0; 3]),
+            ],
+            inherited_features: vec!["RP:RP-1".into()],
+            ..Default::default()
+        };
+        drop_removed_features(&mut settings, &plx_model::FeModel::default());
+        let names: Vec<_> = settings.reference_points.iter().map(|r| &r.name).collect();
+        assert_eq!(names, ["Mine"]);
+        assert!(settings.inherited_features.is_empty());
+    }
 
     #[test]
     fn bound_results_keep_the_workspace_the_project_window_asked_for() {
