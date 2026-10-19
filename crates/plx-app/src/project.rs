@@ -1673,6 +1673,9 @@ impl ProjectApp {
             .clone()
             .ok_or("PrePoLix requires the wgpu backend of eframe")?;
         crate::style::apply(&cc.egui_ctx);
+        (cc.egui_ctx).add_plugin(crate::screenshot::ImmediateCapture::new(
+            render_state.clone(),
+        ));
         let adapter = render_state.adapter.get_info();
         let output = vec![format!(
             "PrePoLix {} started, graphics: {} ({:?})",
