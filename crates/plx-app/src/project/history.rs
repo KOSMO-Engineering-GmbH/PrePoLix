@@ -72,6 +72,8 @@ fn same_data(a: Option<&ProjectNode>, b: Option<&ProjectNode>) -> bool {
         }
         (Some(ProjectNode::Campbell(a)), Some(ProjectNode::Campbell(b))) => a.setup == b.setup,
         (Some(ProjectNode::Note(a)), Some(ProjectNode::Note(b))) => a.text == b.text,
+        (Some(ProjectNode::Math(a)), Some(ProjectNode::Math(b))) => a == b,
+        (Some(ProjectNode::Switch(a)), Some(ProjectNode::Switch(b))) => a == b,
         _ => false,
     }
 }
