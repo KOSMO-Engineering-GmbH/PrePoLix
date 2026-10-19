@@ -12,8 +12,8 @@ use egui_snarl::ui::{AnyPins, PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
 use plx_io::project::{self as file, Link, Project, ProjectAnalysis, ProjectNode};
 use plx_model::{
-    MeasureKind, MeshPrimitive, ModelProperties, ModelSpace, Param, ParamSlot, Parameter, PointRun,
-    Quantity, StudyTable, UnitSystem, ValueKind,
+    MathOp, MeasureKind, MeshPrimitive, ModelProperties, ModelSpace, Param, ParamSlot, Parameter,
+    PointRun, Quantity, StudyTable, UnitSystem, ValueKind,
 };
 
 use crate::app::{AnalysisWindow, Request, Show};
@@ -36,6 +36,7 @@ use crate::tree_icons::StepGlyph;
 
 mod frames;
 mod history;
+mod numbers;
 
 /// Storage key of the project file open at exit, reopened at the next start.
 const LAST_PROJECT_KEY: &str = "last_project";
@@ -55,6 +56,8 @@ enum Kind {
     Campbell,
     File,
     Note,
+    Math,
+    Switch,
 }
 
 impl Kind {
@@ -77,6 +80,8 @@ impl Kind {
             Self::Campbell => "Campbell block",
             Self::File => "file block",
             Self::Note => "note",
+            Self::Math => "math block",
+            Self::Switch => "switch block",
         }
     }
 }
@@ -125,6 +130,88 @@ enum Block {
     File(Box<FileBlock>),
     /// A text for the reader, which gives and takes nothing.
     Note(String),
+    /// A number computed from others, or picked from several.
+    Math(NumberBlock),
+    Switch(NumberBlock),
+}
+
+/// A Math or a Switch block: the numbers of its inputs, which value links give or the block
+/// holds, and what they are. The inputs of a Math block are those of its operation; those of
+/// a Switch block are its index and then its choices.
+#[derive(Clone)]
+struct NumberBlock {
+    units: UnitSystem,
+    /// `None` until a link gives it the kind of the other end.
+    kind: Option<ValueKind>,
+    operation: MathOp,
+    values: Vec<f64>,
+}
+
+/// The row of the result of a Math or Switch block.
+const RESULT: &str = "Result";
+/// The input of a Switch block that picks the choice.
+const INDEX: &str = "index";
+
+impl NumberBlock {
+    /// The inputs of a Math block, or the index and the choices of a Switch block: key of
+    /// the row, label, the kind a link must bring (`None`: that of the block, still open),
+    /// and the value.
+    fn inputs(&self, switch: bool) -> Vec<(String, String, Option<ValueKind>, f64)> {
+        let value = |i: usize| self.values.get(i).copied().unwrap_or(0.0);
+        if switch {
+            let mut inputs = vec![(
+                INDEX.to_owned(),
+                "Index".to_owned(),
+                Some(ValueKind::Count),
+                value(0),
+            )];
+            for i in 1..self.values.len().max(1) {
+                inputs.push((i.to_string(), format!("Choice {i}"), self.kind, value(i)));
+            }
+            return inputs;
+        }
+        (self.operation.inputs().iter().enumerate())
+            .map(|(i, label)| {
+                let kind = if i == 1 && self.operation.scales() {
+                    Some(ValueKind::Factor)
+                } else {
+                    self.kind
+                };
+                (
+                    ["a", "b", "c"][i].to_owned(),
+                    (*label).to_owned(),
+                    kind,
+                    value(i),
+                )
+            })
+            .collect()
+    }
+
+    /// The number it gives.
+    fn result(&self, switch: bool) -> Option<f64> {
+        let value = if switch {
+            plx_model::switch(*self.values.first()?, self.values.get(1..)?)
+        } else {
+            self.operation.apply(&self.values)
+        }?;
+        Some(self.kind.map_or(value, |k| k.clean(value)))
+    }
+
+    /// Gives the input `key` the value; whether it changed.
+    fn set(&mut self, switch: bool, key: &str, value: f64) -> bool {
+        let Some((at, (_, _, kind, _))) =
+            (self.inputs(switch).into_iter().enumerate()).find(|(_, (k, ..))| k == key)
+        else {
+            return false;
+        };
+        let value = kind.map_or(value, |k| k.clean(value));
+        if self.values.len() <= at {
+            self.values.resize(at + 1, 0.0);
+        }
+        let changed = self.values[at] != value;
+        self.values[at] = value;
+        changed
+    }
 }
 
 /// An analysis: its data, or the window that holds them while it is open.
@@ -516,6 +603,8 @@ impl Node {
             Block::Campbell(_) => Kind::Campbell,
             Block::File(_) => Kind::File,
             Block::Note(_) => Kind::Note,
+            Block::Math(_) => Kind::Math,
+            Block::Switch(_) => Kind::Switch,
         }
     }
 
@@ -660,6 +749,36 @@ impl Node {
     }
 
     /// The open window of an analysis.
+    /// A Math or Switch block, and whether it is a switch.
+    fn as_number(&self) -> Option<(&NumberBlock, bool)> {
+        match &self.block {
+            Block::Math(n) => Some((n, false)),
+            Block::Switch(n) => Some((n, true)),
+            _ => None,
+        }
+    }
+
+    fn as_number_mut(&mut self) -> Option<(&mut NumberBlock, bool)> {
+        match &mut self.block {
+            Block::Math(n) => Some((n, false)),
+            Block::Switch(n) => Some((n, true)),
+            _ => None,
+        }
+    }
+
+    /// For a Math or Switch block, the kind of the number of the row of `path`: its result
+    /// or an input; `Some(None)` while the block has no kind yet.
+    fn number_kind(&self, path: &[String]) -> Option<Option<ValueKind>> {
+        let (number, switch) = self.as_number()?;
+        match path {
+            [cell, name] if cell == links::VALUE && name == RESULT => Some(number.kind),
+            [cell, key] if cell == links::PARAMETERS => (number.inputs(switch).into_iter())
+                .find(|(k, ..)| k == key)
+                .map(|(_, _, kind, _)| kind),
+            _ => None,
+        }
+    }
+
     fn window(&self) -> Option<&AnalysisWindow> {
         self.as_analysis()?.window.as_deref()
     }
@@ -710,6 +829,7 @@ impl Node {
             Block::Measure(m) => m.units,
             Block::Study(s) => s.units,
             Block::File(f) => f.units,
+            Block::Math(n) | Block::Switch(n) => n.units,
             Block::MeshExport(_) | Block::Campbell(_) | Block::RefineMesh(_) | Block::Note(_) => {
                 UnitSystem::default()
             }
@@ -900,6 +1020,26 @@ impl Node {
                 Self::campbell_block(block.id, block.name, window)
             }
             ProjectNode::Note(note) => Self::new(note.id, note.name, Block::Note(note.text)),
+            ProjectNode::Math(math) => {
+                let block = NumberBlock {
+                    units: math.units,
+                    kind: math.kind,
+                    operation: math.operation,
+                    values: math.values,
+                };
+                Self::new(math.id, math.name, Block::Math(block))
+            }
+            ProjectNode::Switch(switch) => {
+                let mut values = vec![switch.index];
+                values.extend(switch.choices);
+                let block = NumberBlock {
+                    units: switch.units,
+                    kind: switch.kind,
+                    operation: MathOp::default(),
+                    values,
+                };
+                Self::new(switch.id, switch.name, Block::Switch(block))
+            }
         }
     }
 
@@ -1006,6 +1146,24 @@ impl Node {
                 position,
                 text: text.clone(),
             }),
+            Block::Math(math) => ProjectNode::Math(file::MathBlock {
+                id,
+                name,
+                position,
+                units: math.units,
+                operation: math.operation,
+                kind: math.kind,
+                values: math.values.clone(),
+            }),
+            Block::Switch(switch) => ProjectNode::Switch(file::SwitchBlock {
+                id,
+                name,
+                position,
+                units: switch.units,
+                kind: switch.kind,
+                index: switch.values.first().copied().unwrap_or(1.0),
+                choices: switch.values.get(1..).unwrap_or_default().to_vec(),
+            }),
         })
     }
 
@@ -1085,6 +1243,8 @@ impl Node {
                 return Some(Self::campbell_block(id, name, window));
             }
             Block::Note(text) => Block::Note(text.clone()),
+            Block::Math(math) => Block::Math(math.clone()),
+            Block::Switch(switch) => Block::Switch(switch.clone()),
         };
         Some(Self::new(id, name, block))
     }
@@ -1135,7 +1295,9 @@ impl Node {
             | Block::Measure(_)
             | Block::Study(_)
             | Block::Campbell(_)
-            | Block::Note(_) => None,
+            | Block::Note(_)
+            | Block::Math(_)
+            | Block::Switch(_) => None,
         }
     }
 
@@ -1380,6 +1542,16 @@ enum Action {
     RemoveFrame(usize),
     /// Show the blocks to add at the position on the screen and in the schematic.
     Pick(egui::Pos2, egui::Pos2),
+    /// A new Math or Switch block at the position.
+    AddMath(egui::Pos2),
+    AddSwitch(egui::Pos2),
+    /// The operation of a Math block, the kind of the numbers of a Math or Switch block, the
+    /// value of one of their inputs by key, or the number of choices of a Switch block
+    /// changed in its block.
+    SetOperation(u64, MathOp),
+    SetNumberKind(u64, Option<ValueKind>),
+    SetNumberInput(u64, String, f64),
+    SetChoices(u64, usize),
 }
 
 /// A project read from its file, with notes on its conversion, or why it could not be read.
@@ -2354,6 +2526,15 @@ impl ProjectApp {
                     }
                 }
                 Block::Measure(measure) => print.add(format!("{:?}", measure.kind).as_bytes()),
+                Block::Math(number) | Block::Switch(number) => {
+                    print.add(format!("{:?}{:?}", number.operation, number.kind).as_bytes());
+                    let switch = node.kind() == Kind::Switch;
+                    for (key, _, _, value) in number.inputs(switch) {
+                        if !driven(links::PARAMETERS, &key) {
+                            print.add(&value.to_le_bytes());
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -2737,7 +2918,13 @@ impl ProjectApp {
     ) -> (Vec<String>, Vec<String>) {
         let kind = value_kind(&self.nodes, target, &slot);
         if matches!(item.as_slice(), [cell] if cell == links::LOOP) {
-            let label = self.parameter_label(target, &slot);
+            let mut label = self.parameter_label(target, &slot);
+            // A column of an input of a Math or Switch block goes by the block too.
+            if let Some(node) = (self.nodes.iter().find(|n| n.id == target))
+                && node.as_number().is_some()
+            {
+                label = format!("{} {label}", node.name);
+            }
             let value = self.slot_value(target, &slot).unwrap_or(0.0);
             if let Some(study) = self.node(source).and_then(Node::as_study_mut) {
                 let name = study.table.add_input(&label, kind, value);
@@ -2769,6 +2956,11 @@ impl ProjectApp {
     /// block, the factor of a refine mesh block or a parameter of a parameters block.
     fn slot_value(&self, id: u64, slot: &[String]) -> Option<f64> {
         let node = self.nodes.iter().find(|n| n.id == id)?;
+        if let (Some((number, switch)), [_, key]) = (node.as_number(), slot) {
+            return (number.inputs(switch).into_iter())
+                .find(|(k, ..)| k == key)
+                .map(|(.., value)| value);
+        }
         match slot {
             [cell, name] if cell == links::VALUE => (node.as_parameters()?.parameters.iter())
                 .find(|p| &p.name == name)
@@ -2800,6 +2992,12 @@ impl ProjectApp {
                 let Some(node) = self.node(target) else {
                     continue;
                 };
+                if let Some((number, switch)) = node.as_number_mut() {
+                    if let [_, key] = slot.as_slice() {
+                        changed |= number.set(switch, key, value);
+                    }
+                    continue;
+                }
                 match slot.as_slice() {
                     [cell, name] if cell == links::VALUE => {
                         if let Some(parameter) = (node.as_parameters_mut())
@@ -2849,6 +3047,11 @@ impl ProjectApp {
         let [cell, name] = item else {
             return None;
         };
+        if let Some((number, switch)) = node.as_number() {
+            return (cell == links::VALUE && name == RESULT)
+                .then(|| number.result(switch))
+                .flatten();
+        }
         if cell == links::LOOP {
             let study = node.as_study()?;
             let column = study.table.input(name)?;
@@ -3501,6 +3704,8 @@ impl ProjectApp {
                 self.focus_note = Some(id);
                 return;
             }
+            // Its numbers are edited in its block.
+            Some(Kind::Math | Kind::Switch) => return,
             None => return,
         }
         let path = self.model_path();
@@ -4714,6 +4919,9 @@ impl ProjectApp {
                         bundles.get(&n.id).map_or(&[][..], Vec::as_slice),
                         continuations.get(&n.id),
                     ),
+                    (Kind::Math | Kind::Switch, _) => {
+                        numbers::number_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
+                    }
                     (Kind::Analysis, None) | (Kind::Note, _) => Vec::new(),
                 };
                 let continues = (self.links.iter())
@@ -4746,6 +4954,7 @@ impl ProjectApp {
                         _ => String::new(),
                     },
                     compact: self.compact.contains(&n.id),
+                    number: n.as_number().map(|(b, switch)| (b.clone(), switch)),
                     framed: frames::frame_of(&self.frames, n.id).is_some(),
                 }
             })
@@ -5021,6 +5230,7 @@ impl ProjectApp {
             self.output.push(format!("Not linked: {why}"));
             return;
         }
+        self.adopt_kind(source, &item, target, &slot);
         let (item, slot) = self.study_column(source, item, target, slot);
         let feedback = item.first().is_some_and(|c| c == links::LOOP);
         if slot.first().is_some_and(|c| c == links::MEASURE) {
@@ -6151,7 +6361,13 @@ impl ProjectApp {
             | Action::Unframe(_)
             | Action::FrameLabel(..)
             | Action::FrameColor(..)
-            | Action::RemoveFrame(_) => Vec::new(),
+            | Action::RemoveFrame(_)
+            | Action::AddMath(_)
+            | Action::AddSwitch(_)
+            | Action::SetOperation(..)
+            | Action::SetNumberKind(..)
+            | Action::SetNumberInput(..)
+            | Action::SetChoices(..) => Vec::new(),
         })
     }
 
@@ -6300,6 +6516,26 @@ impl ProjectApp {
                 self.frame_label = None;
             }
             Action::Pick(screen, graph) => self.picker = Some(NodePicker::new(screen, graph)),
+            Action::AddMath(pos) => {
+                self.add_math(pos);
+            }
+            Action::AddSwitch(pos) => {
+                self.add_switch(pos);
+            }
+            Action::SetOperation(id, operation) => self.set_operation(id, operation),
+            Action::SetNumberKind(id, kind) => {
+                if let Some((number, _)) = self.node(id).and_then(Node::as_number_mut) {
+                    number.kind = kind;
+                }
+                self.sync_due = true;
+            }
+            Action::SetNumberInput(id, key, value) => {
+                if let Some((number, switch)) = self.node(id).and_then(Node::as_number_mut) {
+                    number.set(switch, &key, value);
+                }
+                self.sync_due = true;
+            }
+            Action::SetChoices(id, count) => self.set_choices(id, count),
             Action::Toggle(id, path) => {
                 if let Some(node) = self.node(id)
                     && !node.expanded.remove(&path)
@@ -6428,6 +6664,7 @@ impl ProjectApp {
             Kind::File => "(the file it reads stays)",
             Kind::Campbell => "with its diagram",
             Kind::Note => "with its text",
+            Kind::Math | Kind::Switch => "with its numbers",
         };
         let users = (self.links.iter())
             .filter(|l| self.confirm_delete.contains(&l.source))
@@ -6900,6 +7137,12 @@ enum RowWidget {
     Exposed(u32),
     /// The file a mesh export block writes to.
     ExportPath,
+    /// The operation of a Math block, the kind of the numbers of a Math or Switch block, one
+    /// of their inputs by index, and the number of choices of a Switch block.
+    Operation,
+    NumberKind,
+    Input(usize),
+    Choices,
 }
 
 /// A link of a whole category to a block, for its row: from where, how many items it takes
@@ -6951,6 +7194,8 @@ struct BlockView {
     /// Whether it shows only its header and the rows with a wire, and is in a frame.
     compact: bool,
     framed: bool,
+    /// A Math or Switch block, and whether it is a switch.
+    number: Option<(NumberBlock, bool)>,
 }
 
 /// An exposed parameter as its row shows it: its value and kind, `None` when its field is
@@ -7812,8 +8057,12 @@ fn refusal(
             value_kind(nodes, target, slot),
         );
         // The Inputs row of a study, or a column of it without a kind yet, takes the kind
-        // of what it gives to.
-        let any = feedback && given.is_none() && taken.is_some();
+        // of what it gives to; so does a Math or Switch block without a kind, at either end.
+        let open =
+            |id: u64, path: &[String]| node(id).is_some_and(|n| numbers::open_number(n, path));
+        let any = (feedback && given.is_none() && (taken.is_some() || open(target, slot)))
+            || (open(source, item) && (taken.is_some() || open(target, slot)))
+            || (open(target, slot) && given.is_some());
         if !any && (given.is_none() || given != taken) {
             let kind = |k: Option<ValueKind>| k.map_or("no number", ValueKind::label);
             return Some(format!(
@@ -7852,6 +8101,12 @@ fn parameter_label(nodes: &[Node], id: u64, slot: &[String]) -> String {
         return "Factor".into();
     }
     let node = nodes.iter().find(|n| n.id == id);
+    if let Some((number, switch)) = node.and_then(Node::as_number) {
+        let label = (number.inputs(switch).into_iter())
+            .find(|(k, ..)| k == key)
+            .map_or_else(|| key.to_owned(), |(_, label, ..)| label);
+        return label;
+    }
     if let Some(exposed) = (node.and_then(Node::exposing_fe))
         .zip(key.parse().ok())
         .and_then(|(fe, key)| fe.exposed(key))
@@ -7869,6 +8124,9 @@ fn parameter_label(nodes: &[Node], id: u64, slot: &[String]) -> String {
 /// What kind of number a block gives at `item` or takes at `slot`.
 fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
     let node = nodes.iter().find(|n| n.id == id)?;
+    if node.as_number().is_some() {
+        return node.number_kind(path).flatten();
+    }
     match path {
         [cell, name] if cell == links::VALUE => (node.as_parameters()?.parameters.iter())
             .find(|p| &p.name == name)
@@ -8435,6 +8693,8 @@ enum BlockKind {
     Mesh(MeshPrimitive),
     RefineMesh,
     Parameters,
+    Math,
+    Switch,
     Measure,
     Study,
     Campbell,
@@ -8451,6 +8711,8 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::Mesh(MeshPrimitive::default_rectangle()),
         BlockKind::RefineMesh,
         BlockKind::Parameters,
+        BlockKind::Math,
+        BlockKind::Switch,
         BlockKind::Measure,
         BlockKind::Study,
         BlockKind::Campbell,
@@ -8496,6 +8758,24 @@ impl BlockKind {
                 "Parameters",
                 "number value variable length count factor",
                 PARAMETERS_TIP,
+            ),
+            Self::Math => (
+                "Parameters",
+                "Math",
+                "add subtract multiply divide minimum maximum clamp number formula derived \
+                 calculate expression",
+                "Adds a block that computes a number from two others, like Blender's Math \
+                 node: add, subtract, multiply or divide by a factor, the smaller or the larger, \
+                 or a value kept between two limits. For parameters derived from others, such \
+                 as a length twice another one.",
+            ),
+            Self::Switch => (
+                "Parameters",
+                "Switch",
+                "choose select variant case index option number",
+                "Adds a block that gives one of several numbers, picked by its index counted \
+                 from 1. With the index as an input of a parameter study, the design points \
+                 run through the variants.",
             ),
             Self::Measure => (
                 "Measure",
@@ -8558,7 +8838,9 @@ impl BlockKind {
             Self::Materials => "Add Materials",
             Self::Mesh(primitive) => primitive.label(),
             Self::RefineMesh => "Refine Mesh",
-            Self::Parameters => "Add Parameters",
+            Self::Parameters => "Parameters",
+            Self::Math => "Math",
+            Self::Switch => "Switch",
             Self::Measure => "Add Measure",
             Self::Study => "Add Parameter Study",
             Self::MeshExport => "Add Mesh Export",
@@ -8576,6 +8858,8 @@ impl BlockKind {
             Self::Mesh(primitive) => Action::AddMesh(pos, primitive.clone()),
             Self::RefineMesh => Action::AddRefineMesh(pos),
             Self::Parameters => Action::AddParameters(pos),
+            Self::Math => Action::AddMath(pos),
+            Self::Switch => Action::AddSwitch(pos),
             Self::Measure => Action::AddMeasure(pos),
             Self::Study => Action::AddStudy(pos),
             Self::MeshExport => Action::AddMeshExport(pos),
@@ -8897,8 +9181,16 @@ impl Viewer {
                 }
             });
         }
+        // The fields of a Math or Switch block leave room for the label of its operation.
+        let width = match widget {
+            RowWidget::Operation
+            | RowWidget::NumberKind
+            | RowWidget::Input(_)
+            | RowWidget::Choices => 112.0,
+            _ => 118.0,
+        };
         let field = egui::Rect::from_min_max(
-            egui::pos2(rect.right() - 122.0, rect.top() + 1.0),
+            egui::pos2(rect.right() - 4.0 - width, rect.top() + 1.0),
             egui::pos2(rect.right() - 4.0, rect.bottom() - 1.0),
         );
         let mut ui = ui.new_child(
@@ -8908,6 +9200,13 @@ impl Viewer {
         );
         ui.spacing_mut().interact_size.y = field.height();
         match widget {
+            RowWidget::Operation
+            | RowWidget::NumberKind
+            | RowWidget::Input(_)
+            | RowWidget::Choices => {
+                self.edit_number_row(&mut ui, id, row, widget, field, &tip);
+                return;
+            }
             RowWidget::Exposed(key) => {
                 let Some(exposed) = exposed.iter().find(|e| e.key == key) else {
                     return;
@@ -9031,7 +9330,13 @@ impl Viewer {
                         .response
                 }
             },
-            RowWidget::Refinement | RowWidget::Value(_) | RowWidget::Exposed(_) => return,
+            RowWidget::Refinement
+            | RowWidget::Value(_)
+            | RowWidget::Exposed(_)
+            | RowWidget::Operation
+            | RowWidget::NumberKind
+            | RowWidget::Input(_)
+            | RowWidget::Choices => return,
         };
         response.on_hover_text(&tip);
         if primitive != before {
@@ -9153,6 +9458,16 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Note, ink);
                 icon.on_hover_text("A note for the reader; it gives and takes nothing");
             }
+            Kind::Math => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Math, ink);
+                icon.on_hover_text("Computes a number from others");
+            }
+            Kind::Switch => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Switch, ink);
+                icon.on_hover_text("Gives one of several numbers, picked by its index");
+            }
         }
         let text = egui::RichText::new(&block.name).strong();
         let label = ui.add(
@@ -9199,6 +9514,8 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Campbell => "Double-click opens its Campbell diagram and the sweep.",
             Kind::File => "Double-click chooses the file to read.",
             Kind::Note => "Double-click edits its text.",
+            Kind::Math => "Its operation and numbers are edited in the block.",
+            Kind::Switch => "Its index and choices are edited in the block.",
         };
         // The name takes the clicks of the header, so it opens the block's menu too.
         label.on_hover_text(tip).context_menu(|ui| {
@@ -9616,6 +9933,7 @@ impl SnarlViewer<u64> for Viewer {
             Some(Kind::Campbell) => default.fill(crate::style::study_header()),
             Some(Kind::File) => default.fill(crate::style::mesh_header()),
             Some(Kind::Note) => default.fill(crate::style::note_header()),
+            Some(Kind::Math | Kind::Switch) => default.fill(crate::style::parameters_header()),
             _ => default,
         }
     }
@@ -10664,6 +10982,74 @@ mod tests {
         }
         let copy = node.copied(8, "Copy of Note".into()).unwrap();
         assert!(matches!(&copy.block, Block::Note(text) if text == &note.text));
+    }
+
+    #[test]
+    fn math_and_switch_blocks_compute_and_take_numbers_of_their_kind() {
+        let parameters = Node::read(ProjectNode::Parameters(file::ParameterSet {
+            id: 1,
+            name: "Parameters".into(),
+            parameters: vec![
+                Parameter::new("Length", ValueKind::LENGTH, 0.1),
+                Parameter::new("Cells", ValueKind::Count, 4.0),
+            ],
+            ..Default::default()
+        }));
+        let math = Node::read(ProjectNode::Math(file::MathBlock {
+            id: 2,
+            name: "Math".into(),
+            operation: MathOp::Multiply,
+            values: vec![0.1, 2.0],
+            ..Default::default()
+        }));
+        let switch = Node::read(ProjectNode::Switch(file::SwitchBlock {
+            id: 3,
+            name: "Switch".into(),
+            index: 2.0,
+            choices: vec![5.0, 7.0],
+            ..Default::default()
+        }));
+        let (number, is_switch) = math.as_number().unwrap();
+        assert!(!is_switch);
+        assert_eq!(number.result(false), Some(0.2));
+        assert_eq!(switch.as_number().unwrap().0.result(true), Some(7.0));
+        let rows = numbers::number_rows(&math, &[]);
+        assert_eq!(rows.last().unwrap().path, [links::VALUE, RESULT]);
+        assert!(rows.last().unwrap().output);
+        let mut nodes = vec![parameters, math, switch];
+        let value = |name: &str| vec![links::VALUE.to_owned(), name.to_owned()];
+        let input = |key: &str| vec![links::PARAMETERS.to_owned(), key.to_owned()];
+        // Without a kind, A takes any number; B of a product is a factor.
+        assert_eq!(
+            refusal(&nodes, &[], 1, &value("Length"), 2, &input("a")),
+            None
+        );
+        assert!(refusal(&nodes, &[], 1, &value("Length"), 2, &input("b")).is_some());
+        // The index of a switch is a count; its result goes on to a block of any kind.
+        assert_eq!(
+            refusal(&nodes, &[], 1, &value("Cells"), 3, &input(INDEX)),
+            None
+        );
+        assert_eq!(
+            refusal(&nodes, &[], 3, &value(RESULT), 2, &input("a")),
+            None
+        );
+        // Once it has a kind, it takes only numbers of that kind.
+        if let Some((number, _)) = nodes[1].as_number_mut() {
+            number.kind = Some(ValueKind::Quantity(Quantity::Force));
+        }
+        assert!(refusal(&nodes, &[], 1, &value("Length"), 2, &input("a")).is_some());
+        assert_eq!(
+            value_kind(&nodes, 2, &value(RESULT)),
+            Some(ValueKind::Quantity(Quantity::Force))
+        );
+        assert_eq!(parameter_label(&nodes, 3, &input("2")), "Choice 2");
+        // A count is kept whole.
+        let (number, _) = nodes[2].as_number_mut().unwrap();
+        number.kind = Some(ValueKind::Count);
+        assert!(number.set(true, "1", 2.4));
+        assert_eq!(number.values[1], 2.0);
+        assert!(!number.set(true, "9", 1.0));
     }
 
     #[test]

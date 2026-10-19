@@ -10,14 +10,15 @@ each row is a *design point*, a set of input values with the outputs they gave.
 Add one with #menu("Project", "Add Parameter Study"), then link its columns:
 
 + Drag the pin of its #ui("Inputs") row to a number the study varies: a parameter exposed by
-  an analysis (@exposed-parameters), a number of a mesh block or the #ui("Factor") of a Refine
-  Mesh block (@refine-mesh). The link makes an input column named after that number, of its
+  an analysis (@exposed-parameters), a number of a mesh block, the #ui("Factor") of a Refine
+  Mesh block (@refine-mesh) or an input of a Math or Switch block (@math-switch). The link makes an input column named after that number, of its
   kind (a force, a length ...), with its value as it is now. The wire is violet and dashed and
   runs below the blocks, as it leads back to the blocks before the study. One column can give
   its value to several numbers: drag the pin of its row to each. Quicker for an exposed parameter:
   right-click its row and pick the study under #ui("Add to Study").
 + Drag the value pin of a Measure block (@measure-block) to its #ui("Outputs") row. The link
-  makes an output column named after the measure.
+  makes an output column named after the measure. The #ui("Result") of a Math or Switch block
+  is an output in the same way, named after the block.
 
 The first column makes the first design point, *DP 0*, which is the *current* one: the blocks
 stand at its inputs, and its outputs are those the project shows. Removing a link leaves the

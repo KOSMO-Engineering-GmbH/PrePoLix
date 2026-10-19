@@ -23,6 +23,7 @@ pub mod library;
 mod measure;
 mod mesh_set;
 mod moving_load;
+mod number;
 mod parameter;
 mod primitive;
 mod properties;
@@ -60,6 +61,7 @@ pub use library::MaterialLibrary;
 pub use measure::{Extreme, MeasureKind, MeasureRegion};
 pub use mesh_set::{MeshSet, SetKind};
 pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel, load_stations};
+pub use number::{MathOp, switch};
 pub use parameter::{Parameter, ValueKind};
 pub use primitive::{MAX_PRIMITIVE_ELEMENTS, MeshPrimitive, Param, ParamSlot, ParamValue};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
@@ -90,8 +92,9 @@ use serde::{Deserialize, Serialize};
 /// at zero takes its place. Format 8 drops the concentrated force and the surface traction for
 /// the force, which acts on faces, edges or points and optionally at each node. Format 9 gives
 /// numbers a physical quantity, format 10 replaces the optimizer by the parameter study.
-/// Format 11 adds notes, frames and compact blocks to the schematic; format 10 reads as it is.
-pub const PROJECT_FORMAT: u32 = 11;
+/// Format 11 adds notes, frames and compact blocks to the schematic, format 12 the Math and
+/// Switch blocks; formats 10 and 11 read as they are.
+pub const PROJECT_FORMAT: u32 = 12;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

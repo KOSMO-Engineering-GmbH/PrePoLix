@@ -44,6 +44,10 @@ pub enum NodeIcon {
     Export,
     /// A note: a sheet with lines of text and a folded corner.
     Note,
+    /// A Math block: a plus over a minus.
+    Math,
+    /// A Switch block: two inputs and a lever to one of them.
+    Switch,
     /// A step of this type, drawn like in the tree of the FE model.
     StepType(StepGlyph),
 }
@@ -89,6 +93,19 @@ pub fn paint(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32) {
             };
             link(1.5, 8.0);
             link(6.0, 1.5);
+        }
+        NodeIcon::Math => {
+            line(&[p(1.5, 4.5), p(7.5, 4.5)]);
+            line(&[p(4.5, 1.5), p(4.5, 7.5)]);
+            line(&[p(6.5, 10.5), p(12.5, 10.5)]);
+            line(&[p(11.0, 2.0), p(3.0, 12.0)]);
+        }
+        NodeIcon::Switch => {
+            dot(p(2.5, 3.5), 1.6);
+            dot(p(2.5, 10.5), 1.6);
+            dot(p(11.5, 7.0), 1.6);
+            line(&[p(2.5, 3.5), p(11.5, 7.0)]);
+            line(&[p(4.0, 10.5), p(6.0, 10.5)]);
         }
         NodeIcon::Note => {
             closed(&[

@@ -175,7 +175,7 @@ frequency step cannot be linked, as the `.frd` file does not hold them.]
 
 A Parameters block holds named numbers that other blocks take through *value links*, so that
 one number drives several places: the length of two meshes, or a size that is changed in one
-spot. Add it with #menu("Project", "Add Parameters"); it starts with one length.
+spot. Add it with #menu("Project", "Add Parameters", "Parameters"); it starts with one length.
 
 #screenshot("value-links.png", [The length of a Parameters block gives the edge length Lx of a
   box: the row of the box is read-only, in violet, and follows the parameter])
@@ -204,6 +204,44 @@ A double-click on the block opens its editor:
   [Remove], [Removes the parameter and its links.],
   [Add Parameter], [Adds a length.],
 )
+
+=== Math and Switch <math-switch>
+
+A Math block computes a number from others, like the Math node of Blender: a height that is
+twice a width, a thickness that never drops below a minimum. A Switch block picks one of
+several numbers by an index, for variants such as three sheet thicknesses. Add them with
+#menu("Project", "Add Parameters", "Math") and #menu("Project", "Add Parameters", "Switch"), or
+search them with #key("Shift+A").
+
+#screenshot("schematic-math-switch.png", [A parameter study varies the width and the variant:
+  the Math block Height doubles the width, the Switch block Thickness picks the thickness of
+  the variant, and both results are outputs of the study])
+
+Their inputs are rows with a violet pin on the left: type a number, or drag a value pin to it,
+from a Parameters block, from another Math or Switch block or from the #ui("Inputs") of a
+parameter study (@parameter-study). The #ui("Result") row at the bottom shows the number the
+block gives; drag its pin on the right to any number of the same kind, to another Math or
+Switch block or to the #ui("Outputs") of a study. Blocks that take the result are out of date
+when it changes, as with a parameter.
+
+#fields(
+  [Operation], [Math only: #ui("Add") (A + B), #ui("Subtract") (A - B), #ui("Multiply")
+    (A × B), #ui("Divide") (A / B), #ui("Minimum"), #ui("Maximum") or #ui("Clamp"), which
+    keeps #ui("Value") between #ui("Min") and #ui("Max"). A product or quotient gives no
+    result when dividing by zero.],
+  [Kind], [What the numbers are, as for a parameter: a length, a force, a count or a factor.
+    #ui("Any") takes the kind of the first number linked to the block. The B of
+    #ui("Multiply") and #ui("Divide") is always a factor, so a length times 2 stays a
+    length.],
+  [Index], [Switch only: which choice the block gives, counted from 1. Out of range, the block
+    gives no result.],
+  [Choice 1, 2, ...], [Switch only: the numbers to choose from. #ui("Add") adds one,
+    #ui("Remove") removes the last one with its link; a switch holds up to 20.],
+)
+
+A value link joins like with like here too: once a block has a kind, it takes only numbers of
+that kind, and the output pane says why a link was refused. Changing the operation removes
+links to inputs the block no longer has.
 
 === Exposed parameters <exposed-parameters>
 

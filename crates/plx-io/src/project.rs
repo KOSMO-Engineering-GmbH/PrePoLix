@@ -90,6 +90,10 @@ pub enum ProjectNode {
     File(FileSource),
     /// A text in the schematic, without pins.
     Note(Note),
+    /// A number computed from two or three others.
+    Math(MathBlock),
+    /// One of several numbers, picked by its index.
+    Switch(SwitchBlock),
 }
 
 impl ProjectNode {
@@ -107,6 +111,8 @@ impl ProjectNode {
             Self::Campbell(c) => c.id,
             Self::File(f) => f.id,
             Self::Note(n) => n.id,
+            Self::Math(m) => m.id,
+            Self::Switch(s) => s.id,
         }
     }
 
@@ -123,6 +129,8 @@ impl ProjectNode {
             Self::Campbell(c) => &c.name,
             Self::File(f) => &f.name,
             Self::Note(n) => &n.name,
+            Self::Math(m) => &m.name,
+            Self::Switch(s) => &s.name,
         }
     }
 
@@ -140,6 +148,8 @@ impl ProjectNode {
             Self::Campbell(c) => c.position,
             Self::File(f) => f.position,
             Self::Note(n) => n.position,
+            Self::Math(m) => m.position,
+            Self::Switch(s) => s.position,
         }
     }
 }
@@ -268,6 +278,46 @@ pub struct Note {
     pub position: [f32; 2],
     #[serde(default)]
     pub text: String,
+}
+
+/// A Math block: a number computed from the numbers of its inputs, which value links give or
+/// the block holds.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct MathBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The unit system the block shows its numbers in.
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    #[serde(default)]
+    pub operation: plx_model::MathOp,
+    /// What its numbers are; `None` until a link gives it the kind of the other end.
+    #[serde(default)]
+    pub kind: Option<plx_model::ValueKind>,
+    /// The values of its inputs, in SI units.
+    #[serde(default)]
+    pub values: Vec<f64>,
+}
+
+/// A Switch block: gives the number of its choice the index picks, counted from 1.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SwitchBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    /// What its choices are; `None` until a link gives it the kind of the other end.
+    #[serde(default)]
+    pub kind: Option<plx_model::ValueKind>,
+    #[serde(default)]
+    pub index: f64,
+    /// The choices, in SI units.
+    #[serde(default)]
+    pub choices: Vec<f64>,
 }
 
 /// A frame of the project schematic: a named, tinted rectangle around the blocks it holds,
@@ -1037,6 +1087,26 @@ mod tests {
             text: "Loads from the test bench".into(),
         };
         saved.nodes.push(ProjectNode::Note(note.clone()));
+        let math = MathBlock {
+            id: 11,
+            name: "Math".into(),
+            position: [700.0, 20.0],
+            units: plx_model::UnitSystem::MmTonSC,
+            operation: plx_model::MathOp::Multiply,
+            kind: Some(plx_model::ValueKind::LENGTH),
+            values: vec![0.1, 2.0],
+        };
+        saved.nodes.push(ProjectNode::Math(math.clone()));
+        let switch = SwitchBlock {
+            id: 12,
+            name: "Switch".into(),
+            position: [800.0, 20.0],
+            units: plx_model::UnitSystem::MmTonSC,
+            kind: None,
+            index: 2.0,
+            choices: vec![1.0, 2.0, 3.0],
+        };
+        saved.nodes.push(ProjectNode::Switch(switch.clone()));
         saved.frames.push(Frame {
             label: "Sources".into(),
             color: [96, 172, 96],
@@ -1056,7 +1126,14 @@ mod tests {
         assert!(text.contains(&format!("format:{PROJECT_FORMAT}")));
         assert!(!text.contains("analyses:"), "{text}");
         let project = read_project(&path).unwrap();
-        assert_eq!(project.nodes.len(), 9);
+        assert_eq!(project.nodes.len(), 11);
+        match (&project.nodes[9], &project.nodes[10]) {
+            (ProjectNode::Math(a), ProjectNode::Switch(b)) => {
+                assert_eq!(a, &math);
+                assert_eq!(b, &switch);
+            }
+            other => panic!("{other:?}"),
+        }
         match &project.nodes[7] {
             ProjectNode::File(read) => assert_eq!(read, &file),
             other => panic!("{other:?}"),
