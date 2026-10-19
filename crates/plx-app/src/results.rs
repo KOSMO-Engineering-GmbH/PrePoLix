@@ -1132,8 +1132,14 @@ impl ResultsView {
         // PrePoMax writes names with blanks instead of underscores and dashes.
         let name = |n: &str| n.replace(['_', '-'], " ");
         let derived = self.field_outputs.iter().find(|o| o.name == field.name);
-        let unit = match derived {
-            Some(output) => output.unit().map(|u| u.trim().to_string()),
+        let unit = match derived.map(|o| &o.kind) {
+            // The principal value of a direction is in the unit of its tensor.
+            Some(plx_results::FieldOutputKind::PrincipalDirection { field, .. })
+                if matches!(component.name.as_str(), "VALUE" | "ALL") =>
+            {
+                field_unit(field, &component.name, self.units)
+            }
+            Some(_) => derived.and_then(|o| o.unit()).map(|u| u.trim().to_string()),
             None => field_unit(&field.name, &component.name, self.units),
         };
         let unit = unit
@@ -1287,13 +1293,13 @@ fn max_deformation(increment: &Increment) -> Option<f32> {
                 .iter()
                 .all(|n| pdisp.component(n).is_some()) =>
         {
-            let magnitudes = Field {
-                name: String::new(),
-                components: ["MAG1", "MAG2", "MAG3"]
+            let magnitudes = Field::new(
+                String::new(),
+                ["MAG1", "MAG2", "MAG3"]
                     .iter()
                     .map(|n| pdisp.component(n).unwrap().clone())
                     .collect(),
-            };
+            );
             return max_deformation_of(&magnitudes);
         }
         _ => increment.field("DISP")?,
@@ -1370,10 +1376,10 @@ mod tests {
             values: disp.iter().map(|d| d[k]).collect(),
             derived: false,
         };
-        let mut field = Field {
-            name: "DISP".into(),
-            components: vec![column(0, "U1"), column(1, "U2"), column(2, "U3")],
-        };
+        let mut field = Field::new(
+            "DISP",
+            vec![column(0, "U1"), column(1, "U2"), column(2, "U3")],
+        );
         plx_results::add_derived_components(&mut field);
         Increment {
             nodal_diameter: None,
@@ -1390,14 +1396,14 @@ mod tests {
         let mut mesh = FeMesh::default();
         mesh.set_node(1, [1.0, 0.5, 0.0]);
         let mut increments = vec![increment(1, 1, AnalysisKind::Static, &[[0.001, 0.0, 0.0]])];
-        increments[0].fields.push(Field {
-            name: "STRESS".into(),
-            components: vec![Component {
+        increments[0].fields.push(Field::new(
+            "STRESS",
+            vec![Component {
                 name: "SXX".into(),
                 values: vec![2.5e8],
                 derived: false,
             }],
-        });
+        ));
         convert_results(&mut mesh, &mut increments, UnitSystem::MmTonSC);
         assert_eq!(mesh.coords()[0], [1000.0, 500.0, 0.0]);
         let disp = increments[0].field("DISP").unwrap();
@@ -1540,9 +1546,9 @@ mod tests {
             values: vec![value],
             derived: false,
         };
-        increment.fields.push(Field {
-            name: "PDISP".into(),
-            components: vec![
+        increment.fields.push(Field::new(
+            "PDISP",
+            vec![
                 column("MAG1", 0.0),
                 column("MAG2", 2.0),
                 column("MAG3", 2.0),
@@ -1550,7 +1556,7 @@ mod tests {
                 column("PHA2", 0.0),
                 column("PHA3", -90.0),
             ],
-        });
+        ));
         increment
     }
 

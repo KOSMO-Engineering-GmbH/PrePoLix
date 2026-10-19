@@ -9,7 +9,7 @@
 use std::f64::consts::TAU;
 use std::sync::{Arc, Mutex};
 
-use plx_results::{AnalysisKind, Component, Field, Increment, add_derived_components};
+use plx_results::{AnalysisKind, Component, Field, FieldRank, Increment, add_derived_components};
 
 use crate::results::Superposition;
 
@@ -400,6 +400,8 @@ pub struct ShapeMix {
     component: String,
     /// Names of the raw components of the field, when the shown one is derived from them.
     base_names: Option<Vec<String>>,
+    /// What the raw components form, which decides what is derived from them.
+    rank: FieldRank,
     modes: Vec<MixMode>,
     range: Option<(f32, f32)>,
     peak: f32,
@@ -463,6 +465,9 @@ impl ShapeMix {
             .iter()
             .find_map(|i| i.field(field)?.component(component))
             .is_some_and(|c| c.derived);
+        let rank = (chosen.iter())
+            .find_map(|c| c.1.field(field))
+            .map_or(FieldRank::Scalar, |f| f.rank);
         let base_names: Option<Vec<String>> = derived.then(|| {
             let field = chosen.first().and_then(|c| c.1.field(field));
             field.map_or_else(Vec::new, |f| {
@@ -511,6 +516,7 @@ impl ShapeMix {
             field: field.to_string(),
             component: component.to_string(),
             base_names,
+            rank,
             modes,
             range: (bound > 0.0).then_some(if invariant {
                 (0.0, bound)
@@ -573,6 +579,7 @@ impl ShapeMix {
                             derived: false,
                         })
                         .collect(),
+                    rank: self.rank,
                 };
                 add_derived_components(&mut field);
                 (field.components.into_iter())
@@ -963,22 +970,22 @@ mod tests {
             values: vec![value, 0.0],
             derived: false,
         };
-        let mut disp_field = Field {
-            name: "DISP".into(),
-            components: ["U1", "U2", "U3"]
+        let mut disp_field = Field::new(
+            "DISP",
+            ["U1", "U2", "U3"]
                 .iter()
                 .zip(disp)
                 .map(|(n, v)| component(n, v))
                 .collect(),
-        };
-        let mut stress_field = Field {
-            name: "STRESS".into(),
-            components: ["SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"]
+        );
+        let mut stress_field = Field::new(
+            "STRESS",
+            ["SXX", "SYY", "SZZ", "SXY", "SYZ", "SZX"]
                 .iter()
                 .zip(stress)
                 .map(|(n, v)| component(n, v))
                 .collect(),
-        };
+        );
         add_derived_components(&mut disp_field);
         add_derived_components(&mut stress_field);
         Increment {

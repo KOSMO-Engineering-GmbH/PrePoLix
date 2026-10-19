@@ -4,28 +4,36 @@
 use egui::{RichText, Ui};
 use plx_mesh::FeMesh;
 use plx_model::next_name;
+use plx_results::Principal;
 use plx_results::field_output::{FieldOutput, FieldOutputKind, LimitBasis};
 
 use crate::keywords::{frame, tree_row};
 use crate::numeric;
 use crate::results::ResultsView;
 
-/// The types of the list, in PrePoMax's order, with the prefix of their default names.
-const TYPES: [(&str, &str); 4] = [
+/// The types of the list, PrePoMax's first in its order, with the prefix of their default
+/// names.
+const TYPES: [(&str, &str); 6] = [
     ("Limit", "Limit"),
     ("Envelope", "Envelope"),
     ("Equation", "Equation"),
     ("Coordinate System Transformation", "Transform"),
+    ("Principal Direction", "Direction"),
+    ("Anisotropy", "Anisotropy"),
 ];
 const LIMIT: usize = 0;
 const ENVELOPE: usize = 1;
 const EQUATION: usize = 2;
 const TRANSFORM: usize = 3;
+const DIRECTION: usize = 4;
+const ANISOTROPY: usize = 5;
 
 const NO_FIELDS: &str = "There are no field outputs or components from which a field output \
                          can be created.";
 const NO_COORDINATE_SYSTEM: &str = "No coordinate system is defined into which the \
                                     field output can be transformed.";
+const NO_TENSOR: &str = "The results contain no tensor field, such as STRESS or TOSTRAIN, \
+                         whose principal directions could be computed.";
 
 const LIMIT_VALUES: &str = "Limit value of each part or element set, e.g. the yield strength. \
                             It must not be 0.";
@@ -46,6 +54,7 @@ enum Row {
     Equation,
     Unit,
     CoordinateSystem,
+    Principal,
 }
 
 impl Row {
@@ -58,6 +67,7 @@ impl Row {
             Row::Equation => "Equation",
             Row::Unit => "Unit",
             Row::CoordinateSystem => "Coordinate system",
+            Row::Principal => "Principal value",
         }
     }
 
@@ -83,6 +93,10 @@ impl Row {
                  components of a vector or tensor field are transformed; for a \
                  cylindrical one into r, theta, z at every node."
             }
+            Row::Principal => {
+                "Max, Mid or Min: the principal value whose direction is used. A direction \
+                 has no sign, and where its principal value is repeated it is not unique."
+            }
         }
     }
 }
@@ -103,7 +117,7 @@ pub struct FieldOutputDialog {
     pub edit: Option<usize>,
     kind: usize,
     /// One draft per type, as PrePoMax keeps the values of each type while switching.
-    drafts: [FieldOutput; 4],
+    drafts: [FieldOutput; 6],
     /// Limit values per part, per element set and for all elements.
     part_limits: Vec<(String, f64)>,
     set_limits: Vec<(String, f64)>,
@@ -117,6 +131,8 @@ pub struct FieldOutputDialog {
     taken: Vec<String>,
     /// Coordinate systems a field can be transformed into.
     systems: Vec<String>,
+    /// Tensor fields, whose principal directions can be computed.
+    tensors: Vec<String>,
 }
 
 impl FieldOutputDialog {
@@ -154,6 +170,17 @@ impl FieldOutputDialog {
             }
             FieldOutputKind::Equation { .. } => EQUATION,
             FieldOutputKind::CoordinateSystemTransform { .. } => TRANSFORM,
+            FieldOutputKind::PrincipalDirection { field, .. }
+            | FieldOutputKind::Anisotropy { field, .. } => {
+                if !dialog.tensors.contains(field) {
+                    dialog.tensors.push(field.clone());
+                }
+                if matches!(output.kind, FieldOutputKind::Anisotropy { .. }) {
+                    ANISOTROPY
+                } else {
+                    DIRECTION
+                }
+            }
         };
         dialog.drafts[dialog.kind] = output;
         Some(dialog)
@@ -163,6 +190,11 @@ impl FieldOutputDialog {
         let own = edit
             .and_then(|i| view.field_outputs.get(i))
             .map(|o| o.name.clone());
+        let tensors: Vec<String> = (view.current_increment().into_iter())
+            .flat_map(|inc| &inc.fields)
+            .filter(|f| Some(&f.name) != own.as_ref() && f.rank.is_tensor())
+            .map(|f| f.name.clone())
+            .collect();
         let fields: Vec<(String, Vec<String>)> = view
             .current_increment()
             .map(|inc| {
@@ -198,6 +230,12 @@ impl FieldOutputDialog {
             .find(|f| fields.iter().any(|(n, _)| n == f))
             .map(String::from)
             .unwrap_or_else(|| field.clone());
+        // STRESS first for the force flow.
+        let tensor = (tensors.iter())
+            .find(|f| *f == "STRESS")
+            .or(tensors.first())
+            .cloned()
+            .unwrap_or_default();
         let drafts = [
             FieldOutput {
                 name: name(TYPES[LIMIT].1),
@@ -229,6 +267,20 @@ impl FieldOutputDialog {
                     coordinate_system: systems.first().cloned().unwrap_or_default(),
                 },
             },
+            FieldOutput {
+                name: name(TYPES[DIRECTION].1),
+                kind: FieldOutputKind::PrincipalDirection {
+                    field: tensor.clone(),
+                    which: Principal::Max,
+                },
+            },
+            FieldOutput {
+                name: name(TYPES[ANISOTROPY].1),
+                kind: FieldOutputKind::Anisotropy {
+                    field: tensor,
+                    which: Principal::Max,
+                },
+            },
         ];
         Self {
             edit,
@@ -243,6 +295,7 @@ impl FieldOutputDialog {
             fields,
             taken,
             systems,
+            tensors,
         }
     }
 
@@ -271,6 +324,8 @@ impl FieldOutputDialog {
             Some(NO_FIELDS)
         } else if self.kind == TRANSFORM && self.systems.is_empty() {
             Some(NO_COORDINATE_SYSTEM)
+        } else if matches!(self.kind, DIRECTION | ANISOTROPY) && self.tensors.is_empty() {
+            Some(NO_TENSOR)
         } else {
             None
         }
@@ -446,6 +501,7 @@ impl FieldOutputDialog {
         });
         let fields = &self.fields;
         let systems = &self.systems;
+        let tensors = &self.tensors;
         let focus = &mut self.focus;
         let draft = &mut self.drafts[self.kind];
         egui::Grid::new("field output properties")
@@ -513,6 +569,31 @@ impl FieldOutputDialog {
                                 .show_ui(ui, |ui| {
                                     for name in systems {
                                         ui.selectable_value(coordinate_system, name.clone(), name);
+                                    }
+                                });
+                            response.response.clicked()
+                        });
+                    }
+                    FieldOutputKind::PrincipalDirection { field, which }
+                    | FieldOutputKind::Anisotropy { field, which } => {
+                        prop_row(ui, focus, Row::Field, |ui| {
+                            let response = egui::ComboBox::from_id_salt("principal field")
+                                .selected_text(field.as_str())
+                                .width(180.0)
+                                .show_ui(ui, |ui| {
+                                    for name in tensors {
+                                        ui.selectable_value(field, name.clone(), name);
+                                    }
+                                });
+                            response.response.clicked()
+                        });
+                        prop_row(ui, focus, Row::Principal, |ui| {
+                            let response = egui::ComboBox::from_id_salt("principal value")
+                                .selected_text(which.label())
+                                .width(180.0)
+                                .show_ui(ui, |ui| {
+                                    for choice in Principal::ALL {
+                                        ui.selectable_value(which, choice, choice.label());
                                     }
                                 });
                             response.response.clicked()
@@ -737,6 +818,33 @@ mod tests {
                 .is_none()
         );
         assert_eq!(view.field, 0);
+    }
+
+    #[test]
+    fn principal_direction_offers_the_tensor_fields() {
+        let (mut view, mesh) = results();
+        let mut dialog = FieldOutputDialog::create(&view, &mesh);
+        assert_eq!(dialog.tensors, ["STRESS"]);
+        dialog.kind = DIRECTION;
+        let output = dialog.output().unwrap();
+        assert_eq!(output.name, "Direction-1");
+        view.set_field_output(None, output, &mesh).unwrap();
+        let field = view.current_increment().unwrap().field("Direction-1");
+        assert_eq!(field.unwrap().rank, plx_results::FieldRank::Vector);
+        // The principal value is in the unit of the stress.
+        let fields = &view.current_increment().unwrap().fields;
+        let index = fields.iter().position(|f| f.name == "Direction-1").unwrap();
+        (view.field, view.component) = (index, 4);
+        assert!(view.legend().unwrap().title.contains("VALUE\nUnit: MPa"));
+        // The new vector field is no tensor; editing keeps the type.
+        let dialog = FieldOutputDialog::create(&view, &mesh);
+        assert!(!dialog.tensors.iter().any(|t| t == "Direction-1"));
+        let edit = FieldOutputDialog::edit(&view, &mesh, 0).unwrap();
+        assert_eq!(edit.kind, DIRECTION);
+        let mut dialog = FieldOutputDialog::create(&view, &mesh);
+        dialog.kind = ANISOTROPY;
+        dialog.tensors.clear();
+        assert_eq!(dialog.output().unwrap_err(), NO_TENSOR);
     }
 
     #[test]

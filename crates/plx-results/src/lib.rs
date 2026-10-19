@@ -10,12 +10,14 @@ pub mod field_output;
 pub mod history_output;
 pub mod hot_spot;
 pub mod path;
+pub mod principal;
 pub mod saved_view;
 pub mod transformation;
 
 pub use derived::{add_derived_components, principal_values};
 pub use equation::Equation;
 pub use field_output::{FieldOutput, FieldOutputKind, LimitBasis};
+pub use principal::{Principal, VectorSource};
 pub use transformation::{Transformation, TransformationKind};
 
 use serde::{Deserialize, Serialize};
@@ -173,14 +175,74 @@ impl Component {
     }
 }
 
+/// What the raw (not derived) components of a field form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldRank {
+    /// Every component stands for itself.
+    Scalar,
+    /// The first three raw components are x, y and z of a vector; its magnitude is `ALL`.
+    Vector,
+    /// Six raw components of a symmetric tensor, ordered xx, yy, zz, xy, yz, zx.
+    Tensor(TensorKind),
+}
+
+/// Which equivalent values a tensor field gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TensorKind {
+    /// Von Mises and Tresca equivalents.
+    Stress,
+    /// The equivalent strain, 2/3 of the von Mises expression.
+    Strain,
+}
+
+impl FieldRank {
+    /// The rank of a field CalculiX wrote, as PrePoMax judges it: by the field name and the
+    /// number of raw components.
+    pub fn of_calculix(name: &str, raw_components: usize) -> Self {
+        match (name, raw_components) {
+            ("DISP" | "VELO" | "FORC" | "FLUX" | "NORM", 3) => FieldRank::Vector,
+            ("STRESS" | "ZZSTR", 6) => FieldRank::Tensor(TensorKind::Stress),
+            ("TOSTRAIN" | "MESTRAIN", 6) => FieldRank::Tensor(TensorKind::Strain),
+            _ => FieldRank::Scalar,
+        }
+    }
+
+    pub fn is_tensor(self) -> bool {
+        matches!(self, FieldRank::Tensor(_))
+    }
+}
+
 /// A nodal result field such as `DISP` or `STRESS`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
     pub name: String,
     pub components: Vec<Component>,
+    /// Whether the raw components form a vector or a tensor; fields the user derives keep
+    /// the rank of what they compute, whatever their name.
+    pub rank: FieldRank,
 }
 
 impl Field {
+    /// A field CalculiX wrote, ranked by its name and raw components.
+    pub fn new(name: impl Into<String>, components: Vec<Component>) -> Self {
+        let name = name.into();
+        let raw = components.iter().filter(|c| !c.derived).count();
+        let rank = FieldRank::of_calculix(&name, raw);
+        Self {
+            name,
+            components,
+            rank,
+        }
+    }
+
+    /// The values of the raw components, in their order.
+    pub fn raw_values(&self) -> Vec<&[f32]> {
+        (self.components.iter())
+            .filter(|c| !c.derived)
+            .map(|c| c.values.as_slice())
+            .collect()
+    }
+
     pub fn component(&self, name: &str) -> Option<&Component> {
         self.components.iter().find(|c| c.name == name)
     }

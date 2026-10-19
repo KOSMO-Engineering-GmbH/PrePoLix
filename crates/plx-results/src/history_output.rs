@@ -585,10 +585,10 @@ mod tests {
                     .collect(),
                 derived: false,
             };
-            Field {
-                name: "DISP".into(),
-                components: vec![column(0, "U1"), column(1, "U2"), column(2, "U3")],
-            }
+            Field::new(
+                "DISP",
+                vec![column(0, "U1"), column(1, "U2"), column(2, "U3")],
+            )
         };
         let increments = [0.0, 1.0]
             .iter()

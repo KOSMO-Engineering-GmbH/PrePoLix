@@ -1,6 +1,7 @@
 //! Field outputs the user derives from the results, PrePoMax's "Create Field Output": a
 //! limit (utilisation and safety factor), the envelope over all increments, an equation of
-//! other components, or a field in another coordinate system.
+//! other components, a field in another coordinate system, and the principal direction of a
+//! tensor field with the anisotropy that tells where that direction is defined.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -10,8 +11,9 @@ use plx_mesh::FeMesh;
 use crate::equation::Equation;
 use plx_model::CoordinateSystem;
 
+use crate::principal::{Principal, anisotropy, principal_direction};
 use crate::transformation::{ComponentKind, component_kind};
-use crate::{Component, Field, Increment};
+use crate::{Component, Field, FieldRank, Increment, principal_values};
 
 /// Component names PrePoMax gives the computed fields.
 pub const RATIO: &str = "RATIO";
@@ -20,6 +22,9 @@ pub const MAX: &str = "MAX";
 pub const MIN: &str = "MIN";
 pub const AVERAGE: &str = "AVERAGE";
 pub const VALUE: &str = "VALUE";
+pub const ALL: &str = "ALL";
+/// Components of a principal direction.
+pub const DIRECTION: [&str; 3] = ["X", "Y", "Z"];
 
 /// What the limit values of a [`FieldOutputKind::Limit`] are given for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +71,12 @@ pub enum FieldOutputKind {
         field: String,
         coordinate_system: String,
     },
+    /// The principal direction of a tensor field as a vector field: X, Y and Z of the unit
+    /// vector, VALUE the principal value with its sign and ALL its magnitude.
+    PrincipalDirection { field: String, which: Principal },
+    /// VALUE how clearly that principal direction is defined, from 0 where its principal
+    /// value is repeated (see [`anisotropy`]).
+    Anisotropy { field: String, which: Principal },
 }
 
 /// A derived field output: its name becomes the name of the computed field.
@@ -81,7 +92,9 @@ impl FieldOutput {
         match &self.kind {
             FieldOutputKind::Limit { field, .. }
             | FieldOutputKind::Envelope { field, .. }
-            | FieldOutputKind::CoordinateSystemTransform { field, .. } => vec![field.clone()],
+            | FieldOutputKind::CoordinateSystemTransform { field, .. }
+            | FieldOutputKind::PrincipalDirection { field, .. }
+            | FieldOutputKind::Anisotropy { field, .. } => vec![field.clone()],
             FieldOutputKind::Equation { equation, .. } => Equation::parse(equation)
                 .map(|e| {
                     let mut fields: Vec<String> = Vec::new();
@@ -157,67 +170,55 @@ fn component<'a>(increment: &'a Increment, field: &str, component: &str) -> Opti
 }
 
 /// The raw components of a vector or tensor field in local directions given per node; `None`
-/// for a field that is neither.
+/// for a field that is neither. The derived components, magnitudes and invariants, stay.
 fn transformed_field(source: &Field, name: &str, rotations: &[[[f64; 3]; 3]]) -> Option<Field> {
-    let raw: Vec<&Component> = source.components.iter().filter(|c| !c.derived).collect();
     let kinds: Vec<ComponentKind> = (0..source.components.len())
-        .filter(|&i| !source.components[i].derived)
         .map(|i| component_kind(source, i))
         .collect();
     if kinds.iter().all(|k| *k == ComponentKind::Scalar) {
         return None;
     }
-    let count = raw
-        .iter()
-        .map(|c| c.values.len())
-        .min()?
-        .min(rotations.len());
+    let raw = source.raw_values();
+    let count = raw.iter().map(|c| c.len()).min()?.min(rotations.len());
     const SLOT: [[usize; 3]; 3] = [[0, 3, 5], [3, 1, 4], [5, 4, 2]];
-    let components = raw
-        .iter()
+    let components = (source.components.iter())
         .zip(&kinds)
         .map(|(component, kind)| {
-            let values = (0..count)
-                .map(|n| {
-                    let q = &rotations[n];
-                    let value = |k: usize| raw[k].values[n] as f64;
-                    let v = match *kind {
-                        ComponentKind::Scalar => component.values[n] as f64,
-                        ComponentKind::Vector(row) => (0..3).map(|k| q[row][k] * value(k)).sum(),
-                        ComponentKind::Tensor(row, column) => {
-                            let mut sum = 0.0;
-                            for i in 0..3 {
-                                for j in 0..3 {
-                                    sum += q[row][i] * value(SLOT[i][j]) * q[column][j];
-                                }
+            let rotated = |n: usize| {
+                let q = &rotations[n];
+                let value = |k: usize| raw[k][n] as f64;
+                match *kind {
+                    ComponentKind::Scalar => component.values[n] as f64,
+                    ComponentKind::Vector(row) => (0..3).map(|k| q[row][k] * value(k)).sum(),
+                    ComponentKind::Tensor(row, column) => {
+                        let mut sum = 0.0;
+                        for i in 0..3 {
+                            for j in 0..3 {
+                                sum += q[row][i] * value(SLOT[i][j]) * q[column][j];
                             }
-                            sum
                         }
-                    };
-                    v as f32
-                })
-                .collect();
+                        sum
+                    }
+                }
+            };
             Component {
                 name: component.name.clone(),
-                values,
-                derived: false,
+                values: (0..count).map(|n| rotated(n) as f32).collect(),
+                derived: component.derived,
             }
         })
         .collect();
-    // The invariants and magnitudes follow from the raw components, as for read fields;
-    // which ones depends on the source field's name.
-    let mut field = Field {
-        name: source.name.clone(),
+    Some(Field {
+        name: name.to_string(),
         components,
-    };
-    crate::add_derived_components(&mut field);
-    field.name = name.to_string();
-    Some(field)
+        rank: source.rank,
+    })
 }
 
 fn new_field(name: &str, components: Vec<(&str, Vec<f32>)>) -> Field {
     Field {
         name: name.to_string(),
+        rank: FieldRank::Scalar,
         components: components
             .into_iter()
             .map(|(n, values)| Component {
@@ -370,6 +371,44 @@ pub fn compute(
                 .map(|inc| transformed_field(inc.field(field)?, &output.name, &rotations))
                 .collect()
         }
+        FieldOutputKind::PrincipalDirection { field, which }
+        | FieldOutputKind::Anisotropy { field, which } => {
+            let tensors = |inc: &Increment| {
+                let source = inc.field(field).filter(|f| f.rank.is_tensor())?;
+                let raw = source.raw_values();
+                (raw.len() == 6).then(|| {
+                    let count = raw.iter().map(|r| r.len()).min().unwrap_or(0);
+                    (0..count)
+                        .map(|n| [0, 1, 2, 3, 4, 5].map(|k| raw[k][n] as f64))
+                        .collect::<Vec<_>>()
+                })
+            };
+            if increments.iter().all(|inc| inc.field(field).is_none()) {
+                return Err(format!("The result {field} exists in no increment."));
+            }
+            let direction = matches!(output.kind, FieldOutputKind::PrincipalDirection { .. });
+            let mut fields = Vec::with_capacity(increments.len());
+            for inc in increments.iter() {
+                let Some(tensors) = tensors(inc) else {
+                    fields.push(None);
+                    continue;
+                };
+                fields.push(Some(if direction {
+                    principal_field(&output.name, &tensors, *which)
+                } else {
+                    let values = (tensors.iter())
+                        .map(|&t| anisotropy(principal_values(t), *which) as f32)
+                        .collect();
+                    new_field(&output.name, vec![(VALUE, values)])
+                }));
+            }
+            if fields.iter().all(Option::is_none) {
+                return Err(format!(
+                    "{field} is no tensor field such as STRESS or TOSTRAIN."
+                ));
+            }
+            fields
+        }
     };
     if fields.iter().all(Option::is_none) {
         return Err(match &output.kind {
@@ -386,6 +425,36 @@ pub fn compute(
         }
     }
     Ok(())
+}
+
+/// The principal direction of every node as a vector field: ALL, the raw X, Y and Z, which
+/// turn with the copies of result transformations, and VALUE.
+fn principal_field(name: &str, tensors: &[[f64; 6]], which: Principal) -> Field {
+    let mut columns = [(); 5].map(|_| Vec::with_capacity(tensors.len()));
+    for &t in tensors {
+        let (direction, value) = principal_direction(t, which);
+        let row = [value.abs(), direction[0], direction[1], direction[2], value];
+        for (column, v) in columns.iter_mut().zip(row) {
+            column.push(v as f32);
+        }
+    }
+    let [all, x, y, z, value] = columns;
+    let component = |name: &str, values, derived| Component {
+        name: name.to_string(),
+        values,
+        derived,
+    };
+    Field {
+        name: name.to_string(),
+        components: vec![
+            component(ALL, all, true),
+            component(DIRECTION[0], x, false),
+            component(DIRECTION[1], y, false),
+            component(DIRECTION[2], z, false),
+            component(VALUE, value, true),
+        ],
+        rank: FieldRank::Vector,
+    }
 }
 
 /// Removes the computed field of an output from all increments.
@@ -549,16 +618,16 @@ mod tests {
     }
 
     fn raw_field(name: &str, components: &[(&str, [f32; 3])]) -> Field {
-        let mut field = Field {
-            name: name.into(),
-            components: (components.iter())
+        let mut field = Field::new(
+            name,
+            (components.iter())
                 .map(|(n, v)| Component {
                     name: n.to_string(),
                     values: v.to_vec(),
                     derived: false,
                 })
                 .collect(),
-        };
+        );
         crate::add_derived_components(&mut field);
         field
     }
@@ -604,5 +673,88 @@ mod tests {
         assert_eq!(values(&incs[0], "U_CS", "U3"), [3.0; 3]);
         let missing = output("DISP", "X");
         assert!(compute(&missing, &mut incs, &mesh(), &[]).is_err());
+    }
+
+    fn stress_increment(tensors: [[f32; 6]; 3]) -> Increment {
+        let stress: Vec<(&str, [f32; 3])> = ["S11", "S22", "S33", "S12", "S23", "S13"]
+            .iter()
+            .enumerate()
+            .map(|(k, &n)| (n, tensors.map(|t| t[k])))
+            .collect();
+        Increment {
+            nodal_diameter: None,
+            step: 1,
+            increment: 1,
+            kind: AnalysisKind::Static,
+            value: 1.0,
+            fields: vec![raw_field("STRESS", &stress)],
+        }
+    }
+
+    #[test]
+    fn principal_direction_of_uniaxial_shear_and_hydrostatic_states() {
+        // Uniaxial tension along y, pure shear in x-z, hydrostatic pressure.
+        let mut incs = vec![stress_increment([
+            [0.0, 80.0, 0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0, 0.0, 30.0],
+            [-5.0, -5.0, -5.0, 0.0, 0.0, 0.0],
+        ])];
+        let output = |name: &str, which, direction| FieldOutput {
+            name: name.into(),
+            kind: if direction {
+                FieldOutputKind::PrincipalDirection {
+                    field: "STRESS".into(),
+                    which,
+                }
+            } else {
+                FieldOutputKind::Anisotropy {
+                    field: "STRESS".into(),
+                    which,
+                }
+            },
+        };
+        compute(&output("S1", Principal::Max, true), &mut incs, &mesh(), &[]).unwrap();
+        compute(&output("S3", Principal::Min, true), &mut incs, &mesh(), &[]).unwrap();
+        compute(
+            &output("A1", Principal::Max, false),
+            &mut incs,
+            &mesh(),
+            &[],
+        )
+        .unwrap();
+        let field = incs[0].field("S1").unwrap();
+        assert_eq!(field.rank, FieldRank::Vector);
+        let names: Vec<&str> = field.components.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["ALL", "X", "Y", "Z", "VALUE"]);
+        let h = 0.5f32.sqrt();
+        let x = values(&incs[0], "S1", "X");
+        let z = values(&incs[0], "S1", "Z");
+        assert_eq!(values(&incs[0], "S1", "Y")[0], 1.0);
+        assert!((x[1] - h).abs() < 1e-6 && (z[1] - h).abs() < 1e-6);
+        assert!(x[2].is_nan(), "no direction under hydrostatic pressure");
+        assert_eq!(values(&incs[0], "S1", "VALUE"), [80.0, 30.0, -5.0]);
+        assert_eq!(values(&incs[0], "S1", "ALL"), [80.0, 30.0, 5.0]);
+        assert_eq!(values(&incs[0], "S3", "VALUE")[1], -30.0);
+        assert_eq!(values(&incs[0], "A1", "VALUE"), [1.0, 1.0, 0.0]);
+        // A mirrored copy turns the direction like any other vector.
+        let mirror = glam::DMat3::from_diagonal(glam::DVec3::new(-1.0, 1.0, 1.0));
+        let field = incs[0].field("S1").unwrap();
+        let mirrored = crate::transformation::transformed_values(field, 1, mirror).unwrap();
+        assert!((mirrored[1] + h).abs() < 1e-6);
+    }
+
+    #[test]
+    fn principal_direction_needs_a_tensor_field() {
+        let mut incs = vec![increment(1, [1.0; 3])];
+        let output = FieldOutput {
+            name: "Direction-1".into(),
+            kind: FieldOutputKind::PrincipalDirection {
+                field: "STRESS".into(),
+                which: Principal::Max,
+            },
+        };
+        let error = compute(&output, &mut incs, &mesh(), &[]).unwrap_err();
+        assert!(error.contains("no tensor field"), "{error}");
+        assert_eq!(output.parents(), ["STRESS"]);
     }
 }
