@@ -28,8 +28,13 @@ constants can still be changed. For another model space or unit system, create a
   must lie at x ≥ 0.
 
 All 2D models must lie in the global X-Y plane. Hovering over a model space shows a short hint
-on when to use it: plane stress for thin parts loaded in their plane, plane strain for long
-prismatic parts without strain out of the plane, axisymmetric for bodies of revolution.
+on when to use it, with a sketch of the principle: plane stress for thin parts loaded in their
+plane (the plate may grow thinner, `S33` = 0), plane strain for long prismatic parts with the
+same section and load all along (one slice of the body is modelled, `E33` = 0), axisymmetric
+for bodies of revolution (one profile at x ≥ 0 is turned about the y axis). The part drawn in
+blue is what is modelled. The same hints show in the #ui("Rectangle") mesh block.
+
+#screenshot("model-space-sketches.png", [Hover hints of the model spaces])
 
 Geometry and meshes must fit the model space of their analysis: a 2D mesh from an input file
 cannot be imported into a 3D analysis, nor solids into a 2D one.

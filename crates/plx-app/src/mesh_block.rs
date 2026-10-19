@@ -113,7 +113,7 @@ impl MeshBlockEditor {
                     .show_ui(ui, |ui| {
                         for space in ModelSpace::ALL.into_iter().filter(|s| s.is_2d()) {
                             ui.selectable_value(&mut self.space, space, space.label())
-                                .on_hover_text(space.tooltip());
+                                .on_hover_ui(|ui| crate::model_space_sketch::hover(ui, space));
                         }
                     });
             })
