@@ -7,8 +7,11 @@
 mod extrude;
 mod ffi;
 pub mod gmsh;
+mod operation;
 mod revolve;
 mod step_names;
+
+pub use operation::apply_cad_operation;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};

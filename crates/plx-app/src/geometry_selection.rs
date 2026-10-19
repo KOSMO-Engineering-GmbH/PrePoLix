@@ -270,7 +270,7 @@ fn face_at(model: &Model, hit: &Hit) -> Option<i32> {
 }
 
 /// The CAD edge of a hit line, else the edge of the face under the hit nearest to it.
-fn edge_at(model: &Model, hit: &Hit) -> Option<i32> {
+pub fn edge_at(model: &Model, hit: &Hit) -> Option<i32> {
     if hit.line {
         let element = *model.skin(hit.part).line_elements.get(hit.face)?;
         return match model.cad_entity(model.mesh.elements()[element].id)? {

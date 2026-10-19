@@ -171,6 +171,43 @@ again with the new data. The file is never written to; deleting the block leaves
 #limitation[Results of a file serve as global results of submodels only. Eigenmodes of a
 frequency step cannot be linked, as the `.frd` file does not hold them.]
 
+=== CAD Operation <cad-operation-block>
+
+A CAD Operation block changes geometry before it is meshed: it rounds (#ui("Fillet")) or bevels
+(#ui("Chamfer")) picked edges of the geometry linked to it and gives the changed geometry on.
+Add it with #menu("Project", "Add CAD Operation") or from the picker, drag the
+#ui("Geometry") of a file block, of an analysis with imported geometry or of another CAD
+Operation block to the pin on the left of its #ui("Geometry") row, and drag the pin on the
+right of that row to the #ui("Geometry") row of the analyses that are to use the changed
+geometry. Blocks in a row apply their operations one after the other.
+
+Double-click the block to open its editor. It shows the geometry linked to it in its own 3D
+view: click the edges to act on, a click on a picked edge removes it again. Picked edges are
+drawn red, the edge under the resting mouse orange. Choose the operation and type its radius
+or distance; #ui("Preview") applies it and shows the result, #ui("Input") goes back to picking.
+#ui("OK") keeps the operation, and the result of the preview with it if nothing changed since.
+
+#screenshot("cad-operation.png", [Two edges of a plate picked for a fillet of 1 mm])
+
+#fields(
+  [Geometry], [Left pin: the geometry to change. Right pin: the changed geometry, with its
+    state.],
+  [Fillet / Chamfer], [What it does and to how many edges.],
+  [Radius / Distance], [The radius of the fillet or the distance of the chamfer from the
+    edge on both faces. Type or drag it in place, or drop the value of a Parameters block or an
+    input of a parameter study on its pin (@parameter-study): every design point then makes the
+    geometry again, and the analyses after it mesh and solve it anew.],
+)
+
+Once the input geometry or the operation changes, the #ui("Geometry") row is out of date, and
+#ui("Update Project") or #ui("Update Geometry") in the context menu makes it again; the
+analyses linked to it mesh the new geometry. The picked edges are found again when the input
+changes, for example when the file is edited in the CAD program, by where they lie, their kind
+and their size; an edge that is no longer found has to be picked again. When OpenCASCADE cannot
+make the operation, for example because the radius is larger than the faces next to an edge,
+the row shows an error with the reason in its tooltip and the output pane, and the analyses
+after the block are not solved; in a parameter study the design point fails.
+
 === Parameters <parameters-block>
 
 A Parameters block holds named numbers that other blocks take through *value links*, so that

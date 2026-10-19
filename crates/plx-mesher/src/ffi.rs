@@ -94,6 +94,48 @@ gmsh_api! {
         c_int, c_int, c_int,
         Ierr,
     );
+    occ_fillet = "gmshModelOccFillet": fn(
+        *const c_int, usize,
+        *const c_int, usize,
+        *const c_double, usize,
+        *mut *mut c_int, *mut usize,
+        c_int,
+        Ierr,
+    );
+    occ_chamfer = "gmshModelOccChamfer": fn(
+        *const c_int, usize,
+        *const c_int, usize,
+        *const c_int, usize,
+        *const c_double, usize,
+        *mut *mut c_int, *mut usize,
+        c_int,
+        Ierr,
+    );
+    occ_extrude = "gmshModelOccExtrude": fn(
+        *const c_int, usize,
+        c_double, c_double, c_double,
+        *mut *mut c_int, *mut usize,
+        *const c_int, usize,
+        *const c_double, usize,
+        c_int,
+        Ierr,
+    );
+    occ_fuse = "gmshModelOccFuse": fn(
+        *const c_int, usize,
+        *const c_int, usize,
+        *mut *mut c_int, *mut usize,
+        *mut *mut *mut c_int, *mut *mut usize, *mut usize,
+        c_int, c_int, c_int,
+        Ierr,
+    );
+    occ_cut = "gmshModelOccCut": fn(
+        *const c_int, usize,
+        *const c_int, usize,
+        *mut *mut c_int, *mut usize,
+        *mut *mut *mut c_int, *mut *mut usize, *mut usize,
+        c_int, c_int, c_int,
+        Ierr,
+    );
     occ_revolve = "gmshModelOccRevolve": fn(
         *const c_int, usize,
         c_double, c_double, c_double,

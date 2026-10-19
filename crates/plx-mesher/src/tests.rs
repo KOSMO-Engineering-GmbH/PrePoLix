@@ -1604,3 +1604,86 @@ fn picked_entities_are_found_in_changed_and_renumbered_shapes() {
             .all(|&n| (mesh.node(n).unwrap()[2] - 3.0).abs() < 1e-9)
     );
 }
+
+/// A box of 10 mm, its signatures recorded.
+fn cube() -> Geometry {
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        gmsh.add_box([0.0; 3], [10.0; 3])?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    with_signatures(Geometry {
+        source: "wuerfel.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters {
+            max_size: 2.0,
+            ..MeshingParameters::default()
+        },
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+    })
+    .unwrap()
+}
+
+/// Volume of the geometry's solids.
+fn solid_volume(geometry: &Geometry) -> f64 {
+    let file = TempFile::with_contents("brep", &geometry.brep).unwrap();
+    with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        let mut volume = 0.0;
+        for tag in gmsh.entities(3)? {
+            volume += gmsh.mass(3, tag)?;
+        }
+        Ok(volume)
+    })
+    .unwrap()
+}
+
+#[test]
+fn fillets_and_chamfers_change_the_solid_and_keep_its_faces_findable() {
+    use plx_model::CadOperationKind::{Chamfer, Fillet};
+    if !gmsh_available() {
+        return;
+    }
+    let input = cube();
+    // The edge along z at x = y = 10.
+    let edge = (input.signatures.iter())
+        .find(|s| {
+            s.entity.dim() == 1
+                && (s.centroid[0] - 10.0).abs() < 1e-6
+                && (s.centroid[1] - 10.0).abs() < 1e-6
+        })
+        .unwrap()
+        .entity;
+    let rounded = apply_cad_operation(&input, Fillet, &[edge], 2.0).unwrap();
+    let removed = (4.0 - std::f64::consts::PI) * 10.0;
+    assert!((solid_volume(&rounded) - (1000.0 - removed)).abs() < 1e-3);
+    assert_eq!(part_names(&rounded).unwrap(), part_names(&input).unwrap());
+    assert!(rounded.signatures.iter().any(|s| s.kind == "Cylinder"));
+    let bevelled = apply_cad_operation(&input, Chamfer, &[edge], 2.0).unwrap();
+    assert!((solid_volume(&bevelled) - 980.0).abs() < 1e-3);
+    // A larger radius: every face of the first result is found in the second, the bottom
+    // face where it was, and the new mesh has it.
+    let larger = apply_cad_operation(&input, Fillet, &[edge], 3.0).unwrap();
+    let tags = rounded.tags_in(&larger).unwrap();
+    let faces = rounded.signatures.iter().filter(|s| s.entity.dim() == 2);
+    assert_eq!(faces.clone().count(), 7);
+    assert!(faces.clone().all(|s| tags.contains_key(&s.entity)));
+    let bottom = faces
+        .clone()
+        .find(|s| s.kind == "Plane" && s.centroid[2].abs() < 1e-6)
+        .unwrap()
+        .entity;
+    let mesh = generate_mesh(&larger).unwrap().mesh;
+    let nodes = mesh.cad_nodes(&[tags[&bottom]]);
+    assert!(nodes.len() > 10);
+    assert!(nodes.iter().all(|&n| mesh.node(n).unwrap()[2].abs() < 1e-9));
+    // Too large a radius fails rather than giving a broken solid; so do picks that are no
+    // edges of the geometry.
+    assert!(apply_cad_operation(&input, Fillet, &[edge], 20.0).is_err());
+    assert!(apply_cad_operation(&input, Fillet, &[CadEntity::Edge(99)], 1.0).is_err());
+    assert!(apply_cad_operation(&input, Fillet, &[edge], 0.0).is_err());
+}

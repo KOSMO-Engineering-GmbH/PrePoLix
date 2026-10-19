@@ -17,6 +17,7 @@ use plx_model::{
 };
 
 use crate::app::{AnalysisWindow, Request, Show};
+use crate::cad_editor::{CadEditorResult, CadOperationEditor};
 use crate::campbell::CampbellWindow;
 use crate::icons::{self, Icon};
 use crate::links;
@@ -33,7 +34,9 @@ use crate::status::{self, AnalysisStatus, CellState};
 use crate::study::{PointView, StudyEdit, StudyEditor, StudyView};
 use crate::tree::TreeView;
 use crate::tree_icons::StepGlyph;
+use cad::{CAD_LENGTH, CadBlock};
 
+mod cad;
 mod frames;
 mod history;
 mod numbers;
@@ -49,6 +52,7 @@ enum Kind {
     Materials,
     Mesh,
     RefineMesh,
+    CadOperation,
     Parameters,
     Measure,
     Study,
@@ -73,6 +77,7 @@ impl Kind {
             Self::Materials => "materials block",
             Self::Mesh => "mesh block",
             Self::RefineMesh => "refine mesh block",
+            Self::CadOperation => "CAD operation block",
             Self::Parameters => "parameters block",
             Self::Measure => "measure block",
             Self::Study => "parameter study",
@@ -114,6 +119,8 @@ enum Block {
     Mesh(Box<MeshBlock>),
     /// The mesh linked to it made again with a factor on its fineness.
     RefineMesh(Box<RefineBlock>),
+    /// A fillet or chamfer of the geometry linked to it.
+    CadOperation(Box<CadBlock>),
     /// Named numbers that value links give to other blocks.
     Parameters(ParametersBlock),
     /// A key figure computed from the results of a step linked to it.
@@ -599,6 +606,7 @@ impl Node {
             Block::Materials(_) => Kind::Materials,
             Block::Mesh(_) => Kind::Mesh,
             Block::RefineMesh(_) => Kind::RefineMesh,
+            Block::CadOperation(_) => Kind::CadOperation,
             Block::Parameters(_) => Kind::Parameters,
             Block::Measure(_) => Kind::Measure,
             Block::Study(_) => Kind::Study,
@@ -663,6 +671,20 @@ impl Node {
     fn as_refine_mut(&mut self) -> Option<&mut RefineBlock> {
         match &mut self.block {
             Block::RefineMesh(r) => Some(r),
+            _ => None,
+        }
+    }
+
+    fn as_cad(&self) -> Option<&CadBlock> {
+        match &self.block {
+            Block::CadOperation(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    fn as_cad_mut(&mut self) -> Option<&mut CadBlock> {
+        match &mut self.block {
+            Block::CadOperation(c) => Some(c),
             _ => None,
         }
     }
@@ -833,6 +855,7 @@ impl Node {
             Block::Study(s) => s.units,
             Block::File(f) => f.units,
             Block::Math(n) | Block::Switch(n) => n.units,
+            Block::CadOperation(c) => c.units,
             Block::MeshExport(_) | Block::Campbell(_) | Block::RefineMesh(_) | Block::Note(_) => {
                 UnitSystem::default()
             }
@@ -983,6 +1006,12 @@ impl Node {
                 };
                 Self::refine_block(block.id, block.name, factor, block.mesh, block.generated)
             }
+            ProjectNode::CadOperation(block) => {
+                let block = *block;
+                let cad =
+                    CadBlock::new(block.operation, block.units, block.result, block.made_from);
+                Self::new(block.id, block.name, Block::CadOperation(Box::new(cad)))
+            }
             ProjectNode::Parameters(set) => {
                 let block = ParametersBlock {
                     units: set.units,
@@ -1091,6 +1120,18 @@ impl Node {
                 },
                 generated: r.generated,
             })),
+            // The geometry it made is kept, so that the project meshes without making it again.
+            Block::CadOperation(c) => {
+                ProjectNode::CadOperation(Box::new(file::CadOperationBlock {
+                    id,
+                    name,
+                    position,
+                    units: c.units,
+                    operation: c.operation.clone(),
+                    result: c.model.geometry.clone(),
+                    made_from: c.made_from,
+                }))
+            }
             Block::Parameters(p) => ProjectNode::Parameters(file::ParameterSet {
                 id,
                 name,
@@ -1214,6 +1255,12 @@ impl Node {
                     None,
                 ));
             }
+            Block::CadOperation(c) => Block::CadOperation(Box::new(CadBlock::new(
+                c.operation.clone(),
+                c.units,
+                None,
+                None,
+            ))),
             Block::Parameters(p) => Block::Parameters(ParametersBlock {
                 units: p.units,
                 parameters: p.parameters.clone(),
@@ -1292,6 +1339,7 @@ impl Node {
             Block::Materials(m) => Some(m.model.data()),
             Block::Mesh(m) => Some(m.model.data()),
             Block::RefineMesh(r) => Some(r.model.data()),
+            Block::CadOperation(c) => c.link_data(),
             Block::MeshExport(e) => Some(e.model.data()),
             Block::File(f) => Some(f.model.data()),
             Block::Parameters(_)
@@ -1492,6 +1540,11 @@ enum Action {
     Unexpose(u64, u32),
     /// The factor of a refine mesh block changed in its block.
     SetRefinement(u64, f64),
+    /// The length of a CAD operation changed in its block.
+    SetCadLength(u64, f64),
+    /// A new CAD operation block at the position.
+    AddCadOperation(egui::Pos2),
+
     /// Make the mesh of a mesh block anew.
     Generate(u64),
     /// Open the analysis' window, in the workspace of a cell if given.
@@ -1598,6 +1651,11 @@ pub struct ProjectApp {
     material_set: Option<MaterialSetEditor>,
     /// The editor of a mesh block.
     mesh_block: Option<MeshBlockEditor>,
+    /// The editor of a CAD operation block.
+    cad_editor: Option<CadOperationEditor>,
+    /// The 3D view of the CAD operation editor, made when it is first opened and kept for
+    /// the next.
+    cad_viewport: Option<crate::viewport::Viewport>,
     /// The editor of a parameters block.
     parameter_set: Option<ParameterSetEditor>,
     /// The editor of a measure block.
@@ -1708,6 +1766,8 @@ impl ProjectApp {
             moving: BTreeSet::new(),
             material_set: None,
             mesh_block: None,
+            cad_editor: None,
+            cad_viewport: None,
             parameter_set: None,
             measure_editor: None,
             measuring: HashMap::new(),
@@ -1857,6 +1917,24 @@ impl ProjectApp {
     }
 
     /// Adds a refine mesh block with the factor 1; returns its id.
+    /// Adds a CAD operation block, a fillet of 1 mm; returns its id.
+    fn add_cad_operation(&mut self, position: egui::Pos2) -> u64 {
+        let id = self.next_id();
+        let name = self.unique_name("CAD Operation");
+        let cad = CadBlock::new(Default::default(), UnitSystem::default(), None, None);
+        self.nodes.push(Node::new(
+            id,
+            name.clone(),
+            Block::CadOperation(Box::new(cad)),
+        ));
+        self.graph.insert_node(position, id);
+        self.output.push(format!(
+            "{name} created: drag geometry to its Geometry row, double-click it to pick the \
+             edges, and drag its geometry on to analyses."
+        ));
+        id
+    }
+
     fn add_refine_mesh(&mut self, position: egui::Pos2) -> u64 {
         let id = self.next_id();
         let name = self.unique_name("Refine Mesh");
@@ -2520,6 +2598,9 @@ impl ProjectApp {
                 Block::RefineMesh(refine) if !driven(links::PARAMETERS, REFINEMENT) => {
                     print.add(&refine.factor.to_le_bytes());
                 }
+                Block::CadOperation(cad) => {
+                    cad.body_print(driven(links::PARAMETERS, CAD_LENGTH), &mut print);
+                }
                 Block::Parameters(parameters) => {
                     for parameter in &parameters.parameters {
                         print.add(format!("{}{:?}", parameter.name, parameter.kind).as_bytes());
@@ -2969,6 +3050,9 @@ impl ProjectApp {
                 .find(|p| &p.name == name)
                 .map(|p| p.value),
             [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => node.refinement(),
+            [cell, key] if cell == links::PARAMETERS && node.as_cad().is_some() => {
+                (key == CAD_LENGTH).then(|| node.as_cad().map(|c| c.operation.value))?
+            }
             [cell, key] if cell == links::PARAMETERS => match node.exposing_fe() {
                 Some(fe) => fe.value_at(&fe.exposed(key.parse().ok()?)?.path),
                 None => node.as_mesh()?.primitive.value(key),
@@ -3012,6 +3096,13 @@ impl ProjectApp {
                         }
                     }
                     [_, key] if key == REFINEMENT => node.set_refinement(value),
+                    [_, key] if key == CAD_LENGTH && node.as_cad().is_some() => {
+                        if let Some(cad) = node.as_cad_mut()
+                            && value.is_finite()
+                        {
+                            cad.operation.value = value;
+                        }
+                    }
                     [_, key] => {
                         if let Some(mesh) = node.as_mesh_mut() {
                             mesh.primitive.set_value(key, value);
@@ -3556,9 +3647,13 @@ impl ProjectApp {
         let Some(node) = self.node(id) else {
             return;
         };
-        let line = match node.generate() {
-            Ok(count) => format!("{}: mesh made, {count} elements", node.name),
-            Err(why) => format!("{}: no mesh made: {why}", node.name),
+        let line = match node.as_cad_mut().map(CadBlock::generate) {
+            Some(Ok(made)) => format!("{}: {made}", node.name),
+            Some(Err(why)) => format!("{}: the operation failed: {why}", node.name),
+            None => match node.generate() {
+                Ok(count) => format!("{}: mesh made, {count} elements", node.name),
+                Err(why) => format!("{}: no mesh made: {why}", node.name),
+            },
         };
         self.output.push(line);
         self.sync_due = true;
@@ -3580,6 +3675,73 @@ impl ProjectApp {
             mesh.units,
             linked,
         ));
+    }
+
+    fn edit_cad(&mut self, id: u64) {
+        let length = [links::PARAMETERS.to_owned(), CAD_LENGTH.to_owned()];
+        let length_linked = (self.links.iter()).any(|l| l.target == id && l.item == length);
+        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
+            return;
+        };
+        let Some(cad) = node.as_cad() else {
+            return;
+        };
+        let Some(input) = cad.input.clone() else {
+            let line = format!(
+                "{}: link a geometry to its Geometry row first, then pick the edges on it.",
+                node.name
+            );
+            self.output.push(line);
+            return;
+        };
+        self.cad_editor = Some(CadOperationEditor::new(
+            id,
+            &node.name,
+            input,
+            &cad.operation,
+            cad.units,
+            length_linked,
+        ));
+    }
+
+    fn cad_editor_window(&mut self, ctx: &egui::Context) {
+        let Some(editor) = &mut self.cad_editor else {
+            return;
+        };
+        let render_state = &self.render_state;
+        let viewport = (self.cad_viewport)
+            .get_or_insert_with(|| crate::viewport::Viewport::new(render_state.clone()));
+        let id = editor.id;
+        match editor.show(ctx, viewport) {
+            CadEditorResult::Open => {}
+            CadEditorResult::Cancel => self.cad_editor = None,
+            CadEditorResult::Ok(operation, made) => {
+                self.checkpoint(&[]);
+                self.cad_editor = None;
+                if let Some(node) = self.node(id) {
+                    if let Some(cad) = node.as_cad_mut() {
+                        cad.operation = operation;
+                        // The preview made it for this very input and operation.
+                        if let (Some(made), Some(input)) = (made, &cad.input) {
+                            let print = cad.operation.fingerprint(input);
+                            cad.take_result(made, print);
+                        }
+                    }
+                    if node
+                        .as_cad()
+                        .is_some_and(|c| c.state() == CellState::OutOfDate)
+                    {
+                        let line = format!(
+                            "{}: the geometry is out of date; Update Project or Update \
+                             Geometry makes it again.",
+                            node.name
+                        );
+                        self.output.push(line);
+                    }
+                }
+                self.sync_due = true;
+            }
+        }
     }
 
     fn mesh_block_window(&mut self, ctx: &egui::Context) {
@@ -3683,6 +3845,10 @@ impl ProjectApp {
             }
             // Its factor is edited in its block.
             Some(Kind::RefineMesh) => return,
+            Some(Kind::CadOperation) => {
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
+                return self.edit_cad(id);
+            }
             Some(Kind::Parameters) => return self.edit_parameters(id),
             Some(Kind::Measure) => return self.edit_measure(id),
             Some(Kind::Study) => return self.edit_study(id),
@@ -4046,6 +4212,9 @@ impl ProjectApp {
         if self.mesh_block.as_ref().is_some_and(|e| e.id == id) {
             self.mesh_block = None;
         }
+        if self.cad_editor.as_ref().is_some_and(|e| e.id == id) {
+            self.cad_editor = None;
+        }
         if self.parameter_set.as_ref().is_some_and(|e| e.id == id) {
             self.parameter_set = None;
         }
@@ -4273,8 +4442,9 @@ impl ProjectApp {
             let upstream = &analysis.upstream;
             let mut reasons = Vec::new();
             if !upstream.stale_meshes.is_empty() {
+                // Mesh blocks and CAD operations it takes its mesh or geometry from.
                 reasons.push(format!(
-                    "the mesh of {} is out of date",
+                    "{} is not up to date",
                     upstream.stale_meshes.join(", ")
                 ));
             }
@@ -4914,6 +5084,9 @@ impl ProjectApp {
                     (Kind::RefineMesh, _) => {
                         refine_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
                     }
+                    (Kind::CadOperation, _) => {
+                        cad::cad_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
+                    }
                     (Kind::Analysis, Some(status)) => block_rows(
                         status,
                         fe,
@@ -4949,6 +5122,7 @@ impl ProjectApp {
                     open: n.window().is_some(),
                     primitive: n.as_mesh().map(|m| m.primitive.clone()),
                     refinement: n.refinement().unwrap_or(1.0),
+                    cad_length: n.as_cad().map_or(0.0, |c| c.operation.value),
                     parameters: (n.as_parameters()).map_or_else(Vec::new, |p| p.parameters.clone()),
                     exposed: n.exposing_fe().map_or_else(Vec::new, ExposedView::of),
                     units: n.units(),
@@ -5772,6 +5946,10 @@ impl ProjectApp {
                 take_refine_input(&mut self.nodes, &self.links, target);
                 continue;
             }
+            if (self.nodes.iter()).any(|n| n.id == target && n.kind() == Kind::CadOperation) {
+                cad::take_cad_input(&mut self.nodes, &self.links, target);
+                continue;
+            }
             let to_target: Vec<Link> = (self.links.iter())
                 .filter(|l| l.target == target)
                 .cloned()
@@ -6352,6 +6530,9 @@ impl ProjectApp {
             | Action::AddMesh(..)
             | Action::AddRefineMesh(_)
             | Action::SetRefinement(..)
+            | Action::SetCadLength(..)
+            | Action::AddCadOperation(_)
+
             | Action::AddMeshExport(_)
             | Action::AddCampbell(_)
             | Action::AddFile(_)
@@ -6418,6 +6599,18 @@ impl ProjectApp {
                 }
                 self.sync_due = true;
             }
+            Action::SetCadLength(id, value) => {
+                if let Some(cad) = self.node(id).and_then(Node::as_cad_mut)
+                    && value.is_finite()
+                {
+                    cad.operation.value = value;
+                }
+                self.sync_due = true;
+            }
+            Action::AddCadOperation(pos) => {
+                self.add_cad_operation(pos);
+            }
+
             Action::SetExposed(id, key, value) => {
                 if let Some(node) = self.node(id) {
                     node.set_exposed(key, value);
@@ -6639,6 +6832,9 @@ impl ProjectApp {
             if let Some(editor) = self.mesh_block.as_mut().filter(|e| e.id == id) {
                 editor.rename(&name);
             }
+            if let Some(editor) = self.cad_editor.as_mut().filter(|e| e.id == id) {
+                editor.rename(&name);
+            }
             if let Some(editor) = self.parameter_set.as_mut().filter(|e| e.id == id) {
                 editor.rename(&name);
             }
@@ -6667,6 +6863,7 @@ impl ProjectApp {
             Kind::Analysis => "with its model and results",
             Kind::Materials => "with its materials",
             Kind::Mesh | Kind::RefineMesh => "with its mesh",
+            Kind::CadOperation => "with the geometry it made",
             Kind::Parameters => "with its parameters",
             Kind::Measure => "with its value",
             Kind::Study => "with its design points",
@@ -7085,6 +7282,7 @@ impl eframe::App for ProjectApp {
         self.confirm_delete_window(&ctx);
         self.material_set_window(&ctx);
         self.mesh_block_window(&ctx);
+        self.cad_editor_window(&ctx);
         self.parameter_set_window(&ctx);
         self.measure_window(&ctx);
         self.study_window(&ctx);
@@ -7141,6 +7339,8 @@ enum RowWidget {
     Element,
     /// The refinement of a mesh block.
     Refinement,
+    /// The length of a CAD operation, such as a fillet radius.
+    CadLength,
     /// A number of a parameters block, by its index.
     Value(usize),
     /// An exposed parameter of an analysis or a materials block, by its key.
@@ -7192,6 +7392,8 @@ struct BlockView {
     primitive: Option<MeshPrimitive>,
     /// The factor of a refine mesh block.
     refinement: f64,
+    /// The length of a CAD operation block.
+    cad_length: f64,
     /// The numbers of a parameters block.
     parameters: Vec<Parameter>,
     /// The exposed parameters of an analysis or a materials block.
@@ -7671,9 +7873,22 @@ fn generate_stale_meshes(nodes: &mut [Node], only: Option<&[u64]>) -> (bool, Vec
             Kind::Mesh => node.mesh_state() != CellState::UpToDate,
             // One without a mesh to refine has nothing to make.
             Kind::RefineMesh => node.mesh_state() == CellState::OutOfDate,
+            Kind::CadOperation => node
+                .as_cad()
+                .is_some_and(|c| c.state() == CellState::OutOfDate),
             _ => false,
         };
         if !stale {
+            continue;
+        }
+        if let Some(cad) = node.as_cad_mut() {
+            lines.push(match cad.generate() {
+                Ok(line) => {
+                    made = true;
+                    format!("{}: {line}", node.name)
+                }
+                Err(why) => format!("{}: the operation failed: {why}", node.name),
+            });
             continue;
         }
         lines.push(match node.generate() {
@@ -7693,8 +7908,11 @@ fn generate_stale_meshes(nodes: &mut [Node], only: Option<&[u64]>) -> (bool, Vec
 fn stale_meshes(nodes: &[Node], links: &[Link], id: u64) -> Vec<String> {
     (links::upstream(links, id).into_iter())
         .filter_map(|source| nodes.iter().find(|n| n.id == source))
-        .filter(|n| matches!(n.kind(), Kind::Mesh | Kind::RefineMesh))
-        .filter(|n| n.mesh_state() != CellState::UpToDate)
+        .filter(|n| match n.kind() {
+            Kind::Mesh | Kind::RefineMesh => n.mesh_state() != CellState::UpToDate,
+            Kind::CadOperation => n.as_cad().is_some_and(|c| c.state() != CellState::UpToDate),
+            _ => false,
+        })
         .map(|n| n.name.clone())
         .collect()
 }
@@ -8149,6 +8367,11 @@ fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
             table.inputs[table.input(name)?].kind
         }
         [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => Some(ValueKind::Factor),
+        [cell, key]
+            if cell == links::PARAMETERS && key == CAD_LENGTH && node.as_cad().is_some() =>
+        {
+            Some(ValueKind::Quantity(Quantity::Length))
+        }
         [cell, key] if cell == links::PARAMETERS => match node.exposing_fe() {
             Some(fe) => fe.value_kind(&fe.exposed(key.parse().ok()?)?.path),
             None => node.as_mesh()?.primitive.value_kind(key),
@@ -8702,6 +8925,7 @@ enum BlockKind {
     Materials,
     Mesh(MeshPrimitive),
     RefineMesh,
+    CadOperation,
     Parameters,
     Math,
     Switch,
@@ -8720,6 +8944,7 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::Mesh(MeshPrimitive::default_box()),
         BlockKind::Mesh(MeshPrimitive::default_rectangle()),
         BlockKind::RefineMesh,
+        BlockKind::CadOperation,
         BlockKind::Parameters,
         BlockKind::Math,
         BlockKind::Switch,
@@ -8762,6 +8987,16 @@ impl BlockKind {
                  factor: the divisions of a mesh block times the factor, or the element sizes \
                  of geometry divided by it. A parameter study over its factor shows whether \
                  the results converge.",
+            ),
+            Self::CadOperation => (
+                "Geometry",
+                "CAD Operation",
+                "fillet chamfer round bevel edge radius cad geometry modify parametric \
+                 opencascade",
+                "Adds a block that changes the geometry linked to it: a fillet or a chamfer of \
+                 picked edges. Its radius or distance is a row with a pin, so a parameter \
+                 study can vary it; each design point makes the geometry again, and the \
+                 analyses after it mesh it anew.",
             ),
             Self::Parameters => (
                 "Parameters",
@@ -8848,6 +9083,7 @@ impl BlockKind {
             Self::Materials => "Add Materials",
             Self::Mesh(primitive) => primitive.label(),
             Self::RefineMesh => "Refine Mesh",
+            Self::CadOperation => "Add CAD Operation",
             Self::Parameters => "Parameters",
             Self::Math => "Math",
             Self::Switch => "Switch",
@@ -8867,6 +9103,7 @@ impl BlockKind {
             Self::Materials => Action::AddMaterials(pos),
             Self::Mesh(primitive) => Action::AddMesh(pos, primitive.clone()),
             Self::RefineMesh => Action::AddRefineMesh(pos),
+            Self::CadOperation => Action::AddCadOperation(pos),
             Self::Parameters => Action::AddParameters(pos),
             Self::Math => Action::AddMath(pos),
             Self::Switch => Action::AddSwitch(pos),
@@ -9114,6 +9351,7 @@ impl Viewer {
             return;
         }
         let (units, space, refinement) = (block.units, block.space, block.refinement);
+        let cad_length = block.cad_length;
         let parameters = block.parameters.clone();
         let exposed = block.exposed.clone();
         let block_primitive = block.primitive.clone();
@@ -9258,6 +9496,21 @@ impl Viewer {
                 }
                 return;
             }
+            RowWidget::CadLength => {
+                let mut value = cad_length;
+                if row.linked_from.is_some() {
+                    ui.disable();
+                }
+                let response = ui.add_sized(
+                    field.size(),
+                    crate::numeric::quantity(&mut value, units, Quantity::Length),
+                );
+                response.on_hover_text(&tip);
+                if value != cad_length {
+                    self.actions.push(Action::SetCadLength(id, value));
+                }
+                return;
+            }
             RowWidget::Refinement => {
                 let mut value = refinement;
                 if row.linked_from.is_some() {
@@ -9341,6 +9594,7 @@ impl Viewer {
                 }
             },
             RowWidget::Refinement
+            | RowWidget::CadLength
             | RowWidget::Value(_)
             | RowWidget::Exposed(_)
             | RowWidget::Operation
@@ -9422,6 +9676,11 @@ impl SnarlViewer<u64> for Viewer {
                 let ink = ui.visuals().text_color();
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Mesh, ink);
                 icon.on_hover_text("Makes the mesh linked to it again, finer or coarser");
+            }
+            Kind::CadOperation => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::CadOperation, ink);
+                icon.on_hover_text("Changes the geometry linked to it, e.g. rounds edges");
             }
             Kind::Materials => {
                 let ink = ui.visuals().text_color();
@@ -9517,6 +9776,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Materials => "Double-click edits the materials.",
             Kind::Mesh => "Double-click edits the size and division of the mesh.",
             Kind::RefineMesh => "Its factor makes the mesh finer or coarser.",
+            Kind::CadOperation => "Double-click picks the edges and shows the result.",
             Kind::MeshExport => "Double-click chooses the file to write.",
             Kind::Parameters => "Double-click adds, renames or removes parameters.",
             Kind::Measure => "Double-click chooses what it measures.",
@@ -10371,6 +10631,9 @@ fn node_menu(
         if matches!(kind, Kind::Mesh | Kind::RefineMesh) {
             entry(ui, "Generate Mesh", "", Action::Generate(id));
         }
+        if kind == Kind::CadOperation {
+            entry(ui, "Update Geometry", "", Action::Generate(id));
+        }
         if kind == Kind::Study {
             entry(ui, "Run", "", Action::RunStudy(id));
             entry(ui, "Reset", "", Action::ResetStudy(id));
@@ -10596,6 +10859,7 @@ mod tests {
     }
 
     use super::*;
+    use cad::cad_rows;
     use std::collections::HashMap;
 
     #[derive(Default)]
@@ -10734,6 +10998,79 @@ mod tests {
         }
         assert_eq!(node.generate(), Ok(80));
         assert_eq!(node.mesh_state(), CellState::UpToDate);
+    }
+
+    #[test]
+    fn a_cad_operation_block_makes_its_geometry_and_fails_visibly() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/platte_mit_loch.step");
+        let input = match plx_mesher::import_cad(&path, plx_model::UnitSystem::MmTonSC) {
+            Ok(import) => import.geometry,
+            Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
+                eprintln!("Gmsh not available, test skipped: {error}");
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        // A straight edge of the plate.
+        let edge = (input.signatures.iter())
+            .find(|s| matches!(s.entity, plx_mesh::CadEntity::Edge(_)) && s.kind == "Line")
+            .unwrap()
+            .clone();
+        let block = file::CadOperationBlock {
+            id: 3,
+            name: "Fillet".into(),
+            position: [0.0; 2],
+            units: plx_model::UnitSystem::MmTonSC,
+            operation: plx_model::CadOperation {
+                entities: vec![edge],
+                value: 0.5e-3,
+                ..Default::default()
+            },
+            result: None,
+            made_from: None,
+        };
+        let mut node = Node::read(ProjectNode::CadOperation(Box::new(block)));
+        assert_eq!(node.kind(), Kind::CadOperation);
+        let cad = node.as_cad_mut().unwrap();
+        assert_eq!(cad.state(), CellState::Missing);
+        assert!(cad.link_data().is_none() || cad.model.geometry.is_none());
+        cad.input = Some(input.clone());
+        assert_eq!(cad.state(), CellState::OutOfDate);
+        assert!(cad.generate().is_ok());
+        assert_eq!(cad.state(), CellState::UpToDate);
+        let made = cad.model.geometry.clone().unwrap();
+        assert_ne!(made.brep, input.brep);
+        assert_eq!(made.part_names, input.part_names);
+        assert!(cad.link_data().is_some_and(|d| d.geometry.is_some()));
+        // Rows: the geometry in and out, what it does, and the radius with an input pin.
+        let rows = cad_rows(&node, &[]);
+        assert!(rows[0].input && rows[0].output);
+        assert_eq!(rows[1].text, "Fillet: 1 edge");
+        assert_eq!(rows[2].path, [links::PARAMETERS, CAD_LENGTH]);
+        assert!(rows[2].input);
+        // A radius far larger than the plate: the block fails, says why, and gives nothing
+        // on, so that what comes after it is skipped.
+        let cad = node.as_cad_mut().unwrap();
+        cad.operation.value = 1.0;
+        assert_eq!(cad.state(), CellState::OutOfDate);
+        assert!(cad.generate().is_err());
+        assert_eq!(cad.state(), CellState::Failed);
+        assert!(cad.error().is_some());
+        assert!(cad.link_data().is_none());
+        assert!(cad_rows(&node, &[])[0].tip.contains("failed"));
+        // Back to a radius that works: out of date again, then made.
+        let cad = node.as_cad_mut().unwrap();
+        cad.operation.value = 0.5e-3;
+        assert_eq!(cad.state(), CellState::UpToDate);
+        // What it keeps in the project file.
+        match node.written([0.0; 2]) {
+            Some(ProjectNode::CadOperation(written)) => {
+                assert!(written.result.is_some() && written.made_from.is_some());
+                assert_eq!(written.operation.value, 0.5e-3);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     /// A box mesh block, made, with the id 2.
