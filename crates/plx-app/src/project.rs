@@ -36,6 +36,7 @@ use crate::tree_icons::StepGlyph;
 
 mod frames;
 mod history;
+mod minimap;
 mod numbers;
 
 /// Storage key of the project file open at exit, reopened at the next start.
@@ -1616,6 +1617,10 @@ pub struct ProjectApp {
     picker: Option<NodePicker>,
     /// Show All Blocks was asked for: the view fits the blocks in the next frame.
     show_all: bool,
+    /// Whether the minimap of the schematic is shown.
+    show_minimap: bool,
+    /// The point of the schematic the view is to centre on next, from the minimap.
+    look_at: Option<egui::Pos2>,
     /// Where the pins of the schematic were drawn on the screen in the last frame.
     pin_rects: Vec<(PinKey, egui::Rect)>,
     /// The pin a wire is being dragged from in the schematic.
@@ -1715,6 +1720,8 @@ impl ProjectApp {
             update_scope: None,
             picker: None,
             show_all: false,
+            show_minimap: true,
+            look_at: None,
             pin_rects: Vec::new(),
             dragging: None,
             new_analysis: None,
@@ -4757,6 +4764,10 @@ impl ProjectApp {
                 if ui.add(show_all).clicked() {
                     self.show_all = true;
                 }
+                ui.checkbox(&mut self.show_minimap, "Show Minimap")
+                    .on_hover_text(
+                        "All blocks in small in the lower right corner of the schematic",
+                    );
                 ui.separator();
                 let update = egui::Button::new("Update Project").shortcut_text("F5");
                 if ui.add(update).on_hover_text(UPDATE_TIP).clicked() && !self.busy() {
@@ -4991,6 +5002,7 @@ impl ProjectApp {
             actions: Vec::new(),
             to_global: Default::default(),
             show_all: std::mem::take(&mut self.show_all).then(|| ui.max_rect()),
+            look_at: self.look_at.take().map(|p| (ui.max_rect(), p)),
             feedback: (self.links.iter())
                 .filter(|l| links::is_feedback(l))
                 .map(|l| (l.source, l.item.clone(), l.target, l.slot.clone()))
@@ -5034,6 +5046,7 @@ impl ProjectApp {
             self.picker = Some(NodePicker::new(screen, graph));
         }
         self.schematic_keys(ui, ui.max_rect(), viewer.to_global.inverse());
+        self.minimap(ui.ctx(), ui.max_rect(), viewer.to_global);
         if let Some(picker) = &mut self.picker {
             let kinds = block_kinds();
             let entries: Vec<_> = kinds.iter().map(|k| k.entry()).collect();
@@ -9002,6 +9015,21 @@ fn wire_color(path: &[String]) -> egui::Color32 {
     }
 }
 
+/// The tint of the header band of a block of `kind`, like the node groups of Blender; `None`
+/// for the default one.
+fn header_fill(kind: Kind) -> Option<egui::Color32> {
+    Some(match kind {
+        Kind::Materials => crate::style::materials_header(),
+        Kind::Mesh | Kind::RefineMesh | Kind::File => crate::style::mesh_header(),
+        Kind::Parameters | Kind::Math | Kind::Switch => crate::style::parameters_header(),
+        Kind::Measure => crate::style::measure_header(),
+        Kind::Study | Kind::Campbell => crate::style::study_header(),
+        Kind::MeshExport => crate::style::export_header(),
+        Kind::Note => crate::style::note_header(),
+        _ => return None,
+    })
+}
+
 struct Viewer {
     nodes: Vec<BlockView>,
     actions: Vec<Action>,
@@ -9009,6 +9037,8 @@ struct Viewer {
     to_global: egui::emath::TSTransform,
     /// Where the schematic is shown, when its view is to fit all blocks.
     show_all: Option<egui::Rect>,
+    /// Where the schematic is shown and the point of it the view is to centre on.
+    look_at: Option<(egui::Rect, egui::Pos2)>,
     /// The feedback wires of parameter studies: study, item, target and slot.
     feedback: Vec<(u64, Vec<String>, u64, Vec<String>)>,
     /// The lowest edge of the blocks, which feedback wires go around below.
@@ -9113,10 +9143,18 @@ impl Viewer {
         };
         let (rect, label) = ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), sense);
         let link_color = wire_color(&[links::VALUE.to_owned()]);
-        ui.painter().text(
-            egui::pos2(rect.left() + 30.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            &row.text,
+        // The fields of a Math or Switch block leave room for the label of its operation.
+        let width = match widget {
+            RowWidget::Operation
+            | RowWidget::NumberKind
+            | RowWidget::Input(_)
+            | RowWidget::Choices => 112.0,
+            _ => 118.0,
+        };
+        // A long label, such as the name of an exposed parameter, ends in an ellipsis before
+        // the field; the tooltip has it in full.
+        let mut job = egui::text::LayoutJob::simple_singleline(
+            row.text.clone(),
             egui::TextStyle::Body.resolve(ui.style()),
             if row.linked_from.is_some() {
                 link_color
@@ -9124,7 +9162,24 @@ impl Viewer {
                 ui.visuals().text_color()
             },
         );
-        let mut tip = row.tip.clone();
+        job.wrap = egui::text::TextWrapping {
+            max_width: (ROW_WIDTH - 36.0 - width).max(0.0),
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let galley = ui.painter().layout_job(job);
+        let elided = galley.elided;
+        ui.painter().galley(
+            egui::pos2(rect.left() + 30.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            ui.visuals().text_color(),
+        );
+        let mut tip = if elided {
+            format!("{}\n{}", row.text, row.tip)
+        } else {
+            row.tip.clone()
+        };
         if let Some(source) = &row.linked_from {
             tip.push_str(&format!(
                 "\nIts value comes from {source}; change it there."
@@ -9181,14 +9236,6 @@ impl Viewer {
                 }
             });
         }
-        // The fields of a Math or Switch block leave room for the label of its operation.
-        let width = match widget {
-            RowWidget::Operation
-            | RowWidget::NumberKind
-            | RowWidget::Input(_)
-            | RowWidget::Choices => 112.0,
-            _ => 118.0,
-        };
         let field = egui::Rect::from_min_max(
             egui::pos2(rect.right() - 4.0 - width, rect.top() + 1.0),
             egui::pos2(rect.right() - 4.0, rect.bottom() - 1.0),
@@ -9900,12 +9947,15 @@ impl SnarlViewer<u64> for Viewer {
                 let blocks = blocks.expand(40.0);
                 let scale = (view.width() / blocks.width())
                     .min(view.height() / blocks.height())
-                    .clamp(MIN_SCALE, MAX_SCALE);
+                    .clamp(MIN_SCALE, 1.0);
                 *to_global = egui::emath::TSTransform::new(
                     view.center().to_vec2() - blocks.center().to_vec2() * scale,
                     scale,
                 );
             }
+        }
+        if let Some((view, point)) = self.look_at.take() {
+            to_global.translation = view.center().to_vec2() - point.to_vec2() * to_global.scaling;
         }
         self.to_global = *to_global;
     }
@@ -9919,23 +9969,12 @@ impl SnarlViewer<u64> for Viewer {
         _outputs: &[OutPin],
         snarl: &Snarl<u64>,
     ) -> egui::Frame {
-        match snarl
+        let kind = snarl
             .get_node(node)
             .and_then(|id| self.block(*id))
-            .map(|b| b.kind)
-        {
-            Some(Kind::Materials) => default.fill(crate::style::materials_header()),
-            Some(Kind::Mesh | Kind::RefineMesh) => default.fill(crate::style::mesh_header()),
-            Some(Kind::Parameters) => default.fill(crate::style::parameters_header()),
-            Some(Kind::Measure) => default.fill(crate::style::measure_header()),
-            Some(Kind::Study) => default.fill(crate::style::study_header()),
-            Some(Kind::MeshExport) => default.fill(crate::style::export_header()),
-            Some(Kind::Campbell) => default.fill(crate::style::study_header()),
-            Some(Kind::File) => default.fill(crate::style::mesh_header()),
-            Some(Kind::Note) => default.fill(crate::style::note_header()),
-            Some(Kind::Math | Kind::Switch) => default.fill(crate::style::parameters_header()),
-            _ => default,
-        }
+            .map(|b| b.kind);
+        kind.and_then(header_fill)
+            .map_or(default, |fill| default.fill(fill))
     }
 
     fn has_node_menu(&mut self, _node: &u64) -> bool {
@@ -10417,9 +10456,10 @@ fn edit_entries(ui: &mut egui::Ui, id: u64, targets: &[u64], actions: &mut Vec<A
 /// Spacing of the dots of the schematic's background.
 const DOT_SPACING: f32 = 24.0;
 
-/// The zoom of the schematic: at most its true size, at least a third of it.
-const MAX_SCALE: f32 = 1.0;
-const MIN_SCALE: f32 = 0.3;
+/// The zoom of the schematic: from a tenth of its true size to four times it; Show All
+/// magnifies no more than to its true size.
+const MAX_SCALE: f32 = 4.0;
+const MIN_SCALE: f32 = 0.1;
 
 fn schematic_style() -> SnarlStyle {
     let border = egui::Stroke::new(1.0, crate::style::border());
@@ -10455,7 +10495,6 @@ fn schematic_style() -> SnarlStyle {
         pin_size: Some(9.0),
         pin_stroke: Some(egui::Stroke::new(1.0, crate::style::pin_edge())),
         wire_width: Some(2.0),
-        // Blocks are never magnified beyond their size, also when the view centres on them.
         max_scale: Some(MAX_SCALE),
         min_scale: Some(MIN_SCALE),
         // A row per pin, all of the same height, so that the rows line up with their pins.

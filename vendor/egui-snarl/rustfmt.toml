@@ -1,0 +1,2 @@
+# Vendored code keeps the formatting of its upstream.
+disable_all_formatting = true
