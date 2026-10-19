@@ -3136,6 +3136,27 @@ fn calculix_carries_a_block_on_surface_and_point_springs() {
 }
 
 #[test]
+fn springs_of_a_2d_model_have_no_z_direction() {
+    use plx_model::PointSpring;
+    let blocks = blocks(2, 2);
+    let spring = Constraint::PointSpring(PointSpring {
+        name: "Point_Spring-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Faces(blocks.b_bottom.clone()),
+        stiffness: [1.0, 2.0, 3.0],
+    });
+    let mut model = blocks_model(&blocks, vec![spring], [0.0, 0.0, 0.0]);
+    let text = write_inp(&blocks.mesh, &model, "").unwrap();
+    assert!(text.contains("Point_Spring-1_DOF_3"), "{text}");
+    // ccx crashes on a spring in a degree of freedom above 2 in a 2D model.
+    model.properties.space = ModelSpace::PlaneStress;
+    let text = write_inp(&blocks.mesh, &model, "").unwrap();
+    assert!(text.contains("Point_Spring-1_DOF_2"), "{text}");
+    assert!(!text.contains("Point_Spring-1_DOF_3"), "{text}");
+}
+
+#[test]
 fn calculix_compression_only_support_takes_only_pressure() {
     use plx_model::{CompressionOnly, SurfaceSpring};
     let blocks = blocks(2, 2);
