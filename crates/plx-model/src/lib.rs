@@ -13,6 +13,7 @@ mod constraint;
 mod contact;
 pub mod convert;
 mod element_type;
+mod exposed;
 mod features;
 mod field;
 pub mod fingerprint;
@@ -44,6 +45,7 @@ pub use contact::{
     GapConductance, InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
 };
 pub use element_type::{PartElementType, element_type_options};
+pub use exposed::{Exposed, Field, ItemRef, ValuePath};
 pub use features::{
     CoordinatePlane, CoordinateSystem, CoordinateSystemKind, GLOBAL, Plane, PlaneSource,
     PointDefinition, PointRef, ReferencePoint, ResultPath, ResultPlane,
@@ -86,8 +88,9 @@ use serde::{Deserialize, Serialize};
 /// setup (`["Setup", "Steps", step, "Temperatures"]`) in place of a step of the results.
 /// Format 7 drops the fixed boundary condition, a displacement holding all degrees of freedom
 /// at zero takes its place. Format 8 drops the concentrated force and the surface traction for
-/// the force, which acts on faces, edges or points and optionally at each node.
-pub const PROJECT_FORMAT: u32 = 8;
+/// the force, which acts on faces, edges or points and optionally at each node. Format 9 gives
+/// numbers a physical quantity and replaces the optimizer by the parameter study.
+pub const PROJECT_FORMAT: u32 = 9;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -141,6 +144,9 @@ pub struct FeModel {
     /// Element types the user chose for parts instead of those the mesh came with.
     #[serde(default)]
     pub element_types: Vec<PartElementType>,
+    /// Fields exposed as parameters, which value links of the project schematic set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exposed: Vec<Exposed>,
 }
 
 impl FeModel {

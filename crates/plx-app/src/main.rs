@@ -12,6 +12,7 @@ mod constraint_dialog;
 mod contact_search;
 mod contacts;
 mod exploded;
+mod expose;
 mod features;
 mod field_output_dialog;
 mod geometry_selection;

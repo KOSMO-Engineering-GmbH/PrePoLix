@@ -87,6 +87,41 @@ pub enum TreeItem {
     HotSpot(usize),
 }
 
+/// The group of the exposed parameters in the FE Model tree.
+pub const EXPOSED: &str = "Exposed Parameters";
+
+/// The tree item of an item of the model a value path names.
+pub fn item_of(fe: &FeModel, item: &plx_model::ItemRef) -> Option<TreeItem> {
+    use plx_model::ItemRef;
+    let step = |name: &str| fe.steps.iter().position(|s| s.name == name);
+    Some(match item {
+        ItemRef::Load { step: s, name } => {
+            let s = step(s)?;
+            TreeItem::Load(s, fe.steps[s].loads.iter().position(|l| &l.name == name)?)
+        }
+        ItemRef::BoundaryCondition { step: s, name } => {
+            let s = step(s)?;
+            let list = &fe.steps[s].boundary_conditions;
+            TreeItem::BoundaryCondition(s, list.iter().position(|b| &b.name == name)?)
+        }
+        ItemRef::DefinedField { step: s, name } => {
+            let s = step(s)?;
+            let list = &fe.steps[s].defined_fields;
+            TreeItem::DefinedField(s, list.iter().position(|d| &d.name == name)?)
+        }
+        ItemRef::Material(name) => {
+            TreeItem::Material(fe.materials.iter().position(|m| &m.name == name)?)
+        }
+        ItemRef::Section(name) => {
+            TreeItem::Section(fe.sections.iter().position(|s| &s.name == name)?)
+        }
+        ItemRef::Step(name) => TreeItem::Step(step(name)?),
+        ItemRef::InitialCondition(name) => TreeItem::InitialCondition(
+            (fe.initial_conditions.iter()).position(|c| &c.name == name)?,
+        ),
+    })
+}
+
 /// Selection shared by the three trees; an item is selected in one view only.
 #[derive(Default)]
 pub struct TreeState {
@@ -1518,6 +1553,14 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             .map(|(i, c)| (TreeItem::InitialCondition(i), c.name.as_str()))
             .collect();
         tree.container(ui, "Initial Conditions", initial);
+        // The numbers exposed as parameters, each under the item it belongs to, which a
+        // double-click opens.
+        let exposed: Vec<(TreeItem, &str)> = (fe.exposed.iter())
+            .filter_map(|e| Some((item_of(&fe, &e.path.item)?, e.name.as_str())))
+            .collect();
+        if !exposed.is_empty() {
+            tree.container(ui, EXPOSED, exposed);
+        }
         let steps = TreeItem::Group("Steps");
         tree.step_count = fe.steps.len();
         tree.step_types = fe.steps.iter().map(|s| StepGlyph::from(&s.kind)).collect();

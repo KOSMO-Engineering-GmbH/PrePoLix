@@ -169,7 +169,7 @@ impl MeshPrimitive {
     /// What the parameter of the key is, for a value link to it.
     pub fn value_kind(&self, key: &str) -> Option<ValueKind> {
         match self.get(key)? {
-            ParamValue::Length(_) => Some(ValueKind::Length),
+            ParamValue::Length(_) => Some(ValueKind::LENGTH),
             ParamValue::Count(_) => Some(ValueKind::Count),
         }
     }
@@ -425,7 +425,7 @@ mod tests {
     #[test]
     fn value_links_set_lengths_and_whole_counts() {
         let mut block = MeshPrimitive::default_box();
-        assert_eq!(block.value_kind("lx"), Some(ValueKind::Length));
+        assert_eq!(block.value_kind("lx"), Some(ValueKind::LENGTH));
         assert_eq!(block.value_kind("nz"), Some(ValueKind::Count));
         assert_eq!(block.value_kind("element"), None);
         assert!(block.set_value("lx", 0.25));

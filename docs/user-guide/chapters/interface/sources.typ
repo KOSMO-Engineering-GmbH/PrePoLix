@@ -180,25 +180,56 @@ spot. Add it with #menu("Project", "Add Parameters"); it starts with one length.
 #screenshot("value-links.png", [The length of a Parameters block gives the edge length Lx of a
   box: the row of the box is read-only, in violet, and follows the parameter])
 
-Each parameter is a row with its value, typed or dragged in place, and a violet pin on the
-right. Drag the pin to the pin on the left of a number of a mesh block (#ui("X") to #ui("nz"))
-or to the #ui("Factor") of a Refine Mesh block. The number then takes the value of the
-parameter: it is shown in violet and read-only, and when the parameter changes the mesh is out
-of date, so #ui("Update Project") meshes and solves again. A value link joins like with like: a length goes to a length, a count
-to a number of elements, a factor to #ui("Factor"); otherwise the output pane says why it was
-refused. Right-click the pin to remove the link; the number keeps its last value.
+Each parameter is a row with its value, typed or dragged in place, and a violet pin on
+either side. Drag the pin on the right to the pin on the left of a number of a mesh block
+(#ui("X") to #ui("nz")), to the #ui("Factor") of a Refine Mesh block or to an exposed parameter
+of an analysis or a Materials block (@exposed-parameters). The number then takes the value of
+the parameter: it is shown in violet and read-only, and when the parameter changes the blocks
+after it are out of date, so #ui("Update Project") meshes and solves again. The pin on the left
+takes the value of another parameter. A value link joins like with like: a length goes to a
+length, a force to a force, a count to a number of elements, a factor to #ui("Factor");
+otherwise the output pane says why it was refused. Right-click the pin to remove the link; the
+number keeps its last value.
 
 A double-click on the block opens its editor:
 
 #fields(
-  [Lengths in], [The unit system lengths are shown and typed in; they are stored in SI units.],
+  [Shown in], [The unit system the values are shown and typed in; they are stored in SI
+    units.],
   [Name], [The name of the parameter, unique in the block. Renaming it keeps its links.],
-  [Kind], [#ui("Length"), #ui("Count") (a whole number of at least one) or #ui("Factor") (a
-    number without unit).],
+  [Kind], [#ui("Count") (a whole number of at least one), #ui("Factor") (a number without
+    unit) or a physical quantity such as #ui("Length"), #ui("Force"), #ui("Pressure") or
+    #ui("Temperature").],
   [Value], [The number.],
   [Remove], [Removes the parameter and its links.],
   [Add Parameter], [Adds a length.],
 )
+
+=== Exposed parameters <exposed-parameters>
+
+Any number of an analysis that a study or a Parameters block should set, such as a force, a
+thickness or the Young's modulus of a material, is first *exposed*. In the dialog of the item,
+a small #ui("P") button follows each number that can be exposed; click it and close the dialog
+with #ui("OK"). The number then is a row of the analysis' block in the project window, under
+#ui("Exposed Parameters"), with the value it has and a violet pin on the left. It also appears
+in the FE Model tree under #ui("Exposed Parameters"), where a double-click opens the item.
+
+#screenshot("expose-button.png", [The #ui("P") button next to the components of a force: the Y
+  component is exposed])
+
+#screenshot("exposed-parameters.png", [The force of the analysis is exposed and given by the
+  Parameters block: its row under Exposed Parameters is read-only and follows the parameter])
+
+The row is named after the item and the number, such as #ui("Force-1 Y"); right-click it to
+rename it or to remove the parameter, which leaves the number as it is. Type a value in the row,
+or drag a value pin of a Parameters block to its pin: the number then follows the parameter,
+and the field in the dialog is read-only while the link is there. Renaming the item keeps the
+parameter. The numbers that can be exposed are those of loads, boundary conditions, defined
+fields and initial conditions, of materials and sections, the time period and first increment
+of steps and the number of modes of a frequency step. A Materials block (@materials-block)
+exposes the numbers of its own materials in the same way.
+
+Exposing a number does not change the analysis: only a new value makes it out of date.
 
 === Measure <measure-block>
 

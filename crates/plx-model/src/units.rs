@@ -43,7 +43,7 @@ pub const DERIVED_QUANTITIES: [Quantity; 13] = [
 ];
 
 /// What a value of the model measures; decides its unit in every unit system.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Quantity {
     Length,
     Angle,
@@ -87,6 +87,37 @@ pub enum Quantity {
 }
 
 impl Quantity {
+    /// Every quantity, in the order a list offers them.
+    pub const ALL: [Quantity; 27] = [
+        Quantity::Length,
+        Quantity::Angle,
+        Quantity::Mass,
+        Quantity::Time,
+        Quantity::Temperature,
+        Quantity::Area,
+        Quantity::Volume,
+        Quantity::Velocity,
+        Quantity::RotationalSpeed,
+        Quantity::Acceleration,
+        Quantity::Force,
+        Quantity::ForcePerLength,
+        Quantity::Moment,
+        Quantity::Pressure,
+        Quantity::Density,
+        Quantity::Energy,
+        Quantity::Power,
+        Quantity::Frequency,
+        Quantity::ForcePerVolume,
+        Quantity::HeatTransferCoefficient,
+        Quantity::TemperatureDifference,
+        Quantity::ThermalConductivity,
+        Quantity::SpecificHeat,
+        Quantity::ThermalExpansion,
+        Quantity::HeatFlux,
+        Quantity::PowerPerVolume,
+        Quantity::StefanBoltzmann,
+    ];
+
     /// Name in the GUI.
     pub fn label(self) -> &'static str {
         match self {

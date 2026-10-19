@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use plx_mesh::FeMesh;
-use plx_model::{FeModel, Material, UnitSystem};
+use plx_model::{Exposed, FeModel, Material, UnitSystem};
 
 use crate::material_library::{LibraryResult, MaterialLibraryEditor};
 use crate::model::Model;
@@ -14,9 +14,9 @@ use crate::tree::TreeItem;
 
 pub enum MaterialSetResult {
     Open,
-    /// Closed with OK: the materials, stored in SI units, and the unit system they are shown
-    /// in.
-    Ok(Vec<Material>, UnitSystem),
+    /// Closed with OK: the materials, stored in SI units, their exposed parameters, and the
+    /// unit system they are shown in.
+    Ok(Vec<Material>, Vec<Exposed>, UnitSystem),
     Cancel,
 }
 
@@ -32,19 +32,24 @@ pub struct MaterialSetEditor {
     library: Option<MaterialLibraryEditor>,
     /// The materials of the project's analyses, by analysis, to import.
     analyses: Vec<(String, Vec<Material>)>,
+    /// The blocks value links give exposed parameters from, by key.
+    linked: Vec<(u32, String)>,
 }
 
 impl MaterialSetEditor {
     pub fn new(
         id: u64,
         name: &str,
-        materials: &[Material],
+        fe: &FeModel,
         units: UnitSystem,
         analyses: Vec<(String, Vec<Material>)>,
+        linked: Vec<(u32, String)>,
     ) -> Self {
+        let materials = &fe.materials;
         let mut model = Model::new(Path::new(""), FeMesh::default());
         model.fe = FeModel {
             materials: materials.to_vec(),
+            exposed: fe.exposed.clone(),
             ..Default::default()
         };
         model.fe.properties.units = units;
@@ -56,6 +61,7 @@ impl MaterialSetEditor {
             item: None,
             library: None,
             analyses,
+            linked,
         }
     }
 
@@ -104,6 +110,7 @@ impl MaterialSetEditor {
             result = MaterialSetResult::Cancel;
         }
         if let Some(editor) = &mut self.item {
+            editor.set_linked(self.linked.clone());
             match editor.show(ctx, &self.model) {
                 EditorResult::Open => {}
                 EditorResult::Cancel => self.item = None,
@@ -227,6 +234,7 @@ impl MaterialSetEditor {
             if ui.button("OK").clicked() {
                 result = MaterialSetResult::Ok(
                     self.model.fe.materials.clone(),
+                    self.model.fe.exposed.clone(),
                     self.model.fe.properties.units,
                 );
             }

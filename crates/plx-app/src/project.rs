@@ -825,6 +825,7 @@ impl Node {
             ProjectNode::Materials(set) => {
                 let mut model = LinkedModel::default();
                 model.fe.materials = set.materials;
+                model.fe.exposed = set.exposed;
                 let block = MaterialsBlock {
                     model,
                     units: set.units,
@@ -916,6 +917,7 @@ impl Node {
                 position,
                 units: m.units,
                 materials: m.model.fe.materials.clone(),
+                exposed: m.model.fe.exposed.clone(),
             }),
             Block::Mesh(m) => ProjectNode::Mesh(Box::new(file::MeshBlock {
                 id,
@@ -1141,6 +1143,42 @@ impl Node {
         }
     }
 
+    /// The model whose numbers can be exposed as parameters: of an analysis or a materials
+    /// block; `None` while the window of an analysis loads it.
+    fn exposing_fe(&self) -> Option<&plx_model::FeModel> {
+        match self.kind() {
+            Kind::Analysis | Kind::Materials => self.link_data().map(|d| d.fe),
+            _ => None,
+        }
+    }
+
+    fn exposing_fe_mut(&mut self) -> Option<&mut plx_model::FeModel> {
+        match &mut self.block {
+            Block::Analysis(analysis) => match (&mut analysis.window, &mut analysis.data) {
+                (Some(window), _) => window.fe_mut(),
+                (None, Some(data)) => Some(&mut data.model),
+                _ => None,
+            },
+            Block::Materials(m) => Some(&mut m.model.fe),
+            _ => None,
+        }
+    }
+
+    /// Sets the exposed parameter of `key`; returns whether its value changed.
+    fn set_exposed(&mut self, key: u32, value: f64) -> bool {
+        let Some(fe) = self.exposing_fe_mut() else {
+            return false;
+        };
+        let Some(path) = fe.exposed(key).map(|e| e.path.clone()) else {
+            return false;
+        };
+        let changed = fe.set_value(&path, value);
+        if changed {
+            self.refresh_closed();
+        }
+        changed
+    }
+
     /// The factor of a refine mesh block; `None` for other blocks.
     fn refinement(&self) -> Option<f64> {
         self.as_refine().map(|r| r.factor)
@@ -1262,6 +1300,13 @@ enum Action {
     ResetLoop(u64),
     /// The value of a parameter of a parameters block, by its index, changed in its block.
     SetParameter(u64, usize, f64),
+    /// The value of an exposed parameter of an analysis or a materials block, by its key,
+    /// changed in its block.
+    SetExposed(u64, u32, f64),
+    /// An exposed parameter was renamed in its block.
+    RenameExposed(u64, u32, String),
+    /// An exposed parameter is to be no longer exposed, with its links.
+    Unexpose(u64, u32),
     /// The factor of a refine mesh block changed in its block.
     SetRefinement(u64, f64),
     /// Make the mesh of a mesh block anew.
@@ -1601,14 +1646,15 @@ impl ProjectApp {
         let name = self.unique_name("Parameters");
         let block = ParametersBlock {
             units: self.settings.new_model.units,
-            parameters: vec![Parameter::new("Length", ValueKind::Length, 0.1)],
+            parameters: vec![Parameter::new("Length", ValueKind::LENGTH, 0.1)],
         };
         self.nodes
             .push(Node::new(id, name.clone(), Block::Parameters(block)));
         self.graph.insert_node(position, id);
         self.output.push(format!(
-            "{name} created: drag the pin of a parameter to a parameter of a mesh block; \
-             double-click it to add, rename or remove parameters."
+            "{name} created: drag the pin of a parameter to a parameter of a mesh block or to an \
+             exposed parameter of an analysis; double-click it to add, rename or remove \
+             parameters."
         ));
         id
     }
@@ -2457,24 +2503,62 @@ impl ProjectApp {
     /// Gives the numbers of value links to the parameters they go to; a mesh block whose
     /// parameters change is out of date and made anew by Update Project.
     fn apply_values(&mut self) {
-        let values: Vec<(u64, String, f64)> = (self.links.iter())
-            .filter(|l| links::is_value(l))
-            .filter_map(|link| {
-                let key = links::parameter_key(link)?;
-                let value = self.value_of(link.source, &link.item)?;
-                Some((link.target, key.to_owned(), value))
-            })
-            .collect();
-        for (target, key, value) in values {
-            let Some(node) = self.node(target) else {
-                continue;
-            };
-            if key == REFINEMENT {
-                node.set_refinement(value);
-            } else if let Some(mesh) = node.as_mesh_mut() {
-                mesh.primitive.set_value(&key, value);
+        // A parameter of a parameters block can take its value from another one: the values
+        // pass on until none changes, as links make no loop.
+        for _ in 0..=self.nodes.len() {
+            let mut changed = false;
+            let values: Vec<(u64, Vec<String>, f64)> = (self.links.iter())
+                .filter(|l| links::is_value(l))
+                .filter_map(|link| {
+                    let value = self.value_of(link.source, &link.item)?;
+                    Some((link.target, links::slot(link).to_vec(), value))
+                })
+                .collect();
+            for (target, slot, value) in values {
+                let Some(node) = self.node(target) else {
+                    continue;
+                };
+                match slot.as_slice() {
+                    [cell, name] if cell == links::VALUE => {
+                        if let Some(parameter) = (node.as_parameters_mut())
+                            .and_then(|p| p.parameters.iter_mut().find(|p| &p.name == name))
+                        {
+                            let value = parameter.kind.clean(value);
+                            changed |= parameter.value != value;
+                            parameter.value = value;
+                        }
+                    }
+                    [_, key] if key == REFINEMENT => node.set_refinement(value),
+                    [_, key] => {
+                        if let Some(mesh) = node.as_mesh_mut() {
+                            mesh.primitive.set_value(key, value);
+                        } else if let Ok(key) = key.parse() {
+                            node.set_exposed(key, value);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if !changed {
+                break;
             }
         }
+    }
+
+    /// Stops exposing a parameter of a block, and removes the links that set it.
+    fn unexpose(&mut self, id: u64, key: u32) {
+        let slot = vec![links::PARAMETERS.to_owned(), key.to_string()];
+        self.links
+            .retain(|l| !(l.target == id && links::slot(l) == slot.as_slice()));
+        let name = self.name_of(id);
+        if let Some(fe) = self.node(id).and_then(Node::exposing_fe_mut)
+            && let Some(at) = fe.exposed.iter().position(|e| e.key == key)
+        {
+            let exposed = fe.exposed.remove(at);
+            self.output
+                .push(format!("{name}: {} is no longer exposed.", exposed.name));
+        }
+        self.sync_due = true;
     }
 
     /// The number a block gives at `item`, `["Value", name]`.
@@ -3050,12 +3134,17 @@ impl ProjectApp {
         let Some(block) = node.as_materials() else {
             return;
         };
+        let linked = (self.links.iter())
+            .filter(|l| l.target == id)
+            .flat_map(|l| links::filled_paths(l, &self.name_of(l.source)))
+            .collect::<Vec<_>>();
         self.material_set = Some(MaterialSetEditor::new(
             id,
             &node.name,
-            &block.model.fe.materials,
+            &block.model.fe,
             block.units,
             analyses,
+            links::linked_parameters(&linked),
         ));
     }
 
@@ -3067,11 +3156,12 @@ impl ProjectApp {
         match editor.show(ctx) {
             MaterialSetResult::Open => {}
             MaterialSetResult::Cancel => self.material_set = None,
-            MaterialSetResult::Ok(materials, units) => {
+            MaterialSetResult::Ok(materials, exposed, units) => {
                 self.checkpoint(&[]);
                 self.material_set = None;
                 if let Some(block) = self.node(id).and_then(Node::as_materials_mut) {
                     block.model.fe.materials = materials;
+                    block.model.fe.exposed = exposed;
                     block.units = units;
                 }
 
@@ -4246,7 +4336,12 @@ impl ProjectApp {
                 let fe = n.link_data().map(|d| d.fe);
                 let rows = match (n.kind(), &n.status()) {
                     (Kind::Materials, _) => fe
-                        .map(|fe| material_rows(fe, &n.expanded))
+                        .map(|fe| {
+                            let mut rows = material_rows(fe, &n.expanded);
+                            let incoming = incoming.get(&n.id).map_or(&[][..], Vec::as_slice);
+                            rows.extend(exposed_rows(fe, &n.expanded, incoming));
+                            rows
+                        })
                         .unwrap_or_default(),
                     (Kind::Mesh, _) => {
                         mesh_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
@@ -4257,7 +4352,9 @@ impl ProjectApp {
                         incoming.get(&n.id).map_or(&[][..], Vec::as_slice),
                     ),
                     (Kind::File, _) => file_rows(n, base.as_deref()),
-                    (Kind::Parameters, _) => parameter_rows(n),
+                    (Kind::Parameters, _) => {
+                        parameter_rows(n, incoming.get(&n.id).map_or(&[][..], Vec::as_slice))
+                    }
                     (Kind::Optimizer, _) => self.optimizer_rows(n, &incoming),
                     (Kind::Campbell, _) => campbell_rows(
                         n,
@@ -4306,6 +4403,7 @@ impl ProjectApp {
                     primitive: n.as_mesh().map(|m| m.primitive.clone()),
                     refinement: n.refinement().unwrap_or(1.0),
                     parameters: (n.as_parameters()).map_or_else(Vec::new, |p| p.parameters.clone()),
+                    exposed: n.exposing_fe().map_or_else(Vec::new, ExposedView::of),
                     units: n.units(),
                 }
             })
@@ -5616,6 +5714,11 @@ impl ProjectApp {
             | Action::ReadFile(_)
             | Action::RunLoop(_) => return None,
             Action::Link { target, .. } => vec![*target],
+            Action::SetExposed(id, ..)
+            | Action::RenameExposed(id, ..)
+            | Action::Unexpose(id, _) => {
+                vec![*id]
+            }
             Action::Unlink { source, target } => (self.links.iter())
                 .filter(|l| {
                     source.as_ref().is_some_and(|(id, _)| l.source == *id)
@@ -5685,6 +5788,27 @@ impl ProjectApp {
                 }
                 self.sync_due = true;
             }
+            Action::SetExposed(id, key, value) => {
+                if let Some(node) = self.node(id) {
+                    node.set_exposed(key, value);
+                }
+                self.sync_due = true;
+            }
+            Action::RenameExposed(id, key, name) => {
+                let taken = (self.nodes.iter().find(|n| n.id == id))
+                    .and_then(Node::exposing_fe)
+                    .is_some_and(|fe| fe.exposed.iter().any(|e| e.name == name && e.key != key));
+                if taken {
+                    self.output
+                        .push(format!("{name} is the name of another parameter."));
+                } else if let Some(exposed) = (self.node(id))
+                    .and_then(Node::exposing_fe_mut)
+                    .and_then(|fe| fe.exposed.iter_mut().find(|e| e.key == key))
+                {
+                    exposed.name = name;
+                }
+            }
+            Action::Unexpose(id, key) => self.unexpose(id, key),
             Action::AddRefineMesh(pos) => {
                 self.add_refine_mesh(pos);
             }
@@ -6297,6 +6421,8 @@ enum RowWidget {
     Refinement,
     /// A number of a parameters block, by its index.
     Value(usize),
+    /// An exposed parameter of an analysis or a materials block, by its key.
+    Exposed(u32),
     /// The file a mesh export block writes to.
     ExportPath,
 }
@@ -6340,10 +6466,115 @@ struct BlockView {
     refinement: f64,
     /// The numbers of a parameters block.
     parameters: Vec<Parameter>,
+    /// The exposed parameters of an analysis or a materials block.
+    exposed: Vec<ExposedView>,
     units: UnitSystem,
     /// What a mesh export block writes to.
     export_path: String,
 }
+
+/// An exposed parameter as its row shows it: its value and kind, `None` when its field is
+/// gone.
+#[derive(Clone, Debug)]
+struct ExposedView {
+    key: u32,
+    name: String,
+    value: Option<f64>,
+    kind: Option<ValueKind>,
+}
+
+impl ExposedView {
+    fn of(fe: &plx_model::FeModel) -> Vec<Self> {
+        (fe.exposed.iter())
+            .map(|e| Self {
+                key: e.key,
+                name: e.name.clone(),
+                value: fe.value_at(&e.path),
+                kind: fe.value_kind(&e.path),
+            })
+            .collect()
+    }
+}
+
+/// The rows of the exposed parameters of a block: a row that opens them, open at first, and
+/// a row with a pin for each, where value links set it.
+fn exposed_rows(
+    fe: &plx_model::FeModel,
+    expanded: &BTreeSet<Vec<String>>,
+    incoming: &[(Vec<String>, String)],
+) -> Vec<Row> {
+    if fe.exposed.is_empty() {
+        return Vec::new();
+    }
+    let path = vec![links::PARAMETERS.to_owned()];
+    // Open unless it was closed.
+    let open = !expanded.contains(&path);
+    let mut rows = vec![Row {
+        text: format!("{} ({})", EXPOSED, fe.exposed.len()),
+        depth: 0,
+        icon: NodeIcon::Setup,
+        state: None,
+        expander: Some(open),
+        input: false,
+        output: false,
+        linked_from: None,
+        collection: false,
+        partial: false,
+        widget: None,
+        tip: "Exposed Parameters: numbers of the dialogs exposed with their P button. A value \
+              link from a Parameters block or a parameter study sets each of them."
+            .into(),
+        path: path.clone(),
+    }];
+    if !open {
+        return rows;
+    }
+    for exposed in &fe.exposed {
+        let mut path = path.clone();
+        path.push(exposed.key.to_string());
+        let gone = fe.value_at(&exposed.path).is_none();
+        let item = &exposed.path.item;
+        let tip = if gone {
+            format!(
+                "{} '{}' no longer has this number: remove the parameter with a right-click, \
+                 or give the item its name again.",
+                item.noun(),
+                item.name()
+            )
+        } else {
+            format!(
+                "{}: {} of {} '{}'. Drag a number of a Parameters block or a parameter study \
+                 here to set it; right-click to rename or remove it.",
+                exposed.name,
+                exposed.path.field.label().to_lowercase(),
+                item.noun().to_lowercase(),
+                item.name()
+            )
+            .replace(":  of", ": the value of")
+        };
+        rows.push(Row {
+            text: exposed.name.clone(),
+            depth: 1,
+            icon: NodeIcon::Setup,
+            state: gone.then_some(CellState::Missing),
+            expander: None,
+            input: !gone,
+            output: false,
+            linked_from: (incoming.iter())
+                .find(|(slot, _)| *slot == path)
+                .map(|(_, source)| source.clone()),
+            collection: false,
+            partial: false,
+            widget: Some(RowWidget::Exposed(exposed.key)),
+            tip,
+            path,
+        });
+    }
+    rows
+}
+
+/// The name of the rows of the exposed parameters of a block.
+const EXPOSED: &str = "Exposed Parameters";
 
 /// The rows of an analysis' block: its cells, the setup opened as far as `expanded` says, and
 /// the steps whose results can drive a submodel.
@@ -6555,6 +6786,9 @@ fn block_rows(
                 }
             }
         }
+    }
+    if let Some(fe) = fe {
+        rows.extend(exposed_rows(fe, expanded, incoming));
     }
     rows.push(cell("Solution", NodeIcon::Solution, status.solution, false));
     rows.push(cell("Results", NodeIcon::Results, status.results, false));
@@ -7128,8 +7362,17 @@ fn parameter_label(nodes: &[Node], id: u64, slot: &[String]) -> String {
     if key == REFINEMENT {
         return "Factor".into();
     }
-    (nodes.iter().find(|n| n.id == id))
-        .and_then(Node::as_mesh)
+    let node = nodes.iter().find(|n| n.id == id);
+    if let Some(exposed) = (node.and_then(Node::exposing_fe))
+        .zip(key.parse().ok())
+        .and_then(|(fe, key)| fe.exposed(key))
+    {
+        return exposed.name.clone();
+    }
+    if slot.first().is_some_and(|c| c == links::VALUE) {
+        return key.to_owned();
+    }
+    node.and_then(Node::as_mesh)
         .and_then(|m| m.primitive.params().iter().find(|param| param.key == key))
         .map_or_else(|| key.to_owned(), |param| param.label.to_owned())
 }
@@ -7143,7 +7386,10 @@ fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
             .map(|p| p.kind),
         [cell, _] if cell == links::LOOP => Some(node.as_optimizer()?.kind.value_kind()),
         [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => Some(ValueKind::Factor),
-        [cell, key] if cell == links::PARAMETERS => node.as_mesh()?.primitive.value_kind(key),
+        [cell, key] if cell == links::PARAMETERS => match node.exposing_fe() {
+            Some(fe) => fe.value_kind(&fe.exposed(key.parse().ok()?)?.path),
+            None => node.as_mesh()?.primitive.value_kind(key),
+        },
 
         _ => None,
     }
@@ -7511,7 +7757,7 @@ fn estimated_elements(node: &Node, value: f64) -> Option<u64> {
 }
 
 /// The rows of a parameters block: a number each, edited in place, with a pin to give it.
-fn parameter_rows(node: &Node) -> Vec<Row> {
+fn parameter_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<Row> {
     let Some(block) = node.as_parameters() else {
         return Vec::new();
     };
@@ -7523,15 +7769,20 @@ fn parameter_rows(node: &Node) -> Vec<Row> {
             icon: NodeIcon::Setup,
             state: None,
             expander: None,
-            input: false,
+            input: true,
             output: true,
-            linked_from: None,
+            linked_from: (incoming.iter())
+                .find(|(slot, _)| {
+                    slot.len() == 2 && slot[0] == links::VALUE && slot[1] == parameter.name
+                })
+                .map(|(_, source)| source.clone()),
             collection: false,
             partial: false,
             widget: Some(RowWidget::Value(index)),
             tip: format!(
                 "{}, a {}: drag its pin to a parameter of another block, such as a length of \
-                 a mesh block, which then takes this value.",
+                 a mesh block or an exposed parameter of an analysis, which then takes this \
+                 value. Its left pin takes the value of another parameter of the same kind.",
                 parameter.name,
                 parameter.kind.label().to_lowercase()
             ),
@@ -8068,8 +8319,13 @@ impl Viewer {
         }
         let (units, space, refinement) = (block.units, block.space, block.refinement);
         let parameters = block.parameters.clone();
-        let (rect, label) =
-            ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), egui::Sense::hover());
+        let exposed = block.exposed.clone();
+        let block_primitive = block.primitive.clone();
+        let sense = match widget {
+            RowWidget::Exposed(_) => egui::Sense::click(),
+            _ => egui::Sense::hover(),
+        };
+        let (rect, label) = ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), sense);
         let link_color = wire_color(&[links::VALUE.to_owned()]);
         ui.painter().text(
             egui::pos2(rect.left() + 30.0, rect.center().y),
@@ -8088,7 +8344,24 @@ impl Viewer {
                 "\nIts value comes from {source}; change it there."
             ));
         }
-        label.on_hover_text(&tip);
+        let label = label.on_hover_text(&tip);
+        if let RowWidget::Exposed(key) = widget {
+            let name = (exposed.iter().find(|e| e.key == key)).map_or("", |e| e.name.as_str());
+            let mut text = name.to_owned();
+            label.context_menu(|ui| {
+                ui.label("Name");
+                let edit = ui.text_edit_singleline(&mut text);
+                if edit.lost_focus() && !text.trim().is_empty() && text.trim() != name {
+                    (self.actions).push(Action::RenameExposed(id, key, text.trim().to_owned()));
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Remove Parameter").clicked() {
+                    self.actions.push(Action::Unexpose(id, key));
+                    ui.close();
+                }
+            });
+        }
         let field = egui::Rect::from_min_max(
             egui::pos2(rect.right() - 122.0, rect.top() + 1.0),
             egui::pos2(rect.right() - 4.0, rect.bottom() - 1.0),
@@ -8100,10 +8373,35 @@ impl Viewer {
         );
         ui.spacing_mut().interact_size.y = field.height();
         match widget {
+            RowWidget::Exposed(key) => {
+                let Some(exposed) = exposed.iter().find(|e| e.key == key) else {
+                    return;
+                };
+                let (Some(mut value), Some(kind)) = (exposed.value, exposed.kind) else {
+                    ui.weak("gone");
+                    return;
+                };
+                if row.linked_from.is_some() {
+                    ui.disable();
+                }
+                let before = value;
+                let response = ui.add_sized(
+                    field.size(),
+                    crate::parameter_set::field(&mut value, kind, units),
+                );
+                response.on_hover_text(&tip);
+                if value != before {
+                    self.actions.push(Action::SetExposed(id, key, value));
+                }
+                return;
+            }
             RowWidget::Value(index) => {
                 let Some(mut parameter) = parameters.get(index).cloned() else {
                     return;
                 };
+                if row.linked_from.is_some() {
+                    ui.disable();
+                }
                 let before = parameter.value;
                 let response = ui.add_sized(
                     field.size(),
@@ -8136,7 +8434,7 @@ impl Viewer {
             }
             RowWidget::Param(_) | RowWidget::Element | RowWidget::ExportPath => {}
         }
-        let Some(mut primitive) = block.primitive.clone() else {
+        let Some(mut primitive) = block_primitive else {
             return;
         };
         let before = primitive.clone();
@@ -8198,7 +8496,7 @@ impl Viewer {
                         .response
                 }
             },
-            RowWidget::Refinement | RowWidget::Value(_) => return,
+            RowWidget::Refinement | RowWidget::Value(_) | RowWidget::Exposed(_) => return,
         };
         response.on_hover_text(&tip);
         if primitive != before {
@@ -9326,6 +9624,7 @@ mod tests {
                 density: Some(7850.0),
                 ..Default::default()
             }],
+            exposed: Vec::new(),
         };
         let mut node = Node::read(ProjectNode::Materials(set.clone()));
         assert_eq!(node.kind(), Kind::Materials);
@@ -9634,20 +9933,83 @@ mod tests {
             position: [3.0, 4.0],
             units: plx_model::UnitSystem::MmTonSC,
             parameters: vec![
-                Parameter::new("Length", ValueKind::Length, 0.3),
+                Parameter::new("Length", ValueKind::LENGTH, 0.3),
                 Parameter::new("Cells", ValueKind::Count, 12.0),
             ],
         };
         let node = Node::read(ProjectNode::Parameters(set.clone()));
         assert_eq!(node.kind(), Kind::Parameters);
-        let rows = parameter_rows(&node);
+        let rows = parameter_rows(&node, &[]);
         assert_eq!(rows[1].path, ["Value", "Cells"]);
-        assert!(rows.iter().all(|r| r.output && !r.input));
+        // A parameter gives its value and takes one from another parameter.
+        assert!(rows.iter().all(|r| r.output && r.input));
         let mut node = node;
         match node.written([3.0, 4.0]) {
             Some(ProjectNode::Parameters(written)) => assert_eq!(written, set),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn exposed_parameters_take_numbers_of_their_kind() {
+        let path = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let mut model = plx_model::FeModel::default();
+        let mut step = plx_model::Step::new_static("Step-1");
+        step.loads.push(plx_model::Load {
+            name: "Force-1".into(),
+            active: true,
+            visible: true,
+            region: plx_model::Region::Nodes(vec![1]),
+            kind: plx_model::LoadKind::force([0.0, -10.0, 0.0]),
+            amplitude: None,
+            factor_amplitude: None,
+        });
+        model.steps.push(step);
+        let force = plx_model::ValuePath::new(
+            plx_model::ItemRef::Load {
+                step: "Step-1".into(),
+                name: "Force-1".into(),
+            },
+            plx_model::Field::Y,
+        );
+        let key = model.expose(force.clone());
+        let data = ProjectAnalysis {
+            model,
+            ..Default::default()
+        };
+        let mut analysis = Node::analysis(1, "Analysis-1".into(), data);
+        let parameters = Node::new(
+            2,
+            "Parameters".into(),
+            Block::Parameters(ParametersBlock {
+                units: Default::default(),
+                parameters: vec![
+                    Parameter::new("Load", ValueKind::Quantity(Quantity::Force), -50.0),
+                    Parameter::new("Width", ValueKind::LENGTH, 0.1),
+                ],
+            }),
+        );
+        let fe = analysis.exposing_fe().unwrap();
+        let rows = exposed_rows(fe, &BTreeSet::new(), &[]);
+        assert_eq!(rows[0].path, [links::PARAMETERS]);
+        assert_eq!(rows[1].path, path(&["Parameters", &key.to_string()]));
+        assert!(rows[1].input && rows[1].text == "Force-1 Y");
+        assert!(analysis.set_exposed(key, -50.0));
+        assert!(!analysis.set_exposed(key, -50.0));
+        let fe = analysis.exposing_fe().unwrap();
+        assert_eq!(fe.value_at(&force), Some(-50.0));
+        let nodes = vec![analysis, parameters];
+        let slot = path(&["Parameters", &key.to_string()]);
+        assert_eq!(
+            refusal(&nodes, &[], 2, &path(&["Value", "Load"]), 1, &slot),
+            None
+        );
+        let length = refusal(&nodes, &[], 2, &path(&["Value", "Width"]), 1, &slot).unwrap();
+        assert!(
+            length.contains("a length") && length.contains("a force"),
+            "{length}"
+        );
+        assert_eq!(parameter_label(&nodes, 1, &slot), "Force-1 Y");
     }
 
     #[test]
@@ -9785,7 +10147,7 @@ mod tests {
             "Parameters".into(),
             Block::Parameters(ParametersBlock {
                 units: Default::default(),
-                parameters: vec![Parameter::new("Width", ValueKind::Length, 0.1)],
+                parameters: vec![Parameter::new("Width", ValueKind::LENGTH, 0.1)],
             }),
         );
         let nodes = vec![

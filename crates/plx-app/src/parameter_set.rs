@@ -8,7 +8,7 @@ use crate::numeric;
 pub enum ParameterSetResult {
     Open,
     /// Closed with OK: the parameters, each with the name it had before, if it had one, so
-    /// that links follow a renamed parameter; and the unit system lengths are shown in.
+    /// that links follow a renamed parameter; and the unit system values are shown in.
     Ok(Vec<(Option<String>, Parameter)>, UnitSystem),
     Cancel,
 }
@@ -63,7 +63,7 @@ impl ParameterSetEditor {
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Lengths in");
+                    ui.label("Shown in");
                     egui::ComboBox::from_id_salt("parameter set units")
                         .selected_text(self.units.label())
                         .width(200.0)
@@ -85,7 +85,7 @@ impl ParameterSetEditor {
                         .find(|n| !self.rows.iter().any(|(_, p)| &p.name == n))
                         .unwrap_or_default();
                     self.rows
-                        .push((None, Parameter::new(name, ValueKind::Length, 0.1)));
+                        .push((None, Parameter::new(name, ValueKind::LENGTH, 0.1)));
                 }
                 let problem = self.problem();
                 if let Some(problem) = &problem {
@@ -93,7 +93,8 @@ impl ParameterSetEditor {
                 }
                 ui.weak(
                     "Drag the pin of a parameter in the schematic to a parameter of another \
-                     block, such as the length of a mesh block: it then takes this value.",
+                     block, such as the length of a mesh block or a force exposed by an \
+                     analysis: it then takes this value.",
                 );
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
@@ -142,9 +143,10 @@ impl ParameterSetEditor {
                     );
                     egui::ComboBox::from_id_salt(("parameter kind", i))
                         .selected_text(parameter.kind.label())
-                        .width(90.0)
+                        .width(170.0)
+                        .height(320.0)
                         .show_ui(ui, |ui| {
-                            for kind in ValueKind::ALL {
+                            for kind in ValueKind::all() {
                                 ui.selectable_value(&mut parameter.kind, kind, kind.label());
                             }
                         });
@@ -164,7 +166,8 @@ impl ParameterSetEditor {
     }
 }
 
-/// The field of a parameter's value: a length in the unit system, a whole count or a factor.
+/// The field of a parameter's value: a quantity in the unit system, a whole count or a
+/// factor.
 pub fn field(value: &mut f64, kind: ValueKind, units: UnitSystem) -> egui::DragValue<'_> {
     match kind.quantity() {
         Some(quantity) => numeric::quantity(value, units, quantity),

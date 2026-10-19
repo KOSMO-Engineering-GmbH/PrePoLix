@@ -1,7 +1,7 @@
 //! The editor of an Optimizer block of the project schematic: what it varies and when it is
 //! done, with the iterations of its last run as a table and a diagram.
 
-use plx_model::{OptimizerKind, Quantity, UnitSystem, ValueKind};
+use plx_model::{OptimizerKind, UnitSystem, ValueKind};
 
 use crate::xy_plot::{self, XyData};
 
@@ -189,7 +189,7 @@ impl OptimizerEditor {
                     .selected_text(kind.label())
                     .width(200.0)
                     .show_ui(ui, |ui| {
-                        for choice in ValueKind::ALL {
+                        for choice in ValueKind::all() {
                             if ui.selectable_value(kind, choice, choice.label()).changed() {
                                 for value in values.iter_mut() {
                                     *value = choice.clean(*value);
@@ -253,9 +253,9 @@ fn history_table(ui: &mut egui::Ui, history: &History) {
 /// A value of an optimizer as text, in `units` for a length.
 pub fn shown(kind: ValueKind, value: f64, units: UnitSystem) -> String {
     match kind {
-        ValueKind::Length => {
-            let shown = units.shown(value, Quantity::Length);
-            let unit = units.unit(Quantity::Length);
+        ValueKind::Quantity(quantity) => {
+            let shown = units.shown(value, quantity);
+            let unit = units.unit(quantity);
             format!("{} {unit}", crate::results::format_value(shown as f32))
         }
         ValueKind::Count => format!("{value:.0}"),
