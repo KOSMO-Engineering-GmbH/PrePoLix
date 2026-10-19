@@ -379,7 +379,7 @@ fn pixels(data: &[u8], [width, height]: [u32; 2], row: usize, order: [usize; 4])
     let pixels = data
         .chunks(row)
         .take(height as usize)
-        .flat_map(|line| line[..width as usize * 4].chunks_exact(4))
+        .flat_map(|line| line[..width as usize * 4].as_chunks::<4>().0)
         .map(|c| {
             egui::Color32::from_rgba_premultiplied(
                 c[order[0]],
