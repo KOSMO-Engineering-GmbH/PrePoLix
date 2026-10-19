@@ -171,10 +171,13 @@ impl ParameterSetEditor {
 pub fn field(value: &mut f64, kind: ValueKind, units: UnitSystem) -> egui::DragValue<'_> {
     match kind.quantity() {
         Some(quantity) => numeric::quantity(value, units, quantity),
-        None if kind == ValueKind::Count => egui::DragValue::new(value)
+        None if kind == ValueKind::Count => crate::numeric::count(value)
             .range(1.0..=1e6)
             .speed(0.1)
             .fixed_decimals(0),
-        None => egui::DragValue::new(value).speed(0.01).max_decimals(4),
+        None => egui::DragValue::new(value)
+            .custom_parser(crate::numeric::evaluate)
+            .speed(0.01)
+            .max_decimals(4),
     }
 }

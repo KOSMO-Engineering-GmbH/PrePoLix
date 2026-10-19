@@ -704,7 +704,7 @@ fn moving_rows(ui: &mut Ui, moving: &mut MovingLoad, fe: &FeModel, two_d: bool, 
     ui.end_row();
     ui.label("Positions");
     ui.add(
-        egui::DragValue::new(&mut moving.positions)
+        crate::numeric::count(&mut moving.positions)
             .range(1..=10_000)
             .speed(0.2),
     )
@@ -4096,7 +4096,7 @@ pub fn creep_coefficient(creep: &mut plx_model::Creep, units: UnitSystem) -> egu
         }
         *a * factor
     })
-    .custom_parser(numeric::parse_number)
+    .custom_parser(numeric::evaluate)
     .custom_formatter(|v, _| numeric::format_physical(v))
     .speed(0.0)
 }
@@ -4687,10 +4687,10 @@ fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, cyclic: &Cycli
     ui.add_enabled_ui(set, |ui| {
         ui.horizontal(|ui| {
             ui.label("from");
-            ui.add(egui::DragValue::new(&mut values[0]).range(0..=highest));
+            ui.add(crate::numeric::count(&mut values[0]).range(0..=highest));
             ui.label("to");
             let low = values[0];
-            ui.add(egui::DragValue::new(&mut values[1]).range(low..=highest));
+            ui.add(crate::numeric::count(&mut values[1]).range(low..=highest));
         });
     });
     *range = set.then_some(values);

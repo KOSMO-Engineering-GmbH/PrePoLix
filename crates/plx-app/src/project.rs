@@ -9256,6 +9256,7 @@ impl Viewer {
                 let response = ui.add_sized(
                     field.size(),
                     egui::DragValue::new(&mut value)
+                        .custom_parser(crate::numeric::evaluate)
                         .range(0.05..=20.0)
                         .speed(0.01)
                         .max_decimals(3),
@@ -9284,7 +9285,7 @@ impl Viewer {
                 ),
                 Some(ParamSlot::Count(value)) => ui.add_sized(
                     field.size(),
-                    egui::DragValue::new(value).range(1..=10_000).speed(0.1),
+                    crate::numeric::count(value).range(1..=10_000).speed(0.1),
                 ),
                 None => return,
             },

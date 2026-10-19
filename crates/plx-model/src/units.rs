@@ -401,11 +401,13 @@ impl UnitSystem {
 
     /// Reads a value typed by the user, in this system's units unless the text names other
     /// ones: "3 cm", "3cm" and "30" all give 30 in a millimetre model. The number takes `.`
-    /// or `,` as decimal separator and e-notation ([`parse_number`]); the unit may combine
+    /// or `,` as decimal separator and e-notation ([`parse_number`]) and may be a calculation
+    /// ([`evaluate`]) whose result the unit applies to, e.g. "100/3 mm"; the unit may combine
     /// units with prefixes, products, quotients and powers, e.g. "kN·m", "Nmm", "N/mm²",
     /// "200 GPa", "7,85 g/cm³", "5°".
     pub fn parse_value(self, text: &str, quantity: Quantity) -> Result<f64, String> {
-        let (number, unit) = split_number(text).ok_or_else(|| format!("Not a number: {text}"))?;
+        let (number, unit) =
+            split_expression(text).ok_or_else(|| format!("Not a number: {text}"))?;
         if unit.is_empty() {
             return Ok(number);
         }
@@ -464,9 +466,138 @@ pub fn parse_number(text: &str) -> Option<f64> {
     text.parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
-/// The number at the start of the text and the unit after it: the longest start that is a
-/// number, so that "2e5Pa" is 2e5 Pa.
-fn split_number(text: &str) -> Option<(f64, &str)> {
+/// Evaluates simple arithmetic typed by the user, e.g. "1/30" or "2*(3,5-1)": numbers as
+/// [`parse_number`] reads them, `+ - * /` (also `−`, `×`, `÷`), signs and parentheses. Only
+/// the result counts; it must be finite, so "1/0" is rejected.
+pub fn evaluate(text: &str) -> Option<f64> {
+    let tokens = tokenize(text)?;
+    let mut parser = Calculation {
+        tokens: &tokens,
+        at: 0,
+    };
+    let value = parser.sum()?;
+    (parser.at == tokens.len() && value.is_finite()).then_some(value)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Token {
+    Number(f64),
+    Operator(char),
+}
+
+fn tokenize(text: &str) -> Option<Vec<Token>> {
+    let mut tokens = Vec::new();
+    let mut chars = text.char_indices().peekable();
+    while let Some((start, c)) = chars.next() {
+        match c {
+            c if c.is_whitespace() => {}
+            '+' | '(' | ')' | '*' | '/' => tokens.push(Token::Operator(c)),
+            '-' | '\u{2212}' => tokens.push(Token::Operator('-')),
+            '×' | '·' => tokens.push(Token::Operator('*')),
+            '÷' => tokens.push(Token::Operator('/')),
+            c if c.is_ascii_digit() || c == '.' || c == ',' => {
+                let mut end = start + c.len_utf8();
+                while let Some(&(i, c)) = chars.peek() {
+                    let exponent = (c == 'e' || c == 'E') && {
+                        // An exponent only when digits follow, possibly after a sign.
+                        let rest = &text[i + 1..];
+                        let rest = rest.strip_prefix(['+', '-']).unwrap_or(rest);
+                        rest.starts_with(|c: char| c.is_ascii_digit())
+                    };
+                    if c.is_ascii_digit() || c == '.' || c == ',' {
+                        end = i + 1;
+                        chars.next();
+                    } else if exponent {
+                        chars.next();
+                        if let Some(&(j, '+' | '-')) = chars.peek() {
+                            end = j + 1;
+                            chars.next();
+                        }
+                        while let Some(&(j, c)) = chars.peek()
+                            && c.is_ascii_digit()
+                        {
+                            end = j + 1;
+                            chars.next();
+                        }
+                        break;
+                    } else {
+                        break;
+                    }
+                }
+                tokens.push(Token::Number(parse_number(&text[start..end])?));
+            }
+            _ => return None,
+        }
+    }
+    Some(tokens)
+}
+
+/// A recursive descent over the tokens of [`evaluate`].
+struct Calculation<'a> {
+    tokens: &'a [Token],
+    at: usize,
+}
+
+impl Calculation<'_> {
+    fn next_operator(&mut self, of: &str) -> Option<char> {
+        match self.tokens.get(self.at) {
+            Some(&Token::Operator(c)) if of.contains(c) => {
+                self.at += 1;
+                Some(c)
+            }
+            _ => None,
+        }
+    }
+
+    fn sum(&mut self) -> Option<f64> {
+        let mut value = self.product()?;
+        while let Some(op) = self.next_operator("+-") {
+            let term = self.product()?;
+            value = if op == '+' {
+                value + term
+            } else {
+                value - term
+            };
+        }
+        Some(value)
+    }
+
+    fn product(&mut self) -> Option<f64> {
+        let mut value = self.factor()?;
+        while let Some(op) = self.next_operator("*/") {
+            let factor = self.factor()?;
+            value = if op == '*' {
+                value * factor
+            } else {
+                value / factor
+            };
+        }
+        Some(value)
+    }
+
+    fn factor(&mut self) -> Option<f64> {
+        if let Some(sign) = self.next_operator("+-") {
+            let value = self.factor()?;
+            return Some(if sign == '-' { -value } else { value });
+        }
+        if self.next_operator("(").is_some() {
+            let value = self.sum()?;
+            self.next_operator(")")?;
+            return Some(value);
+        }
+        match self.tokens.get(self.at) {
+            Some(&Token::Number(value)) => {
+                self.at += 1;
+                Some(value)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The calculation at the start of the text and the unit after it: the longest start that
+/// [`evaluate`]s, so that "2e5Pa" is 2e5 Pa and "100/3 mm" is 33.3 mm.
+fn split_expression(text: &str) -> Option<(f64, &str)> {
     let text = text.trim();
     let ends: Vec<usize> = (text.char_indices().map(|(i, _)| i))
         .skip(1)
@@ -474,7 +605,7 @@ fn split_number(text: &str) -> Option<(f64, &str)> {
         .collect();
     ends.into_iter()
         .rev()
-        .find_map(|end| Some((parse_number(&text[..end])?, text[end..].trim())))
+        .find_map(|end| Some((evaluate(&text[..end])?, text[end..].trim())))
 }
 
 /// A unit read from text: its size in SI units and what it measures.
@@ -761,6 +892,42 @@ mod tests {
     fn parses(units: UnitSystem, text: &str, quantity: Quantity, expected: f64) {
         let value = units.parse_value(text, quantity).unwrap();
         assert!(close(value, expected), "{text}: {value} != {expected}");
+    }
+
+    #[test]
+    fn evaluates_arithmetic() {
+        assert_eq!(evaluate("1/30"), Some(1.0 / 30.0));
+        assert_eq!(evaluate("2*(3,5-1)"), Some(5.0));
+        assert_eq!(evaluate(" 1 + 2 * 3 "), Some(7.0));
+        assert_eq!(evaluate("(1+2)*3"), Some(9.0));
+        assert_eq!(evaluate("8/4/2"), Some(1.0));
+        assert_eq!(evaluate("10-4-3"), Some(3.0));
+        assert_eq!(evaluate("-2*-3"), Some(6.0));
+        assert_eq!(evaluate("-(1,5+0.5)"), Some(-2.0));
+        assert_eq!(evaluate("\u{2212}3 × 2 ÷ 4"), Some(-1.5));
+        assert_eq!(evaluate("2e5/2"), Some(1e5));
+        assert_eq!(evaluate("2,1E-3*1e+3"), Some(2.1));
+        // A plain number is its own result, unchanged.
+        assert_eq!(evaluate("7,85e-9"), Some(7.85e-9));
+        assert_eq!(evaluate("0.1"), Some(0.1));
+        for bad in [
+            "", "1/0", "0/0", "1+", "*2", "(1+2", "1+2)", "()", "1 2", "2(3)", "abc", "1e999",
+            "1.000,5", "e5",
+        ] {
+            assert_eq!(evaluate(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn units_apply_to_a_calculation() {
+        let value = MmTonSC.parse_value("100/4 cm", Length).unwrap();
+        assert!(close(value, 250.0), "{value}");
+        assert_eq!(MmTonSC.parse_value("1/30", Length), Ok(1.0 / 30.0));
+        assert_eq!(MmTonSC.parse_value("(2+3)mm", Length), Ok(5.0));
+        let value = MKgSC.parse_value("2e5/2Pa", Pressure).unwrap();
+        assert!(close(value, 1e5), "{value}");
+        assert!(MmTonSC.parse_value("1/0 mm", Length).is_err());
+        assert!(MmTonSC.parse_value("2 mm + 3", Length).is_err());
     }
 
     #[test]

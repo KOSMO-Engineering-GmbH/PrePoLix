@@ -670,7 +670,7 @@ impl MeshItemEditor {
                     }
                     ExtrudeLayers::NumberOfElements(n) => {
                         ui.label("Number of elements");
-                        ui.add(egui::DragValue::new(n).range(1..=10_000));
+                        ui.add(crate::numeric::count(n).range(1..=10_000));
                         ui.end_row();
                     }
                     ExtrudeLayers::MultiLayered { .. } => {

@@ -171,10 +171,10 @@ fn cyclic_symmetry_rows(ui: &mut Ui, model: &Model, cyclic: &mut Option<CyclicSy
         return;
     };
     ui.label("Number of sectors");
-    ui.add(egui::DragValue::new(&mut cyclic.sectors).range(2..=10_000));
+    ui.add(crate::numeric::count(&mut cyclic.sectors).range(2..=10_000));
     ui.end_row();
     ui.label("Displayed sectors");
-    ui.add(egui::DragValue::new(&mut cyclic.graph_sectors).range(1..=cyclic.sectors.max(1)))
+    ui.add(crate::numeric::count(&mut cyclic.graph_sectors).range(1..=cyclic.sectors.max(1)))
         .on_hover_text("Sectors the results are expanded to; all sectors show the whole part.");
     ui.end_row();
     let units = model.fe.properties.units;

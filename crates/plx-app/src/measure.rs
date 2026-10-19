@@ -395,7 +395,7 @@ impl MeasureEditor {
             } => {
                 field_and_component(ui, offered.map(|o| o.fields.as_slice()), field, component);
                 ui.label("Node");
-                ui.add(egui::DragValue::new(node).range(1..=u32::MAX));
+                ui.add(crate::numeric::count(node).range(1..=u32::MAX));
                 ui.end_row();
             }
             MeasureKind::History {
@@ -421,7 +421,7 @@ impl MeasureEditor {
             }
             MeasureKind::Eigenfrequency { mode } => {
                 ui.label("Mode");
-                ui.add(egui::DragValue::new(mode).range(1..=10_000));
+                ui.add(crate::numeric::count(mode).range(1..=10_000));
                 ui.end_row();
             }
         }

@@ -195,6 +195,7 @@ impl ExplodedDialog {
                     .on_hover_text("How far apart the parts are at scale factor 1");
                 ui.add(
                     egui::DragValue::new(&mut self.draft.magnification)
+                        .custom_parser(crate::numeric::evaluate)
                         .speed(0.05)
                         .range(1.0..=method.max_magnification())
                         .max_decimals(3),
@@ -203,6 +204,7 @@ impl ExplodedDialog {
                 ui.label("Scale factor");
                 ui.add(
                     egui::DragValue::new(&mut self.draft.scale_factor)
+                        .custom_parser(crate::numeric::evaluate)
                         .speed(0.005)
                         .range(0.0..=1.0)
                         .max_decimals(3),
