@@ -6535,7 +6535,7 @@ fn display_controls(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
     if tensor && shown != Representation::Contour {
         egui::ComboBox::from_id_salt("principal direction")
             .selected_text(display.principal.label())
-            .width(50.0)
+            .width(70.0)
             .show_ui(ui, |ui| {
                 for choice in plx_results::Principal::ALL {
                     ui.selectable_value(&mut display.principal, choice, choice.label());

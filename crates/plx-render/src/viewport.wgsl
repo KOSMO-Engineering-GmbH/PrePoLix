@@ -18,7 +18,7 @@ struct Globals {
     // Colour of the wireframe of the undeformed shape in rgb.
     wireframe: vec4<f32>,
     // x: LIC source, 0 none, 1 vector, 2 tensor; y: principal value of a tensor, 0 to 2 from
-    // the largest; z: grain size in world units; w: size of a pixel in world units.
+    // the largest, 3 the largest in magnitude; z: grain size in world units; w: size of a pixel in world units.
     lic: vec4<f32>,
     // x: streak length in pixels, y: contrast, z: mix.
     lic_params: vec4<f32>,
@@ -241,13 +241,21 @@ fn source_direction(a: vec3<f32>, b: vec3<f32>) -> vec4<f32> {
     }
     let values = principal_values(a, b);
     let scale = max(abs(values.x), max(abs(values.y), abs(values.z)));
-    let which = u32(globals.lic.y);
+    var which = u32(globals.lic.y);
+    // The largest in magnitude: tension where it pulls, compression where it pushes. Where
+    // both are equally large the direction turns by 90 degrees, so the streaks fade there.
+    var switch_gap = 1e30;
+    if which == 3u {
+        which = select(0u, 2u, abs(values.z) > abs(values.x));
+        switch_gap = abs(abs(values.x) - abs(values.z));
+    }
     var gap = values.x - values.y;
     if which == 1u {
         gap = min(values.x - values.y, values.y - values.z);
     } else if which == 2u {
         gap = values.y - values.z;
     }
+    gap = min(gap, switch_gap);
     // Nearly repeated principal values leave the direction open, as in unloaded or
     // hydrostatic regions.
     let mask = smoothstep(0.002, 0.01, scale) * smoothstep(0.02, 0.08, gap / max(scale, 1e-12));

@@ -14,22 +14,45 @@ pub enum Principal {
     Max,
     Mid,
     Min,
+    /// The principal value of the largest magnitude, Max where it pulls and Min where it
+    /// pushes: the load path through tension and compression alike, as SGN_MAX_ABS_PRI.
+    AbsMax,
 }
 
 impl Principal {
-    pub const ALL: [Principal; 3] = [Principal::Max, Principal::Mid, Principal::Min];
+    pub const ALL: [Principal; 4] = [
+        Principal::Max,
+        Principal::Mid,
+        Principal::Min,
+        Principal::AbsMax,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Principal::Max => "Max",
             Principal::Mid => "Mid",
             Principal::Min => "Min",
+            Principal::AbsMax => "Abs Max",
+        }
+    }
+
+    /// Which of the principal values, ordered largest first, this one is: Max or Min for
+    /// [`Principal::AbsMax`], whichever is larger in magnitude (Max on a tie).
+    pub fn pick(self, [p1, _, p3]: [f64; 3]) -> Principal {
+        match self {
+            Principal::AbsMax if p3.abs() > p1.abs() => Principal::Min,
+            Principal::AbsMax => Principal::Max,
+            which => which,
         }
     }
 
     /// Index into the principal values ordered largest first.
-    fn index(self) -> usize {
-        self as usize
+    fn index(self, values: [f64; 3]) -> usize {
+        match self.pick(values) {
+            Principal::Max | Principal::AbsMax => 0,
+            Principal::Mid => 1,
+            Principal::Min => 2,
+        }
     }
 }
 
@@ -80,7 +103,8 @@ fn signed(v: DVec3) -> DVec3 {
 pub fn principal_direction(t: [f64; 6], which: Principal) -> ([f64; 3], f64) {
     let values = principal_values(t);
     let [p1, p2, p3] = values;
-    let value = values[which.index()];
+    let which = which.pick(values);
+    let value = values[which.index(values)];
     let scale = values.iter().fold(0.0f64, |m, v| m.max(v.abs()));
     let tolerance = REPEATED * scale;
     if !scale.is_finite() || p1 - p3 <= tolerance {
@@ -90,17 +114,17 @@ pub fn principal_direction(t: [f64; 6], which: Principal) -> ([f64; 3], f64) {
         let min = eigenvector(t, p3);
         let max = normal_to(min);
         match which {
-            Principal::Max => max,
             Principal::Mid => min.cross(max),
             Principal::Min => min,
+            Principal::Max | Principal::AbsMax => max,
         }
     } else if p2 - p3 <= tolerance {
         let max = eigenvector(t, p1);
         let mid = normal_to(max);
         match which {
-            Principal::Max => max,
             Principal::Mid => mid,
             Principal::Min => max.cross(mid),
+            Principal::Max | Principal::AbsMax => max,
         }
     } else {
         eigenvector(t, value)
@@ -111,6 +135,8 @@ pub fn principal_direction(t: [f64; 6], which: Principal) -> ([f64; 3], f64) {
 /// How clearly a principal direction is defined: the gap between its principal value and the
 /// nearest other one over the largest magnitude, from 0 (repeated value, any direction in a
 /// plane or all) to 2 (equal and opposite neighbours, such as pure shear's Max and Min have 1).
+/// [`Principal::AbsMax`] also turns by 90 degrees where Max and Min are equally large, so
+/// there it is the gap between their magnitudes too.
 pub fn anisotropy([p1, p2, p3]: [f64; 3], which: Principal) -> f64 {
     let scale = p1.abs().max(p2.abs()).max(p3.abs());
     if !scale.is_finite() {
@@ -119,12 +145,16 @@ pub fn anisotropy([p1, p2, p3]: [f64; 3], which: Principal) -> f64 {
     if scale == 0.0 {
         return 0.0;
     }
-    let gap = match which {
-        Principal::Max => p1 - p2,
+    let gap = match which.pick([p1, p2, p3]) {
+        Principal::Max | Principal::AbsMax => p1 - p2,
         Principal::Mid => (p1 - p2).min(p2 - p3),
         Principal::Min => p2 - p3,
     };
-    gap / scale
+    let switch = match which {
+        Principal::AbsMax => (p1.abs() - p3.abs()).abs(),
+        _ => f64::INFINITY,
+    };
+    gap.min(switch) / scale
 }
 
 /// Where a directional display takes its directions from.
@@ -260,9 +290,25 @@ mod tests {
         assert!(min.iter().cloned().fold(f64::MIN, f64::max) > 0.0);
         assert!((value + 50.0).abs() < 1e-9);
         let values = principal_values(t);
-        for which in Principal::ALL {
+        for which in [Principal::Max, Principal::Mid, Principal::Min] {
             assert!((anisotropy(values, which) - 1.0).abs() < 1e-9);
         }
+        // Tension and compression are equally large: Abs Max could take either.
+        assert!(anisotropy(values, Principal::AbsMax) < 1e-9);
+    }
+
+    #[test]
+    fn abs_max_follows_tension_and_compression() {
+        // Uniaxial tension along x, then compression along y.
+        let (tension, value) =
+            principal_direction([80.0, 0.0, 0.0, 0.0, 0.0, 0.0], Principal::AbsMax);
+        assert_eq!((tension, value), ([1.0, 0.0, 0.0], 80.0));
+        let pushed = [0.0, -80.0, 0.0, 0.0, 0.0, 0.0];
+        let (compression, value) = principal_direction(pushed, Principal::AbsMax);
+        assert_eq!((compression, value), ([0.0, 1.0, 0.0], -80.0));
+        // Max alone has no direction there: 0 is repeated.
+        assert!(anisotropy(principal_values(pushed), Principal::Max) < 1e-9);
+        assert_eq!(anisotropy(principal_values(pushed), Principal::AbsMax), 1.0);
     }
 
     #[test]
@@ -285,9 +331,13 @@ mod tests {
         let directions = Principal::ALL.map(|which| {
             let (v, lambda) = principal_direction(t, which);
             assert!(is_eigenpair(t, v, lambda), "{which:?}");
-            assert_eq!(lambda, values[which.index()]);
+            assert_eq!(lambda, values[which.index(values)]);
             DVec3::from(v)
         });
+        assert_eq!(
+            directions[3], directions[0],
+            "40 outweighs the smallest value"
+        );
         assert!(directions[0].dot(directions[1]).abs() < 1e-9);
         assert!(directions[1].dot(directions[2]).abs() < 1e-9);
     }
@@ -324,10 +374,11 @@ mod tests {
     fn sources_of_vector_and_tensor_fields() {
         let increment = increment();
         let sources = VectorSource::available(&increment);
-        assert_eq!(sources.len(), 4);
+        assert_eq!(sources.len(), 5);
         assert_eq!(sources[0].label(), "DISP");
         assert_eq!(sources[1].label(), "Principal Max of STRESS");
-        assert!(!sources[0].is_line_field() && sources[3].is_line_field());
+        assert!(!sources[0].is_line_field() && sources[4].is_line_field());
+        assert_eq!(sources[4].label(), "Principal Abs Max of STRESS");
 
         let disp = sources[0].sample(&increment).unwrap();
         assert_eq!(disp[0], ([0.6, 0.0, 0.8], 5.0));

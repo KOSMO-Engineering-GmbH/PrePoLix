@@ -48,7 +48,7 @@ struct Globals {
     /// Colour of the wireframe of the undeformed shape in rgb.
     wireframe: [f32; 4],
     /// x: LIC source, 0 none, 1 vector, 2 tensor; y: principal value of a tensor, 0 to 2
-    /// from the largest; z: grain size in world units; w: size of a pixel in world units.
+    /// from the largest, 3 the largest in magnitude; z: grain size in world units; w: size of a pixel in world units.
     lic: [f32; 4],
     /// x: streak length in pixels, y: contrast, z: mix.
     lic_params: [f32; 4],
@@ -108,7 +108,7 @@ pub enum LicSource {
     /// A vector, in the first three values.
     Vector,
     /// A symmetric tensor, whose principal direction the streaks follow: 0 for the largest
-    /// principal value, 1 the middle, 2 the smallest.
+    /// principal value, 1 the middle, 2 the smallest, 3 the largest in magnitude.
     Principal(u32),
 }
 
@@ -429,7 +429,7 @@ impl ViewportRenderer {
             lic: lic.map_or([0.0; 4], |lic| {
                 let (source, which) = match lic.source {
                     LicSource::Vector => (1.0, 0.0),
-                    LicSource::Principal(which) => (2.0, which.min(2) as f32),
+                    LicSource::Principal(which) => (2.0, which.min(3) as f32),
                 };
                 [source, which, lic.grain, pixel_size]
             }),
