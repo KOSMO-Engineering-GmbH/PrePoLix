@@ -1414,3 +1414,98 @@ fn bodies_of_revolution_are_meshed_with_hexahedra_turned_about_their_axis() {
         }
     }
 }
+
+/// A STEP file of one rounded rectangle 40 x 20 mm at the height `z`, tilted by `tilt`
+/// radians about the x axis.
+fn flat_step_file(z: f64, tilt: f64) -> TempFile {
+    let file = TempFile::new("step");
+    with_gmsh(|gmsh| {
+        let face = gmsh.add_rectangle([0.0, 0.0, z], [40.0, 20.0], 3.0)?;
+        let (c, s) = (tilt.cos(), tilt.sin());
+        #[rustfmt::skip]
+        let matrix = [
+            1.0, 0.0, 0.0, 0.0,
+            0.0, c, -s, s * z,
+            0.0, s, c, z - c * z,
+        ];
+        gmsh.affine_transform(&[(2, face)], &matrix)?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    file
+}
+
+fn z_range(display: &GeometryDisplay) -> (f64, f64) {
+    let (min, max) = display.mesh.bounds().unwrap();
+    (min[2], max[2])
+}
+
+#[test]
+fn flat_geometry_is_moved_into_the_xy_plane() {
+    if !gmsh_available() {
+        return;
+    }
+    let file = flat_step_file(5.0, 0.0);
+    let import = import_cad(&file.0, UnitSystem::Unitless).unwrap();
+    let (low, high) = z_range(&import.display);
+    assert!(low.abs() < 1e-9 && high.abs() < 1e-9, "{low} {high}");
+    assert!((width(&import.display) - 40.0).abs() < 1e-6);
+    // The face is moved with its edges, not copied apart from them.
+    let level = import_cad(&flat_step_file(0.0, 0.0).0, UnitSystem::Unitless).unwrap();
+    assert_eq!(import.display.faces, 1);
+    assert_eq!(import.display.edges, level.display.edges);
+    assert_eq!(import.notes.len(), 1, "{:?}", import.notes);
+    assert!(import.notes[0].contains("z = 5;"), "{:?}", import.notes);
+    // In a unit system, the geometry is stored in metres and the note names the unit.
+    let import = import_cad(&file.0, UnitSystem::MmTonSC).unwrap();
+    let (low, high) = z_range(&import.display);
+    assert!(low.abs() < 1e-12 && high.abs() < 1e-12, "{low} {high}");
+    assert!(import.notes[0].contains("z = 5 mm"), "{:?}", import.notes);
+    // Below the plane, it is moved up.
+    let below = import_cad(&flat_step_file(-12.5, 0.0).0, UnitSystem::Unitless).unwrap();
+    assert!(z_range(&below.display).0.abs() < 1e-9);
+    assert!(below.notes[0].contains("z = -12.5"), "{:?}", below.notes);
+}
+
+#[test]
+fn geometry_off_a_plane_z_const_stays_put() {
+    if !gmsh_available() {
+        return;
+    }
+    // Already in the x-y plane.
+    let level = import_cad(&flat_step_file(0.0, 0.0).0, UnitSystem::Unitless).unwrap();
+    assert!(level.notes.is_empty(), "{:?}", level.notes);
+    // A tilted face is flat, but not parallel to the x-y plane.
+    let tilted = import_cad(&flat_step_file(5.0, 0.5).0, UnitSystem::Unitless).unwrap();
+    assert!(tilted.notes.is_empty(), "{:?}", tilted.notes);
+    let (low, high) = z_range(&tilted.display);
+    assert!((low - 5.0).abs() < 1e-6 && (high - 5.0 - 20.0 * 0.5f64.sin()).abs() < 1e-6);
+    // Solids keep their place.
+    let blocks = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless).unwrap();
+    assert!(blocks.notes.is_empty(), "{:?}", blocks.notes);
+}
+
+#[test]
+fn flat_files_added_to_a_geometry_are_moved_into_the_xy_plane() {
+    if !gmsh_available() {
+        return;
+    }
+    let base = rectangle([100.0, 0.0, 0.0], [30.0, 10.0], 0.0);
+    let file = flat_step_file(8.0, 0.0);
+    let addition = add_cad_files(
+        Some(&base),
+        std::slice::from_ref(&file.0),
+        UnitSystem::Unitless,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(addition.added.len(), 1);
+    assert_eq!(
+        addition.import.notes.len(),
+        1,
+        "{:?}",
+        addition.import.notes
+    );
+    let (low, high) = z_range(&addition.import.display);
+    assert!(low.abs() < 1e-9 && high.abs() < 1e-9, "{low} {high}");
+}
