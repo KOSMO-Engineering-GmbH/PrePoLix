@@ -3,15 +3,28 @@
 use egui::emath::Numeric;
 use plx_model::{Quantity, UnitSystem};
 
-pub use plx_model::units::parse_number;
+pub use plx_model::units::{evaluate, parse_number};
 
-/// A [`egui::DragValue`] that parses typed input with [`parse_number`] and shows the value
-/// with all its digits ([`format_physical`]). egui would show only as many decimals as its
-/// drag speed resolves, so 0.005 would read "0.01" and be stored so on the next edit.
+/// A [`egui::DragValue`] that reads typed input with [`evaluate`], so "1/30" may be typed for
+/// its result, and shows the value with all its digits ([`format_physical`]). egui would show
+/// only as many decimals as its drag speed resolves, so 0.005 would read "0.01" and be stored
+/// so on the next edit.
 pub fn drag_value<Num: Numeric>(value: &mut Num) -> egui::DragValue<'_> {
     egui::DragValue::new(value)
-        .custom_parser(parse_number)
+        .custom_parser(evaluate)
         .custom_formatter(|v, _| format_physical(v))
+}
+
+/// A [`egui::DragValue`] for a whole number such as a count, which takes a calculation
+/// ([`evaluate`]) as well, but only one with a whole result: "12/4" gives 3, "10/4" is
+/// rejected rather than cut to 2.
+pub fn count<Num: Numeric>(value: &mut Num) -> egui::DragValue<'_> {
+    egui::DragValue::new(value).custom_parser(parse_count)
+}
+
+/// A whole number typed, possibly as a calculation ([`count`]).
+pub fn parse_count(text: &str) -> Option<f64> {
+    evaluate(text).filter(|v| v.fract() == 0.0)
 }
 
 /// A field for a value of a physical quantity, stored in SI units ([`plx_model::STORED`]) and
@@ -71,7 +84,7 @@ pub fn format_physical(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_physical, parse_number};
+    use super::{format_physical, parse_count, parse_number};
     use plx_model::{Quantity, UnitSystem};
 
     #[test]
@@ -123,5 +136,13 @@ mod tests {
         assert_eq!(parse_number("inf"), None);
         assert_eq!(parse_number("NaN"), None);
         assert_eq!(parse_number("1e999"), None);
+    }
+
+    #[test]
+    fn counts_take_whole_results_only() {
+        assert_eq!(parse_count("12/4"), Some(3.0));
+        assert_eq!(parse_count("2*(3+4)"), Some(14.0));
+        assert_eq!(parse_count("10/4"), None);
+        assert_eq!(parse_count("x"), None);
     }
 }

@@ -760,6 +760,7 @@ impl EditDialog {
                             ui.add_enabled(
                                 draft.on_path,
                                 egui::DragValue::new(&mut draft.height)
+                                    .custom_parser(crate::numeric::evaluate)
                                     .range(-2000.0..=2000.0)
                                     .suffix(" px"),
                             );

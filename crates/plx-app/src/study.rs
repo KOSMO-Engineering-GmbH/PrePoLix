@@ -90,9 +90,7 @@ impl StudyView {
             (self.inputs.get(column)).and_then(|(_, kind)| kind.and_then(ValueKind::quantity));
         match quantity {
             Some(q) => Ok(self.units.stored(self.units.parse_value(text, q)?, q)),
-            None => {
-                crate::numeric::parse_number(text).ok_or_else(|| format!("Not a number: {text}"))
-            }
+            None => crate::numeric::evaluate(text).ok_or_else(|| format!("Not a number: {text}")),
         }
     }
 }
@@ -450,7 +448,7 @@ impl StudyEditor {
                                     ui.add(number_field(&mut rule.to, *kind, view.units));
                                     ui.weak(view.input_unit(column));
                                     ui.label("values");
-                                    ui.add(egui::DragValue::new(&mut rule.count).range(1..=1000));
+                                    ui.add(crate::numeric::count(&mut rule.count).range(1..=1000));
                                 }
                             });
                             ui.end_row();

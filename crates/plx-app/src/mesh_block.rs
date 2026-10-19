@@ -204,7 +204,7 @@ fn count_row(ui: &mut egui::Ui, axes: &[&str], counts: &mut [u32]) {
             ui.label(*axis);
             ui.add_sized(
                 [90.0, 18.0],
-                egui::DragValue::new(count).range(1..=10_000).speed(0.1),
+                crate::numeric::count(count).range(1..=10_000).speed(0.1),
             );
         }
     });
