@@ -44,11 +44,13 @@ transformations.
     defined under #ui("Features"); cylindrical systems give radial, tangential and axial
     components.],
   [Principal Direction], [The direction of the largest (#ui("Max")), middle (#ui("Mid")) or
-    smallest (#ui("Min")) principal value of a tensor field such as `STRESS` or `TOSTRAIN`, as a
-    vector field: `X`, `Y`, `Z` of the unit vector, `VALUE` the principal value with its sign
+    smallest (#ui("Min")) principal value of a tensor field such as `STRESS` or `TOSTRAIN`, or of
+    the one largest in magnitude (#ui("Abs Max"): #ui("Max") where the part is pulled,
+    #ui("Min") where it is pushed, like `SGN_MAX_ABS_PRI`), as a vector field: `X`, `Y`, `Z` of the unit vector, `VALUE` the principal value with its sign
     and `ALL` its magnitude.],
   [Anisotropy], [How clearly that principal direction is defined: the gap between its principal
-    value and the nearest other one, divided by the largest magnitude. 0 means the direction is
+    value and the nearest other one, divided by the largest magnitude; for #ui("Abs Max") also
+    the gap between the magnitudes of #ui("Max") and #ui("Min"). 0 means the direction is
     undefined, for example under hydrostatic pressure or where the material carries no stress;
     uniaxial tension and pure shear give 1.],
 )

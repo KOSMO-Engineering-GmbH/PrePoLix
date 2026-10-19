@@ -49,7 +49,8 @@ to the results. Results of an analysis run from PrePoLix always have it.
     colour scale (@color-scale).],
   [Display], [#ui("Contour"), #ui("Arrows") (@arrows) or #ui("LIC") streaks (@lic) along the
     directions of the shown field. For a tensor field such as `STRESS` the box next to it picks
-    the principal direction: #ui("Max"), #ui("Mid") or #ui("Min"); #ui("...") holds the options
+    the principal direction: #ui("Max"), #ui("Mid"), #ui("Min") or #ui("Abs Max");
+    #ui("...") holds the options
     of the arrows or streaks.],
   [Transformations], [Symmetries and patterns (@transformations).],
   [Step, Increment], [The displayed increment, with buttons for the first, previous, next and
@@ -115,9 +116,13 @@ brightness. The legend names what the streaks show.
 Where the direction is not defined, the streaks fade out and the contours remain: where a
 vector is close to zero, where the picked principal value is close to another one (unloaded or
 evenly loaded regions), and where the direction points out of the surface or the surface is
-seen edge on. A direction is followed within the surface, so on a free surface the
-#ui("Max") direction of a part under compression, which may point out of it, shows nothing
-there; #ui("Min") then gives the compression paths.
+seen edge on. #ui("Max") follows the tension paths and fades where the part is only pushed,
+since there its largest principal value is close to zero like another one; #ui("Min") follows
+the compression paths and fades where the part is only pulled. #ui("Abs Max") follows whichever
+of the two is larger in magnitude, so one picture shows the load path through the pulled and
+the pushed fibres of a bent part alike. Where tension and compression are equally large, as
+near the neutral axis of a bent beam, its direction turns by 90 degrees; the streaks fade
+along that line.
 
 The streaks are drawn for the view on the screen, so they keep their fineness when zooming;
 the noise stays on the model when the view turns. Section faces (@section-view) show the

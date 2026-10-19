@@ -19,6 +19,7 @@ pub fn display(view: &ResultsView) -> Option<LicDisplay> {
             Principal::Max => 0,
             Principal::Mid => 1,
             Principal::Min => 2,
+            Principal::AbsMax => 3,
         }),
     };
     let options = &view.vector_display.lic;
