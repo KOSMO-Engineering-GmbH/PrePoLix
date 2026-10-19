@@ -1,0 +1,25 @@
+# egui-snarl 0.12.0 (https://github.com/zakarumych/egui-snarl, MIT OR Apache-2.0), vendored by
+# PrePoLix for its mouse controls of the schematic: see the "PrePoLix:" comments in src/ui.rs.
+[package]
+name = "egui-snarl"
+version = "0.12.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+description = "Node-graphs for egui"
+repository = "https://github.com/zakarumych/egui-snarl"
+readme = "README.md"
+publish = false
+
+[features]
+serde = ["dep:serde", "egui/serde", "slab/serde"]
+egui-probe = ["dep:egui-probe"]
+
+[dependencies]
+ahash = { version = "0.8.12", default-features = false }
+egui = "0.36"
+slab = "0.4"
+serde = { version = "1", features = ["derive"], optional = true }
+smallvec = { version = "1.15", features = ["const_new"] }
+egui-probe = { version = "0.13.0", features = ["derive"], optional = true }
+egui-scale = "0.6.1"

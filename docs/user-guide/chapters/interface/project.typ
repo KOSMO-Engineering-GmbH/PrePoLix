@@ -101,8 +101,18 @@ the state of another analysis (@data-links).
   Double-clicking a row opens the window in the matching workspace: #ui("Geometry") and
   #ui("Mesh") in the Geometry workspace, #ui("Setup") and its categories in the FE Model
   workspace, the rows of the steps likewise with the step selected in the tree, and #ui("Results") in the Results workspace.
-- *Drag* a block by its header to move it, drag the background to pan, and scroll to zoom.
-  #menu("Project", "Show All Blocks") (#key("Home")) fits all blocks into the view.
+- *Drag* a block by its header to move it. Drag the background to select the blocks in a
+  rectangle, and click it to clear the selection. Drag with the middle mouse button to pan,
+  scroll to pan up and down, and scroll with #key("Ctrl") held to zoom, from a tenth of the
+  true size up to four times it. #menu("Project", "Show All Blocks") (#key("Home")) fits all
+  blocks into the view.
+- The *minimap* in the lower right corner shows all blocks and frames in small, with the part
+  in view outlined; click or drag in it to move the view there.
+  #menu("Project", "Show Minimap") shows or hides it.
+
+#screenshot("schematic-minimap.png", [The minimap: the frames and blocks of the project in
+  small, the outline is the part in view])
+
 - *Drag* from a pin on the right of a row to a pin on the left of a row of another block to
   link them (@links). Right-click a pin to remove its links.
 - *Right-click* a block for its context menu.
@@ -179,8 +189,9 @@ Frames, notes and compact blocks are saved with the project, and undo and redo c
 
 While the mouse pointer is over the schematic and no text field is being edited, these keys
 work as in Blender. They act on the selected blocks, or on the block under the pointer when
-none is selected. Select blocks with #key("Shift") and a click, or drag a rectangle with
-#key("Shift") held; #key("Ctrl") and a click removes a block from the selection. The
+none is selected. Drag a rectangle on the background to select the blocks in it, or click a
+block with #key("Shift") held; with #key("Shift") a rectangle adds to the selection, and
+#key("Ctrl") and a click removes a block from it. A click on the background clears it. The
 #menu("Edit") menu lists them for the selected blocks.
 
 #fields(
@@ -217,6 +228,7 @@ none is selected. Select blocks with #key("Shift") and a click, or drag a rectan
     selected blocks, as their keys do (@schematic-keys).],
   [Project > Show All Blocks (#key("Home"))], [Fits all blocks of the schematic into the
     view.],
+  [Project > Show Minimap], [Shows or hides the minimap of the schematic.],
   [Project > Update Project (#key("F5"))], [Solves every analysis that is not up to date
     (@update-project). #key("F5") in an analysis window solves only that analysis.],
   [Project > Solution Monitor], [Shows the #ui("Analyses") tab of the output pane, with the
