@@ -6344,6 +6344,7 @@ impl Workbench {
         };
         let Some(model) = model else {
             self.viewport.options.contour = None;
+            self.viewport.options.lic = None;
             self.viewport.overlay = Overlay {
                 show_view_triad: self.settings.graphics.view_triad,
                 ..Overlay::default()
@@ -6363,6 +6364,7 @@ impl Workbench {
         let legend = view.and_then(ResultsView::legend);
         self.viewport.options.contour =
             (legend.as_ref()).map(|legend| plx_render::ContourPalette::new(&legend.palette()));
+        self.viewport.options.lic = view.and_then(crate::lic::display);
         let (graphics, post) = (&self.settings.graphics, &self.settings.post);
         // The open transformation dialog shows the points and axis of the selected item.
         let transformation = (self.transformation_dialog.as_ref())
@@ -6458,9 +6460,9 @@ struct ToolBarResponse {
     color_scale: bool,
 }
 
-/// The representation of the shown field: contours, or arrows of its directions with the
-/// principal direction of a tensor field and the arrow options. Returns whether anything
-/// changed.
+/// The representation of the shown field: contours, or arrows or LIC streaks along its
+/// directions, with the principal direction of a tensor field and the options of each.
+/// Returns whether anything changed.
 fn display_controls(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
     use plx_results::display::Representation;
     let before = view.vector_display.clone();
@@ -6483,7 +6485,9 @@ fn display_controls(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
                 }
             })
             .response
-            .on_disabled_hover_text("Arrows need a vector or tensor field, such as DISP or STRESS")
+            .on_disabled_hover_text(
+                "Arrows and LIC need a vector or tensor field, such as DISP or STRESS",
+            )
     });
     let tensor = field.is_some_and(|rank| rank.is_tensor());
     if tensor && shown != Representation::Contour {
@@ -6496,7 +6500,7 @@ fn display_controls(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
                 }
             })
             .response
-            .on_hover_text("Principal direction the arrows follow");
+            .on_hover_text("Principal direction the arrows or streaks follow");
     }
     if shown == Representation::Arrows {
         let arrows = &mut display.arrows;
@@ -6525,6 +6529,55 @@ fn display_controls(ui: &mut egui::Ui, view: &mut ResultsView) -> bool {
         })
         .response
         .on_hover_text("Arrow options");
+    }
+    if shown == Representation::Lic {
+        let lic = &mut display.lic;
+        ui.menu_button("…", |ui| {
+            use plx_results::display::LicOptions;
+            egui::Grid::new("lic options")
+                .num_columns(2)
+                .show(ui, |ui| {
+                    ui.label("Streak length");
+                    ui.add(
+                        numeric::drag_value(&mut lic.length)
+                            .range(LicOptions::LENGTH)
+                            .speed(0.2),
+                    )
+                    .on_hover_text("Length of the streaks to either side of a pixel, in pixels");
+                    ui.end_row();
+                    ui.label("Grain size");
+                    ui.add(
+                        numeric::drag_value(&mut lic.grain)
+                            .range(LicOptions::GRAIN)
+                            .speed(0.002),
+                    )
+                    .on_hover_text(
+                        "Size of the noise grains in percent of the model size; never finer \
+                     than a pixel",
+                    );
+                    ui.end_row();
+                    ui.label("Contrast");
+                    ui.add(
+                        numeric::drag_value(&mut lic.contrast)
+                            .range(LicOptions::CONTRAST)
+                            .speed(0.05),
+                    );
+                    ui.end_row();
+                    ui.label("Mix");
+                    ui.add(
+                        numeric::drag_value(&mut lic.mix)
+                            .range(0.0..=1.0)
+                            .speed(0.01),
+                    )
+                    .on_hover_text("How much of the brightness the streaks set, 0 to 1");
+                    ui.end_row();
+                });
+            if ui.button("Defaults").clicked() {
+                *lic = LicOptions::default();
+            }
+        })
+        .response
+        .on_hover_text("LIC options");
     }
     view.vector_display != before
 }

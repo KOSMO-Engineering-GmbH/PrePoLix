@@ -37,6 +37,9 @@ impl PartArrows {
         skins: &[PartSkin],
         with_arrows: impl Fn(usize) -> bool,
     ) -> Option<Self> {
+        if view.representation() != plx_results::display::Representation::Arrows {
+            return None;
+        }
         let source = view.vector_source()?;
         let samples = source.sample(view.current_increment()?)?;
         let options = &view.vector_display.arrows;

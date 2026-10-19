@@ -25,6 +25,7 @@ mod hot_spot_dialog;
 mod hot_spots;
 mod icons;
 mod keywords;
+mod lic;
 mod links;
 mod material_library;
 mod material_set;

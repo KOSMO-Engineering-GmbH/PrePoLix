@@ -13,15 +13,23 @@ pub enum Representation {
     Contour,
     /// A glyph per node on the surface, along the direction of the vector source.
     Arrows,
+    /// Line integral convolution: streaks along the direction of the vector source over the
+    /// contours.
+    Lic,
 }
 
 impl Representation {
-    pub const ALL: [Representation; 2] = [Representation::Contour, Representation::Arrows];
+    pub const ALL: [Representation; 3] = [
+        Representation::Contour,
+        Representation::Arrows,
+        Representation::Lic,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Representation::Contour => "Contour",
             Representation::Arrows => "Arrows",
+            Representation::Lic => "LIC",
         }
     }
 }
@@ -57,6 +65,38 @@ impl ArrowOptions {
     pub const MAX_COUNT: u32 = 50_000;
 }
 
+/// How the streaks of [`Representation::Lic`] look.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LicOptions {
+    /// Length of a streak to either side of a pixel, in pixels.
+    pub length: u32,
+    /// Size of the grains of the noise the streaks are smeared from, in percent of the model
+    /// size; never finer than a pixel.
+    pub grain: f64,
+    /// How strongly the streaks stand out from each other.
+    pub contrast: f64,
+    /// Share of the brightness the streaks set, from 0 (contours alone) to 1.
+    pub mix: f64,
+}
+
+impl Default for LicOptions {
+    fn default() -> Self {
+        Self {
+            length: 15,
+            grain: 0.1,
+            contrast: 4.0,
+            mix: 0.7,
+        }
+    }
+}
+
+impl LicOptions {
+    pub const LENGTH: std::ops::RangeInclusive<u32> = 3..=60;
+    pub const GRAIN: std::ops::RangeInclusive<f64> = 0.01..=2.0;
+    pub const CONTRAST: std::ops::RangeInclusive<f64> = 1.0..=10.0;
+}
+
 /// What the results view draws besides the contours, saved with the view.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -66,6 +106,7 @@ pub struct VectorDisplay {
     /// Which principal direction a tensor field gives.
     pub principal: Principal,
     pub arrows: ArrowOptions,
+    pub lic: LicOptions,
 }
 
 impl VectorDisplay {

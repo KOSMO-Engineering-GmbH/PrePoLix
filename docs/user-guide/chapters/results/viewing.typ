@@ -47,9 +47,10 @@ to the results. Results of an analysis run from PrePoLix always have it.
   [Show Undeformed], [Draws the undeformed outline behind the deformed shape.],
   [Color levels], [Number of colour bands (2 to 24). The #ui("...") button next to it opens the
     colour scale (@color-scale).],
-  [Display], [#ui("Contour") or #ui("Arrows") along the directions of the shown field
-    (@arrows). For a tensor field such as `STRESS` the box next to it picks the principal
-    direction: #ui("Max"), #ui("Mid") or #ui("Min"); #ui("...") holds the arrow options.],
+  [Display], [#ui("Contour"), #ui("Arrows") (@arrows) or #ui("LIC") streaks (@lic) along the
+    directions of the shown field. For a tensor field such as `STRESS` the box next to it picks
+    the principal direction: #ui("Max"), #ui("Mid") or #ui("Min"); #ui("...") holds the options
+    of the arrows or streaks.],
   [Transformations], [Symmetries and patterns (@transformations).],
   [Step, Increment], [The displayed increment, with buttons for the first, previous, next and
     last increment.],
@@ -96,6 +97,49 @@ Parts without colour contours (@color-contours) get no arrows. Arrows and their 
 kept with the results of a project (@bind-result).
 
 #limitation[Arrows sit on the outer surface; section faces (@section-view) have none.]
+
+== LIC <lic>
+
+#ui("Display") > #ui("LIC") draws the directions of the shown field as fine streaks over the
+colour contours, by line integral convolution: a noise pattern fixed on the surface is smeared
+along the directions, so that the streaks follow them everywhere at once. The directions come
+from the same fields as the arrows (@arrows); with `STRESS` and the #ui("Max") direction the
+streaks are the force flow through the part, the trajectories of its largest principal
+stress. The colours still show the shown component, the streaks only change their
+brightness. The legend names what the streaks show.
+
+#screenshot("lic-force-flow.png", [Force flow in a bracket with a hole, clamped on the left and
+  loaded downwards on the right: LIC along the Max principal direction of `STRESS`, coloured by
+  `PRINCIPAL_MAX`])
+
+Where the direction is not defined, the streaks fade out and the contours remain: where a
+vector is close to zero, where the picked principal value is close to another one (unloaded or
+evenly loaded regions), and where the direction points out of the surface or the surface is
+seen edge on. A direction is followed within the surface, so on a free surface the
+#ui("Max") direction of a part under compression, which may point out of it, shows nothing
+there; #ui("Min") then gives the compression paths.
+
+The streaks are drawn for the view on the screen, so they keep their fineness when zooming;
+the noise stays on the model when the view turns. Section faces (@section-view) show the
+streaks inside the part: move the plane through it to follow the force flow in the volume.
+
+#screenshot("lic-section.png", [The bracket cut by a section plane: the streaks continue on the
+  section face])
+
+#fields(
+  [Streak length], [Length of a streak to either side of each pixel, in pixels (default 15).
+    Longer streaks are smoother but blur small details.],
+  [Grain size], [Size of the noise grains in percent of the model size (default 0.1), never
+    finer than a pixel. Coarser grains give wider streaks.],
+  [Contrast], [How strongly the streaks stand out from each other (default 4).],
+  [Mix], [How much of the brightness the streaks set, from 0 (contours alone) to 1 (default
+    0.7).],
+  [Defaults], [Restores the values above.],
+)
+
+Mirrored and patterned copies (@transformations) show the streaks too, turned with the copy.
+Parts without colour contours (@color-contours) get none. The options are kept with the
+results of a project (@bind-result).
 
 == Color scale <color-scale>
 

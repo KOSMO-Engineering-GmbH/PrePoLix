@@ -3,7 +3,7 @@ use plx_mesh::{PartSkin, SkinFace, face_normal};
 
 use crate::contour::NO_VALUE;
 
-use crate::mesh::{RenderMesh, Vertex};
+use crate::mesh::{NodeBlend, RenderMesh, Vertex};
 
 pub(crate) const EDGE_COLOR: [f32; 3] = [0.0, 0.0, 0.0];
 /// Opacities of PrePoMax's edge actors; line vertices carry them in [`Vertex::scalar`], the
@@ -70,7 +70,7 @@ pub fn part_render_mesh(
                 color,
                 scalar: scalar(node),
             };
-            local.push(shared.index(&mut render.vertices, node, vertex));
+            local.push(shared.index(&mut render, node, vertex));
         }
         (render.triangles).extend(face_triangles(face).iter().map(|&k| local[k as usize]));
     }
@@ -103,7 +103,7 @@ pub fn part_render_mesh(
                 for node in [a, b] {
                     let index = shared.any(node).unwrap_or_else(|| {
                         let vertex = line_vertex(node, EDGE_COLOR, MESH_EDGE_OPACITY);
-                        shared.index(&mut render.vertices, node, vertex)
+                        shared.index(&mut render, node, vertex)
                     });
                     render.mesh_edges.push(index);
                 }
@@ -137,17 +137,18 @@ impl SharedVertices {
     }
 
     /// Index of a vertex of the node with the same normal and colour, added if there is none.
-    fn index(&mut self, vertices: &mut Vec<Vertex>, node: usize, vertex: Vertex) -> u32 {
+    fn index(&mut self, render: &mut RenderMesh, node: usize, vertex: Vertex) -> u32 {
         let mut index = self.first[node];
         while index != Self::NONE {
-            let other = &vertices[index as usize];
+            let other = &render.vertices[index as usize];
             if other.normal == vertex.normal && other.color == vertex.color {
                 return index;
             }
             index = self.next[index as usize];
         }
-        let index = vertices.len() as u32;
-        vertices.push(vertex);
+        let index = render.vertices.len() as u32;
+        render.vertices.push(vertex);
+        render.origins.push(NodeBlend::at(node));
         self.next.push(self.first[node]);
         self.first[node] = index;
         index

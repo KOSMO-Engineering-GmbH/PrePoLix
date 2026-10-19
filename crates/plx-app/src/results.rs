@@ -285,6 +285,11 @@ impl ResultsView {
         }
     }
 
+    /// A typical length of the model, as the edge of a cube of its bounding volume.
+    pub fn model_size(&self) -> f64 {
+        self.model_size
+    }
+
     pub fn current_increment(&self) -> Option<&Increment> {
         self.increments.get(self.increment)
     }
@@ -302,7 +307,8 @@ impl ResultsView {
         }
     }
 
-    /// Where arrows take their directions from, while the representation needs them.
+    /// Where arrows or streaks take their directions from, while the representation needs
+    /// them.
     pub fn vector_source(&self) -> Option<plx_results::VectorSource> {
         if self.representation() == Representation::Contour {
             return None;
@@ -1170,10 +1176,16 @@ impl ResultsView {
             .filter(|u| !u.is_empty() && u != "/")
             .map(|u| format!("\nUnit: {u}"))
             .unwrap_or_default();
-        // What the arrows show, as their colours come from the component.
+        // What the arrows or streaks show, as their colours come from the component.
         let arrows = self
             .vector_source()
-            .map(|source| format!("\nArrows: {}", source.label()))
+            .map(|source| {
+                let kind = match self.representation() {
+                    Representation::Lic => "LIC",
+                    _ => "Arrows",
+                };
+                format!("\n{kind}: {}", source.label())
+            })
             .unwrap_or_default();
         Some(Legend {
             title: format!(
