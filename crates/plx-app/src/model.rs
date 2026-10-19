@@ -65,6 +65,8 @@ pub struct Model {
     pub mesh: FeMesh,
     pub parts: Vec<PartInfo>,
     pub warnings: Vec<String>,
+    /// What was changed on reading, printed as notes in the output.
+    pub notes: Vec<String>,
     pub skipped_keywords: BTreeMap<String, usize>,
     pub included_files: usize,
     pub load_time: Duration,
@@ -253,6 +255,7 @@ pub fn load_geometry(paths: &[PathBuf], units: UnitSystem) -> Result<LoadedModel
     model.fe.properties.units = units;
     model.geometry = Some(import.geometry);
     model.warnings = import.warnings;
+    model.notes = import.notes;
     let view = Model::geometry_view(path, import.display);
     let render_meshes = view.render_meshes();
     model.load_time = start.elapsed();
@@ -560,6 +563,7 @@ impl Model {
             mesh,
             parts,
             warnings: Vec::new(),
+            notes: Vec::new(),
             skipped_keywords: BTreeMap::new(),
             included_files: 0,
             load_time: Duration::ZERO,
@@ -914,11 +918,36 @@ impl Model {
     /// with the transformed copies of the results.
     pub fn render_meshes(&self) -> Vec<RenderMesh> {
         let (coords, scalars, deformed) = self.shown_state();
-        let mut meshes = self.part_meshes(&coords, scalars.as_deref(), deformed);
+        let arrows = self.part_arrows();
+        // Coloured arrows take the contour colours, the surfaces under them turn grey.
+        let surface = |scalars: Option<Vec<f32>>| {
+            scalars.filter(|_| !arrows.as_ref().is_some_and(|a| a.colored))
+        };
+        let mut meshes = self.part_meshes(&coords, surface(scalars.clone()).as_deref(), deformed);
+        let lic = self.lic_values();
+        if let Some((values, _)) = &lic {
+            for (index, mesh) in meshes.iter_mut().enumerate() {
+                if self.shows_lic(index) {
+                    mesh.set_directions(values);
+                }
+            }
+        }
+        if let Some(arrows) = &arrows {
+            for (index, mesh) in meshes.iter_mut().enumerate() {
+                mesh.glyphs = arrows.lines(
+                    index,
+                    &coords,
+                    scalars.as_deref(),
+                    &DAffine3::IDENTITY,
+                    self.origin,
+                );
+            }
+        }
         for (instance, scalars) in self.transformed_copies() {
             let moved = transform_coords(&coords, &instance);
             let undeformed = deformed.then(|| transform_coords(&self.exploded_coords(), &instance));
-            for ((mesh, info), skin) in meshes.iter_mut().zip(&self.parts).zip(&self.skins) {
+            let parts = meshes.iter_mut().zip(&self.parts).zip(&self.skins);
+            for (index, ((mesh, info), skin)) in parts.enumerate() {
                 let mut copy = part_render_mesh(
                     &moved,
                     skin,
@@ -926,8 +955,17 @@ impl Model {
                     info.color,
                     |_| None,
                     SMOOTH_ANGLE_DEG,
-                    scalars.as_deref(),
+                    surface(scalars.clone()).as_deref(),
                 );
+                if let Some(arrows) = &arrows {
+                    copy.glyphs =
+                        arrows.lines(index, &moved, scalars.as_deref(), &instance, self.origin);
+                }
+                if let Some((values, tensor)) = &lic
+                    && self.shows_lic(index)
+                {
+                    copy.set_directions(&crate::lic::turned(values, &instance, *tensor));
+                }
                 if let Some(undeformed) = &undeformed {
                     copy.wireframe_edges = wireframe_edges(undeformed, skin, self.origin);
                 }
@@ -935,6 +973,28 @@ impl Model {
             }
         }
         meshes
+    }
+
+    /// The vector source of LIC per node, if the results view shows it, and whether it is a
+    /// tensor. Only parts with colour contours show streaks ([`Model::shows_lic`]).
+    fn lic_values(&self) -> Option<(Vec<plx_render::Directions>, bool)> {
+        let view = self.results.as_ref()?;
+        let values = crate::lic::node_values(view)?;
+        let tensor = view.vector_source()?.is_line_field();
+        Some((values, tensor))
+    }
+
+    fn shows_lic(&self, part: usize) -> bool {
+        self.parts.get(part).is_some_and(|p| p.contours)
+    }
+
+    /// The arrows of the shown vector source, if the results view draws them: spread over
+    /// the undeformed surface of the parts with colour contours.
+    fn part_arrows(&self) -> Option<crate::arrows::PartArrows> {
+        let view = self.results.as_ref()?;
+        let reference = self.exploded_coords();
+        let with_arrows = |part: usize| self.parts.get(part).is_some_and(|p| p.contours);
+        crate::arrows::PartArrows::new(view, &reference, &self.skins, with_arrows)
     }
 
     /// [`Model::render_meshes`] followed, for a submodel, by the wireframe of its global model.
@@ -1087,12 +1147,14 @@ impl Model {
                 info.color
             }
         };
+        let lic = self.lic_values();
         let mut meshes: Vec<RenderMesh> = cells
             .iter()
             .zip(&self.parts)
-            .map(|(cells, info)| {
+            .enumerate()
+            .map(|(index, (cells, info))| {
                 let color = color(info);
-                section_mesh(
+                let mut mesh = section_mesh(
                     cells,
                     &coords,
                     self.origin,
@@ -1100,24 +1162,30 @@ impl Model {
                     normal,
                     color,
                     scalars.as_deref(),
-                )
+                );
+                if let Some((values, _)) = &lic
+                    && self.shows_lic(index)
+                {
+                    mesh.set_directions(values);
+                }
+                mesh
             })
             .collect();
         // The copies are cut by the same plane.
         for (instance, scalars) in self.transformed_copies() {
             let moved = transform_coords(&coords, &instance);
-            for ((mesh, cells), info) in meshes.iter_mut().zip(cells).zip(&self.parts) {
+            let parts = meshes.iter_mut().zip(cells).zip(&self.parts);
+            for (index, ((mesh, cells), info)) in parts.enumerate() {
                 let color = color(info);
                 let scalars = scalars.as_deref();
-                mesh.append(section_mesh(
-                    cells,
-                    &moved,
-                    self.origin,
-                    point,
-                    normal,
-                    color,
-                    scalars,
-                ));
+                let mut copy =
+                    section_mesh(cells, &moved, self.origin, point, normal, color, scalars);
+                if let Some((values, tensor)) = &lic
+                    && self.shows_lic(index)
+                {
+                    copy.set_directions(&crate::lic::turned(values, &instance, *tensor));
+                }
+                mesh.append(copy);
             }
         }
         meshes
@@ -2360,6 +2428,10 @@ mod tests {
                     })
                     .saved(),
                 ],
+                vector_display: Some(plx_results::display::VectorDisplay {
+                    representation: plx_results::display::Representation::Arrows,
+                    ..Default::default()
+                }),
                 // Camera and mesh edges belong to the 3D view, not to the results.
                 camera: None,
                 mesh_edges: None,

@@ -5,6 +5,7 @@ use crate::sound::ModeSound;
 use glam::{DAffine3, DMat3};
 use plx_mesh::FeMesh;
 use plx_model::{ColorScale, Quantity, UnitSystem};
+use plx_results::display::Representation;
 use plx_results::field_output::{self, FieldOutput};
 use plx_results::history_output::{self, HistoryOutput, HistorySet};
 use plx_results::transformation::{self, Transformation};
@@ -122,6 +123,8 @@ pub struct ResultsView {
     pub plain_nodes: Vec<bool>,
     /// The plane result shown alone, by index in the features of the results.
     pub plane_result: Option<usize>,
+    /// Arrows over the contours and their options.
+    pub vector_display: plx_results::display::VectorDisplay,
     /// Unit system of the values, PrePoMax's results unit system: that of the FE model the
     /// results belong to; the legend shows units after it.
     pub units: UnitSystem,
@@ -229,6 +232,7 @@ impl ResultsView {
             section_range: None,
             plain_nodes: Vec::new(),
             plane_result: None,
+            vector_display: Default::default(),
             units: UnitSystem::default(),
             model_size: bounds.map_or(1.0, model_size),
             deformation_peaks: Vec::new(),
@@ -281,6 +285,11 @@ impl ResultsView {
         }
     }
 
+    /// A typical length of the model, as the edge of a cube of its bounding volume.
+    pub fn model_size(&self) -> f64 {
+        self.model_size
+    }
+
     pub fn current_increment(&self) -> Option<&Increment> {
         self.increments.get(self.increment)
     }
@@ -288,6 +297,23 @@ impl ResultsView {
     pub fn current(&self) -> Option<(&Field, &Component)> {
         let field = self.current_increment()?.fields.get(self.field)?;
         Some((field, field.components.get(self.component)?))
+    }
+
+    /// The representation drawn for the shown field: contours alone for a scalar field.
+    pub fn representation(&self) -> Representation {
+        match self.current() {
+            Some((field, _)) if self.superposition.is_none() => self.vector_display.shown(field),
+            _ => Representation::Contour,
+        }
+    }
+
+    /// Where arrows or streaks take their directions from, while the representation needs
+    /// them.
+    pub fn vector_source(&self) -> Option<plx_results::VectorSource> {
+        if self.representation() == Representation::Contour {
+            return None;
+        }
+        self.vector_display.source(self.current()?.0)
     }
 
     /// Switches to another increment, keeping field and component by name where possible.
@@ -329,6 +355,7 @@ impl ResultsView {
                 show_undeformed: Some(self.show_undeformed),
                 levels: Some(self.color_scale.levels),
                 color_scale: Some(self.color_scale.clone()),
+                vector_display: Some(self.vector_display.clone()),
                 ..Default::default()
             },
             ..Default::default()
@@ -360,6 +387,9 @@ impl ResultsView {
         self.follow_default_deformation();
         self.user_scale = view.user_scale.unwrap_or(self.user_scale);
         self.show_undeformed = view.show_undeformed.unwrap_or(self.show_undeformed);
+        if let Some(display) = &view.vector_display {
+            self.vector_display = display.clone();
+        }
         match &view.color_scale {
             Some(scale) => self.color_scale = scale.clone(),
             None => self.color_scale.levels = view.levels.unwrap_or(self.color_scale.levels),
@@ -1132,17 +1162,34 @@ impl ResultsView {
         // PrePoMax writes names with blanks instead of underscores and dashes.
         let name = |n: &str| n.replace(['_', '-'], " ");
         let derived = self.field_outputs.iter().find(|o| o.name == field.name);
-        let unit = match derived {
-            Some(output) => output.unit().map(|u| u.trim().to_string()),
+        let unit = match derived.map(|o| &o.kind) {
+            // The principal value of a direction is in the unit of its tensor.
+            Some(plx_results::FieldOutputKind::PrincipalDirection { field, .. })
+                if matches!(component.name.as_str(), "VALUE" | "ALL") =>
+            {
+                field_unit(field, &component.name, self.units)
+            }
+            Some(_) => derived.and_then(|o| o.unit()).map(|u| u.trim().to_string()),
             None => field_unit(&field.name, &component.name, self.units),
         };
         let unit = unit
             .filter(|u| !u.is_empty() && u != "/")
             .map(|u| format!("\nUnit: {u}"))
             .unwrap_or_default();
+        // What the arrows or streaks show, as their colours come from the component.
+        let arrows = self
+            .vector_source()
+            .map(|source| {
+                let kind = match self.representation() {
+                    Representation::Lic => "LIC",
+                    _ => "Arrows",
+                };
+                format!("\n{kind}: {}", source.label())
+            })
+            .unwrap_or_default();
         Some(Legend {
             title: format!(
-                "{}: {}{unit}\n{scope}",
+                "{}: {}{unit}\n{scope}{arrows}",
                 name(&field.name),
                 name(&component.name)
             ),
@@ -1287,13 +1334,13 @@ fn max_deformation(increment: &Increment) -> Option<f32> {
                 .iter()
                 .all(|n| pdisp.component(n).is_some()) =>
         {
-            let magnitudes = Field {
-                name: String::new(),
-                components: ["MAG1", "MAG2", "MAG3"]
+            let magnitudes = Field::new(
+                String::new(),
+                ["MAG1", "MAG2", "MAG3"]
                     .iter()
                     .map(|n| pdisp.component(n).unwrap().clone())
                     .collect(),
-            };
+            );
             return max_deformation_of(&magnitudes);
         }
         _ => increment.field("DISP")?,
@@ -1370,10 +1417,10 @@ mod tests {
             values: disp.iter().map(|d| d[k]).collect(),
             derived: false,
         };
-        let mut field = Field {
-            name: "DISP".into(),
-            components: vec![column(0, "U1"), column(1, "U2"), column(2, "U3")],
-        };
+        let mut field = Field::new(
+            "DISP",
+            vec![column(0, "U1"), column(1, "U2"), column(2, "U3")],
+        );
         plx_results::add_derived_components(&mut field);
         Increment {
             nodal_diameter: None,
@@ -1390,14 +1437,14 @@ mod tests {
         let mut mesh = FeMesh::default();
         mesh.set_node(1, [1.0, 0.5, 0.0]);
         let mut increments = vec![increment(1, 1, AnalysisKind::Static, &[[0.001, 0.0, 0.0]])];
-        increments[0].fields.push(Field {
-            name: "STRESS".into(),
-            components: vec![Component {
+        increments[0].fields.push(Field::new(
+            "STRESS",
+            vec![Component {
                 name: "SXX".into(),
                 values: vec![2.5e8],
                 derived: false,
             }],
-        });
+        ));
         convert_results(&mut mesh, &mut increments, UnitSystem::MmTonSC);
         assert_eq!(mesh.coords()[0], [1000.0, 500.0, 0.0]);
         let disp = increments[0].field("DISP").unwrap();
@@ -1540,9 +1587,9 @@ mod tests {
             values: vec![value],
             derived: false,
         };
-        increment.fields.push(Field {
-            name: "PDISP".into(),
-            components: vec![
+        increment.fields.push(Field::new(
+            "PDISP",
+            vec![
                 column("MAG1", 0.0),
                 column("MAG2", 2.0),
                 column("MAG3", 2.0),
@@ -1550,7 +1597,7 @@ mod tests {
                 column("PHA2", 0.0),
                 column("PHA3", -90.0),
             ],
-        });
+        ));
         increment
     }
 

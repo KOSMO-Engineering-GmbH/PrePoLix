@@ -1149,7 +1149,9 @@ fn remote_rows(
         } else {
             ["X", "Y", "Z"]
         };
-        for (k, (value, label)) in location.iter_mut().zip(labels).enumerate() {
+        // A 2D model has no z coordinate.
+        let count = if fe.properties.space.is_2d() { 2 } else { 3 };
+        for (k, (value, label)) in location.iter_mut().zip(labels).take(count).enumerate() {
             ui.label(label);
             if cylindrical && k == 1 {
                 ui.add(numeric::drag_value(value).speed(1.0).suffix(" °"));

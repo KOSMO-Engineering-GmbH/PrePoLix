@@ -43,9 +43,33 @@ transformations.
   [Coordinate System Transformation], [Rotates a vector or tensor field into a coordinate system
     defined under #ui("Features"); cylindrical systems give radial, tangential and axial
     components.],
+  [Principal Direction], [The direction of the largest (#ui("Max")), middle (#ui("Mid")) or
+    smallest (#ui("Min")) principal value of a tensor field such as `STRESS` or `TOSTRAIN`, as a
+    vector field: `X`, `Y`, `Z` of the unit vector, `VALUE` the principal value with its sign
+    and `ALL` its magnitude.],
+  [Anisotropy], [How clearly that principal direction is defined: the gap between its principal
+    value and the nearest other one, divided by the largest magnitude. 0 means the direction is
+    undefined, for example under hydrostatic pressure or where the material carries no stress;
+    uniaxial tension and pure shear give 1.],
 )
 
 #limitation[Derived field outputs are lost when the result file is reloaded.]
+
+=== Principal directions <principal-directions>
+
+The direction of the largest principal stress shows the path the load takes through a part,
+its force flow; the direction of the smallest one shows the compression paths. A principal
+direction has no sign: the vector and its opposite are the same direction. PrePoLix turns each
+vector so that its largest component is positive, which keeps the contours of `X`, `Y` and `Z`
+from jumping between neighbouring nodes. Where the principal value is repeated, as the two zero
+values of uniaxial tension, any direction in their plane is one; PrePoLix picks one normal to
+the others. Where all three are equal, the direction is undefined and the node has no value.
+
+#screenshot("principal-direction.png", [The Y component of the Max principal direction of
+  `STRESS` in a plate with a hole under tension])
+
+Principal directions are vector fields, so result transformations mirror and rotate them
+like displacements.
 
 == History outputs and tables <history-outputs>
 

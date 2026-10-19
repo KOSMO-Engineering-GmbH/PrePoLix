@@ -8,12 +8,7 @@
 use glam::{DAffine3, DMat3, DVec3};
 use serde::{Deserialize, Serialize};
 
-use crate::Field;
-
-/// Field names whose three raw components form a vector (see [`crate::derived`]).
-const VECTOR_FIELDS: [&str; 5] = ["DISP", "VELO", "FORC", "FLUX", "NORM"];
-/// Fields whose six raw components form a symmetric tensor, ordered xx, yy, zz, xy, yz, zx.
-const TENSOR_FIELDS: [&str; 4] = ["STRESS", "ZZSTR", "TOSTRAIN", "MESTRAIN"];
+use crate::{Field, FieldRank};
 
 /// Plane of a symmetry, named by the axis normal to it as in PrePoMax.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,8 +192,8 @@ pub enum ComponentKind {
     Tensor(usize, usize),
 }
 
-/// How the component at `index` of the field transforms, judged like PrePoMax's derived
-/// quantities: by the field name and the raw (not derived) components.
+/// How the component at `index` of the field transforms, judged by the field's rank and the
+/// component's place among the raw (not derived) components.
 pub fn component_kind(field: &Field, index: usize) -> ComponentKind {
     let Some(component) = field.components.get(index) else {
         return ComponentKind::Scalar;
@@ -212,14 +207,13 @@ pub fn component_kind(field: &Field, index: usize) -> ComponentKind {
     let Some(position) = raw.iter().position(|&i| i == index) else {
         return ComponentKind::Scalar;
     };
-    let name = field.name.as_str();
-    if VECTOR_FIELDS.contains(&name) && raw.len() == 3 {
-        ComponentKind::Vector(position)
-    } else if TENSOR_FIELDS.contains(&name) && raw.len() == 6 {
-        let (row, column) = [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0)][position];
-        ComponentKind::Tensor(row, column)
-    } else {
-        ComponentKind::Scalar
+    match field.rank {
+        FieldRank::Vector if raw.len() == 3 => ComponentKind::Vector(position),
+        FieldRank::Tensor(_) if raw.len() == 6 => {
+            let (row, column) = [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (2, 0)][position];
+            ComponentKind::Tensor(row, column)
+        }
+        _ => ComponentKind::Scalar,
     }
 }
 
@@ -271,9 +265,9 @@ mod tests {
     use crate::Component;
 
     fn field(name: &str, components: &[(&str, f32)]) -> Field {
-        let mut field = Field {
-            name: name.into(),
-            components: components
+        let mut field = Field::new(
+            name,
+            components
                 .iter()
                 .map(|&(name, value)| Component {
                     name: name.into(),
@@ -281,7 +275,7 @@ mod tests {
                     derived: false,
                 })
                 .collect(),
-        };
+        );
         crate::add_derived_components(&mut field);
         field
     }

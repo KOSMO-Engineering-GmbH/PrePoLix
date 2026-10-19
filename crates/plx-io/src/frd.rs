@@ -142,9 +142,9 @@ impl<'a> Reader<'a> {
         let blocks = std::mem::take(&mut self.blocks);
         let mesh = &self.import.mesh;
         let fields = parallel_map(&blocks, |block| {
-            let mut field = Field {
-                name: block.field_name.clone(),
-                components: block
+            let mut field = Field::new(
+                block.field_name.clone(),
+                block
                     .names
                     .iter()
                     .zip(block_values(block, mesh))
@@ -154,7 +154,7 @@ impl<'a> Reader<'a> {
                         derived: false,
                     })
                     .collect(),
-            };
+            );
             add_derived_components(&mut field);
             field
         });

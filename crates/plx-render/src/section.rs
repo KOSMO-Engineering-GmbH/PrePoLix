@@ -8,7 +8,7 @@ use plx_mesh::{ElementFamily, ElementShape, FeMesh, Part};
 
 use crate::contour::NO_VALUE;
 use crate::fe::{FEATURE_EDGE_OPACITY, MESH_EDGE_OPACITY};
-use crate::mesh::{RenderMesh, Vertex};
+use crate::mesh::{NodeBlend, RenderMesh, Vertex};
 
 /// The half-space kept by a section view: points with `normal · (p - point) >= 0` stay
 /// visible, the side the normal points away from is cut off.
@@ -162,6 +162,11 @@ pub fn section_mesh(
                     sa + (sb - sa) * t as f32
                 },
                 edge: (a.min(b), a.max(b)),
+                blend: NodeBlend {
+                    a: corners[a],
+                    b: corners[b],
+                    t: t as f32,
+                },
             })
         };
 
@@ -209,6 +214,7 @@ pub fn section_mesh(
             color,
             scalar: p.scalar,
         }));
+        render.origins.extend(polygon.iter().map(|p| p.blend));
         for k in 1..polygon.len() as u32 - 1 {
             render.triangles.extend([base, base + k, base + k + 1]);
         }
@@ -408,6 +414,8 @@ struct CutPoint {
     scalar: f32,
     /// The crossed edge as local corner indices, to find the same point from both faces.
     edge: (usize, usize),
+    /// The nodes of the crossed edge, to give the point their values.
+    blend: NodeBlend,
 }
 
 /// Unit normal and a point of a plane in render coordinates, for the GPU and for picking.

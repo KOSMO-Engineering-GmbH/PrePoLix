@@ -75,15 +75,15 @@ fn increment(step: u32, number: u32, value: f64, nodes: usize) -> Increment {
             .collect(),
         derived,
     };
-    let mut disp = Field {
-        name: "DISP".into(),
-        components: vec![
+    let mut disp = Field::new(
+        "DISP",
+        vec![
             component("U1", 1.0, false),
             component("U2", 2.0, false),
             component("U3", 3.0, false),
             component("ALL", 4.0, true),
         ],
-    };
+    );
     disp.components[0].values[0] = f32::NAN;
     Increment {
         nodal_diameter: None,

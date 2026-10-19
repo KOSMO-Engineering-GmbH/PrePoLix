@@ -5,6 +5,7 @@ mod analysis;
 mod animation;
 mod animation_export;
 mod app;
+mod arrows;
 mod cad_selection;
 mod campbell;
 mod color_scale_dialog;
@@ -24,6 +25,7 @@ mod hot_spot_dialog;
 mod hot_spots;
 mod icons;
 mod keywords;
+mod lic;
 mod links;
 mod material_library;
 mod material_set;
@@ -33,6 +35,7 @@ mod mesh_tools;
 mod meshing;
 mod model;
 mod model_properties;
+mod model_space_sketch;
 mod motion_preview;
 mod node_icons;
 mod node_picker;
@@ -147,6 +150,10 @@ mod tests {
             ("main.rs", include_str!("main.rs")),
             ("model.rs", include_str!("model.rs")),
             ("model_properties.rs", include_str!("model_properties.rs")),
+            (
+                "model_space_sketch.rs",
+                include_str!("model_space_sketch.rs"),
+            ),
             ("overlay.rs", include_str!("overlay.rs")),
             ("project.rs", include_str!("project.rs")),
             ("project/frames.rs", include_str!("project/frames.rs")),

@@ -77,7 +77,12 @@ impl ModelPropertiesDialog {
                                         egui::RadioButton::new(draft.space == space, space.label());
                                     let clicked = ui
                                         .add_enabled(!fixed || draft.space == space, radio)
-                                        .on_hover_text(space.tooltip())
+                                        .on_hover_ui(|ui| {
+                                            crate::model_space_sketch::hover(ui, space)
+                                        })
+                                        .on_disabled_hover_ui(|ui| {
+                                            crate::model_space_sketch::hover(ui, space)
+                                        })
                                         .clicked();
                                     if clicked && !fixed {
                                         draft.space = space;

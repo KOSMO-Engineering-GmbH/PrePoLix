@@ -685,10 +685,7 @@ mod tests {
             increment: 1,
             kind: AnalysisKind::Static,
             value: 1.0,
-            fields: vec![Field {
-                name: "STRESS".into(),
-                components,
-            }],
+            fields: vec![Field::new("STRESS", components)],
         }
     }
 
