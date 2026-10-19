@@ -353,6 +353,8 @@ pub fn parse_dat(text: &str) -> DatImport {
     // twice, as a cosine and a sine part; only the first of each pair is kept, as the .frd
     // file does (see `cyclic_mode`).
     let (mut offset, mut cyclic_modes) = (0u32, 0u32);
+    // Sets with the values of the rotation node of a point.
+    let mut rotation_sets: Vec<String> = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
@@ -563,6 +565,14 @@ pub fn parse_dat(text: &str) -> DatImport {
             }
             continue;
         };
+        let kind = if trimmed.to_ascii_uppercase().contains(ROTATION_PREFIX) {
+            if !rotation_sets.contains(&set) {
+                rotation_sets.push(set.clone());
+            }
+            rotation_kind(kind)
+        } else {
+            kind
+        };
         let row = row_of(&mut data, step, increment, mode, &frequencies, time);
         // The values follow after blank lines and end with a blank line.
         while i < lines.len() && lines[i].trim().is_empty() {
@@ -598,9 +608,35 @@ pub fn parse_dat(text: &str) -> DatImport {
             unknown.join(", ")
         ));
     }
-    DatImport {
-        sets: data.finish(),
-        warnings,
+    let mut sets = data.finish();
+    for set in sets.iter_mut().filter(|s| rotation_sets.contains(&s.name)) {
+        name_rotations_after_point(set);
+    }
+    DatImport { sets, warnings }
+}
+
+/// Shows the rotations and moments of a point under its reference node, the one node of the
+/// set's other values, rather than under the rotation node.
+fn name_rotations_after_point(set: &mut HistorySet) {
+    let rotational = |name: &str| ROTATION_KINDS.iter().any(|k| k.field == name);
+    let mut nodes: Vec<&str> = (set.fields.iter())
+        .filter(|f| !rotational(&f.name))
+        .flat_map(|f| &f.components)
+        .flat_map(|c| &c.entries)
+        .map(|e| e.name.as_str())
+        .filter(|name| name.parse::<u64>().is_ok())
+        .collect();
+    nodes.dedup();
+    let [node] = nodes[..] else {
+        return;
+    };
+    let node = node.to_string();
+    for field in set.fields.iter_mut().filter(|f| rotational(&f.name)) {
+        for entry in field.components.iter_mut().flat_map(|c| &mut c.entries) {
+            if entry.name.parse::<u64>().is_ok() {
+                entry.name = node.clone();
+            }
+        }
     }
 }
 
@@ -653,11 +689,47 @@ fn header_parts(line: &str) -> Option<(String, f64)> {
     Some((set, time))
 }
 
+/// Start of the sets prepolix writes for the rotation node of a reference point
+/// (`INTERNAL_ROTATION-2_NH_OUTPUT-1`): its displacements are the rotations of the point, its
+/// forces the moments.
+const ROTATION_PREFIX: &str = "INTERNAL_ROTATION-";
+
+/// The rotational counterparts of the blocks of a rotation node, shown with the values of
+/// the point's reference node.
+const ROTATION_KINDS: &[Kind] = &[
+    kind(
+        "displacements",
+        "ROTATIONS",
+        &["UR1", "UR2", "UR3"],
+        Ids::Id,
+    ),
+    kind(
+        "velocities",
+        "ANGULAR_VELOCITIES",
+        &["VR1", "VR2", "VR3"],
+        Ids::Id,
+    ),
+    kind("forces", "MOMENTS", &["RM1", "RM2", "RM3"], Ids::Id),
+    kind(
+        "total force",
+        "TOTAL_MOMENT",
+        &["RM1", "RM2", "RM3"],
+        Ids::None,
+    ),
+];
+
+/// The block of a rotation node a block kind stands for; other kinds stay.
+fn rotation_kind(kind: &'static Kind) -> &'static Kind {
+    (ROTATION_KINDS.iter())
+        .find(|k| k.key == kind.key)
+        .unwrap_or(kind)
+}
+
 /// The name PrePoMax shows for a set: without the prefix of the sets written for picked
 /// regions.
 fn repair_set_name(name: &str) -> String {
     let upper = name.to_ascii_uppercase();
-    for prefix in ["INTERNAL_SELECTION-", "INTERNAL-"] {
+    for prefix in ["INTERNAL_SELECTION-", ROTATION_PREFIX, "INTERNAL-"] {
         if let Some(rest) = upper.strip_prefix(prefix)
             && let Some((number, name)) = rest.split_once('_')
             && number.chars().all(|c| c.is_ascii_digit())

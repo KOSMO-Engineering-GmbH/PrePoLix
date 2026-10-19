@@ -165,7 +165,11 @@ impl FeModel {
                         (!self.contact_pairs.iter().any(|c| c.name == *pair))
                             .then(|| format!("Contact Pair {pair} does not exist"))
                     }
-                    kind => kind.region().and_then(|r| r.missing_reference(mesh)),
+                    kind => kind.region().and_then(|r| {
+                        r.missing_reference(mesh)
+                            .or_else(|| self.missing_region_point(r))
+                            .or_else(|| self.missing_remote_point(r))
+                    }),
                 };
                 if let Some(reason) = reason {
                     invalid.push(Invalid {
@@ -222,6 +226,13 @@ impl FeModel {
         region
             .reference_point()
             .and_then(|name| self.missing_reference_point(name))
+    }
+
+    /// The remote displacement of a region on its point, if the model has none of that name.
+    fn missing_remote_point(&self, region: &Region) -> Option<String> {
+        let name = region.remote_point()?;
+        (self.remote_displacement(name).is_none())
+            .then(|| format!("Remote Displacement {name} does not exist"))
     }
 
     /// The first of the amplitude references that names no amplitude of the model.
@@ -323,8 +334,9 @@ impl Region {
                 let missing = edges.len() - mesh.edge_lines(edges).len();
                 (missing > 0).then(|| format!("{missing} element edges do not exist"))
             }
-            // Checked against the model's reference points by the caller.
-            Region::ReferencePoint(_) => None,
+            // Checked against the model's reference points and boundary conditions by the
+            // caller.
+            Region::ReferencePoint(_) | Region::RemotePoint(_) => None,
             Region::Geometry(entities) => {
                 if mesh.cad.is_empty() {
                     return Some("The mesh was not created from the geometry".into());

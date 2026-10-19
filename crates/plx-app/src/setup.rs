@@ -84,6 +84,9 @@ pub(crate) enum Source {
     Surface,
     /// A reference point, which drives a rigid body.
     ReferencePoint,
+    /// The point of a remote displacement boundary condition, offered among the reference
+    /// points.
+    RemotePoint,
 }
 
 impl Source {
@@ -94,7 +97,7 @@ impl Source {
             Source::NodeSet => "Node Set",
             Source::ElementSet => "Element Set",
             Source::Surface => "Surface",
-            Source::ReferencePoint => "Reference Point",
+            Source::ReferencePoint | Source::RemotePoint => "Reference Point",
         }
     }
 }
@@ -125,6 +128,15 @@ pub(crate) const SUPPORT_SOURCES: &[Source] = &[
     Source::NodeSet,
     Source::Surface,
     Source::ReferencePoint,
+];
+/// Nodes, or the point of a rigid body or a remote displacement: for nodal history outputs,
+/// which print the forces and moments of a point too.
+pub(crate) const HISTORY_NODE_SOURCES: &[Source] = &[
+    Source::Selection,
+    Source::NodeSet,
+    Source::Surface,
+    Source::ReferencePoint,
+    Source::RemotePoint,
 ];
 /// Solid elements: whole parts, element sets or the elements of picked faces.
 pub(crate) const SOLID_SOURCES: &[Source] = &[Source::Parts, Source::ElementSet, Source::Selection];
@@ -195,11 +207,13 @@ impl RegionDraft {
             Region::NodeSet(set)
             | Region::ElementSet(set)
             | Region::Surface(set)
-            | Region::ReferencePoint(set) => {
+            | Region::ReferencePoint(set)
+            | Region::RemotePoint(set) => {
                 draft.source = match region {
                     Region::NodeSet(_) => Source::NodeSet,
                     Region::ElementSet(_) => Source::ElementSet,
                     Region::ReferencePoint(_) => Source::ReferencePoint,
+                    Region::RemotePoint(_) => Source::RemotePoint,
                     _ => Source::Surface,
                 };
                 draft.set = set.clone();
@@ -227,6 +241,7 @@ impl RegionDraft {
             Source::ElementSet => Region::ElementSet(self.set.clone()),
             Source::Surface => Region::Surface(self.set.clone()),
             Source::ReferencePoint => Region::ReferencePoint(self.set.clone()),
+            Source::RemotePoint => Region::RemotePoint(self.set.clone()),
         }
     }
 
@@ -490,8 +505,16 @@ impl RegionDraft {
                 .selected_text(self.source.label())
                 .width(200.0)
                 .show_ui(ui, |ui| {
-                    for &source in self.sources {
-                        ui.selectable_value(&mut self.source, source, source.label());
+                    // Remote points are listed with the reference points.
+                    for &source in self.sources.iter().filter(|&&s| s != Source::RemotePoint) {
+                        let point =
+                            source == Source::ReferencePoint && self.source == Source::RemotePoint;
+                        if ui
+                            .selectable_label(self.source == source || point, source.label())
+                            .clicked()
+                        {
+                            self.source = source;
+                        }
                     }
                 });
             wanted |= self.source != source;
@@ -521,18 +544,14 @@ impl RegionDraft {
                     ui.weak("Choose in the \"Selection\" window what a click selects.");
                 }
                 Source::Parts => wanted |= self.parts.ui(ui, active),
-                Source::NodeSet | Source::ElementSet | Source::Surface | Source::ReferencePoint => {
+                Source::ReferencePoint | Source::RemotePoint => self.point_ui(ui, model),
+                Source::NodeSet | Source::ElementSet | Source::Surface => {
                     let names: Vec<&String> = match self.source {
                         Source::NodeSet => model.mesh.node_sets.keys().collect(),
                         Source::ElementSet => model.mesh.element_sets.keys().collect(),
-                        Source::ReferencePoint => {
-                            model.fe.reference_points.iter().map(|p| &p.name).collect()
-                        }
                         _ => model.mesh.surfaces.keys().collect(),
                     };
-                    if names.is_empty() && self.source == Source::ReferencePoint {
-                        ui.weak("The model has no reference points (Features).");
-                    } else if names.is_empty() {
+                    if names.is_empty() {
                         ui.weak("The mesh contains no such sets.");
                     }
                     egui::ComboBox::from_id_salt("region set")
@@ -547,6 +566,57 @@ impl RegionDraft {
             }
         });
         wanted
+    }
+
+    /// The reference points, and where the region takes them the points of the remote
+    /// displacements, by name.
+    fn point_ui(&mut self, ui: &mut Ui, model: &Model) {
+        let points: Vec<&str> = (model.fe.reference_points.iter())
+            .map(|p| p.name.as_str())
+            .collect();
+        let mut remotes: Vec<&str> = Vec::new();
+        if self.sources.contains(&Source::RemotePoint) {
+            let conditions = model.fe.steps.iter().flat_map(|s| &s.boundary_conditions);
+            for bc in conditions {
+                if matches!(bc.kind, BoundaryKind::RemoteDisplacement(_))
+                    && !remotes.contains(&bc.name.as_str())
+                {
+                    remotes.push(&bc.name);
+                }
+            }
+        }
+        if points.is_empty() && remotes.is_empty() {
+            ui.weak(if self.sources.contains(&Source::RemotePoint) {
+                "The model has no reference points (Features) and no remote displacements."
+            } else {
+                "The model has no reference points (Features)."
+            });
+        }
+        let (mut source, mut set) = (self.source, self.set.clone());
+        egui::ComboBox::from_id_salt("region set")
+            .selected_text(self.set.as_str())
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                for &name in &points {
+                    let chosen = source == Source::ReferencePoint && set == name;
+                    if ui.selectable_label(chosen, name).clicked() {
+                        (source, set) = (Source::ReferencePoint, name.to_string());
+                    }
+                }
+                if !remotes.is_empty() {
+                    if !points.is_empty() {
+                        ui.separator();
+                    }
+                    ui.weak("Remote Displacements");
+                }
+                for name in remotes {
+                    let chosen = source == Source::RemotePoint && set == name;
+                    if ui.selectable_label(chosen, name).clicked() {
+                        (source, set) = (Source::RemotePoint, name.to_string());
+                    }
+                }
+            });
+        (self.source, self.set) = (source, set);
     }
 
     pub(crate) fn highlight(&self, model: &Model) -> Highlight {
@@ -905,6 +975,12 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
         Region::Geometry(entities) => return crate::cad_selection::highlight(model, entities),
         // The point is drawn as a feature; the body it drives is the constraint's region.
         Region::ReferencePoint(_) => {}
+        // The point of a remote displacement exists only in the input file; its region shows.
+        Region::RemotePoint(name) => {
+            if let Some((_, bc, _)) = model.fe.remote_displacement(name) {
+                return region_highlight(model, &bc.region);
+            }
+        }
         Region::Nodes(_) | Region::NodeSet(_) => {
             highlight.nodes = region.nodes(&model.mesh);
             // Faces whose corners are all selected show as faces, like PrePoMax does for
@@ -3150,10 +3226,18 @@ impl Editor {
                     bc.amplitude = None;
                 }
                 let list = &mut fe.steps[s].boundary_conditions;
+                let mut renamed = None;
                 if let Some(existing) = index.and_then(|i| list.get(i)) {
                     bc.active = existing.active;
+                    renamed = Some(existing.name.clone()).filter(|old| *old != bc.name);
                 }
+                let remote = matches!(bc.kind, BoundaryKind::RemoteDisplacement(_));
+                let new = bc.name.clone();
                 put(list, index, bc);
+                // History outputs of a remote displacement's point follow a renamed one.
+                if let Some(old) = renamed.filter(|_| remote) {
+                    fe.rename_remote_point(&old, &new);
+                }
             }
             Draft::Load(s, mut load, region) => {
                 load.region = region.region();
@@ -3511,7 +3595,7 @@ pub fn item_region<'a>(fe: &'a FeModel, item: &TreeItem) -> Option<&'a Region> {
 fn history_region(kind: &HistoryKind, fe: &FeModel, mesh: &FeMesh) -> RegionDraft {
     let (sources, target) = match kind {
         HistoryKind::Element { .. } => (SOLID_SOURCES, face_target(fe)),
-        _ => (NODE_SOURCES, Target::Nodes),
+        _ => (HISTORY_NODE_SOURCES, Target::Nodes),
     };
     match kind.region() {
         Some(region) => RegionDraft::from_region(region, sources, target, mesh),
@@ -3617,8 +3701,41 @@ fn history_output_form(
             );
             ui.end_row();
         }
-        _ => region.ui(ui, model),
+        _ => {
+            region.ui(ui, model);
+            if let Some(hint) = point_hint(&region.region(), &model.fe) {
+                ui.label("");
+                ui.weak(hint);
+                ui.end_row();
+            }
+        }
     }
+}
+
+/// What a nodal history output of a point prints besides forces and displacements.
+fn point_hint(region: &Region, fe: &FeModel) -> Option<&'static str> {
+    let behavior = match region {
+        Region::ReferencePoint(_) => RemoteBehavior::Rigid,
+        Region::RemotePoint(name) => match fe.remote_displacement(name) {
+            Some((_, _, remote)) => remote.behavior,
+            None => return None,
+        },
+        _ => return None,
+    };
+    Some(match behavior {
+        RemoteBehavior::Rigid => {
+            "RF and U of the point include its moments (RM) and rotations (UR), \
+             V its angular velocities."
+        }
+        RemoteBehavior::Deformable => {
+            "U includes the rotations (UR) of the point. CalculiX has no reaction forces or \
+             moments at a deformable remote point; use the Rigid behavior for them."
+        }
+        RemoteBehavior::Coupled => {
+            "CalculiX has no reaction forces at a coupled remote point, which does not turn: \
+             only its displacements are printed."
+        }
+    })
 }
 
 /// PrePoMax's field output dialog: the kind, chosen only for a new output, the variables
@@ -4878,6 +4995,34 @@ mod tests {
         assert_eq!(region.target, Target::Nodes);
         assert!(region.sources.contains(&Source::ReferencePoint));
         assert_eq!(load_kinds()[0].0, "Force");
+    }
+
+    #[test]
+    fn a_node_history_output_takes_the_point_of_a_remote_displacement() {
+        let mut fe = FeModel::default();
+        Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
+        let editor = Editor::create(NewItem::HistoryOutput(0), &fe).unwrap();
+        let Draft::HistoryOutput(_, _, region) = &editor.draft else {
+            unreachable!()
+        };
+        assert!(region.sources.contains(&Source::RemotePoint));
+        let point = Region::RemotePoint("Remote_Displacement-1".into());
+        let draft = RegionDraft::from_region(
+            &point,
+            HISTORY_NODE_SOURCES,
+            Target::Nodes,
+            &FeMesh::default(),
+        );
+        assert_eq!(draft.region(), point);
+        // History outputs follow a renamed remote displacement.
+        let mut output = HistoryOutput::node("NH_Output-1", point);
+        output.normalize_variables();
+        fe.steps[0].history_outputs.push(output);
+        fe.rename_remote_point("Remote_Displacement-1", "Shaft");
+        assert_eq!(
+            fe.steps[0].history_outputs[0].kind.region(),
+            Some(&Region::RemotePoint("Shaft".into()))
+        );
     }
 
     #[test]

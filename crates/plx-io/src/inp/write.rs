@@ -48,6 +48,9 @@ pub enum WriteError {
     /// or a rigid body whose reference point does not exist.
     #[error("{item}: Reference Point {point} has no active rigid body")]
     UnknownReferencePoint { item: String, point: String },
+    /// A history output of the point of a remote displacement that no active step applies.
+    #[error("{item}: Remote Displacement {point} does not exist or is deactivated")]
+    UnknownRemotePoint { item: String, point: String },
     /// A load without a direction, such as a gravity of zero.
     #[error("{item}: {reason}")]
     InvalidLoad { item: String, reason: String },
@@ -710,6 +713,9 @@ struct Sets<'a> {
     /// Reference and rotation node of the point of each remote displacement, with its
     /// region; boundary conditions with the same region and point share it.
     remote_points: Vec<(Region, plx_model::RemoteDisplacement, [NodeId; 2])>,
+    /// Reference and rotation node of the point of each remote displacement by the boundary
+    /// condition's name, with its behavior.
+    remote_names: BTreeMap<String, ([NodeId; 2], RemoteBehavior)>,
     /// Local coordinate systems (`*Transform`, type R) of node sets whose symmetry plane is
     /// no coordinate plane: the set with the local x and y axes.
     transforms: Vec<(String, [f64; 3], [f64; 3])>,
@@ -742,6 +748,7 @@ impl<'a> Sets<'a> {
             surface_sets: BTreeMap::new(),
             reference_nodes: BTreeMap::new(),
             remote_points: Vec::new(),
+            remote_names: BTreeMap::new(),
             pre_tension_nodes: BTreeMap::new(),
             cut_originals: BTreeMap::new(),
             submodel_sets: Vec::new(),
@@ -1337,11 +1344,13 @@ fn constraints(
             let BoundaryKind::RemoteDisplacement(remote) = &bc.kind else {
                 continue;
             };
-            if !bc.active
-                || !step.kind.supports_boundary(&bc.kind)
-                || (sets.remote_points.iter())
-                    .any(|(r, p, _)| *r == bc.region && p.same_point(remote))
+            if !bc.active || !step.kind.supports_boundary(&bc.kind) {
+                continue;
+            }
+            if let Some(&(_, _, nodes)) = (sets.remote_points.iter())
+                .find(|(r, p, _)| *r == bc.region && p.same_point(remote))
             {
+                (sets.remote_names.entry(bc.name.clone())).or_insert((nodes, remote.behavior));
                 continue;
             }
             let point = (remote.resolve(model, sets.mesh, &bc.region)).map_err(|reason| {
@@ -1356,6 +1365,8 @@ fn constraints(
             generated.nodes.push((rotation, point.position));
             sets.remote_points
                 .push((bc.region.clone(), remote.clone(), [reference, rotation]));
+            (sets.remote_names.entry(bc.name.clone()))
+                .or_insert(([reference, rotation], remote.behavior));
             if let Some([x, y, _]) = point.axes {
                 let set =
                     sets.free_name("Internal_Selection", &format!("{}_Point", name(&bc.name)));
@@ -2963,6 +2974,11 @@ fn history_output(
         Totals::Only => ", Totals=Only",
     };
     let header = match &output.kind {
+        HistoryKind::Node {
+            region: region @ (Region::ReferencePoint(_) | Region::RemotePoint(_)),
+        } => {
+            return point_output(sets, output, region, totals);
+        }
         HistoryKind::Node { region } => {
             let set = sets.node_set(&output.name, region)?;
             format!("*Node print, Nset={set}{totals}")
@@ -2992,6 +3008,77 @@ fn history_output(
         output.name,
         output.variables.join(", ")
     ))))
+}
+
+/// Reference and rotation node of a reference point or the point of a remote displacement,
+/// and how the region follows the point: a reference point drives a rigid body.
+fn point_nodes(
+    sets: &Sets,
+    item: &str,
+    region: &Region,
+) -> Result<([NodeId; 2], RemoteBehavior), WriteError> {
+    match region {
+        Region::ReferencePoint(point) => match sets.reference_nodes.get(point) {
+            Some(nodes) => Ok(([nodes.reference, nodes.rotation], RemoteBehavior::Rigid)),
+            None => Err(WriteError::UnknownReferencePoint {
+                item: item.to_string(),
+                point: point.clone(),
+            }),
+        },
+        Region::RemotePoint(point) => match sets.remote_names.get(point) {
+            Some(&nodes) => Ok(nodes),
+            None => Err(WriteError::UnknownRemotePoint {
+                item: item.to_string(),
+                point: point.clone(),
+            }),
+        },
+        _ => unreachable!("not a point"),
+    }
+}
+
+/// The nodal history output of a point: the values of its reference node, and the
+/// rotations, moments and angular velocities as the displacements, forces and velocities
+/// of its rotation node. The rotation node's set is named `Internal_Rotation-n_<output>`,
+/// by which the `.dat` reader shows its values under the output's name.
+///
+/// CalculiX has reaction forces at the point of a rigid body only: the point of equations,
+/// a deformable or coupled remote displacement, prints zeros, so its `RF` is left out. A
+/// coupled point does not turn.
+fn point_output(
+    sets: &mut Sets,
+    output: &HistoryOutput,
+    region: &Region,
+    totals: &str,
+) -> Result<Option<Keyword>, WriteError> {
+    let ([reference, rotation], behavior) = point_nodes(sets, &output.name, region)?;
+    let reactions = behavior == RemoteBehavior::Rigid;
+    let printed: Vec<&str> = (output.variables.iter())
+        .map(String::as_str)
+        .filter(|&v| reactions || v != "RF")
+        .collect();
+    if printed.is_empty() {
+        return Ok(None);
+    }
+    let set = sets.free_name("Internal_Selection", &name(&output.name));
+    sets.node_sets.push((set.clone(), vec![reference]));
+    let mut text = format!(
+        "** Name: {}\n*Node print, Nset={set}{totals}\n{}\n",
+        output.name,
+        printed.join(", ")
+    );
+    let turning: Vec<&str> = (printed.iter().copied())
+        .filter(|v| ["RF", "U", "V"].contains(v))
+        .collect();
+    if behavior != RemoteBehavior::Coupled && !turning.is_empty() {
+        let set = sets.free_name("Internal_Rotation", &name(&output.name));
+        sets.node_sets.push((set.clone(), vec![rotation]));
+        let _ = write!(
+            text,
+            "*Node print, Nset={set}{totals}\n{}\n",
+            turning.join(", ")
+        );
+    }
+    Ok(Some(Keyword::generated(text)))
 }
 
 /// A keyword line followed by ids, 16 per line, the most CalculiX reads on one line.
