@@ -286,6 +286,9 @@ impl ModelMut<'_> {
             mesh_sets,
             element_types,
         } = copy;
+        if let Some(tags) = links::geometry_tags(self.geometry.as_ref(), geometry.as_ref()) {
+            links::follow_geometry(self.fe, None, &tags);
+        }
         *self.geometry = geometry;
         *self.mesh = mesh;
         *self.mesh_inputs = mesh_inputs;
@@ -6232,7 +6235,14 @@ impl ProjectApp {
         let mut data = node.closed_model_mut()?;
         match payload {
             Payload::Setup(fe) => links::apply_setup(data.fe, &fe, path),
-            Payload::Geometry(geometry) => links::take_geometry(data.geometry, geometry),
+            Payload::Geometry(geometry) => {
+                if let Some(tags) = links::take_geometry(data.geometry, geometry)
+                    && let Some(lost) = links::follow_geometry(data.fe, Some(data.mesh), &tags)
+                {
+                    let line = format!("{}: {lost}.", node.name);
+                    self.output.push(line);
+                }
+            }
             Payload::Mesh(mesh) => data.take_mesh(*mesh),
             Payload::Results(global, file) => {
                 links::apply_results(data.fe, link, global, file);
@@ -10834,6 +10844,7 @@ mod tests {
             mesh_items: Vec::new(),
             part_names: Vec::new(),
             refinement: 1.0,
+            signatures: Vec::new(),
         };
         let mesh = MeshPrimitive::default_box().generate(ModelSpace::ThreeD, "Solid-1");
         let space = ModelSpace::ThreeD;

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::{EntitySignature, TagMap, match_entities};
+
 /// CAD geometry imported from a STEP, IGES or BREP file, the source of the mesh, like the
 /// geometry parts of PrePoMax.
 ///
@@ -28,6 +30,11 @@ pub struct Geometry {
     /// link of the project schematic, such as a mesh convergence, gives it.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub refinement: f64,
+    /// What each face, edge and vertex looks like, recorded when the BREP was read, so that
+    /// selections and local mesh sizes find their entities again when the shapes change and
+    /// Gmsh numbers them anew, see [`Geometry::tags_in`]. Empty if not recorded.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signatures: Vec<EntitySignature>,
 }
 
 fn one() -> f64 {
@@ -101,6 +108,43 @@ impl Geometry {
             && !self.mesh_items.iter().any(|item| {
                 matches!(&item.kind, MeshSetupKind::TetrahedralGmsh { parts, .. } if names(parts, part))
             })
+    }
+
+    /// Where the faces, edges and vertices of this geometry are in `new`, the geometry that
+    /// takes its place, e.g. a STEP file read again or the result of a CAD operation: `None`
+    /// when the shapes are the same, so the tags are, or when either geometry has no
+    /// signatures to go by. Entities that cannot be found clearly are left out.
+    pub fn tags_in(&self, new: &Geometry) -> Option<TagMap> {
+        if self.brep == new.brep || self.signatures.is_empty() || new.signatures.is_empty() {
+            return None;
+        }
+        Some(match_entities(&self.signatures, &new.signatures))
+    }
+
+    /// Renumbers the faces and edges the mesh setup items name after `tags`, from
+    /// [`Self::tags_in`]; those without a new tag are dropped. Returns how many were.
+    pub fn renumber_mesh_items(&mut self, tags: &TagMap) -> usize {
+        let mut dropped = 0;
+        let mut renumber = |tags_of: fn(i32) -> plx_mesh::CadEntity, list: &mut Vec<i32>| {
+            let before = list.len();
+            *list = (list.iter())
+                .filter_map(|&tag| tags.get(&tags_of(tag)).map(|e| e.tag()))
+                .collect();
+            dropped += before - list.len();
+        };
+        for item in &mut self.mesh_items {
+            match &mut item.kind {
+                MeshSetupKind::LocalMeshSize { faces, edges, .. } => {
+                    renumber(plx_mesh::CadEntity::Face, faces);
+                    renumber(plx_mesh::CadEntity::Edge, edges);
+                }
+                MeshSetupKind::ExtrudeMesh(extrude) => {
+                    renumber(plx_mesh::CadEntity::Face, &mut extrude.faces);
+                }
+                _ => {}
+            }
+        }
+        dropped
     }
 
     /// The local mesh sizes as (faces, edges, size), the sizes divided by the refinement.
@@ -401,6 +445,7 @@ mod tests {
             ],
             part_names: Vec::new(),
             refinement: 1.0,
+            signatures: Vec::new(),
         };
         assert_eq!(geometry.parameters("solid-1"), fine);
         assert_eq!(geometry.parameters("SOLID-2").max_size, 5.0);
@@ -484,6 +529,7 @@ mod tests {
             mesh_items: vec![tet.clone(), extrude(&["A", "B"])],
             part_names: Vec::new(),
             refinement: 1.0,
+            signatures: Vec::new(),
         };
         assert!(geometry.extrusion("a").is_some());
         assert!(geometry.extrusion("C").is_none());

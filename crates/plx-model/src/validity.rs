@@ -329,6 +329,23 @@ impl Region {
                 if mesh.cad.is_empty() {
                     return Some("The mesh was not created from the geometry".into());
                 }
+                let lost = entities.iter().filter(|e| e.is_lost()).count();
+                match lost {
+                    0 => {}
+                    1 => {
+                        return Some(
+                            "1 picked geometry entity was not found in the changed geometry; \
+                             pick it again"
+                                .into(),
+                        );
+                    }
+                    _ => {
+                        return Some(format!(
+                            "{lost} picked geometry entities were not found in the changed \
+                             geometry; pick them again"
+                        ));
+                    }
+                }
                 let missing = entities.iter().filter(|&&e| !mesh.cad.contains(e)).count();
                 (missing > 0).then(|| format!("{missing} geometry entities are not meshed"))
             }

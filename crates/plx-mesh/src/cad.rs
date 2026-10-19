@@ -13,6 +13,50 @@ pub enum CadEntity {
     Vertex(i32),
 }
 
+impl CadEntity {
+    /// The entity of Gmsh's dimension (0 vertex, 1 edge, 2 face) and tag.
+    pub fn of(dim: i32, tag: i32) -> Option<Self> {
+        match dim {
+            0 => Some(Self::Vertex(tag)),
+            1 => Some(Self::Edge(tag)),
+            2 => Some(Self::Face(tag)),
+            _ => None,
+        }
+    }
+
+    /// Gmsh's dimension of the entity.
+    pub fn dim(self) -> i32 {
+        match self {
+            Self::Vertex(_) => 0,
+            Self::Edge(_) => 1,
+            Self::Face(_) => 2,
+        }
+    }
+
+    pub fn tag(self) -> i32 {
+        match self {
+            Self::Vertex(tag) | Self::Edge(tag) | Self::Face(tag) => tag,
+        }
+    }
+
+    /// The entity marked as not found in a changed geometry: Gmsh's tags are positive, so
+    /// the negative tag names nothing, and the selection holding it shows that something
+    /// must be picked again instead of quietly taking another entity.
+    pub fn lost(self) -> Self {
+        let tag = -self.tag().abs();
+        match self {
+            Self::Vertex(_) => Self::Vertex(tag),
+            Self::Edge(_) => Self::Edge(tag),
+            Self::Face(_) => Self::Face(tag),
+        }
+    }
+
+    /// Whether the entity was not found in a changed geometry, see [`Self::lost`].
+    pub fn is_lost(self) -> bool {
+        self.tag() <= 0
+    }
+}
+
 /// Where the CAD entities lie in a mesh generated from the geometry: kept with the mesh and
 /// rebuilt with it, so that selections by CAD entity find their nodes and faces again.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

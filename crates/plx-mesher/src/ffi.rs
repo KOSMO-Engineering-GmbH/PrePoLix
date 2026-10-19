@@ -59,6 +59,7 @@ gmsh_api! {
     get_entities = "gmshModelGetEntities": fn(*mut *mut c_int, *mut usize, c_int, Ierr);
     get_entity_name = "gmshModelGetEntityName": fn(c_int, c_int, *mut *mut c_char, Ierr);
     set_entity_name = "gmshModelSetEntityName": fn(c_int, c_int, *const c_char, Ierr);
+    get_type = "gmshModelGetType": fn(c_int, c_int, *mut *mut c_char, Ierr);
     get_adjacencies = "gmshModelGetAdjacencies":
         fn(c_int, c_int, *mut *mut c_int, *mut usize, *mut *mut c_int, *mut usize, Ierr);
     get_bounding_box = "gmshModelGetBoundingBox": fn(

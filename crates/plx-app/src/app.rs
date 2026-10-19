@@ -442,13 +442,27 @@ impl AnalysisWindow {
 
     /// Takes over the geometry of another analysis, shown on the Geometry tab.
     pub fn apply_geometry(&mut self, geometry: Option<plx_model::Geometry>) {
+        self.take_geometry(geometry, true);
+    }
+
+    /// [`Self::apply_geometry`]; `follow` has the selections and the mesh follow changed
+    /// shapes, which a mesh taken with them does not need.
+    fn take_geometry(&mut self, geometry: Option<plx_model::Geometry>, follow: bool) {
         let workbench = &mut self.workbench;
         let Some(model) = &mut workbench.model else {
             return;
         };
         // The analysis keeps its own mesh setup.
         let mut own = model.geometry.take();
-        crate::links::take_geometry(&mut own, geometry);
+        if let Some(tags) = crate::links::take_geometry(&mut own, geometry)
+            && follow
+        {
+            let lost = crate::links::follow_geometry(&mut model.fe, Some(&mut model.mesh), &tags);
+            if let Some(lost) = lost {
+                (workbench.output).push(format!("{lost}."));
+            }
+            workbench.symbols_shown = None;
+        }
         let geometry = own;
         workbench.geometry = match &geometry {
             Some(geometry) => match plx_mesher::tessellate(geometry) {
@@ -476,11 +490,16 @@ impl AnalysisWindow {
         let Some(model) = &mut self.workbench.model else {
             return;
         };
+        // The new mesh is of the new shapes already: only the selections follow them.
+        if let Some(tags) = crate::links::geometry_tags(model.geometry.as_ref(), geometry.as_ref())
+        {
+            crate::links::follow_geometry(&mut model.fe, None, &tags);
+        }
         model.fe.mesh_sets = mesh_sets;
         model.fe.element_types = element_types;
         model.set_mesh(mesh);
         model.mesh_inputs = mesh_inputs;
-        self.apply_geometry(geometry);
+        self.take_geometry(geometry, false);
         self.workbench.view_command = Some(ViewCommand::Fit);
     }
 

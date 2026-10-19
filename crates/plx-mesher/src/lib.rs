@@ -16,7 +16,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 pub use plx_mesh::CadEntity;
 use plx_mesh::{CadMap, Element, ElementId, ElementShape, FeMesh, NodeId, Part, SurfaceDefinition};
-use plx_model::{Algorithm2d, Algorithm3d, Geometry, MeshingParameters, UnitSystem};
+use plx_model::{
+    Algorithm2d, Algorithm3d, EntitySignature, Geometry, MeshingParameters, TagMap, UnitSystem,
+};
 
 use gmsh::{Gmsh, with_gmsh};
 pub use gmsh::{GmshError, LibraryInfo, loaded_library, set_library_path};
@@ -139,7 +141,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         return Err(GmshError::Other("No file selected".into()));
     }
     let brep_file = TempFile::new("brep");
-    let (diagonal, warnings, part_names, notes) = with_gmsh(|gmsh| {
+    let (diagonal, warnings, part_names, notes, signatures) = with_gmsh(|gmsh| {
         let notes = read_files(gmsh, paths, units)?;
         let read = part_boxes(gmsh, default_parts(gmsh)?)?;
         gmsh.write(&brep_file.0)?;
@@ -154,7 +156,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         gmsh.clear()?;
         gmsh.import_shapes(&brep_file.0)?;
         let part_names = names_by_place(part_boxes(gmsh, default_parts(gmsh)?)?, read);
-        Ok((diagonal, warnings, part_names, notes))
+        Ok((diagonal, warnings, part_names, notes, signatures(gmsh)?))
     })?;
     let brep = std::fs::read_to_string(&brep_file.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", brep_file.0.display())))?;
@@ -165,6 +167,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         mesh_items: Vec::new(),
         part_names,
         refinement: 1.0,
+        signatures,
     };
     let display = tessellate(&geometry)?;
     Ok(CadImport {
@@ -417,20 +420,20 @@ pub fn add_cad_files(
     }
     let file = TempFile::with_contents("brep", &geometry.brep)?;
     let combined = TempFile::new("brep");
-    let (old_parts, old_boxes, read, warnings, notes) = with_gmsh(|gmsh| {
+    let (old_parts, old_signatures, read, warnings, notes) = with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
         let parts = part_boxes(gmsh, parts(gmsh, geometry)?)?;
-        let boxes = entity_boxes(gmsh)?;
+        let old_signatures = signatures(gmsh)?;
         let notes = read_files(gmsh, paths, units)?;
         let read = part_boxes(gmsh, default_parts(gmsh)?)?;
         gmsh.write(&combined.0)?;
-        Ok((parts, boxes, read, gmsh.warnings()?, notes))
+        Ok((parts, old_signatures, read, gmsh.warnings()?, notes))
     })?;
     let brep = std::fs::read_to_string(&combined.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", combined.0.display())))?;
-    let (new_parts, new_boxes) = with_gmsh(|gmsh| {
+    let (new_parts, new_signatures) = with_gmsh(|gmsh| {
         gmsh.import_shapes(&combined.0)?;
-        Ok((part_boxes(gmsh, default_parts(gmsh)?)?, entity_boxes(gmsh)?))
+        Ok((part_boxes(gmsh, default_parts(gmsh)?)?, signatures(gmsh)?))
     })?;
     // The old parts are found again by where they lie, the new ones keep the names of the
     // file or are numbered on.
@@ -459,15 +462,15 @@ pub fn add_cad_files(
         names.push(name.clone());
         added.push(name);
     }
-    let mut mesh_items = geometry.mesh_items.clone();
-    renumber_mesh_items(&mut mesh_items, &old_boxes, &new_boxes);
-    let combined = Geometry {
+    let renumbered = unchanged(&old_signatures, &new_signatures);
+    let mut combined = Geometry {
         source: format!("{}, {}", geometry.source, file_names(paths)),
         brep,
-        mesh_items,
         part_names: names,
+        signatures: new_signatures,
         ..geometry.clone()
     };
+    combined.renumber_mesh_items(&renumbered);
     let display = tessellate(&combined)?;
     Ok(CadAddition {
         import: CadImport {
@@ -476,7 +479,7 @@ pub fn add_cad_files(
             warnings,
             notes,
         },
-        renumbered: renumbering(&old_boxes, &new_boxes),
+        renumbered,
         added,
     })
 }
@@ -495,7 +498,7 @@ pub fn scale_geometry(geometry: &Geometry, factor: f64) -> Result<Geometry, Gmsh
     })?;
     let brep = std::fs::read_to_string(&scaled.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", scaled.0.display())))?;
-    Ok(Geometry {
+    with_signatures(Geometry {
         brep,
         ..geometry.clone()
     })
@@ -699,38 +702,40 @@ pub fn delete_parts_renumbered(
 ) -> Result<(Option<Geometry>, BTreeMap<CadEntity, CadEntity>), GmshError> {
     let file = TempFile::with_contents("brep", &geometry.brep)?;
     let smaller = TempFile::new("brep");
-    let (names, old_boxes) = with_gmsh(|gmsh| {
+    let (names, old_signatures) = with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
         let parts = parts(gmsh, geometry)?;
         if let Some(part) = (deleted.iter()).find(|d| !parts.iter().any(|(_, n)| n == *d)) {
             return Err(GmshError::Other(format!("The geometry has no part {part}")));
         }
-        let boxes = entity_boxes(gmsh)?;
+        let old_signatures = signatures(gmsh)?;
         let (gone, kept): (Vec<_>, Vec<_>) =
             (parts.into_iter()).partition(|(_, n)| deleted.contains(n));
         let entities: Vec<Entity> = gone.into_iter().map(|(entity, _)| entity).collect();
         gmsh.remove(&entities)?;
         gmsh.write(&smaller.0)?;
-        Ok((kept.into_iter().map(|(_, n)| n).collect::<Vec<_>>(), boxes))
+        Ok((
+            kept.into_iter().map(|(_, n)| n).collect::<Vec<_>>(),
+            old_signatures,
+        ))
     })?;
     if names.is_empty() {
         return Ok((None, BTreeMap::new()));
     }
     let brep = std::fs::read_to_string(&smaller.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", smaller.0.display())))?;
-    let new_boxes = with_gmsh(|gmsh| {
+    let new_signatures = with_gmsh(|gmsh| {
         gmsh.import_shapes(&smaller.0)?;
-        entity_boxes(gmsh)
+        signatures(gmsh)
     })?;
-    let mut mesh_items = geometry.mesh_items.clone();
-    renumber_mesh_items(&mut mesh_items, &old_boxes, &new_boxes);
-    let renumbered = renumbering(&old_boxes, &new_boxes);
-    let smaller = Geometry {
+    let renumbered = unchanged(&old_signatures, &new_signatures);
+    let mut smaller = Geometry {
         brep,
-        mesh_items,
         part_names: names,
+        signatures: new_signatures,
         ..geometry.clone()
     };
+    smaller.renumber_mesh_items(&renumbered);
     Ok((Some(smaller), renumbered))
 }
 
@@ -739,15 +744,46 @@ type Entity = (i32, i32);
 
 type BoundingBox = ([f64; 3], [f64; 3]);
 
-/// Bounding box of every face, edge and vertex, by (dimension, tag).
-fn entity_boxes(gmsh: &Gmsh) -> Result<Vec<(Entity, BoundingBox)>, GmshError> {
-    let mut boxes = Vec::new();
+/// What every face, edge and vertex of the model looks like, to find them again once Gmsh
+/// numbered them anew, see [`plx_model::match_entities`].
+fn signatures(gmsh: &Gmsh) -> Result<Vec<EntitySignature>, GmshError> {
+    let mut signatures = Vec::new();
     for dim in [0, 1, 2] {
         for tag in gmsh.entities(dim)? {
-            boxes.push(((dim, tag), gmsh.entity_bounding_box(dim, tag)?));
+            let Some(entity) = CadEntity::of(dim, tag) else {
+                continue;
+            };
+            let (min, max) = gmsh.entity_bounding_box(dim, tag)?;
+            let (centroid, size) = if dim == 0 {
+                (gmsh.point(tag)?, 0.0)
+            } else {
+                (gmsh.center_of_mass(dim, tag)?, gmsh.mass(dim, tag)?)
+            };
+            signatures.push(EntitySignature {
+                entity,
+                kind: gmsh.entity_type(dim, tag)?,
+                centroid,
+                min,
+                max,
+                size,
+            });
         }
     }
-    Ok(boxes)
+    Ok(signatures)
+}
+
+/// The geometry with the signatures of its entities as Gmsh reads its BREP, for a geometry
+/// made without them.
+pub fn with_signatures(geometry: Geometry) -> Result<Geometry, GmshError> {
+    let file = TempFile::with_contents("brep", &geometry.brep)?;
+    let signatures = with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        signatures(gmsh)
+    })?;
+    Ok(Geometry {
+        signatures,
+        ..geometry
+    })
 }
 
 /// Whether a part name is a numbered default, as "SOLID-2", rather than one from the file.
@@ -806,53 +842,26 @@ fn part_boxes(
         .collect()
 }
 
-/// The new entity of every old one that lies where it did, after Gmsh numbered the faces,
-/// edges and vertices anew.
-fn renumbering(
-    old_boxes: &[(Entity, BoundingBox)],
-    new_boxes: &[(Entity, BoundingBox)],
-) -> BTreeMap<CadEntity, CadEntity> {
-    let entity = |(dim, tag): Entity| match dim {
-        0 => CadEntity::Vertex(tag),
-        1 => CadEntity::Edge(tag),
-        _ => CadEntity::Face(tag),
-    };
-    (old_boxes.iter())
-        .filter_map(|&((dim, tag), ref old)| {
-            let (new, _) =
-                (new_boxes.iter()).find(|((d, _), new)| *d == dim && same_box(old, new))?;
-            Some((entity((dim, tag)), entity(*new)))
-        })
-        .collect()
-}
-
-/// Renumbers the faces and edges of the local mesh sizes and extrude meshes after [`renumbering`]; those
-/// without a new tag are dropped.
-fn renumber_mesh_items(
-    items: &mut [plx_model::MeshSetupItem],
-    old_boxes: &[(Entity, BoundingBox)],
-    new_boxes: &[(Entity, BoundingBox)],
-) {
-    let renumber = |dim: i32, tags: &mut Vec<i32>| {
-        *tags = (tags.iter())
-            .filter_map(|tag| {
-                let (_, old) = old_boxes.iter().find(|(e, _)| *e == (dim, *tag))?;
-                (new_boxes.iter())
-                    .find(|((d, _), new)| *d == dim && same_box(old, new))
-                    .map(|((_, t), _)| *t)
+/// The new tags of the entities that a geometry kept unchanged when parts were added or
+/// deleted; the others are left out.
+fn unchanged(old: &[EntitySignature], new: &[EntitySignature]) -> TagMap {
+    let mut map = plx_model::match_entities(old, new);
+    // Only the entities that are still there exactly: those of a deleted part must not be
+    // taken for a similar one that stays.
+    let by_entity: BTreeMap<CadEntity, &EntitySignature> =
+        new.iter().map(|s| (s.entity, s)).collect();
+    map.retain(|from, to| {
+        let (Some(a), Some(b)) = (old.iter().find(|s| s.entity == *from), by_entity.get(to)) else {
+            return false;
+        };
+        let size = (0..3).map(|k| a.max[k] - a.min[k]).fold(0.0, f64::max);
+        let tolerance = 1e-6 * size.max(1e-3);
+        a.kind == b.kind
+            && (0..3).all(|k| {
+                (a.min[k] - b.min[k]).abs() <= tolerance && (a.max[k] - b.max[k]).abs() <= tolerance
             })
-            .collect();
-    };
-    for item in items {
-        match &mut item.kind {
-            plx_model::MeshSetupKind::LocalMeshSize { faces, edges, .. } => {
-                renumber(2, faces);
-                renumber(1, edges);
-            }
-            plx_model::MeshSetupKind::ExtrudeMesh(extrude) => renumber(2, &mut extrude.faces),
-            _ => {}
-        }
-    }
+    });
+    map
 }
 
 /// Whether two bounding boxes are those of the same entity, read twice.

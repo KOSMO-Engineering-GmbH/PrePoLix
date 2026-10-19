@@ -651,6 +651,13 @@ impl Gmsh {
         Ok(self.take_string(name))
     }
 
+    /// Gmsh's type of an entity, e.g. "Plane", "Cylinder", "Line", "Circle", "Point".
+    pub fn entity_type(&self, dim: i32, tag: i32) -> Result<String, GmshError> {
+        let mut kind = std::ptr::null_mut();
+        self.call(|e| unsafe { (self.api.get_type)(dim, tag, &mut kind, e) })?;
+        Ok(self.take_string(kind))
+    }
+
     pub fn set_entity_name(&self, dim: i32, tag: i32, name: &str) -> Result<(), GmshError> {
         let name = c_string(name)?;
         self.call(|e| unsafe { (self.api.set_entity_name)(dim, tag, name.as_ptr(), e) })

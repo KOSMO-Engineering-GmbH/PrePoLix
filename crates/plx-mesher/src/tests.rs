@@ -479,6 +479,7 @@ fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
         mesh_items: Vec::new(),
         part_names: Vec::new(),
         refinement: 1.0,
+        signatures: Vec::new(),
     }
 }
 
@@ -589,6 +590,7 @@ fn box_and_lines() -> Geometry {
         mesh_items: Vec::new(),
         part_names: Vec::new(),
         refinement: 1.0,
+        signatures: Vec::new(),
     }
 }
 
@@ -619,6 +621,7 @@ fn a_long_thin_round_bar_is_displayed_with_few_triangles() {
         mesh_items: Vec::new(),
         part_names: Vec::new(),
         refinement: 1.0,
+        signatures: Vec::new(),
     };
     let display = tessellate(&geometry).unwrap();
     let triangles = display
@@ -937,6 +940,7 @@ fn beam_on_block() -> Geometry {
         mesh_items: Vec::new(),
         part_names: Vec::new(),
         refinement: 1.0,
+        signatures: Vec::new(),
     }
 }
 
@@ -1363,6 +1367,7 @@ fn revolved(origin: [f64; 3], size: [f64; 2], radius: f64, angle: f64) -> Geomet
         mesh_items: Vec::new(),
         part_names: Vec::new(),
         refinement: 1.0,
+        signatures: Vec::new(),
     }
 }
 
@@ -1508,4 +1513,94 @@ fn flat_files_added_to_a_geometry_are_moved_into_the_xy_plane() {
     );
     let (low, high) = z_range(&addition.import.display);
     assert!(low.abs() < 1e-9 && high.abs() < 1e-9, "{low} {high}");
+}
+
+/// A plate of the size beside a small cube, which Gmsh numbers before the plate if it comes
+/// first, so that the plate's faces and edges get other tags.
+fn plate_and_cube(size: [f64; 3], cube_first: bool) -> Geometry {
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        let cube = || gmsh.add_box([-20.0, 0.0, 0.0], [5.0; 3]);
+        if cube_first {
+            cube()?;
+        }
+        gmsh.add_box([0.0; 3], size)?;
+        if !cube_first {
+            cube()?;
+        }
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    with_signatures(Geometry {
+        source: "platte.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters {
+            max_size: 2.0,
+            ..MeshingParameters::default()
+        },
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+    })
+    .unwrap()
+}
+
+#[test]
+fn picked_entities_are_found_in_changed_and_renumbered_shapes() {
+    if !gmsh_available() {
+        return;
+    }
+    let old = plate_and_cube([10.0, 10.0, 2.0], false);
+    let on_plate = |s: &&plx_model::EntitySignature| s.centroid[0] > 0.0;
+    let top = |geometry: &Geometry, z: f64| {
+        (geometry.signatures.iter())
+            .filter(on_plate)
+            .find(|s| {
+                s.entity.dim() == 2
+                    && (s.centroid[2] - z).abs() < 1e-6
+                    && s.kind == "Plane"
+                    && s.max[2] - s.min[2] < 1e-3
+            })
+            .map(|s| s.entity)
+            .unwrap()
+    };
+    let old_top = top(&old, 2.0);
+    // The same shapes read again keep their tags.
+    let again = plate_and_cube([10.0, 10.0, 2.0], false);
+    assert_eq!(again.signatures, old.signatures);
+    // A thicker plate, numbered after the cube: every face of both is found, the top face
+    // on the new top.
+    let mut new = plate_and_cube([10.0, 10.0, 3.0], true);
+    let tags = old.tags_in(&new).unwrap();
+    let faces = |g: &Geometry| g.signatures.iter().filter(|s| s.entity.dim() == 2).count();
+    assert_eq!(faces(&old), 12);
+    assert_eq!(tags.keys().filter(|e| e.dim() == 2).count(), 12);
+    let new_top = top(&new, 3.0);
+    assert_ne!(new_top, old_top, "the plate is numbered after the cube now");
+    assert_eq!(tags[&old_top], new_top);
+    // Its edges too: the twelve of the plate and those of the cube.
+    assert_eq!(tags.keys().filter(|e| e.dim() == 1).count(), 24);
+    // A local mesh size on the top face follows it, and the new mesh has it.
+    new.mesh_items = vec![MeshSetupItem {
+        name: "Local Mesh Size-1".into(),
+        kind: MeshSetupKind::LocalMeshSize {
+            faces: vec![old_top.tag()],
+            edges: Vec::new(),
+            size: 0.5,
+        },
+    }];
+    assert_eq!(new.renumber_mesh_items(&tags), 0);
+    let MeshSetupKind::LocalMeshSize { faces, .. } = &new.mesh_items[0].kind else {
+        unreachable!()
+    };
+    assert_eq!(faces, &[new_top.tag()]);
+    let mesh = generate_mesh(&new).unwrap().mesh;
+    let nodes = mesh.cad_nodes(&[tags[&old_top]]);
+    assert!(nodes.len() > 20);
+    assert!(
+        nodes
+            .iter()
+            .all(|&n| (mesh.node(n).unwrap()[2] - 3.0).abs() < 1e-9)
+    );
 }
