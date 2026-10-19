@@ -291,16 +291,28 @@ impl ConstraintDraft {
         );
         name_row(ui, &mut self.constraint);
         let units = model.fe.properties.units;
+        // A 2D model has no z direction, and ccx crashes on springs in it.
+        let dofs = if model.fe.properties.space.is_2d() {
+            2
+        } else {
+            3
+        };
         match &mut self.constraint {
             Constraint::PointSpring(spring) => {
                 self.region.ui(ui, model);
-                stiffness_rows(ui, &mut spring.stiffness, units, stiffness(false));
+                stiffness_rows(ui, &mut spring.stiffness, units, stiffness(false), dofs);
                 hint(ui, "Each node of the region gets these springs to ground.");
             }
             Constraint::SurfaceSpring(spring) => {
                 self.region.ui(ui, model);
                 per_area_row(ui, &mut spring.per_area);
-                stiffness_rows(ui, &mut spring.stiffness, units, stiffness(spring.per_area));
+                stiffness_rows(
+                    ui,
+                    &mut spring.stiffness,
+                    units,
+                    stiffness(spring.per_area),
+                    dofs,
+                );
                 hint(
                     ui,
                     "Springs to ground, distributed area-weighted to the nodes on \
@@ -349,7 +361,13 @@ impl ConstraintDraft {
             Constraint::SurfaceToSurfaceSpring(spring) => {
                 self.pair.ui(ui, model);
                 per_area_row(ui, &mut spring.per_area);
-                stiffness_rows(ui, &mut spring.stiffness, units, stiffness(spring.per_area));
+                stiffness_rows(
+                    ui,
+                    &mut spring.stiffness,
+                    units,
+                    stiffness(spring.per_area),
+                    dofs,
+                );
                 hint(
                     ui,
                     "Each node of the slave surface is connected by springs in the global directions \
@@ -416,8 +434,14 @@ fn per_area_row(ui: &mut Ui, per_area: &mut bool) {
     ui.end_row();
 }
 
-fn stiffness_rows(ui: &mut Ui, stiffness: &mut [f64; 3], units: UnitSystem, of: Quantity) {
-    for (value, label) in stiffness.iter_mut().zip(["K1", "K2", "K3"]) {
+fn stiffness_rows(
+    ui: &mut Ui,
+    stiffness: &mut [f64; 3],
+    units: UnitSystem,
+    of: Quantity,
+    dofs: usize,
+) {
+    for (value, label) in stiffness.iter_mut().zip(["K1", "K2", "K3"]).take(dofs) {
         ui.label(label);
         ui.add(
             numeric::quantity(value, units, of)

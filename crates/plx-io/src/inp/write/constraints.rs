@@ -48,6 +48,7 @@ pub(super) fn springs(sets: &mut Sets, model: &FeModel) -> Result<Generated, Wri
         equations: Vec::new(),
         gaps: Vec::new(),
         ground: Vec::new(),
+        dofs: if model.properties.space.is_2d() { 2 } else { 3 },
     };
     let mut nonlinear = false;
     for constraint in model.constraints.iter().filter(|c| c.active()) {
@@ -75,9 +76,11 @@ pub(super) fn springs(sets: &mut Sets, model: &FeModel) -> Result<Generated, Wri
         out.elements.push(Keyword::generated(block));
         let set = sets.unique("Internal_All_Compression_Only_Constraints_NodeSet");
         sets.node_sets.push((set.clone(), writer.ground));
-        out.boundary = Some(Keyword::generated(format!(
-            "** Name: Compression_Only_BC\n*Boundary\n{set}, 1, 1, 0\n{set}, 2, 2, 0\n{set}, 3, 3, 0\n"
-        )));
+        let mut text = String::from("** Name: Compression_Only_BC\n*Boundary\n");
+        for dof in 1..=writer.dofs {
+            let _ = writeln!(text, "{set}, {dof}, {dof}, 0");
+        }
+        out.boundary = Some(Keyword::generated(text));
     }
     if nonlinear {
         let name = sets.unique("Internal_compression_only-1");
@@ -109,6 +112,8 @@ struct Writer {
     /// Gap elements with their ground and surface node.
     gaps: Vec<(ElementId, [NodeId; 2])>,
     ground: Vec<NodeId>,
+    /// Translational degrees of freedom of the model: ccx crashes on more than two in 2D.
+    dofs: usize,
 }
 
 impl Writer {
@@ -139,7 +144,11 @@ impl Writer {
             .is_some_and(|nodes| nodes.len() == 2);
         let mut block = String::new();
         for (group, springs, stiffness) in groups {
-            for (dof, k) in (1..).zip(stiffness).filter(|(_, k)| *k != 0.0) {
+            for (dof, k) in (1..)
+                .zip(stiffness)
+                .take(self.dofs)
+                .filter(|(_, k)| *k != 0.0)
+            {
                 let mut elements = Vec::new();
                 for nodes in &springs {
                     let element = self.element();

@@ -8,10 +8,13 @@ Create them with #menu("Interaction", "Create Constraint ...") or with #ui("Crea
 
 #screenshot("constraint.png", [Constraint dialog])
 
+#screenshot("constraint-spring-2d.png", [Point spring in a plane stress model: only #ui("K1") and #ui("K2")]) <spring-2d>
+
 #fields(
   [Point Spring], [Springs from every node of the region to ground. #ui("K1"), #ui("K2"),
     #ui("K3") are the stiffnesses in the global directions; 0 means no spring in that direction.
-    Written as `SPRING1` elements.],
+    In a 2D model (plane stress, plane strain, axisymmetric) there is no #ui("K3"): the dialog
+    offers the first two directions only (@spring-2d). Written as `SPRING1` elements.],
   [Surface Spring], [Springs on a face region. The stiffness is given #ui("Total") or
     #ui("Per area") and distributed over the nodes by area.],
   [Compression Only], [A support that only takes pressure, like a part resting on a rigid floor.
