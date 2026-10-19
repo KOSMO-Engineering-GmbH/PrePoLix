@@ -67,6 +67,14 @@ static STATE: Mutex<State> = Mutex::new(State {
     loaded: None,
 });
 
+/// A boolean operation of OpenCASCADE.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Boolean {
+    Intersect,
+    Fuse,
+    Cut,
+}
+
 /// Sets where the library is loaded from. Gmsh cannot be unloaded, so a change takes effect
 /// only if the library has not been loaded yet; returns whether that is the case.
 pub fn set_library_path(path: Option<PathBuf>) -> bool {
@@ -501,6 +509,15 @@ impl Gmsh {
         Ok(inside > 0)
     }
 
+    /// Whether a point given by its coordinates lies inside an entity, e.g. a solid.
+    pub fn contains_point(&self, dim: i32, tag: i32, point: [f64; 3]) -> Result<bool, GmshError> {
+        let mut inside = 0;
+        self.call(|e| unsafe {
+            inside = (self.api.is_inside)(dim, tag, point.as_ptr(), 3, 0, e);
+        })?;
+        Ok(inside > 0)
+    }
+
     /// Shows or hides entities with what bounds them; meshing can be limited to the shown
     /// ones with the option `Mesh.MeshOnlyVisible`.
     pub fn set_visibility(&self, entities: &[(i32, i32)], visible: bool) -> Result<(), GmshError> {
@@ -529,13 +546,30 @@ impl Gmsh {
         objects: &[(i32, i32)],
         tools: &[(i32, i32)],
     ) -> Result<Vec<(i32, i32)>, GmshError> {
+        self.boolean(Boolean::Intersect, objects, tools, false)
+    }
+
+    /// A boolean operation of objects and tools; the objects are removed, the tools too if
+    /// `remove_tools`. Returns the new entities.
+    pub fn boolean(
+        &self,
+        operation: Boolean,
+        objects: &[(i32, i32)],
+        tools: &[(i32, i32)],
+        remove_tools: bool,
+    ) -> Result<Vec<(i32, i32)>, GmshError> {
+        let function = match operation {
+            Boolean::Intersect => self.api.occ_intersect,
+            Boolean::Fuse => self.api.occ_fuse,
+            Boolean::Cut => self.api.occ_cut,
+        };
         let objects: Vec<c_int> = objects.iter().flat_map(|&(d, t)| [d, t]).collect();
         let tools: Vec<c_int> = tools.iter().flat_map(|&(d, t)| [d, t]).collect();
         let (mut out, mut out_len) = (std::ptr::null_mut(), 0);
         let (mut map, mut map_lens, mut map_len) =
             (std::ptr::null_mut(), std::ptr::null_mut(), 0usize);
         self.call(|e| unsafe {
-            (self.api.occ_intersect)(
+            function(
                 objects.as_ptr(),
                 objects.len(),
                 tools.as_ptr(),
@@ -547,7 +581,7 @@ impl Gmsh {
                 &mut map_len,
                 -1,
                 1,
-                0,
+                c_int::from(remove_tools),
                 e,
             );
         })?;
@@ -557,6 +591,97 @@ impl Gmsh {
             self.take_vec(pointer, 0);
         }
         self.take_vec(map_lens, map_len);
+        let out = self.take_vec(out, out_len);
+        self.synchronize()?;
+        Ok(pairs(&out))
+    }
+
+    /// Rounds edges of solids with a radius, the solids replaced by the rounded ones; returns
+    /// the new solids.
+    pub fn fillet(
+        &self,
+        volumes: &[i32],
+        curves: &[i32],
+        radius: f64,
+    ) -> Result<Vec<(i32, i32)>, GmshError> {
+        let (mut out, mut out_len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.occ_fillet)(
+                volumes.as_ptr(),
+                volumes.len(),
+                curves.as_ptr(),
+                curves.len(),
+                &radius,
+                1,
+                &mut out,
+                &mut out_len,
+                1,
+                e,
+            );
+        })?;
+        let out = self.take_vec(out, out_len);
+        self.synchronize()?;
+        Ok(pairs(&out))
+    }
+
+    /// Bevels edges of solids by a distance measured on the given face of each edge, the
+    /// solids replaced by the bevelled ones; returns the new solids.
+    pub fn chamfer(
+        &self,
+        volumes: &[i32],
+        curves: &[i32],
+        surfaces: &[i32],
+        distance: f64,
+    ) -> Result<Vec<(i32, i32)>, GmshError> {
+        let (mut out, mut out_len) = (std::ptr::null_mut(), 0);
+        self.call(|e| unsafe {
+            (self.api.occ_chamfer)(
+                volumes.as_ptr(),
+                volumes.len(),
+                curves.as_ptr(),
+                curves.len(),
+                surfaces.as_ptr(),
+                surfaces.len(),
+                &distance,
+                1,
+                &mut out,
+                &mut out_len,
+                1,
+                e,
+            );
+        })?;
+        let out = self.take_vec(out, out_len);
+        self.synchronize()?;
+        Ok(pairs(&out))
+    }
+
+    /// Extrudes entities along a vector; returns the new entities, among them the solids
+    /// swept by faces.
+    pub fn extrude(
+        &self,
+        entities: &[(i32, i32)],
+        along: [f64; 3],
+    ) -> Result<Vec<(i32, i32)>, GmshError> {
+        let entities: Vec<c_int> = entities.iter().flat_map(|&(d, t)| [d, t]).collect();
+        let (mut out, mut out_len) = (std::ptr::null_mut(), 0);
+        let [dx, dy, dz] = along;
+        self.call(|e| unsafe {
+            (self.api.occ_extrude)(
+                entities.as_ptr(),
+                entities.len(),
+                dx,
+                dy,
+                dz,
+                &mut out,
+                &mut out_len,
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                e,
+            );
+        })?;
         let out = self.take_vec(out, out_len);
         self.synchronize()?;
         Ok(pairs(&out))
@@ -649,6 +774,13 @@ impl Gmsh {
         let mut name = std::ptr::null_mut();
         self.call(|e| unsafe { (self.api.get_entity_name)(dim, tag, &mut name, e) })?;
         Ok(self.take_string(name))
+    }
+
+    /// Gmsh's type of an entity, e.g. "Plane", "Cylinder", "Line", "Circle", "Point".
+    pub fn entity_type(&self, dim: i32, tag: i32) -> Result<String, GmshError> {
+        let mut kind = std::ptr::null_mut();
+        self.call(|e| unsafe { (self.api.get_type)(dim, tag, &mut kind, e) })?;
+        Ok(self.take_string(kind))
     }
 
     pub fn set_entity_name(&self, dim: i32, tag: i32, name: &str) -> Result<(), GmshError> {

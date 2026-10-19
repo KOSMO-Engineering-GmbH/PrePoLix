@@ -171,6 +171,83 @@ again with the new data. The file is never written to; deleting the block leaves
 #limitation[Results of a file serve as global results of submodels only. Eigenmodes of a
 frequency step cannot be linked, as the `.frd` file does not hold them.]
 
+=== CAD Operation <cad-operation-block>
+
+A CAD Operation block changes geometry before it is meshed: it rounds (#ui("Fillet")) or bevels
+(#ui("Chamfer")) picked edges, or moves picked planar faces (#ui("Push/Pull")), of the geometry
+linked to it and gives the changed geometry on.
+Add it with #menu("Project", "Add CAD Operation") or from the picker, drag the
+#ui("Geometry") of a file block, of an analysis with imported geometry or of another CAD
+Operation block to the pin on the left of its #ui("Geometry") row, and drag the pin on the
+right of that row to the #ui("Geometry") row of the analyses that are to use the changed
+geometry. Blocks in a row apply their operations one after the other.
+
+Double-click the block to open its editor. It shows the geometry linked to it in its own 3D
+view: click the edges or faces to act on, a click on a picked one removes it again. Picked
+ones are drawn red, the one under the resting mouse orange. Choose the operation and type its
+radius, distance or offset; #ui("Preview") applies it and shows the result, #ui("Input") goes back to picking.
+#ui("OK") keeps the operation, and the result of the preview with it if nothing changed since.
+
+#screenshot("cad-operation.png", [Two edges of a plate picked for a fillet of 1 mm])
+
+#fields(
+  [Geometry], [Left pin: the geometry to change. Right pin: the changed geometry, with its
+    state.],
+  [Fillet / Chamfer / Push/Pull], [What it does and to how many edges or faces.],
+  [Radius / Distance / Offset], [The radius of the fillet, the distance of the chamfer from
+    the edge on both faces, or how far the faces move: outwards when positive, inwards when
+    negative. Type or drag it in place, or drop the value of a Parameters block or an
+    input of a parameter study on its pin (@parameter-study): every design point then makes the
+    geometry again, and the analyses after it mesh and solve it anew.],
+)
+
+Once the input geometry or the operation changes, the #ui("Geometry") row is out of date, and
+#ui("Update Project") or #ui("Update Geometry") in the context menu makes it again; the
+analyses linked to it mesh the new geometry. The picked edges are found again when the input
+changes, for example when the file is edited in the CAD program, by where they lie, their kind
+and their size; one that is no longer found has to be picked again. When OpenCASCADE cannot
+make the operation, for example because the radius is larger than the faces next to an edge,
+the row shows an error with the reason in its tooltip and the output pane, and the analyses
+after the block are not solved; in a parameter study the design point fails.
+
+==== Push/Pull <push-pull>
+
+#ui("Push/Pull") moves planar faces along their normal, for example to make a plate thicker,
+a bracket longer or a shoulder higher. It adds a prism on the face to the solid, or cuts it
+away for a negative offset, so neighbouring faces at right angles grow or shrink with it and
+stay one face each. A sloped or rounded neighbour does not follow: it gets a step at the old
+edge, which #ui("Preview") shows. Change the main sizes first and round the edges after, with
+a second CAD Operation block behind the first. Curved faces cannot be picked. Several picked
+faces move one after the other, so two faces that meet both move as a whole.
+
+#screenshot("cad-push-pull.png", [The top face of a stepped bar picked to make it thicker])
+
+==== Example: a fillet radius study <cad-fillet-study>
+
+How much does a larger fillet at the shoulder of a stepped bar lower the stress? The project
+for the answer has five blocks:
+
++ A file block reads the bar from a STEP file.
++ A CAD Operation block, #ui("Shoulder Fillet"), rounds the two edges in the inner corners of
+  the shoulder.
++ The analysis #ui("Tension") takes its geometry from the fillet block, holds the wide end
+  and pulls the narrow end by 0.04 mm.
++ A Measure block (@measure-block) reads the largest von Mises stress of its step.
++ A parameter study takes that value as its output and gives its input to the
+  #ui("Radius") of the fillet block: drag the pin of the study's #ui("Inputs") row onto the pin
+  of the #ui("Radius") row.
+
+#screenshot("cad-fillet-study.png", [The study varies the fillet radius (dashed wire) and reads
+  the largest stress of the analysis])
+
+With five design points from 2 to 6 mm (#ui("Fill ...") in the study editor, @study-fill),
+#ui("Run") makes the geometry again for each point, meshes it and solves it. The peak stress at
+the shoulder falls from about 300 to 221 MPa, steeply up to 3 mm and less and less after
+that:
+
+#screenshot("cad-fillet-study-plot.png", [The plot of the study: the largest stress over the
+  fillet radius])
+
 === Parameters <parameters-block>
 
 A Parameters block holds named numbers that other blocks take through *value links*, so that

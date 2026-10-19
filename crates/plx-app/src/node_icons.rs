@@ -44,6 +44,8 @@ pub enum NodeIcon {
     Export,
     /// A note: a sheet with lines of text and a folded corner.
     Note,
+    /// A CAD operation: a cube with a rounded edge.
+    CadOperation,
     /// A Math block: a plus over a minus.
     Math,
     /// A Switch block: two inputs and a lever to one of them.
@@ -129,6 +131,23 @@ pub fn paint(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32) {
             line(&[p(0.5, 7.0), p(5.0, 7.0)]);
             line(&[p(3.0, 4.8), p(5.2, 7.0), p(3.0, 9.2)]);
             circle(p(9.5, 7.0), 3.3);
+        }
+        NodeIcon::CadOperation => {
+            // The front face with its upper right corner rounded, the cube behind it.
+            let mut front = vec![p(1.5, 12.0), p(1.5, 4.5), p(5.5, 4.5)];
+            for k in 0..=6 {
+                let angle = std::f32::consts::FRAC_PI_2 * k as f32 / 6.0;
+                front.push(p(5.5 + 3.5 * angle.sin(), 8.0 - 3.5 * angle.cos()));
+            }
+            front.push(p(9.0, 12.0));
+            closed(&front);
+            line(&[
+                p(1.5, 4.5),
+                p(5.0, 1.5),
+                p(12.5, 1.5),
+                p(12.5, 9.0),
+                p(9.0, 12.0),
+            ]);
         }
         NodeIcon::Geometry => {
             closed(&[p(1.5, 4.5), p(9.0, 4.5), p(9.0, 12.0), p(1.5, 12.0)]);

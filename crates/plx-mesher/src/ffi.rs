@@ -59,6 +59,7 @@ gmsh_api! {
     get_entities = "gmshModelGetEntities": fn(*mut *mut c_int, *mut usize, c_int, Ierr);
     get_entity_name = "gmshModelGetEntityName": fn(c_int, c_int, *mut *mut c_char, Ierr);
     set_entity_name = "gmshModelSetEntityName": fn(c_int, c_int, *const c_char, Ierr);
+    get_type = "gmshModelGetType": fn(c_int, c_int, *mut *mut c_char, Ierr);
     get_adjacencies = "gmshModelGetAdjacencies":
         fn(c_int, c_int, *mut *mut c_int, *mut usize, *mut *mut c_int, *mut usize, Ierr);
     get_bounding_box = "gmshModelGetBoundingBox": fn(
@@ -86,6 +87,48 @@ gmsh_api! {
     occ_affine_transform = "gmshModelOccAffineTransform":
         fn(*const c_int, usize, *const c_double, usize, Ierr);
     occ_intersect = "gmshModelOccIntersect": fn(
+        *const c_int, usize,
+        *const c_int, usize,
+        *mut *mut c_int, *mut usize,
+        *mut *mut *mut c_int, *mut *mut usize, *mut usize,
+        c_int, c_int, c_int,
+        Ierr,
+    );
+    occ_fillet = "gmshModelOccFillet": fn(
+        *const c_int, usize,
+        *const c_int, usize,
+        *const c_double, usize,
+        *mut *mut c_int, *mut usize,
+        c_int,
+        Ierr,
+    );
+    occ_chamfer = "gmshModelOccChamfer": fn(
+        *const c_int, usize,
+        *const c_int, usize,
+        *const c_int, usize,
+        *const c_double, usize,
+        *mut *mut c_int, *mut usize,
+        c_int,
+        Ierr,
+    );
+    occ_extrude = "gmshModelOccExtrude": fn(
+        *const c_int, usize,
+        c_double, c_double, c_double,
+        *mut *mut c_int, *mut usize,
+        *const c_int, usize,
+        *const c_double, usize,
+        c_int,
+        Ierr,
+    );
+    occ_fuse = "gmshModelOccFuse": fn(
+        *const c_int, usize,
+        *const c_int, usize,
+        *mut *mut c_int, *mut usize,
+        *mut *mut *mut c_int, *mut *mut usize, *mut usize,
+        c_int, c_int, c_int,
+        Ierr,
+    );
+    occ_cut = "gmshModelOccCut": fn(
         *const c_int, usize,
         *const c_int, usize,
         *mut *mut c_int, *mut usize,

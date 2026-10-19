@@ -6,6 +6,7 @@
 //! file is written, so the user never has to define sets by hand.
 
 mod amplitude;
+mod cad_operation;
 pub mod campbell;
 mod checks;
 pub mod color_scale;
@@ -30,12 +31,14 @@ mod properties;
 mod region;
 mod remote;
 mod section;
+mod signature;
 mod study;
 mod symmetry;
 pub mod units;
 mod validity;
 
 pub use amplitude::{Amplitude, AmplitudeTime};
+pub use cad_operation::{CadOperation, CadOperationKind};
 pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
 pub use color_scale::{ColorScale, ColorSpectrum};
 pub use constraint::{
@@ -71,6 +74,7 @@ pub use section::{
     BeamOrientation, BeamProfile, BeamSection, Section, SectionKind, line_tangent, membrane_type,
     unit_thickness,
 };
+pub use signature::{EntitySignature, TagMap, match_entities};
 pub use study::{DesignPoint, FillMode, FillRule, PointRun, PointState, StudyColumn, StudyTable};
 pub use symmetry::{SymmetryError, SymmetryPlane, symmetry_dofs, symmetry_plane};
 pub use units::{BASE_QUANTITIES, DERIVED_QUANTITIES, Quantity, STORED, UnitSystem};
@@ -93,8 +97,10 @@ use serde::{Deserialize, Serialize};
 /// the force, which acts on faces, edges or points and optionally at each node. Format 9 gives
 /// numbers a physical quantity, format 10 replaces the optimizer by the parameter study.
 /// Format 11 adds notes, frames and compact blocks to the schematic, format 12 the Math and
-/// Switch blocks; formats 10 and 11 read as they are.
-pub const PROJECT_FORMAT: u32 = 12;
+/// Switch blocks; formats 10 and 11 read as they are. Format 13 records the signatures of
+/// the geometry's entities, to find them again in changed shapes; format 12 reads as it is,
+/// without them.
+pub const PROJECT_FORMAT: u32 = 13;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -201,6 +207,27 @@ impl FeModel {
                     .collect();
             }
         }
+    }
+
+    /// Follows the CAD entities into a geometry that took the place of the one they were
+    /// picked on, `tags` from [`Geometry::tags_in`]: each entity names the one it became, or
+    /// is marked lost ([`CadEntity::lost`]) when it was not found, so that the item shows it
+    /// must be picked again. Returns how many were lost.
+    pub fn follow_cad(&mut self, tags: &TagMap) -> usize {
+        let mut lost = 0;
+        let mut follow = |region: &mut Region| {
+            if let Region::Geometry(entities) = region {
+                for entity in entities.iter_mut().filter(|e| !e.is_lost()) {
+                    *entity = tags.get(entity).copied().unwrap_or_else(|| {
+                        lost += 1;
+                        entity.lost()
+                    });
+                }
+            }
+        };
+        self.regions_mut().for_each(&mut follow);
+        (self.initial_conditions.iter_mut()).for_each(|i| follow(&mut i.region));
+        lost
     }
 
     /// Follows nodes merged into others, as [`plx_mesh::FeMesh::merge_nodes`] does: regions

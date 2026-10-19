@@ -195,10 +195,14 @@ pub fn describe_entities(entities: &[CadEntity]) -> String {
         .filter(|(n, ..)| *n > 0)
         .map(|&(n, one, many)| format!("{n} {}", if n == 1 { one } else { many }))
         .collect();
-    if text.is_empty() {
+    let text = if text.is_empty() {
         "no geometry".into()
     } else {
         text.join(", ")
+    };
+    match entities.iter().filter(|e| e.is_lost()).count() {
+        0 => text,
+        lost => format!("{text} ({lost} not found)"),
     }
 }
 

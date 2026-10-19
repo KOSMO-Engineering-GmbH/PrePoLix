@@ -32,6 +32,7 @@ use plx_io::project::Link;
 use plx_mesh::{FeMesh, Fnv};
 use plx_model::{
     BoundaryKind, DefinedField, DefinedFieldKind, FeModel, Geometry, ModelKind, Step, StepKind,
+    TagMap,
 };
 
 use crate::tree::TreeItem;
@@ -656,16 +657,57 @@ pub fn exists(data: Data, path: &[String]) -> bool {
 /// Takes over the shapes of a geometry link's source: the mesh setup, the default meshing
 /// parameters and the refinement stay those the target has, so that each analysis meshes
 /// the same geometry its own way. A target without geometry starts from the source's setup.
-pub fn take_geometry(target: &mut Option<Geometry>, source: Option<Geometry>) {
+///
+/// When the shapes changed, Gmsh's tags did with them: the local mesh sizes are renumbered
+/// here, and the returned tags are for the selections on the old shapes, see
+/// [`follow_geometry`].
+pub fn take_geometry(target: &mut Option<Geometry>, source: Option<Geometry>) -> Option<TagMap> {
+    let mut tags = None;
     *target = match (target.take(), source) {
-        (Some(own), Some(source)) => Some(Geometry {
-            meshing: own.meshing,
-            mesh_items: own.mesh_items,
-            refinement: own.refinement,
-            ..source
-        }),
+        (Some(own), Some(source)) => {
+            tags = own.tags_in(&source);
+            let mut taken = Geometry {
+                meshing: own.meshing,
+                mesh_items: own.mesh_items,
+                refinement: own.refinement,
+                ..source
+            };
+            if let Some(tags) = &tags {
+                taken.renumber_mesh_items(tags);
+            }
+            Some(taken)
+        }
         (_, source) => source,
     };
+    tags
+}
+
+/// Where the shapes of `old` are in `new`, which takes their place with its own mesh, e.g.
+/// through a mesh link; `None` when nothing needs renumbering.
+pub fn geometry_tags(old: Option<&Geometry>, new: Option<&Geometry>) -> Option<TagMap> {
+    old?.tags_in(new?)
+}
+
+/// Follows the selections on CAD entities, and the mesh made from the old shapes, into the
+/// new shapes after [`take_geometry`]; a message says how many were not found, if any.
+pub fn follow_geometry(
+    fe: &mut FeModel,
+    mesh: Option<&mut FeMesh>,
+    tags: &TagMap,
+) -> Option<String> {
+    if let Some(mesh) = mesh {
+        mesh.cad = mesh.cad.renumbered(tags);
+    }
+    match fe.follow_cad(tags) {
+        0 => None,
+        1 => Some(
+            "1 picked geometry entity was not found in the changed geometry; pick it again".into(),
+        ),
+        lost => Some(format!(
+            "{lost} picked geometry entities were not found in the changed geometry; pick \
+             them again"
+        )),
+    }
 }
 
 /// Fingerprint of what the path takes from the analysis: a link copies it anew when the
@@ -1302,6 +1344,7 @@ mod tests {
             mesh_items: Vec::new(),
             part_names: Vec::new(),
             refinement: 1.0,
+            signatures: Vec::new(),
         };
         let mut own = shapes("old");
         own.meshing.max_size = 2.0;
@@ -1340,6 +1383,75 @@ mod tests {
         assert_eq!(target.as_ref(), Some(&own));
         take_geometry(&mut target, None);
         assert_eq!(target, None);
+    }
+
+    #[test]
+    fn changed_shapes_take_the_selections_and_local_sizes_with_them() {
+        use plx_mesh::CadEntity::{Edge, Face};
+        let face = |entity, z: f64| plx_model::EntitySignature {
+            entity,
+            kind: "Plane".into(),
+            centroid: [0.5, 0.5, z],
+            min: [0.0, 0.0, z],
+            max: [1.0, 1.0, z],
+            size: 1.0,
+        };
+        let shapes = |brep: &str, signatures| Geometry {
+            source: "part.step".into(),
+            brep: brep.into(),
+            meshing: Default::default(),
+            mesh_items: vec![plx_model::MeshSetupItem {
+                name: "Local Size-1".into(),
+                kind: plx_model::MeshSetupKind::LocalMeshSize {
+                    faces: vec![1, 2],
+                    edges: Vec::new(),
+                    size: 0.5,
+                },
+            }],
+            part_names: Vec::new(),
+            refinement: 1.0,
+            signatures,
+        };
+        // The bottom face 1 is now 7; the top face 2 went away.
+        let own = shapes("old", vec![face(Face(1), 0.0), face(Face(2), 1.0)]);
+        let source = shapes("new", vec![face(Face(7), 0.0), face(Face(8), 5.0)]);
+        let mut target = Some(own);
+        let tags = take_geometry(&mut target, Some(source)).unwrap();
+        let plx_model::MeshSetupKind::LocalMeshSize { faces, .. } =
+            &target.unwrap().mesh_items[0].kind
+        else {
+            unreachable!()
+        };
+        assert_eq!(faces, &[7]);
+        let mut fe = FeModel::default();
+        let region = plx_model::Region::Geometry(vec![Face(1), Face(2), Edge(3)]);
+        let set = plx_model::MeshSet::new("Set-1", plx_model::SetKind::Nodes, region);
+        fe.mesh_sets.push(set);
+        let lost = follow_geometry(&mut fe, None, &tags);
+        assert_eq!(
+            lost.as_deref(),
+            Some(
+                "2 picked geometry entities were not found in the changed geometry; pick them \
+                 again"
+            )
+        );
+        let plx_model::Region::Geometry(entities) = &fe.mesh_sets[0].region else {
+            unreachable!()
+        };
+        assert_eq!(entities, &[Face(7), Face(-2), Edge(-3)]);
+        assert_eq!(
+            plx_model::describe_entities(entities),
+            "2 faces, 1 edge (2 not found)"
+        );
+        // Lost ones stay lost on the next change, and the same shapes renumber nothing.
+        let next = BTreeMap::from([(Face(7), Face(9))]);
+        assert_eq!(follow_geometry(&mut fe, None, &next), None);
+        let plx_model::Region::Geometry(entities) = &fe.mesh_sets[0].region else {
+            unreachable!()
+        };
+        assert_eq!(entities, &[Face(9), Face(-2), Edge(-3)]);
+        let same = shapes("new", Vec::new());
+        assert!(same.tags_in(&same).is_none());
     }
 
     fn material(name: &str, young: f64) -> Material {

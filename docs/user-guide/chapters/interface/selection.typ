@@ -48,6 +48,21 @@ faces of the visible parts.
 and vertices. They survive remeshing. Picks of single nodes or element faces refer to the mesh
 and have to be repeated after remeshing; the output pane says how many selections are affected.]
 
+Picks on geometry also follow the geometry when its shapes change: a STEP file that a file
+block reads again (@file-block) or a geometry link from another analysis brings new shapes,
+and Gmsh numbers their faces and edges anew. Each face, edge and vertex is recorded with what
+it looks like (its type, centre, extent and size), and a pick takes the entity of the new
+shapes that is unchanged or clearly the nearest of the same type, for example the top face of
+a plate that became thicker. Local mesh sizes follow in the same way. A pick that cannot be
+found, because its face went away or two faces fit it equally well, is kept as
+not found: the item turns red with a warning sign, its selection reads e.g.
+#ui("2 faces (1 not found)"), and the output pane says how many there are; select those faces
+again.
+
+#screenshot("selection-not-found.png", [The STEP file of the plate changed to a thicker plate
+  without its hole: the boundary conditions on the top and bottom face follow, the one on the
+  hole is not found])
+
 === Modifier keys and box selection
 
 - A plain click replaces the selection, #key("Shift") adds, #key("Ctrl") removes,

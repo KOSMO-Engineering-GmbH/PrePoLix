@@ -75,6 +75,8 @@ pub enum ProjectNode {
     Mesh(Box<MeshBlock>),
     /// The mesh linked to it, made again finer or coarser by a factor.
     RefineMesh(Box<RefineMesh>),
+    /// A fillet or chamfer of the geometry linked to it.
+    CadOperation(Box<CadOperationBlock>),
     /// Named numbers that value links give to other blocks.
     Parameters(ParameterSet),
     /// A key figure computed from the results of a step.
@@ -104,6 +106,7 @@ impl ProjectNode {
             Self::Materials(m) => m.id,
             Self::Mesh(m) => m.id,
             Self::RefineMesh(r) => r.id,
+            Self::CadOperation(c) => c.id,
             Self::Parameters(p) => p.id,
             Self::Measure(m) => m.id,
             Self::Study(o) => o.id,
@@ -122,6 +125,7 @@ impl ProjectNode {
             Self::Materials(m) => &m.name,
             Self::Mesh(m) => &m.name,
             Self::RefineMesh(r) => &r.name,
+            Self::CadOperation(c) => &c.name,
             Self::Parameters(p) => &p.name,
             Self::Measure(m) => &m.name,
             Self::Study(o) => &o.name,
@@ -141,6 +145,7 @@ impl ProjectNode {
             Self::Materials(m) => m.position,
             Self::Mesh(m) => m.position,
             Self::RefineMesh(r) => r.position,
+            Self::CadOperation(c) => c.position,
             Self::Parameters(p) => p.position,
             Self::Measure(m) => m.position,
             Self::Study(o) => o.position,
@@ -152,6 +157,27 @@ impl ProjectNode {
             Self::Switch(s) => s.position,
         }
     }
+}
+
+/// A block that applies a CAD operation to the geometry linked to it and gives the result.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CadOperationBlock {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The unit system its length is shown and typed in.
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    pub operation: plx_model::CadOperation,
+    /// The geometry as last made, kept so that the project opens and meshes without making
+    /// it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Geometry>,
+    /// Fingerprint of the input and the operation the result was made from, see
+    /// [`plx_model::CadOperation::fingerprint`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made_from: Option<u64>,
 }
 
 /// A block that makes a structured mesh for analyses to link, with its sides as node sets
@@ -891,6 +917,7 @@ mod tests {
             ],
             part_names: vec!["SOLID-1".into()],
             refinement: 1.0,
+            signatures: Vec::new(),
         };
         let mut saved = single(Some(&geometry), &mesh, &model, None);
         (saved.analyses_mut().next().unwrap())

@@ -479,6 +479,7 @@ fn rectangle(origin: [f64; 3], size: [f64; 2], radius: f64) -> Geometry {
         mesh_items: Vec::new(),
         part_names: Vec::new(),
         refinement: 1.0,
+        signatures: Vec::new(),
     }
 }
 
@@ -589,6 +590,7 @@ fn box_and_lines() -> Geometry {
         mesh_items: Vec::new(),
         part_names: Vec::new(),
         refinement: 1.0,
+        signatures: Vec::new(),
     }
 }
 
@@ -619,6 +621,7 @@ fn a_long_thin_round_bar_is_displayed_with_few_triangles() {
         mesh_items: Vec::new(),
         part_names: Vec::new(),
         refinement: 1.0,
+        signatures: Vec::new(),
     };
     let display = tessellate(&geometry).unwrap();
     let triangles = display
@@ -937,6 +940,7 @@ fn beam_on_block() -> Geometry {
         mesh_items: Vec::new(),
         part_names: Vec::new(),
         refinement: 1.0,
+        signatures: Vec::new(),
     }
 }
 
@@ -1363,6 +1367,7 @@ fn revolved(origin: [f64; 3], size: [f64; 2], radius: f64, angle: f64) -> Geomet
         mesh_items: Vec::new(),
         part_names: Vec::new(),
         refinement: 1.0,
+        signatures: Vec::new(),
     }
 }
 
@@ -1508,4 +1513,222 @@ fn flat_files_added_to_a_geometry_are_moved_into_the_xy_plane() {
     );
     let (low, high) = z_range(&addition.import.display);
     assert!(low.abs() < 1e-9 && high.abs() < 1e-9, "{low} {high}");
+}
+
+/// A plate of the size beside a small cube, which Gmsh numbers before the plate if it comes
+/// first, so that the plate's faces and edges get other tags.
+fn plate_and_cube(size: [f64; 3], cube_first: bool) -> Geometry {
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        let cube = || gmsh.add_box([-20.0, 0.0, 0.0], [5.0; 3]);
+        if cube_first {
+            cube()?;
+        }
+        gmsh.add_box([0.0; 3], size)?;
+        if !cube_first {
+            cube()?;
+        }
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    with_signatures(Geometry {
+        source: "platte.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters {
+            max_size: 2.0,
+            ..MeshingParameters::default()
+        },
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+    })
+    .unwrap()
+}
+
+#[test]
+fn picked_entities_are_found_in_changed_and_renumbered_shapes() {
+    if !gmsh_available() {
+        return;
+    }
+    let old = plate_and_cube([10.0, 10.0, 2.0], false);
+    let on_plate = |s: &&plx_model::EntitySignature| s.centroid[0] > 0.0;
+    let top = |geometry: &Geometry, z: f64| {
+        (geometry.signatures.iter())
+            .filter(on_plate)
+            .find(|s| {
+                s.entity.dim() == 2
+                    && (s.centroid[2] - z).abs() < 1e-6
+                    && s.kind == "Plane"
+                    && s.max[2] - s.min[2] < 1e-3
+            })
+            .map(|s| s.entity)
+            .unwrap()
+    };
+    let old_top = top(&old, 2.0);
+    // The same shapes read again keep their tags.
+    let again = plate_and_cube([10.0, 10.0, 2.0], false);
+    assert_eq!(again.signatures, old.signatures);
+    // A thicker plate, numbered after the cube: every face of both is found, the top face
+    // on the new top.
+    let mut new = plate_and_cube([10.0, 10.0, 3.0], true);
+    let tags = old.tags_in(&new).unwrap();
+    let faces = |g: &Geometry| g.signatures.iter().filter(|s| s.entity.dim() == 2).count();
+    assert_eq!(faces(&old), 12);
+    assert_eq!(tags.keys().filter(|e| e.dim() == 2).count(), 12);
+    let new_top = top(&new, 3.0);
+    assert_ne!(new_top, old_top, "the plate is numbered after the cube now");
+    assert_eq!(tags[&old_top], new_top);
+    // Its edges too: the twelve of the plate and those of the cube.
+    assert_eq!(tags.keys().filter(|e| e.dim() == 1).count(), 24);
+    // A local mesh size on the top face follows it, and the new mesh has it.
+    new.mesh_items = vec![MeshSetupItem {
+        name: "Local Mesh Size-1".into(),
+        kind: MeshSetupKind::LocalMeshSize {
+            faces: vec![old_top.tag()],
+            edges: Vec::new(),
+            size: 0.5,
+        },
+    }];
+    assert_eq!(new.renumber_mesh_items(&tags), 0);
+    let MeshSetupKind::LocalMeshSize { faces, .. } = &new.mesh_items[0].kind else {
+        unreachable!()
+    };
+    assert_eq!(faces, &[new_top.tag()]);
+    let mesh = generate_mesh(&new).unwrap().mesh;
+    let nodes = mesh.cad_nodes(&[tags[&old_top]]);
+    assert!(nodes.len() > 20);
+    assert!(
+        nodes
+            .iter()
+            .all(|&n| (mesh.node(n).unwrap()[2] - 3.0).abs() < 1e-9)
+    );
+}
+
+/// A box of 10 mm, its signatures recorded.
+fn cube() -> Geometry {
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        gmsh.add_box([0.0; 3], [10.0; 3])?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    with_signatures(Geometry {
+        source: "wuerfel.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters {
+            max_size: 2.0,
+            ..MeshingParameters::default()
+        },
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+    })
+    .unwrap()
+}
+
+/// Volume of the geometry's solids.
+fn solid_volume(geometry: &Geometry) -> f64 {
+    let file = TempFile::with_contents("brep", &geometry.brep).unwrap();
+    with_gmsh(|gmsh| {
+        gmsh.import_shapes(&file.0)?;
+        let mut volume = 0.0;
+        for tag in gmsh.entities(3)? {
+            volume += gmsh.mass(3, tag)?;
+        }
+        Ok(volume)
+    })
+    .unwrap()
+}
+
+#[test]
+fn fillets_and_chamfers_change_the_solid_and_keep_its_faces_findable() {
+    use plx_model::CadOperationKind::{Chamfer, Fillet};
+    if !gmsh_available() {
+        return;
+    }
+    let input = cube();
+    // The edge along z at x = y = 10.
+    let edge = (input.signatures.iter())
+        .find(|s| {
+            s.entity.dim() == 1
+                && (s.centroid[0] - 10.0).abs() < 1e-6
+                && (s.centroid[1] - 10.0).abs() < 1e-6
+        })
+        .unwrap()
+        .entity;
+    let rounded = apply_cad_operation(&input, Fillet, &[edge], 2.0).unwrap();
+    let removed = (4.0 - std::f64::consts::PI) * 10.0;
+    assert!((solid_volume(&rounded) - (1000.0 - removed)).abs() < 1e-3);
+    assert_eq!(part_names(&rounded).unwrap(), part_names(&input).unwrap());
+    assert!(rounded.signatures.iter().any(|s| s.kind == "Cylinder"));
+    let bevelled = apply_cad_operation(&input, Chamfer, &[edge], 2.0).unwrap();
+    assert!((solid_volume(&bevelled) - 980.0).abs() < 1e-3);
+    // A larger radius: every face of the first result is found in the second, the bottom
+    // face where it was, and the new mesh has it.
+    let larger = apply_cad_operation(&input, Fillet, &[edge], 3.0).unwrap();
+    let tags = rounded.tags_in(&larger).unwrap();
+    let faces = rounded.signatures.iter().filter(|s| s.entity.dim() == 2);
+    assert_eq!(faces.clone().count(), 7);
+    assert!(faces.clone().all(|s| tags.contains_key(&s.entity)));
+    let bottom = faces
+        .clone()
+        .find(|s| s.kind == "Plane" && s.centroid[2].abs() < 1e-6)
+        .unwrap()
+        .entity;
+    let mesh = generate_mesh(&larger).unwrap().mesh;
+    let nodes = mesh.cad_nodes(&[tags[&bottom]]);
+    assert!(nodes.len() > 10);
+    assert!(nodes.iter().all(|&n| mesh.node(n).unwrap()[2].abs() < 1e-9));
+    // Too large a radius fails rather than giving a broken solid; so do picks that are no
+    // edges of the geometry.
+    assert!(apply_cad_operation(&input, Fillet, &[edge], 20.0).is_err());
+    assert!(apply_cad_operation(&input, Fillet, &[CadEntity::Edge(99)], 1.0).is_err());
+    assert!(apply_cad_operation(&input, Fillet, &[edge], 0.0).is_err());
+}
+
+#[test]
+fn push_pull_moves_planar_faces_along_their_normal() {
+    use plx_model::CadOperationKind::{Fillet, PushPull};
+    if !gmsh_available() {
+        return;
+    }
+    let input = cube();
+    let face_at = |geometry: &Geometry, axis: usize, at: f64| {
+        (geometry.signatures.iter())
+            .find(|s| {
+                s.entity.dim() == 2 && s.kind == "Plane" && (s.centroid[axis] - at).abs() < 1e-6
+            })
+            .unwrap()
+            .entity
+    };
+    let top = face_at(&input, 2, 10.0);
+    // Pulled out: the cube grows to 15 high, and its sides stay one face each.
+    let pulled = apply_cad_operation(&input, PushPull, &[top], 5.0).unwrap();
+    assert!((solid_volume(&pulled) - 1500.0).abs() < 1e-3);
+    assert_eq!(part_names(&pulled).unwrap(), part_names(&input).unwrap());
+    let faces = pulled.signatures.iter().filter(|s| s.entity.dim() == 2);
+    assert_eq!(faces.count(), 6);
+    face_at(&pulled, 2, 15.0);
+    // Pushed in, and on a side face: the normal points out of the solid either way.
+    let pushed = apply_cad_operation(&input, PushPull, &[top], -3.0).unwrap();
+    assert!((solid_volume(&pushed) - 700.0).abs() < 1e-3);
+    let side = face_at(&input, 0, 0.0);
+    let wider = apply_cad_operation(&input, PushPull, &[side, top], 2.0).unwrap();
+    assert!((solid_volume(&wider) - 1440.0).abs() < 1e-3);
+    // Through the whole solid, a curved face, nothing to move: it fails.
+    assert!(apply_cad_operation(&input, PushPull, &[top], -10.0).is_err());
+    assert!(apply_cad_operation(&input, PushPull, &[top], 0.0).is_err());
+    let edge = (input.signatures.iter())
+        .find(|s| s.entity.dim() == 1)
+        .unwrap()
+        .entity;
+    let rounded = apply_cad_operation(&input, Fillet, &[edge], 2.0).unwrap();
+    let curved = (rounded.signatures.iter())
+        .find(|s| s.kind == "Cylinder")
+        .unwrap()
+        .entity;
+    let error = apply_cad_operation(&rounded, PushPull, &[curved], 1.0).unwrap_err();
+    assert!(error.to_string().contains("planar"), "{error}");
 }
