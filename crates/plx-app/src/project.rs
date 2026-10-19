@@ -34,6 +34,7 @@ use crate::study::{PointView, StudyEdit, StudyEditor, StudyView};
 use crate::tree::TreeView;
 use crate::tree_icons::StepGlyph;
 
+mod frames;
 mod history;
 
 /// Storage key of the project file open at exit, reopened at the next start.
@@ -53,6 +54,7 @@ enum Kind {
     MeshExport,
     Campbell,
     File,
+    Note,
 }
 
 impl Kind {
@@ -74,6 +76,7 @@ impl Kind {
             Self::MeshExport => "mesh export block",
             Self::Campbell => "Campbell block",
             Self::File => "file block",
+            Self::Note => "note",
         }
     }
 }
@@ -120,6 +123,8 @@ enum Block {
     Campbell(CampbellBlock),
     /// A file outside the project read as a source: geometry, a mesh or results.
     File(Box<FileBlock>),
+    /// A text for the reader, which gives and takes nothing.
+    Note(String),
 }
 
 /// An analysis: its data, or the window that holds them while it is open.
@@ -510,6 +515,7 @@ impl Node {
             Block::MeshExport(_) => Kind::MeshExport,
             Block::Campbell(_) => Kind::Campbell,
             Block::File(_) => Kind::File,
+            Block::Note(_) => Kind::Note,
         }
     }
 
@@ -704,7 +710,7 @@ impl Node {
             Block::Measure(m) => m.units,
             Block::Study(s) => s.units,
             Block::File(f) => f.units,
-            Block::MeshExport(_) | Block::Campbell(_) | Block::RefineMesh(_) => {
+            Block::MeshExport(_) | Block::Campbell(_) | Block::RefineMesh(_) | Block::Note(_) => {
                 UnitSystem::default()
             }
         }
@@ -893,6 +899,7 @@ impl Node {
                 );
                 Self::campbell_block(block.id, block.name, window)
             }
+            ProjectNode::Note(note) => Self::new(note.id, note.name, Block::Note(note.text)),
         }
     }
 
@@ -993,6 +1000,12 @@ impl Node {
                     fingerprint: window.fingerprint(),
                 }))
             }
+            Block::Note(text) => ProjectNode::Note(file::Note {
+                id,
+                name,
+                position,
+                text: text.clone(),
+            }),
         })
     }
 
@@ -1071,6 +1084,7 @@ impl Node {
                 let window = CampbellWindow::saved(setup, Vec::new(), None, None);
                 return Some(Self::campbell_block(id, name, window));
             }
+            Block::Note(text) => Block::Note(text.clone()),
         };
         Some(Self::new(id, name, block))
     }
@@ -1117,7 +1131,11 @@ impl Node {
             Block::RefineMesh(r) => Some(r.model.data()),
             Block::MeshExport(e) => Some(e.model.data()),
             Block::File(f) => Some(f.model.data()),
-            Block::Parameters(_) | Block::Measure(_) | Block::Study(_) | Block::Campbell(_) => None,
+            Block::Parameters(_)
+            | Block::Measure(_)
+            | Block::Study(_)
+            | Block::Campbell(_)
+            | Block::Note(_) => None,
         }
     }
 
@@ -1317,8 +1335,6 @@ enum Action {
     /// Update the block and what it takes data from: its out-of-date symbol was clicked.
     Update(u64),
     Rename(u64),
-    Duplicate(u64),
-    Delete(u64),
     /// Open or close a row of the block.
     Toggle(u64, Vec<String>),
     /// Link `item` of `source` to `slot` of `target`.
@@ -1344,6 +1360,26 @@ enum Action {
         source: Option<(u64, Vec<String>)>,
         target: Option<(u64, Vec<String>)>,
     },
+    /// A new note at the position.
+    AddNote(egui::Pos2),
+    /// The text of a note was edited in its block.
+    SetNote(u64, String),
+    /// Duplicate the blocks, or delete them once the user agrees.
+    DuplicateAll(Vec<u64>),
+    DeleteAll(Vec<u64>),
+    /// Show the blocks compact, or all in full if they are all compact.
+    Compact(Vec<u64>),
+    /// Put the blocks in a new frame, or take them out of theirs.
+    Frame(Vec<u64>),
+    Unframe(Vec<u64>),
+    /// A frame, by its index, was dragged by the vector, given a label or a colour, or is
+    /// to be removed without its blocks.
+    MoveFrame(usize, egui::Vec2),
+    FrameLabel(usize, String),
+    FrameColor(usize, [u8; 3]),
+    RemoveFrame(usize),
+    /// Show the blocks to add at the position on the screen and in the schematic.
+    Pick(egui::Pos2, egui::Pos2),
 }
 
 /// A project read from its file, with notes on its conversion, or why it could not be read.
@@ -1365,8 +1401,24 @@ pub struct ProjectApp {
     graph_generation: u64,
     /// Name typed for an analysis being renamed, with why it cannot be taken.
     rename: Option<(u64, String)>,
-    /// Analysis to delete once the user agrees.
-    confirm_delete: Option<u64>,
+    /// Blocks to delete once the user agrees.
+    confirm_delete: Vec<u64>,
+    /// The frames around groups of blocks.
+    frames: Vec<file::Frame>,
+    /// The blocks shown compact.
+    compact: BTreeSet<u64>,
+    /// The size each block was drawn at in the last frame, in the schematic.
+    block_sizes: HashMap<u64, egui::Vec2>,
+    /// The blocks selected in the schematic.
+    selected: Vec<u64>,
+    /// The frame whose label is being edited, by index, with the text typed.
+    frame_label: Option<(usize, String)>,
+    /// The note whose text takes the keyboard in the next frame.
+    focus_note: Option<u64>,
+    /// The positions of the blocks in the last frame, and the blocks moved while a button
+    /// is down, to put those dropped onto a frame in it.
+    last_positions: Vec<(u64, [f32; 2])>,
+    moving: BTreeSet<u64>,
     /// The editor of a materials block.
     material_set: Option<MaterialSetEditor>,
     /// The editor of a mesh block.
@@ -1470,7 +1522,15 @@ impl ProjectApp {
             graph: Snarl::new(),
             graph_generation: 0,
             rename: None,
-            confirm_delete: None,
+            confirm_delete: Vec::new(),
+            frames: Vec::new(),
+            compact: BTreeSet::new(),
+            block_sizes: HashMap::new(),
+            selected: Vec::new(),
+            frame_label: None,
+            focus_note: None,
+            last_positions: Vec::new(),
+            moving: BTreeSet::new(),
             material_set: None,
             mesh_block: None,
             parameter_set: None,
@@ -1656,6 +1716,17 @@ impl ProjectApp {
              exposed parameter of an analysis; double-click it to add, rename or remove \
              parameters."
         ));
+        id
+    }
+
+    /// Adds a note, whose text takes the keyboard at once.
+    fn add_note(&mut self, position: egui::Pos2) -> u64 {
+        let id = self.next_id();
+        let name = self.unique_name("Note");
+        self.nodes
+            .push(Node::new(id, name, Block::Note(String::new())));
+        self.graph.insert_node(position, id);
+        self.focus_note = Some(id);
         id
     }
 
@@ -3426,6 +3497,10 @@ impl ProjectApp {
                 }
                 return;
             }
+            Some(Kind::Note) => {
+                self.focus_note = Some(id);
+                return;
+            }
             None => return,
         }
         let path = self.model_path();
@@ -3518,6 +3593,9 @@ impl ProjectApp {
         }
         self.nodes.clear();
         self.links.clear();
+        self.frames.clear();
+        self.compact.clear();
+        self.frame_label = None;
         self.applied.clear();
         self.restoring.clear();
         self.sync_due = true;
@@ -3577,6 +3655,9 @@ impl ProjectApp {
                 self.graph = Snarl::new();
                 self.graph_generation += 1;
                 self.links = project.links;
+                self.frames = project.frames;
+                self.compact = project.compact.into_iter().collect();
+                self.frame_label = None;
                 self.applied.clear();
                 self.restoring.clear();
                 self.sync_due = true;
@@ -3629,7 +3710,9 @@ impl ProjectApp {
         Project {
             nodes,
             links: self.links.clone(),
-            ..Default::default()
+            frames: self.frames.clone(),
+            compact: self.compact.iter().copied().collect(),
+            format: plx_model::PROJECT_FORMAT,
         }
     }
 
@@ -3711,6 +3794,13 @@ impl ProjectApp {
         };
         self.nodes.push(copy);
         self.graph.insert_node(position, new_id);
+        // The copy goes into the frame of the block, and looks like it.
+        if let Some(frame) = frames::frame_of(&self.frames, id) {
+            self.frames[frame].nodes.push(new_id);
+        }
+        if self.compact.contains(&id) {
+            self.compact.insert(new_id);
+        }
         self.output.push(format!("{name} created"));
     }
 
@@ -3739,6 +3829,9 @@ impl ProjectApp {
         let node = (self.nodes.iter().position(|n| n.id == id)).map(|i| self.nodes.remove(i));
         self.links.retain(|l| l.source != id && l.target != id);
         self.applied.retain(|(target, _), _| *target != id);
+        self.leave_frames(&[id]);
+        self.compact.remove(&id);
+        self.selected.retain(|&s| s != id);
         if self.material_set.as_ref().is_some_and(|e| e.id == id) {
             self.material_set = None;
         }
@@ -4420,6 +4513,34 @@ impl ProjectApp {
                 if ui.add_enabled(self.history.can_redo(), redo).clicked() {
                     self.redo(&ctx);
                 }
+                ui.separator();
+                // On the blocks selected with Shift+click or a Shift+drag rectangle.
+                let selected = self.selected.clone();
+                let any = !selected.is_empty();
+                let items = [
+                    (
+                        "Duplicate",
+                        "Shift+D",
+                        Action::DuplicateAll(selected.clone()),
+                    ),
+                    ("Delete …", "X", Action::DeleteAll(selected.clone())),
+                    ("Compact View", "H", Action::Compact(selected.clone())),
+                    ("Frame Blocks", "Ctrl+J", Action::Frame(selected.clone())),
+                    ("Remove from Frame", "Alt+P", Action::Unframe(selected)),
+                ];
+                for (text, key, action) in items {
+                    let button = egui::Button::new(text).shortcut_text(key);
+                    if ui
+                        .add_enabled(any, button)
+                        .on_disabled_hover_text(
+                            "Select blocks with Shift+click or a Shift+drag rectangle; the keys \
+                             also work on the block under the mouse pointer.",
+                        )
+                        .clicked()
+                    {
+                        self.act(&ctx, action);
+                    }
+                }
             });
             ui.menu_button("Project", |ui| {
                 if let Some(action) = add_block_menu(ui, self.free_position()) {
@@ -4546,7 +4667,7 @@ impl ProjectApp {
             }
         }
         let base = self.export_base();
-        let blocks: Vec<BlockView> = (self.nodes.iter())
+        let mut blocks: Vec<BlockView> = (self.nodes.iter())
             .map(|n| {
                 let fe = n.link_data().map(|d| d.fe);
                 let rows = match (n.kind(), &n.status()) {
@@ -4593,7 +4714,7 @@ impl ProjectApp {
                         bundles.get(&n.id).map_or(&[][..], Vec::as_slice),
                         continuations.get(&n.id),
                     ),
-                    (Kind::Analysis, None) => Vec::new(),
+                    (Kind::Analysis, None) | (Kind::Note, _) => Vec::new(),
                 };
                 let continues = (self.links.iter())
                     .find(|l| l.target == n.id && links::is_state(l))
@@ -4620,9 +4741,38 @@ impl ProjectApp {
                     parameters: (n.as_parameters()).map_or_else(Vec::new, |p| p.parameters.clone()),
                     exposed: n.exposing_fe().map_or_else(Vec::new, ExposedView::of),
                     units: n.units(),
+                    note: match &n.block {
+                        Block::Note(text) => text.clone(),
+                        _ => String::new(),
+                    },
+                    compact: self.compact.contains(&n.id),
+                    framed: frames::frame_of(&self.frames, n.id).is_some(),
                 }
             })
             .collect();
+        // A compact block keeps the rows its wires end at.
+        if blocks.iter().any(|b| b.compact) {
+            let ends = self.wired_rows(&blocks);
+            for block in blocks.iter_mut().filter(|b| b.compact) {
+                let kept: BTreeSet<usize> = (ends.iter())
+                    .flat_map(|&((source, output), (target, input))| {
+                        [
+                            (source == block.id).then_some(output),
+                            (target == block.id).then_some(input),
+                        ]
+                    })
+                    .flatten()
+                    .collect();
+                let mut index = 0;
+                block.rows.retain(|_| {
+                    index += 1;
+                    kept.contains(&(index - 1))
+                });
+                for row in &mut block.rows {
+                    row.expander = None;
+                }
+            }
+        }
         self.sync_wires(&blocks);
         let verdicts = self.drag_verdicts(ui.ctx(), &blocks);
         let mut viewer = Viewer {
@@ -4638,11 +4788,25 @@ impl ProjectApp {
                 .collect(),
             bottom: f32::MIN,
             busy: self.busy(),
+            frames: self.frames.clone(),
+            sizes: std::mem::take(&mut self.block_sizes),
+            frame_label: self.frame_label.take(),
+            drawn: HashMap::new(),
+            focus_note: self.focus_note.take(),
+            selected: self.selected.clone(),
         };
+        let snarl_id = egui::Id::new(("project schematic", self.graph_generation));
         let response = SnarlWidget::new()
-            .id_salt(("project schematic", self.graph_generation))
+            .id(snarl_id)
             .style(schematic_style())
             .show(&mut self.graph, &mut viewer, ui);
+        // Blocks not drawn this frame keep their last size.
+        self.block_sizes = std::mem::take(&mut viewer.sizes);
+        self.block_sizes.extend(viewer.drawn.drain());
+        self.frame_label = viewer.frame_label.take();
+        self.selected = (egui_snarl::ui::get_selected_nodes(snarl_id, ui.ctx()).into_iter())
+            .filter_map(|g| self.graph.get_node(g).copied())
+            .collect();
         let clip = viewer.to_global.inverse() * ui.clip_rect();
         draw_feedback(ui.ctx(), &viewer.feedback, viewer.bottom, clip);
         self.pin_rects = ui.ctx().data_mut(|d| {
@@ -4660,6 +4824,7 @@ impl ProjectApp {
             let graph = viewer.to_global.inverse() * screen;
             self.picker = Some(NodePicker::new(screen, graph));
         }
+        self.schematic_keys(ui, ui.max_rect(), viewer.to_global.inverse());
         if let Some(picker) = &mut self.picker {
             let kinds = block_kinds();
             let entries: Vec<_> = kinds.iter().map(|k| k.entry()).collect();
@@ -4777,9 +4942,11 @@ impl ProjectApp {
 
     /// Lets the wires of the schematic show the project's links, each between the rows its
     /// ends are shown in.
-    fn sync_wires(&mut self, blocks: &[BlockView]) {
+    /// The rows the wires of the links end at: block and row of the source, block and row
+    /// of the target.
+    fn wired_rows(&self, blocks: &[BlockView]) -> Vec<((u64, usize), (u64, usize))> {
         let block = |id: u64| blocks.iter().find(|b| b.id == id);
-        let mut wanted = std::collections::HashSet::new();
+        let mut wired = Vec::new();
         for link in &self.links {
             let (Some(source), Some(target)) = (block(link.source), block(link.target)) else {
                 continue;
@@ -4798,7 +4965,6 @@ impl ProjectApp {
                 } else {
                     vec![(links::output_path(link), links::slot(link).to_vec())]
                 };
-            let nodes = (self.graph_node(link.source), self.graph_node(link.target));
             for (output, input) in paths {
                 let output = shown_row(&source.rows, &output);
                 // The global results of a submodel end at its Global results row while the
@@ -4811,13 +4977,22 @@ impl ProjectApp {
                         .or(Some(row)),
                     row => row,
                 };
-                if let (Some(output), Some(input), (Some(from), Some(to))) = (output, input, nodes)
-                {
-                    wanted.insert((
-                        egui_snarl::OutPinId { node: from, output },
-                        egui_snarl::InPinId { node: to, input },
-                    ));
+                if let (Some(output), Some(input)) = (output, input) {
+                    wired.push(((link.source, output), (link.target, input)));
                 }
+            }
+        }
+        wired
+    }
+
+    fn sync_wires(&mut self, blocks: &[BlockView]) {
+        let mut wanted = std::collections::HashSet::new();
+        for ((source, output), (target, input)) in self.wired_rows(blocks) {
+            if let (Some(from), Some(to)) = (self.graph_node(source), self.graph_node(target)) {
+                wanted.insert((
+                    egui_snarl::OutPinId { node: from, output },
+                    egui_snarl::InPinId { node: to, input },
+                ));
             }
         }
         let wires: Vec<_> = self.graph.wires().collect();
@@ -5925,12 +6100,15 @@ impl ProjectApp {
             | Action::Solve(_)
             | Action::Update(_)
             | Action::Rename(_)
-            | Action::Delete(_)
             | Action::Toggle(..)
             | Action::Generate(_)
             | Action::ExportNow(_)
             | Action::ReadFile(_)
-            | Action::RunStudy(_) => return None,
+            | Action::RunStudy(_)
+            | Action::DeleteAll(_)
+            | Action::Pick(..)
+            // Blocks moved are noticed on their own.
+            | Action::MoveFrame(..) => return None,
             Action::Link { target, .. } => vec![*target],
             Action::SetExposed(id, ..)
             | Action::RenameExposed(id, ..)
@@ -5964,8 +6142,16 @@ impl ProjectApp {
             | Action::SetPrimitive(..)
             | Action::ResetStudy(_)
             | Action::SetParameter(..)
-            | Action::Duplicate(_)
-            | Action::Continue { .. } => Vec::new(),
+            | Action::Continue { .. }
+            | Action::AddNote(_)
+            | Action::SetNote(..)
+            | Action::DuplicateAll(_)
+            | Action::Compact(_)
+            | Action::Frame(_)
+            | Action::Unframe(_)
+            | Action::FrameLabel(..)
+            | Action::FrameColor(..)
+            | Action::RemoveFrame(_) => Vec::new(),
         })
     }
 
@@ -6079,8 +6265,41 @@ impl ProjectApp {
                     .map(|n| n.name.clone());
                 self.rename = name.map(|name| (id, name));
             }
-            Action::Duplicate(id) => self.duplicate(id),
-            Action::Delete(id) => self.confirm_delete = Some(id),
+            Action::DeleteAll(ids) => self.confirm_delete = ids,
+            Action::DuplicateAll(ids) => {
+                for id in ids {
+                    self.duplicate(id);
+                }
+            }
+            Action::AddNote(pos) => {
+                self.add_note(pos);
+            }
+            Action::SetNote(id, text) => {
+                if let Some(Block::Note(note)) = self.node(id).map(|n| &mut n.block) {
+                    *note = text;
+                }
+            }
+            Action::Compact(ids) => self.toggle_compact(&ids),
+            Action::Frame(ids) => self.frame_blocks(&ids),
+            Action::Unframe(ids) => self.leave_frames(&ids),
+            Action::MoveFrame(index, delta) => self.move_frame(index, delta),
+            Action::FrameLabel(index, label) => {
+                if let Some(frame) = self.frames.get_mut(index) {
+                    frame.label = label;
+                }
+            }
+            Action::FrameColor(index, color) => {
+                if let Some(frame) = self.frames.get_mut(index) {
+                    frame.color = color;
+                }
+            }
+            Action::RemoveFrame(index) => {
+                if index < self.frames.len() {
+                    self.frames.remove(index);
+                }
+                self.frame_label = None;
+            }
+            Action::Pick(screen, graph) => self.picker = Some(NodePicker::new(screen, graph)),
             Action::Toggle(id, path) => {
                 if let Some(node) = self.node(id)
                     && !node.expanded.remove(&path)
@@ -6189,14 +6408,15 @@ impl ProjectApp {
     }
 
     fn confirm_delete_window(&mut self, ctx: &egui::Context) {
-        let Some(id) = self.confirm_delete else {
+        self.confirm_delete
+            .retain(|id| self.nodes.iter().any(|n| n.id == *id));
+        let blocks: Vec<(String, Kind)> = (self.confirm_delete.iter())
+            .filter_map(|id| self.nodes.iter().find(|n| n.id == *id))
+            .map(|n| (n.name.clone(), n.kind()))
+            .collect();
+        let Some((name, kind)) = blocks.first().cloned() else {
             return;
         };
-        let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
-            self.confirm_delete = None;
-            return;
-        };
-        let (name, kind) = (node.name.clone(), node.kind());
         let what = match kind {
             Kind::Analysis => "with its model and results",
             Kind::Materials => "with its materials",
@@ -6207,24 +6427,51 @@ impl ProjectApp {
             Kind::MeshExport => "(the file it wrote stays)",
             Kind::File => "(the file it reads stays)",
             Kind::Campbell => "with its diagram",
+            Kind::Note => "with its text",
         };
         let users = (self.links.iter())
-            .filter(|l| l.source == id)
+            .filter(|l| self.confirm_delete.contains(&l.source))
+            .filter(|l| !self.confirm_delete.contains(&l.target))
             .map(|l| l.target)
             .collect::<BTreeSet<_>>()
             .len();
+        let title = match blocks.len() {
+            1 => format!("Delete {}", title_case(kind.noun())),
+            _ => "Delete Blocks".into(),
+        };
         let mut answer = None;
-        egui::Window::new(format!("Delete {}", title_case(kind.noun())))
+        egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
-                ui.label(format!("Delete {name} {what} from the project?"));
-                if kind.is_source() && users > 0 {
+                if let [_] = blocks[..] {
+                    ui.label(format!("Delete {name} {what} from the project?"));
+                } else {
                     ui.label(format!(
-                        "{users} analyses link to it; they keep their copies."
+                        "Delete these {} blocks from the project?",
+                        blocks.len()
                     ));
+                    for (name, _) in &blocks {
+                        ui.label(format!("  {name}"));
+                    }
+                }
+                match (users, blocks.len()) {
+                    (0, _) => {}
+                    (1, 1) => {
+                        ui.label("1 block links to it; it keeps its copies.");
+                    }
+                    (_, 1) => {
+                        ui.label(format!(
+                            "{users} blocks link to it; they keep their copies."
+                        ));
+                    }
+                    _ => {
+                        ui.label(format!(
+                            "{users} blocks link to them; they keep their copies."
+                        ));
+                    }
                 }
                 ui.horizontal(|ui| {
                     if ui.button("Delete").clicked() {
@@ -6235,13 +6482,22 @@ impl ProjectApp {
                     }
                 });
             });
+        // As in Blender, Enter agrees and Escape does not.
+        if ctx.memory(|m| m.focused().is_none()) {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+                answer = Some(true);
+            } else if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                answer = Some(false);
+            }
+        }
         match answer {
             Some(true) => {
-                self.confirm_delete = None;
                 self.checkpoint(&[]);
-                self.delete(id);
+                for id in std::mem::take(&mut self.confirm_delete) {
+                    self.delete(id);
+                }
             }
-            Some(false) => self.confirm_delete = None,
+            Some(false) => self.confirm_delete.clear(),
             None => {}
         }
     }
@@ -6599,6 +6855,7 @@ impl eframe::App for ProjectApp {
         self.run_study();
         self.run_exports();
         self.analysis_windows(&ctx);
+        self.join_dropped(&ctx);
         self.record_change(&ctx);
     }
 }
@@ -6689,6 +6946,11 @@ struct BlockView {
     units: UnitSystem,
     /// What a mesh export block writes to.
     export_path: String,
+    /// The text of a note.
+    note: String,
+    /// Whether it shows only its header and the rows with a wire, and is in a frame.
+    compact: bool,
+    framed: bool,
 }
 
 /// An exposed parameter as its row shows it: its value and kind, `None` when its field is
@@ -8178,6 +8440,7 @@ enum BlockKind {
     Campbell,
     MeshExport,
     File,
+    Note,
 }
 
 fn block_kinds() -> Vec<BlockKind> {
@@ -8193,6 +8456,7 @@ fn block_kinds() -> Vec<BlockKind> {
         BlockKind::Campbell,
         BlockKind::MeshExport,
         BlockKind::File,
+        BlockKind::Note,
     ]
 }
 
@@ -8271,6 +8535,13 @@ impl BlockKind {
                  temperatures, the mesh of an input file (.inp), or geometry (STEP, IGES, \
                  BREP, STL). It reads the file again when it changes.",
             ),
+            Self::Note => (
+                "Note",
+                "Note",
+                "text comment remark label annotation",
+                "Adds a note: a text in the schematic for whoever reads the project. It has no \
+                 pins. Frames (Ctrl+J) group blocks under a name.",
+            ),
         };
         node_picker::Entry {
             category,
@@ -8293,6 +8564,7 @@ impl BlockKind {
             Self::MeshExport => "Add Mesh Export",
             Self::Campbell => "Add Campbell",
             Self::File => "Add File …",
+            Self::Note => "Add Note",
         }
     }
 
@@ -8309,6 +8581,7 @@ impl BlockKind {
             Self::MeshExport => Action::AddMeshExport(pos),
             Self::Campbell => Action::AddCampbell(pos),
             Self::File => Action::AddFile(pos),
+            Self::Note => Action::AddNote(pos),
         }
     }
 }
@@ -8463,6 +8736,17 @@ struct Viewer {
     verdicts: HashMap<PinKey, Option<String>>,
     /// An update or loop is under way: the out-of-date symbols cannot be clicked.
     busy: bool,
+    /// The frames, drawn behind the blocks, the size of each block as last drawn, and the
+    /// frame whose label is being edited.
+    frames: Vec<file::Frame>,
+    sizes: HashMap<u64, egui::Vec2>,
+    frame_label: Option<(usize, String)>,
+    /// The size of each block as drawn now.
+    drawn: HashMap<u64, egui::Vec2>,
+    /// The note whose text takes the keyboard.
+    focus_note: Option<u64>,
+    /// The blocks selected, which the items of a block's menu work on if it is one of them.
+    selected: Vec<u64>,
 }
 
 impl Viewer {
@@ -8783,6 +9067,36 @@ impl SnarlViewer<u64> for Viewer {
         let Some(block) = self.block(id) else {
             return;
         };
+        let compact = block.compact;
+        // A triangle as in Blender: pointing down while the block shows all its rows.
+        let (rect, toggle) = ui.allocate_exact_size(egui::vec2(10.0, 16.0), egui::Sense::click());
+        let ink = if toggle.hovered() {
+            ui.visuals().strong_text_color()
+        } else {
+            ui.visuals().weak_text_color()
+        };
+        let c = rect.center();
+        let points = if compact {
+            vec![
+                c + egui::vec2(-2.0, -4.0),
+                c + egui::vec2(3.0, 0.0),
+                c + egui::vec2(-2.0, 4.0),
+            ]
+        } else {
+            vec![
+                c + egui::vec2(-4.0, -2.0),
+                c + egui::vec2(4.0, -2.0),
+                c + egui::vec2(0.0, 3.0),
+            ]
+        };
+        ui.painter()
+            .add(egui::Shape::convex_polygon(points, ink, egui::Stroke::NONE));
+        let toggle_tip = if compact {
+            "Shows all rows of the block (H)"
+        } else {
+            "Shows only the header and the rows with a wire (H)"
+        };
+        let toggled = toggle.on_hover_text(toggle_tip).clicked();
         let (rect, icon) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
         match block.kind {
             Kind::Analysis | Kind::Mesh => {
@@ -8834,6 +9148,11 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, glyph, ink);
                 icon.on_hover_text("Reads a file outside the project for analyses to link");
             }
+            Kind::Note => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::Note, ink);
+                icon.on_hover_text("A note for the reader; it gives and takes nothing");
+            }
         }
         let text = egui::RichText::new(&block.name).strong();
         let label = ui.add(
@@ -8848,8 +9167,25 @@ impl SnarlViewer<u64> for Viewer {
             ui.spinner();
         }
         let (steps, continues, kind) = (block.steps.clone(), block.continues.clone(), block.kind);
+        let layout = Layout {
+            targets: if self.selected.contains(&id) {
+                self.selected.clone()
+            } else {
+                vec![id]
+            },
+            compact,
+            framed: block.framed,
+        };
+        if toggled {
+            self.actions.push(Action::Compact(vec![id]));
+        }
         if label.double_clicked() {
-            self.actions.push(Action::Open(id, None));
+            // A compact block opens to show its rows first, as in Blender.
+            self.actions.push(if compact {
+                Action::Compact(vec![id])
+            } else {
+                Action::Open(id, None)
+            });
         }
         let tip = match kind {
             Kind::Analysis => "Double-click opens the analysis in its own window.",
@@ -8862,6 +9198,7 @@ impl SnarlViewer<u64> for Viewer {
             Kind::Study => "Double-click opens its table of design points.",
             Kind::Campbell => "Double-click opens its Campbell diagram and the sweep.",
             Kind::File => "Double-click chooses the file to read.",
+            Kind::Note => "Double-click edits its text.",
         };
         // The name takes the clicks of the header, so it opens the block's menu too.
         label.on_hover_text(tip).context_menu(|ui| {
@@ -8871,6 +9208,7 @@ impl SnarlViewer<u64> for Viewer {
                 kind,
                 &steps,
                 continues.as_deref(),
+                &layout,
                 &mut self.actions,
             )
         });
@@ -9092,18 +9430,63 @@ impl SnarlViewer<u64> for Viewer {
         }
     }
 
-    fn has_body(&mut self, _node: &u64) -> bool {
-        false
+    // Only a note has a body: its text.
+    fn has_body(&mut self, node: &u64) -> bool {
+        self.block(*node)
+            .is_some_and(|b| b.kind == Kind::Note && !b.compact)
+    }
+
+    fn show_body(
+        &mut self,
+        node: NodeId,
+        _inputs: &[InPin],
+        _outputs: &[OutPin],
+        ui: &mut egui::Ui,
+        snarl: &mut Snarl<u64>,
+    ) {
+        let id = snarl[node];
+        let Some(note) = self.block(id).map(|b| b.note.clone()) else {
+            return;
+        };
+        // The text being typed is kept until the field lets go of the keyboard, and then
+        // becomes the note's, as one change to undo.
+        let draft = egui::Id::new(("note draft", id));
+        let mut text = ui
+            .data(|d| d.get_temp::<String>(draft))
+            .unwrap_or_else(|| note.clone());
+        ui.set_min_width(ROW_WIDTH);
+        let edit = ui.add(
+            egui::TextEdit::multiline(&mut text)
+                .desired_width(ROW_WIDTH)
+                .desired_rows(3)
+                .frame(egui::Frame::NONE)
+                .hint_text("Double-click to write a note"),
+        );
+        if self.focus_note == Some(id) {
+            edit.request_focus();
+        }
+        if edit.has_focus() {
+            ui.data_mut(|d| d.insert_temp(draft, text.clone()));
+        }
+        if edit.lost_focus() {
+            ui.data_mut(|d| d.remove::<String>(draft));
+            if text != note {
+                self.actions.push(Action::SetNote(id, text));
+            }
+        }
     }
 
     fn final_node_rect(
         &mut self,
-        _node: NodeId,
+        node: NodeId,
         rect: egui::Rect,
         _ui: &mut egui::Ui,
-        _snarl: &mut Snarl<u64>,
+        snarl: &mut Snarl<u64>,
     ) {
         self.bottom = self.bottom.max(rect.bottom());
+        if let Some(id) = snarl.get_node(node) {
+            self.drawn.insert(*id, rect.size());
+        }
     }
 
     /// A grid of dots behind the blocks, like the background of a node editor.
@@ -9114,7 +9497,7 @@ impl SnarlViewer<u64> for Viewer {
         _snarl_style: &SnarlStyle,
         _style: &egui::Style,
         painter: &egui::Painter,
-        _snarl: &Snarl<u64>,
+        snarl: &Snarl<u64>,
     ) {
         let color = crate::style::schematic_dot();
         let first = |v: f32| (v / DOT_SPACING).floor() as i32;
@@ -9125,6 +9508,7 @@ impl SnarlViewer<u64> for Viewer {
                 painter.circle_filled(center, 1.0, color);
             }
         }
+        self.frames(painter, snarl);
     }
 
     fn connect(&mut self, from: &OutPin, to: &InPin, snarl: &mut Snarl<u64>) {
@@ -9187,9 +9571,14 @@ impl SnarlViewer<u64> for Viewer {
             // The blocks, each about as large as it is drawn.
             let blocks = (snarl.nodes_pos_ids()).fold(egui::Rect::NOTHING, |all, (_, pos, id)| {
                 let rows = self.block(*id).map_or(0, |b| b.rows.len() + b.steps.len());
-                let size = egui::vec2(260.0, 60.0 + 22.0 * rows as f32);
+                let size = (self.sizes.get(id).copied())
+                    .unwrap_or(egui::vec2(260.0, 60.0 + 22.0 * rows as f32));
                 all.union(egui::Rect::from_min_size(pos, size))
             });
+            // With the label bands of the frames above them.
+            let blocks = (self.frames.iter())
+                .filter_map(|f| frames::frame_rect(f, snarl, &self.sizes))
+                .fold(blocks, egui::Rect::union);
             if blocks.is_finite() {
                 let blocks = blocks.expand(40.0);
                 let scale = (view.width() / blocks.width())
@@ -9226,6 +9615,7 @@ impl SnarlViewer<u64> for Viewer {
             Some(Kind::MeshExport) => default.fill(crate::style::export_header()),
             Some(Kind::Campbell) => default.fill(crate::style::study_header()),
             Some(Kind::File) => default.fill(crate::style::mesh_header()),
+            Some(Kind::Note) => default.fill(crate::style::note_header()),
             _ => default,
         }
     }
@@ -9247,12 +9637,22 @@ impl SnarlViewer<u64> for Viewer {
         let steps = block.map(|b| b.steps.clone()).unwrap_or_default();
         let continues = block.and_then(|b| b.continues.clone());
         let kind = block.map_or(Kind::Analysis, |b| b.kind);
+        let layout = Layout {
+            targets: if self.selected.contains(&id) {
+                self.selected.clone()
+            } else {
+                vec![id]
+            },
+            compact: block.is_some_and(|b| b.compact),
+            framed: block.is_some_and(|b| b.framed),
+        };
         node_menu(
             ui,
             id,
             kind,
             &steps,
             continues.as_deref(),
+            &layout,
             &mut self.actions,
         );
     }
@@ -9582,16 +9982,47 @@ fn hidden_pin() -> PinInfo {
 }
 
 /// The context menu of an analysis' block.
+/// How a block lies in the schematic, for its menu: the blocks its layout items work on,
+/// itself or the selected blocks it is one of, whether it is compact and in a frame.
+struct Layout {
+    targets: Vec<u64>,
+    compact: bool,
+    framed: bool,
+}
+
+/// The items of a block's menu that change how it looks in the schematic, with their keys.
+fn layout_menu(ui: &mut egui::Ui, layout: &Layout, actions: &mut Vec<Action>) {
+    let mut entry = |ui: &mut egui::Ui, text: &str, key: &str, action: Action| {
+        if ui.add(egui::Button::new(text).shortcut_text(key)).clicked() {
+            actions.push(action);
+            ui.close();
+        }
+    };
+    let targets = layout.targets.clone();
+    let compact = if layout.compact {
+        "Show All Rows"
+    } else {
+        "Compact View"
+    };
+    entry(ui, compact, "H", Action::Compact(targets.clone()));
+    entry(ui, "Frame Blocks", "Ctrl+J", Action::Frame(targets.clone()));
+    if layout.framed {
+        entry(ui, "Remove from Frame", "Alt+P", Action::Unframe(targets));
+    }
+}
+
 fn node_menu(
     ui: &mut egui::Ui,
     id: u64,
     kind: Kind,
     steps: &[String],
     continues: Option<&str>,
+    layout: &Layout,
     actions: &mut Vec<Action>,
 ) {
-    let mut entry = |ui: &mut egui::Ui, text: &str, action: Action| {
-        if ui.button(text).clicked() {
+    let targets = layout.targets.clone();
+    let mut entry = |ui: &mut egui::Ui, text: &str, key: &str, action: Action| {
+        if ui.add(egui::Button::new(text).shortcut_text(key)).clicked() {
             actions.push(action);
             ui.close();
         }
@@ -9599,37 +10030,37 @@ fn node_menu(
     if kind.is_source() {
         // Sources have no steps and are not solved.
         if kind == Kind::MeshExport {
-            entry(ui, "Export Now", Action::ExportNow(id));
-            entry(ui, "Choose File …", Action::Open(id, None));
+            entry(ui, "Export Now", "", Action::ExportNow(id));
+            entry(ui, "Choose File …", "", Action::Open(id, None));
         } else if kind == Kind::File {
-            entry(ui, "Choose File …", Action::Open(id, None));
-            entry(ui, "Read Again", Action::ReadFile(id));
+            entry(ui, "Choose File …", "", Action::Open(id, None));
+            entry(ui, "Read Again", "", Action::ReadFile(id));
         } else if kind == Kind::Campbell {
-            entry(ui, "Open Diagram …", Action::Open(id, None));
+            entry(ui, "Open Diagram …", "", Action::Open(id, None));
         } else if kind != Kind::RefineMesh {
-            entry(ui, "Edit …", Action::Open(id, None));
+            entry(ui, "Edit …", "", Action::Open(id, None));
         }
         if matches!(kind, Kind::Mesh | Kind::RefineMesh) {
-            entry(ui, "Generate Mesh", Action::Generate(id));
+            entry(ui, "Generate Mesh", "", Action::Generate(id));
         }
         if kind == Kind::Study {
-            entry(ui, "Run", Action::RunStudy(id));
-            entry(ui, "Reset", Action::ResetStudy(id));
+            entry(ui, "Run", "", Action::RunStudy(id));
+            entry(ui, "Reset", "", Action::ResetStudy(id));
         }
         ui.separator();
-        entry(ui, "Rename …", Action::Rename(id));
-        entry(ui, "Duplicate", Action::Duplicate(id));
-        entry(ui, "Delete …", Action::Delete(id));
+        layout_menu(ui, layout, actions);
+        ui.separator();
+        edit_entries(ui, id, &targets, actions);
         return;
     }
-    entry(ui, "Open", Action::Open(id, None));
-    entry(ui, "Solve", Action::Solve(id));
+    entry(ui, "Open", "", Action::Open(id, None));
+    entry(ui, "Solve", "", Action::Solve(id));
     ui.separator();
     let split = steps.len() > 1;
     ui.add_enabled_ui(split, |ui| {
         ui.menu_button("Split After", |ui| {
             for step in &steps[..steps.len().saturating_sub(1)] {
-                entry(ui, step, Action::Split(id, step.clone()));
+                entry(ui, step, "", Action::Split(id, step.clone()));
             }
         })
         .response
@@ -9639,12 +10070,30 @@ fn node_menu(
         );
     });
     if let Some(source) = continues {
-        entry(ui, &format!("Merge into {source}"), Action::Merge(id));
+        entry(ui, &format!("Merge into {source}"), "", Action::Merge(id));
     }
     ui.separator();
-    entry(ui, "Rename …", Action::Rename(id));
-    entry(ui, "Duplicate", Action::Duplicate(id));
-    entry(ui, "Delete …", Action::Delete(id));
+    layout_menu(ui, layout, actions);
+    ui.separator();
+    edit_entries(ui, id, &targets, actions);
+}
+
+/// Rename, Duplicate and Delete in a block's menu; the last two work on `targets`.
+fn edit_entries(ui: &mut egui::Ui, id: u64, targets: &[u64], actions: &mut Vec<Action>) {
+    let mut entry = |ui: &mut egui::Ui, text: &str, key: &str, action: Action| {
+        if ui.add(egui::Button::new(text).shortcut_text(key)).clicked() {
+            actions.push(action);
+            ui.close();
+        }
+    };
+    entry(ui, "Rename …", "F2", Action::Rename(id));
+    entry(
+        ui,
+        "Duplicate",
+        "Shift+D",
+        Action::DuplicateAll(targets.to_vec()),
+    );
+    entry(ui, "Delete …", "X", Action::DeleteAll(targets.to_vec()));
 }
 
 /// Spacing of the dots of the schematic's background.
@@ -10196,6 +10645,51 @@ mod tests {
             Some(ProjectNode::Parameters(written)) => assert_eq!(written, set),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_note_reads_back_and_its_copy_keeps_the_text() {
+        let note = file::Note {
+            id: 7,
+            name: "Note".into(),
+            position: [1.0, 2.0],
+            text: "Check the bolt preload".into(),
+        };
+        let mut node = Node::read(ProjectNode::Note(note.clone()));
+        assert_eq!(node.kind(), Kind::Note);
+        assert!(node.link_data().is_none());
+        match node.written([1.0, 2.0]) {
+            Some(ProjectNode::Note(written)) => assert_eq!(written, note),
+            other => panic!("{other:?}"),
+        }
+        let copy = node.copied(8, "Copy of Note".into()).unwrap();
+        assert!(matches!(&copy.block, Block::Note(text) if text == &note.text));
+    }
+
+    #[test]
+    fn a_frame_lies_around_its_blocks_with_its_label_above() {
+        let mut graph = Snarl::new();
+        graph.insert_node(egui::pos2(0.0, 0.0), 1);
+        graph.insert_node(egui::pos2(300.0, 100.0), 2);
+        graph.insert_node(egui::pos2(900.0, 900.0), 3);
+        let sizes = HashMap::from([(1, egui::vec2(200.0, 80.0)), (2, egui::vec2(220.0, 120.0))]);
+        let frame = file::Frame {
+            label: "Load cases".into(),
+            color: frames::FRAME_COLORS[1].1,
+            nodes: vec![1, 2],
+        };
+        let rect = frames::frame_rect(&frame, &graph, &sizes).unwrap();
+        assert!(rect.contains(egui::pos2(10.0, 10.0)));
+        assert!(rect.contains(egui::pos2(510.0, 210.0)));
+        assert!(!rect.contains(egui::pos2(900.0, 900.0)));
+        // The label band lies above the blocks.
+        assert!(rect.top() < -30.0);
+        let empty = file::Frame {
+            nodes: vec![5],
+            ..frame
+        };
+        assert!(frames::frame_rect(&empty, &graph, &sizes).is_none());
+        assert_eq!(frames::frame_of(&[empty], 5), Some(0));
     }
 
     #[test]

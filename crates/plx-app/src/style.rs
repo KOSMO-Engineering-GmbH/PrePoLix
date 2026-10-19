@@ -215,6 +215,14 @@ pub fn export_header() -> Color32 {
         Color32::from_rgb(214, 222, 238)
     }
 }
+/// Header band of a note in the project schematic: a muted yellow.
+pub fn note_header() -> Color32 {
+    if dark() {
+        Color32::from_rgb(80, 74, 44)
+    } else {
+        Color32::from_rgb(240, 232, 196)
+    }
+}
 /// Outline of the pins of the project schematic.
 pub fn pin_edge() -> Color32 {
     if dark() {

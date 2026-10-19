@@ -27,6 +27,12 @@ pub struct Project {
     /// Data one block takes from another.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
+    /// Named frames around groups of blocks, drawn behind them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub frames: Vec<Frame>,
+    /// The blocks shown compact: only their header and the rows with a wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compact: Vec<u64>,
 }
 
 impl Default for Project {
@@ -35,6 +41,8 @@ impl Default for Project {
             format: PROJECT_FORMAT,
             nodes: Vec::new(),
             links: Vec::new(),
+            frames: Vec::new(),
+            compact: Vec::new(),
         }
     }
 }
@@ -80,6 +88,8 @@ pub enum ProjectNode {
     Campbell(Box<CampbellBlock>),
     /// A file outside the project read as a source: geometry, a mesh or results.
     File(FileSource),
+    /// A text in the schematic, without pins.
+    Note(Note),
 }
 
 impl ProjectNode {
@@ -96,6 +106,7 @@ impl ProjectNode {
             Self::MeshExport(e) => e.id,
             Self::Campbell(c) => c.id,
             Self::File(f) => f.id,
+            Self::Note(n) => n.id,
         }
     }
 
@@ -111,6 +122,7 @@ impl ProjectNode {
             Self::MeshExport(e) => &e.name,
             Self::Campbell(c) => &c.name,
             Self::File(f) => &f.name,
+            Self::Note(n) => &n.name,
         }
     }
 
@@ -127,6 +139,7 @@ impl ProjectNode {
             Self::MeshExport(e) => e.position,
             Self::Campbell(c) => c.position,
             Self::File(f) => f.position,
+            Self::Note(n) => n.position,
         }
     }
 }
@@ -244,6 +257,30 @@ pub struct FileSource {
     /// The unit system the numbers of an input file and the lengths of geometry are in.
     #[serde(default)]
     pub units: plx_model::UnitSystem,
+}
+
+/// A note in the project schematic: a text for the reader, which gives and takes nothing.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Note {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    #[serde(default)]
+    pub text: String,
+}
+
+/// A frame of the project schematic: a named, tinted rectangle around the blocks it holds,
+/// like a frame of Blender's node editor. It follows its blocks when they move.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Frame {
+    pub label: String,
+    /// The tint of the frame, red, green and blue.
+    #[serde(default)]
+    pub color: [u8; 3],
+    /// The ids of the blocks in the frame.
+    #[serde(default)]
+    pub nodes: Vec<u64>,
 }
 
 /// A block that writes the mesh linked to it to a file when the project is updated. It keeps
@@ -993,6 +1030,19 @@ mod tests {
             units: plx_model::UnitSystem::MmTonSC,
         };
         saved.nodes.push(ProjectNode::File(file.clone()));
+        let note = Note {
+            id: 10,
+            name: "Note".into(),
+            position: [600.0, 20.0],
+            text: "Loads from the test bench".into(),
+        };
+        saved.nodes.push(ProjectNode::Note(note.clone()));
+        saved.frames.push(Frame {
+            label: "Sources".into(),
+            color: [96, 172, 96],
+            nodes: vec![3, 9],
+        });
+        saved.compact = vec![1, 9];
         saved.links.push(Link {
             source: 3,
             target: 1,
@@ -1006,11 +1056,17 @@ mod tests {
         assert!(text.contains(&format!("format:{PROJECT_FORMAT}")));
         assert!(!text.contains("analyses:"), "{text}");
         let project = read_project(&path).unwrap();
-        assert_eq!(project.nodes.len(), 8);
+        assert_eq!(project.nodes.len(), 9);
         match &project.nodes[7] {
             ProjectNode::File(read) => assert_eq!(read, &file),
             other => panic!("{other:?}"),
         }
+        match &project.nodes[8] {
+            ProjectNode::Note(read) => assert_eq!(read, &note),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(project.frames, saved.frames);
+        assert_eq!(project.compact, vec![1, 9]);
         match &project.nodes[5] {
             ProjectNode::MeshExport(read) => assert_eq!(read, &export),
             other => panic!("{other:?}"),
