@@ -14,13 +14,17 @@ Add one with #menu("Project", "Add Parameter Study"), then link its columns:
   Mesh block (@refine-mesh). The link makes an input column named after that number, of its
   kind (a force, a length ...), with its value as it is now. The wire is violet and dashed and
   runs below the blocks, as it leads back to the blocks before the study. One column can give
-  its value to several numbers: drag the pin of its row to each.
+  its value to several numbers: drag the pin of its row to each. Quicker for an exposed parameter:
+  right-click its row and pick the study under #ui("Add to Study").
 + Drag the value pin of a Measure block (@measure-block) to its #ui("Outputs") row. The link
   makes an output column named after the measure.
 
 The first column makes the first design point, *DP 0*, which is the *current* one: the blocks
 stand at its inputs, and its outputs are those the project shows. Removing a link leaves the
 column; #ui("Remove") in the editor removes a column and its links.
+
+#screenshot("add-to-study.png", [#ui("Add to Study") in the context menu of an exposed
+  parameter])
 
 #screenshot("study-block.png", [The study varies the exposed force of the analysis Static
   (dashed wire) and reads the largest stress of its results through Max Stress])
@@ -43,6 +47,11 @@ columns and the table of the design points:
   [P1 ...], [The input values of each point, entered in place.],
   [O1 ...], [The outputs each point gave.],
   [Time, Elements], [How long the point took and the elements of its largest mesh.],
+  [Table, Plot], [The table of the points, or a diagram of their outputs
+    (@study-plot).],
+  [Fill ..., Import ...], [Add many points at once (@study-fill).],
+  [Copy Table], [Copies the table with tabs, for a spreadsheet.],
+  [Export CSV ...], [Saves the table as a CSV file.],
   [Add Point], [Adds a point with the inputs of the current one.],
   [Run], [Solves the points that are not up to date, one after the other.],
   [Reset], [Forgets the outputs of all points; the inputs stay.],
@@ -60,12 +69,43 @@ solves them again. #ui("Set as Current") gives the inputs of a point to the bloc
 is up to date, #ui("Update Project") then solves the analyses for its results without running
 the study.
 
+=== Filling and importing points <study-fill>
+
+#ui("Fill ...") makes points from values per input. Each input takes the value of the current
+point (#ui("Current")), a #ui("List") of values separated by `;`, such as `1; 1.5; 2`, or a
+#ui("Range") of evenly spaced values from one value to another. #ui("All combinations") makes a
+point for every combination of the values of the inputs; #ui("One at a time") varies each input
+by itself, the others at the current point. A point with the inputs of a point already in the
+table is not added again. #ui("Replace the points") removes all points but the current one
+first. The dialog says how many points it adds before #ui("Add Points").
+
+#screenshot("study-fill.png", [Five forces from -1000 to -5000 N: three of them are in the
+  table already])
+
+#ui("Import ...") adds the points of a table pasted from a spreadsheet, or read with
+#ui("Open File ...") from a CSV file. Cells are separated by tabs, `;` or `,`. A first row of
+names takes the columns named after inputs, with or without the unit in brackets, as
+#ui("Copy Table") and #ui("Export CSV ...") write them; an input without a column takes the
+value of the current point. Without such a row, the columns are the inputs in order. Values
+are in the units shown; a value with its own unit, such as `7 kN`, is converted.
+
+=== Plot <study-plot>
+
+The #ui("Plot") tab draws the outputs over an input, another output or the elements (#ui("x")).
+The boxes #ui("O1"), #ui("O2") ... choose the outputs shown, and #ui("Curve per") makes a curve
+for each value of another input, for a study over two inputs. Points without the values are
+left out. Drag to move the view, scroll to zoom, double-click to fit.
+
+#screenshot("study-plot.png", [The largest stress over the force: five points of a linear
+  model on a straight line])
+
 === Mesh convergence
 
 A study checks whether the results depend on the mesh: put a Refine Mesh block between the
 mesh and the analyses that solve on it, link the Inputs row to its #ui("Factor") and a Measure
 block of the results to the Outputs row, and add points with factors such as 1, 1.5, 2 and 3.
-The #ui("Elements") column shows how many elements each one solved. When the output hardly
+The #ui("Elements") column shows how many elements each one solved; in the plot, the measure
+over #ui("Elements") is the convergence curve. When the output hardly
 changes from one point to the next, the mesh is fine enough. When it grows with every
 refinement, it is a singularity: a stress at a sharp corner or under a point load grows without
 end as the mesh gets finer. Measure a displacement there, or a region away from it.
