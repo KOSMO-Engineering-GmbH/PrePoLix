@@ -6555,3 +6555,180 @@ fn calculix_drives_a_quadratic_end_face_with_every_behavior() {
         }
     }
 }
+
+#[test]
+fn a_point_history_output_prints_its_reference_and_rotation_node() {
+    let (mesh, mut model) = rigid_tip(None, None);
+    (model.steps[0].history_outputs).push(HistoryOutput::node(
+        "NH_Output-1",
+        Region::ReferencePoint("RP-1".into()),
+    ));
+    let mut temperatures =
+        HistoryOutput::node("NH_Output-2", Region::ReferencePoint("RP-1".into()));
+    temperatures.variables = vec!["NT".into()];
+    model.steps[0].history_outputs.push(temperatures);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for expected in [
+        "*Nset, Nset=Internal_Selection-1_NH_Output-1\n100\n",
+        "*Nset, Nset=Internal_Rotation-1_NH_Output-1\n101\n",
+        "** Name: NH_Output-1\n\
+         *Node print, Nset=Internal_Selection-1_NH_Output-1\nRF, U\n\
+         *Node print, Nset=Internal_Rotation-1_NH_Output-1\nRF, U\n\
+         ** Name: NH_Output-2\n\
+         *Node print, Nset=Internal_Selection-1_NH_Output-2\nNT\n**\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\nmissing in\n{text}");
+    }
+    // Without a rigid body the point has no node.
+    model.constraints.clear();
+    assert_eq!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::UnknownReferencePoint {
+            item: "NH_Output-1".into(),
+            point: "RP-1".into(),
+        })
+    );
+}
+
+#[test]
+fn a_remote_point_history_output_prints_the_nodes_of_the_point() {
+    let values = [Some(0.0), None, None, None, None, None];
+    let (mesh, mut model) = remote_cantilever(remote_with(values, |r| {
+        r.behavior = plx_model::RemoteBehavior::Coupled;
+    }));
+    (model.steps[0].history_outputs).push(HistoryOutput::node(
+        "NH_Output-1",
+        Region::RemotePoint("Remote-1".into()),
+    ));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // A coupled point does not turn: only its reference node is printed.
+    assert!(
+        text.contains("*Nset, Nset=Internal_Selection-1_NH_Output-1\n100\n"),
+        "{text}"
+    );
+    assert!(!text.contains("Internal_Rotation"), "{text}");
+    // A deactivated remote displacement has no point.
+    model.steps[0].boundary_conditions[1].active = false;
+    assert_eq!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::UnknownRemotePoint {
+            item: "NH_Output-1".into(),
+            point: "Remote-1".into(),
+        })
+    );
+}
+
+/// The moment and rotation of a point turned by 0.01 about z, from the `.dat` file, and the
+/// moment of the reactions at the clamped end about the point's axis, which balances it.
+fn point_moment(
+    mesh: &FeMesh,
+    mut model: FeModel,
+    region: Region,
+    name: &str,
+) -> Option<(f64, f64, f64)> {
+    let step = &mut model.steps[0];
+    step.history_outputs
+        .push(HistoryOutput::node("NH_Output-1", region));
+    let mut clamp = HistoryOutput::node("NH_Output-2", Region::NodeSet("FIX".into()));
+    clamp.variables = vec!["RF".into()];
+    step.history_outputs.push(clamp);
+    let dat = run_ccx_dat(name, &write_inp(mesh, &model, "").unwrap())?;
+    let import = crate::dat::parse_dat(&dat);
+    assert!(import.warnings.is_empty(), "{:?}", import.warnings);
+    let set = |name: &str| import.sets.iter().find(|s| s.name == name).unwrap();
+    let value = |field: &str, component: &str| {
+        let component = set("NH_OUTPUT-1")
+            .field(field)
+            .unwrap()
+            .component(component)
+            .unwrap();
+        // Shown under the reference node, as the forces.
+        let node = &set("NH_OUTPUT-1").field("FORCES").unwrap().components[0].entries[0].name;
+        assert_eq!(component.entries[0].name, *node);
+        *component.entries[0].values.last().unwrap()
+    };
+    let (moment, rotation) = (value("MOMENTS", "RM3"), value("ROTATIONS", "UR3"));
+    assert!(value("FORCES", "RF1").abs() < 1e-6 * moment.abs());
+    let forces = set("FIX")
+        .field("FORCES")
+        .unwrap()
+        .component("RF1")
+        .unwrap();
+    let clamp: f64 = (forces.entries.iter())
+        .map(|e| {
+            let y = mesh.node(e.name.parse().unwrap()).unwrap()[1];
+            -(y - 5.0) * e.values.last().unwrap()
+        })
+        .sum();
+    Some((moment, rotation, clamp))
+}
+
+/// A rotation prescribed at a reference point needs a moment, which its history output
+/// prints with the rotation; the reactions at the clamped end balance it.
+#[test]
+fn calculix_prints_the_moment_and_rotation_of_a_reference_point() {
+    let bc = BoundaryCondition {
+        name: "Turn-1".into(),
+        active: true,
+        visible: true,
+        region: Region::ReferencePoint("RP-1".into()),
+        kind: BoundaryKind::Displacement([None, None, None, None, None, Some(0.01)]),
+        amplitude: None,
+    };
+    let (mesh, model) = rigid_tip(None, Some(bc));
+    let region = Region::ReferencePoint("RP-1".into());
+    let Some((moment, rotation, clamp)) = point_moment(&mesh, model, region, "rp-moment") else {
+        return;
+    };
+    assert!((rotation - 0.01).abs() < 1e-9, "{rotation}");
+    assert!(moment > 1.0, "{moment}");
+    assert!((moment + clamp).abs() < 1e-3 * moment, "{moment} {clamp}");
+}
+
+#[test]
+fn calculix_prints_the_moment_and_rotation_of_a_remote_point() {
+    let values = [None, None, None, None, None, Some(0.01)];
+    let (mesh, model) = remote_cantilever(remote("Remote-1", values));
+    let region = Region::RemotePoint("Remote-1".into());
+    let Some((moment, rotation, clamp)) = point_moment(&mesh, model, region, "remote-moment")
+    else {
+        return;
+    };
+    assert!((rotation - 0.01).abs() < 1e-9, "{rotation}");
+    assert!(moment > 1.0, "{moment}");
+    assert!((moment + clamp).abs() < 1e-3 * moment, "{moment} {clamp}");
+}
+
+/// CalculiX prints zero forces at the point of equations: a deformable remote point prints
+/// its displacements and rotations only.
+#[test]
+fn calculix_prints_the_rotation_of_a_deformable_remote_point() {
+    let values = [None, None, None, None, None, Some(0.01)];
+    let (mesh, mut model) = remote_cantilever(remote_with(values, |r| {
+        r.behavior = plx_model::RemoteBehavior::Deformable;
+    }));
+    (model.steps[0].history_outputs).push(HistoryOutput::node(
+        "NH_Output-1",
+        Region::RemotePoint("Remote-1".into()),
+    ));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "*Node print, Nset=Internal_Selection-1_NH_Output-1\nU\n\
+             *Node print, Nset=Internal_Rotation-1_NH_Output-1\nU\n"
+        ),
+        "{text}"
+    );
+    let Some(dat) = run_ccx_dat("remote-deformable-rotation", &text) else {
+        return;
+    };
+    let import = crate::dat::parse_dat(&dat);
+    let set = import
+        .sets
+        .iter()
+        .find(|s| s.name == "NH_OUTPUT-1")
+        .unwrap();
+    assert!(set.field("FORCES").is_none() && set.field("MOMENTS").is_none());
+    let ur3 = set.field("ROTATIONS").unwrap().component("UR3").unwrap();
+    assert!((ur3.entries[0].values[0] - 0.01).abs() < 1e-9);
+}

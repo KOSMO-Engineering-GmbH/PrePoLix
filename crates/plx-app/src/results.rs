@@ -1226,6 +1226,9 @@ fn field_measure(field: &str, component: &str) -> Option<Measure> {
         "PDISP" => (component.starts_with("MAG")).then_some(Of(Length)),
         "PSTRESS" => (component.starts_with("MAG")).then_some(Of(Pressure)),
         "FORC" | "FORCR" | "FORCI" | "FORCES" | "TOTAL_FORCE" => Some(Of(Force)),
+        "ROTATIONS" => Some(Of(Angle)),
+        "MOMENTS" | "TOTAL_MOMENT" => Some(Of(Moment)),
+        "ANGULAR_VELOCITIES" => Some(Of(RotationalSpeed)),
         "VELO" | "VELOCITIES" => Some(Of(Velocity)),
         "ENER" | "INTERNAL_ENERGY_DENSITY" => Some(Per(Energy, Volume)),
         "CELS"

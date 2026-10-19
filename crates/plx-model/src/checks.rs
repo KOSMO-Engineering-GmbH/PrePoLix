@@ -38,8 +38,8 @@ pub enum Problem {
     NoSection,
     NoElastic,
     NoDensity,
-    /// A boundary condition or load on a reference point that no active rigid body is driven
-    /// by: the point has no node in the input file.
+    /// A boundary condition, load or history output on a reference point that no active
+    /// rigid body is driven by: the point has no node in the input file.
     NoRigidBody,
     /// Nodes in two rigid bodies, of rigid body constraints or remote displacements:
     /// CalculiX keeps them in the first and only warns.
@@ -228,7 +228,7 @@ impl Problem {
             }
             Problem::NoRigidBody => {
                 "A boundary condition or load on a reference point acts on the rigid body the \
-                 point drives. Without an active rigid body constraint with this reference \
+                 point drives, a history output prints its values. Without an active rigid body constraint with this reference \
                  point there is no node to apply it to; the input file would be incomplete."
             }
             Problem::InvalidCreep => {
@@ -1221,6 +1221,18 @@ impl FeModel {
                     ModelItem::Load(s, i),
                     Problem::NoRigidBody,
                     format!("{}: {}", load.name, load.region.describe()),
+                ));
+            }
+        }
+        for (i, output) in step.history_outputs.iter().enumerate() {
+            if let Some(region) = output.kind.region()
+                && output.active
+                && !driven(region)
+            {
+                findings.push(Finding::new(
+                    ModelItem::HistoryOutput(s, i),
+                    Problem::NoRigidBody,
+                    format!("{}: {}", output.name, region.describe()),
                 ));
             }
         }

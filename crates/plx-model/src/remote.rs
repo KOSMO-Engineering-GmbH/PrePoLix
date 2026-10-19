@@ -73,6 +73,38 @@ pub enum RemoteDof {
     Rotation(usize),
 }
 
+impl FeModel {
+    /// The first remote displacement boundary condition of the name, of any step, with
+    /// the index of its step.
+    pub fn remote_displacement(
+        &self,
+        name: &str,
+    ) -> Option<(usize, &crate::BoundaryCondition, &RemoteDisplacement)> {
+        self.steps.iter().enumerate().find_map(|(s, step)| {
+            step.boundary_conditions
+                .iter()
+                .find_map(|bc| match &bc.kind {
+                    crate::BoundaryKind::RemoteDisplacement(remote) if bc.name == name => {
+                        Some((s, bc, remote))
+                    }
+                    _ => None,
+                })
+        })
+    }
+
+    /// Follows a renamed remote displacement: history outputs of its point keep referring
+    /// to it.
+    pub fn rename_remote_point(&mut self, old: &str, new: &str) {
+        for output in self.steps.iter_mut().flat_map(|s| &mut s.history_outputs) {
+            if let Some(Region::RemotePoint(name)) = output.kind.region_mut()
+                && name == old
+            {
+                *name = new.to_string();
+            }
+        }
+    }
+}
+
 impl RemoteDisplacement {
     pub fn new(values: [Option<f64>; 6]) -> Self {
         Self {

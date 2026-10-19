@@ -31,6 +31,10 @@ pub enum Region {
     /// body's reference node, which exists only in the input file, so the region has no
     /// nodes of the mesh.
     ReferencePoint(String),
+    /// The point of a remote displacement boundary condition by the boundary condition's
+    /// name, for history outputs of its reaction forces and moments. Like a reference
+    /// point it exists only in the input file.
+    RemotePoint(String),
 }
 
 impl Region {
@@ -51,7 +55,7 @@ impl Region {
                 ids.extend(mesh.cad_faces(entities).iter().map(|(e, _)| *e));
             }
             Region::Nodes(_) | Region::NodeSet(_) | Region::Surface(_) => {}
-            Region::Edges(_) | Region::ReferencePoint(_) => {}
+            Region::Edges(_) | Region::ReferencePoint(_) | Region::RemotePoint(_) => {}
         }
         ids.into_iter().collect()
     }
@@ -82,7 +86,7 @@ impl Region {
                 }
                 None => {}
             },
-            Region::ReferencePoint(_) => {}
+            Region::ReferencePoint(_) | Region::RemotePoint(_) => {}
         }
         ids.into_iter().collect()
     }
@@ -131,7 +135,7 @@ impl Region {
                 name.clone()
             }
             Region::Geometry(entities) => describe_entities(entities),
-            Region::ReferencePoint(name) => name.clone(),
+            Region::ReferencePoint(name) | Region::RemotePoint(name) => name.clone(),
         }
     }
 
@@ -157,6 +161,14 @@ impl Region {
     pub fn reference_point(&self) -> Option<&str> {
         match self {
             Region::ReferencePoint(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// The remote displacement whose point the region stands for, if it is one.
+    pub fn remote_point(&self) -> Option<&str> {
+        match self {
+            Region::RemotePoint(name) => Some(name),
             _ => None,
         }
     }

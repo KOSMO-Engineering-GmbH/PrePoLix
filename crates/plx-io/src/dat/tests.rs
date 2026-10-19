@@ -429,3 +429,41 @@ fn cyclic_frequency_steps_number_their_modes_through_the_nodal_diameters() {
     );
     assert_eq!(component("TURNING_DIRECTION"), &[1.0, -1.0, -1.0, -1.0]);
 }
+
+#[test]
+fn the_rotation_node_of_a_point_gives_its_moments_and_rotations() {
+    let text = "
+                        S T E P       1
+
+                                INCREMENT     1
+
+ forces (fx,fy,fz) for set INTERNAL_SELECTION-1_NH_OUTPUT-1 and time  0.1000000E+01
+
+       100 -7.719336E-11  3.028617E-10  6.730261E-11
+
+ displacements (vx,vy,vz) for set INTERNAL_SELECTION-1_NH_OUTPUT-1 and time  0.1000000E+01
+
+       100 -3.868964E-16  5.000000E-01 -1.225547E-13
+
+ forces (fx,fy,fz) for set INTERNAL_ROTATION-1_NH_OUTPUT-1 and time  0.1000000E+01
+
+       101  1.024318E-09  8.776624E-11  2.521516E+04
+
+ displacements (vx,vy,vz) for set INTERNAL_ROTATION-1_NH_OUTPUT-1 and time  0.1000000E+01
+
+       101  9.350916E-16  1.534989E-15  1.000000E-02
+";
+    let import = parse_dat(text);
+    assert!(import.warnings.is_empty(), "{:?}", import.warnings);
+    assert_eq!(import.sets.len(), 1);
+    let set = &import.sets[0];
+    assert_eq!(set.name, "NH_OUTPUT-1");
+    let names: Vec<&str> = set.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["FORCES", "DISPLACEMENTS", "MOMENTS", "ROTATIONS"]);
+    let rm3 = set.field("MOMENTS").unwrap().component("RM3").unwrap();
+    // Under the reference node, as the forces.
+    assert_eq!(rm3.entries[0].name, "100");
+    assert_eq!(rm3.entries[0].values, [2.521516E+04]);
+    let ur3 = set.field("ROTATIONS").unwrap().component("UR3").unwrap();
+    assert_eq!(ur3.entries[0].values, [1.0E-02]);
+}
