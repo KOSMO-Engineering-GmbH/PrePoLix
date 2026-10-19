@@ -2074,7 +2074,20 @@ fn step_block<'f>(
             BoundaryKind::RemoteDisplacement(_) => unreachable!("written above"),
             BoundaryKind::Displacement(values) => {
                 let rotation = rotation_node.map(|n| n.to_string());
-                displacement_lines(&mut out, &set, rotation.as_deref(), &values, dofs);
+                // The point of a rigid body turns in a plane model too: about z, the
+                // rotation node's third degree of freedom. Its other directions do not exist.
+                if rotation.is_some() && space.is_2d() {
+                    let held = std::array::from_fn(|i| {
+                        space
+                            .remote_dofs()
+                            .contains(&i)
+                            .then(|| values[i])
+                            .flatten()
+                    });
+                    displacement_lines(&mut out, &set, rotation.as_deref(), &held, 6);
+                } else {
+                    displacement_lines(&mut out, &set, rotation.as_deref(), &values, dofs);
+                }
             }
             BoundaryKind::Temperature(t) => {
                 let _ = writeln!(out, "{set}, 11, 11, {}", number(t));

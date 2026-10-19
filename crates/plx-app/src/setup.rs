@@ -2272,6 +2272,12 @@ impl Editor {
                     BoundaryKind::RemoteDisplacement(remote) => {
                         remote.dofs(model.fe.properties.space)
                     }
+                    // The reference point of a rigid body in a plane model also turns about z.
+                    BoundaryKind::Displacement(_)
+                        if two_d && region.region().reference_point().is_some() =>
+                    {
+                        model.fe.properties.space.remote_dofs().to_vec()
+                    }
                     _ if two_d => vec![0, 1],
                     _ => (0..6).collect(),
                 };

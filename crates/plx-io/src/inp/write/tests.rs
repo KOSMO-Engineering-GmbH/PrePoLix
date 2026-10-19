@@ -6476,6 +6476,60 @@ fn calculix_turns_the_remote_point_of_a_plane_model() {
     }
 }
 
+/// The reference point of a rigid body in a plane model turns about z with a Displacement/
+/// Rotation boundary condition: UR3 is the third degree of freedom of its rotation node.
+#[test]
+fn calculix_turns_the_reference_point_of_a_plane_model() {
+    let angle = 0.01;
+    let mesh = rectangle(0.0, 10.0, 2.0, 5, 2);
+    let mut model = plane_model(
+        ModelSpace::PlaneStress,
+        1.0,
+        vec![(nodes_at(&mesh, 0, 0.0), [Some(0.0); 6])],
+        LoadKind::force([0.0, 0.0, 0.0]),
+        Region::Nodes(vec![1]),
+    );
+    model.steps[0].loads.clear();
+    model
+        .reference_points
+        .push(ReferencePoint::new("RP-1", [10.0, 1.0, 0.0]));
+    let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+    body.region = Region::Nodes(nodes_at(&mesh, 0, 10.0));
+    model.constraints.push(Constraint::RigidBody(body));
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Turn-1".into(),
+        active: true,
+        visible: true,
+        region: Region::ReferencePoint("RP-1".into()),
+        // U3, UR1 and UR2 do not exist in a plane model and are left out.
+        kind: BoundaryKind::Displacement([
+            Some(0.0),
+            Some(0.0),
+            Some(1.0),
+            Some(1.0),
+            Some(1.0),
+            Some(angle),
+        ]),
+        amplitude: None,
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("** Name: Turn-1\n*Boundary\n") && text.contains(", 3, 3, 0.01\n"),
+        "{text}"
+    );
+    let Some(frd) = run_ccx("referenzpunkt-2d", &text) else {
+        return;
+    };
+    for node in nodes_at(&mesh, 0, 10.0) {
+        let y = mesh.node(node).unwrap()[1];
+        let u1 = node_value(&frd, "DISP", "U1", node);
+        let u2 = node_value(&frd, "DISP", "U2", node);
+        let expected = -angle * (y - 1.0);
+        assert!((u1 - expected).abs() < 1e-7, "{u1} != {expected}");
+        assert!(u2.abs() < 1e-7, "{u2}");
+    }
+}
+
 /// A deformable point of a plane model turns the end of the strip by the mean of its nodes.
 #[test]
 fn calculix_turns_a_deformable_remote_point_of_a_plane_model() {
