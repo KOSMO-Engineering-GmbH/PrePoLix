@@ -104,6 +104,8 @@ pub struct CadImport {
     pub display: GeometryDisplay,
     /// What Gmsh warned about while reading.
     pub warnings: Vec<String>,
+    /// What was changed on reading, such as flat geometry moved into the x-y plane.
+    pub notes: Vec<String>,
 }
 
 /// A mesh generated from the geometry.
@@ -126,8 +128,8 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         return Err(GmshError::Other("No file selected".into()));
     }
     let brep_file = TempFile::new("brep");
-    let (diagonal, warnings, part_names) = with_gmsh(|gmsh| {
-        read_files(gmsh, paths, units)?;
+    let (diagonal, warnings, part_names, notes) = with_gmsh(|gmsh| {
+        let notes = read_files(gmsh, paths, units)?;
         let read = part_boxes(gmsh, default_parts(gmsh)?)?;
         gmsh.write(&brep_file.0)?;
         let (min, max) = gmsh.bounding_box()?;
@@ -141,7 +143,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         gmsh.clear()?;
         gmsh.import_shapes(&brep_file.0)?;
         let part_names = names_by_place(part_boxes(gmsh, default_parts(gmsh)?)?, read);
-        Ok((diagonal, warnings, part_names))
+        Ok((diagonal, warnings, part_names, notes))
     })?;
     let brep = std::fs::read_to_string(&brep_file.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", brep_file.0.display())))?;
@@ -158,6 +160,7 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
         geometry,
         display,
         warnings,
+        notes,
     })
 }
 
@@ -165,10 +168,14 @@ pub fn import_cad_files(paths: &[PathBuf], units: UnitSystem) -> Result<CadImpor
 /// STEP and IGES files know their unit; BREP files have none, and their numbers are taken in
 /// the length unit of `units`, the unit system of the model. Without a unit system, nothing
 /// is converted and STEP and IGES files are read in millimetres.
-fn read_files(gmsh: &Gmsh, paths: &[PathBuf], units: UnitSystem) -> Result<(), GmshError> {
+///
+/// A file whose geometry lies flat in a plane z = const away from z = 0 is moved into the
+/// x-y plane, where 2D models lie; the returned notes say which.
+fn read_files(gmsh: &Gmsh, paths: &[PathBuf], units: UnitSystem) -> Result<Vec<String>, GmshError> {
     let unit = if units.has_units() { "M" } else { "MM" };
     let brep_scale = units.factor_to(plx_model::Quantity::Length, plx_model::STORED);
     gmsh.set_string("Geometry.OCCTargetUnit", unit)?;
+    let mut notes = Vec::new();
     let imported = paths.iter().try_for_each(|path| {
         let scale = if is_step_file(path) || is_iges_file(path) {
             1.0
@@ -188,10 +195,63 @@ fn read_files(gmsh: &Gmsh, paths: &[PathBuf], units: UnitSystem) -> Result<(), G
         if is_step_file(path) {
             name_step_bodies(gmsh, path, &shapes)?;
         }
+        if let Some(z) = move_into_xy_plane(gmsh, &shapes)? {
+            let name = path
+                .file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy();
+            let length = plx_model::Quantity::Length;
+            let shown = (units.shown(z, length) * 1e9).round() / 1e9;
+            let unit = units.unit(length);
+            let at = if unit.is_empty() {
+                format!("{shown}")
+            } else {
+                format!("{shown} {unit}")
+            };
+            notes.push(format!(
+                "{name} lies flat in the plane z = {at}; it was moved into the x-y plane."
+            ));
+        }
         Ok(())
     });
     gmsh.set_string("Geometry.OCCTargetUnit", "MM")?;
-    imported
+    imported.map(|()| notes)
+}
+
+/// Moves shapes that lie flat in a plane z = const into the plane z = 0 and returns where
+/// they lay; shapes with any extent in z, or already in the x-y plane, stay where they are.
+fn move_into_xy_plane(gmsh: &Gmsh, shapes: &[Entity]) -> Result<Option<f64>, GmshError> {
+    let (mut min, mut max) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+    for &(dim, tag) in shapes {
+        let (lo, hi) = gmsh.entity_bounding_box(dim, tag)?;
+        for k in 0..3 {
+            min[k] = min[k].min(lo[k]);
+            max[k] = max[k].max(hi[k]);
+        }
+    }
+    let extent = (0..2).map(|k| max[k] - min[k]).fold(0.0, f64::max);
+    // OpenCASCADE widens bounding boxes by its confusion tolerance, 1e-7 whatever the unit,
+    // so a flat shape is 2e-7 thick.
+    let flat = 1e-6 * extent + 4e-7;
+    let z = 0.5 * (min[2] + max[2]);
+    if !(extent > 0.0 && max[2] - min[2] <= flat && z.abs() > flat) {
+        return Ok(None);
+    }
+    // Only the shapes no other one bounds are moved; their faces, edges and points go along.
+    let mut top = Vec::new();
+    for &(dim, tag) in shapes {
+        if dim == 3 || gmsh.adjacencies(dim, tag)?.0.is_empty() {
+            top.push((dim, tag));
+        }
+    }
+    #[rustfmt::skip]
+    let matrix = [
+        1.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, -z,
+    ];
+    gmsh.affine_transform(&top, &matrix)?;
+    Ok(Some(z))
 }
 
 fn is_iges_file(path: &Path) -> bool {
@@ -346,14 +406,14 @@ pub fn add_cad_files(
     }
     let file = TempFile::with_contents("brep", &geometry.brep)?;
     let combined = TempFile::new("brep");
-    let (old_parts, old_boxes, read, warnings) = with_gmsh(|gmsh| {
+    let (old_parts, old_boxes, read, warnings, notes) = with_gmsh(|gmsh| {
         gmsh.import_shapes(&file.0)?;
         let parts = part_boxes(gmsh, parts(gmsh, geometry)?)?;
         let boxes = entity_boxes(gmsh)?;
-        read_files(gmsh, paths, units)?;
+        let notes = read_files(gmsh, paths, units)?;
         let read = part_boxes(gmsh, default_parts(gmsh)?)?;
         gmsh.write(&combined.0)?;
-        Ok((parts, boxes, read, gmsh.warnings()?))
+        Ok((parts, boxes, read, gmsh.warnings()?, notes))
     })?;
     let brep = std::fs::read_to_string(&combined.0)
         .map_err(|e| GmshError::Other(format!("{}: {e}", combined.0.display())))?;
@@ -403,6 +463,7 @@ pub fn add_cad_files(
             geometry: combined,
             display,
             warnings,
+            notes,
         },
         renumbered: renumbering(&old_boxes, &new_boxes),
         added,

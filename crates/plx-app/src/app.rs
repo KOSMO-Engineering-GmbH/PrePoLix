@@ -1687,6 +1687,9 @@ impl Workbench {
                 for warning in &model.warnings {
                     self.output.push(format!("Warning: {warning}"));
                 }
+                for note in &model.notes {
+                    self.output.push(format!("Note: {note}"));
+                }
                 if !turned_faces.is_empty() {
                     let faces: Vec<String> = turned_faces.iter().map(i32::to_string).collect();
                     self.output.push(format!(
@@ -4774,6 +4777,9 @@ impl Workbench {
         model.geometry = Some(import.geometry);
         for warning in &import.warnings {
             self.output.push(format!("Warning: {warning}"));
+        }
+        for note in &import.notes {
+            self.output.push(format!("Note: {note}"));
         }
         self.output.push(format!(
             "{files} imported: {} part(s) added ({})",

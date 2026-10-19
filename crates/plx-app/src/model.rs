@@ -64,6 +64,8 @@ pub struct Model {
     pub mesh: FeMesh,
     pub parts: Vec<PartInfo>,
     pub warnings: Vec<String>,
+    /// What was changed on reading, printed as notes in the output.
+    pub notes: Vec<String>,
     pub skipped_keywords: BTreeMap<String, usize>,
     pub included_files: usize,
     pub load_time: Duration,
@@ -223,6 +225,7 @@ pub fn load_geometry(paths: &[PathBuf], units: UnitSystem) -> Result<LoadedModel
     model.fe.properties.units = units;
     model.geometry = Some(import.geometry);
     model.warnings = import.warnings;
+    model.notes = import.notes;
     let view = Model::geometry_view(path, import.display);
     let render_meshes = view.render_meshes();
     model.load_time = start.elapsed();
@@ -530,6 +533,7 @@ impl Model {
             mesh,
             parts,
             warnings: Vec::new(),
+            notes: Vec::new(),
             skipped_keywords: BTreeMap::new(),
             included_files: 0,
             load_time: Duration::ZERO,

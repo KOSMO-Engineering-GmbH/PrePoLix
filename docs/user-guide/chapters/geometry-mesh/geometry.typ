@@ -72,3 +72,11 @@ In a 2D model the geometry must consist of faces only and lie in the plane z = 0
 axisymmetric model it must lie at x ≥ 0, because the y axis is the axis of rotation. Otherwise
 the import is refused with a message. Faces whose normal points in −z direction are flipped
 when they are meshed.
+
+Many CAD programs draw a sketch or a face on a plane away from the origin. A file whose geometry
+lies flat in a plane parallel to the x-y plane, at a constant z, is therefore moved into the plane
+z = 0 when it is imported, and the #ui("Output") names the file and the height it came from. This
+is checked file by file, also when files are added to a geometry. Geometry that is tilted or has
+any thickness in z stays where it was drawn.
+
+#screenshot("flat-geometry-moved.png", [A plate drawn at z = 25 mm, moved into the x-y plane on import])
