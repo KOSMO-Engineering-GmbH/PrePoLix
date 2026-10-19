@@ -24,6 +24,9 @@ pub struct SavedView {
     pub annotations: Vec<SavedAnnotation>,
     /// Plots of result paths, hot spots and history tables in the view.
     pub path_plots: Vec<SavedPathPlot>,
+    /// Arrows or contours, and their options.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_display: Option<crate::display::VectorDisplay>,
 }
 
 /// The camera of the results view.

@@ -1,15 +1,8 @@
-use crate::{Component, Field};
-
-/// Field names whose three components form a vector, as PrePoMax classifies them.
-const VECTOR_FIELDS: [&str; 5] = ["DISP", "VELO", "FORC", "FLUX", "NORM"];
-/// Stress-like tensor fields: von Mises and Tresca equivalents.
-const STRESS_FIELDS: [&str; 2] = ["STRESS", "ZZSTR"];
-/// Strain tensor fields: equivalent strain (2/3 of the von Mises expression), no Tresca.
-const STRAIN_FIELDS: [&str; 2] = ["TOSTRAIN", "MESTRAIN"];
+use crate::{Component, Field, FieldRank, TensorKind};
 
 /// Adds the quantities PrePoMax shows besides the raw components, in PrePoMax's order: the
 /// magnitude `ALL` of vector fields first; for tensor fields the equivalent value(s) first and
-/// the principal values last.
+/// the principal values last. Which ones follows from the field's rank.
 pub fn add_derived_components(field: &mut Field) {
     field.components.retain(|c| !c.derived && c.name != "ALL");
     let base: Vec<&[f32]> = field
@@ -18,24 +11,23 @@ pub fn add_derived_components(field: &mut Field) {
         .map(|c| c.values.as_slice())
         .collect();
     let count = base.first().map_or(0, |c| c.len());
-    let name = field.name.as_str();
     let derived = |name: &str, values: Vec<f32>| Component {
         name: name.to_string(),
         values,
         derived: true,
     };
 
-    if VECTOR_FIELDS.contains(&name) && base.len() == 3 {
+    if field.rank == FieldRank::Vector && base.len() == 3 {
         let all = (0..count)
             .map(|i| (base[0][i].powi(2) + base[1][i].powi(2) + base[2][i].powi(2)).sqrt())
             .collect();
         field.components.insert(0, derived("ALL", all));
         return;
     }
-    let strain = STRAIN_FIELDS.contains(&name);
-    if !(strain || STRESS_FIELDS.contains(&name)) || base.len() != 6 {
-        return;
-    }
+    let strain = match field.rank {
+        FieldRank::Tensor(kind) if base.len() == 6 => kind == TensorKind::Strain,
+        _ => return,
+    };
     let mut equivalent = Vec::with_capacity(count);
     let mut tresca = Vec::with_capacity(count);
     let mut signed_max_abs = Vec::with_capacity(count);
@@ -100,9 +92,9 @@ mod tests {
     use super::*;
 
     fn field(name: &str, components: &[(&str, f32)]) -> Field {
-        Field {
-            name: name.into(),
-            components: components
+        Field::new(
+            name,
+            components
                 .iter()
                 .map(|&(n, v)| Component {
                     name: n.into(),
@@ -110,7 +102,7 @@ mod tests {
                     derived: false,
                 })
                 .collect(),
-        }
+        )
     }
 
     fn value(field: &Field, name: &str) -> f32 {
@@ -169,6 +161,20 @@ mod tests {
         add_derived_components(&mut disp);
         add_derived_components(&mut disp);
         assert_eq!(disp.components.len(), 4);
+    }
+
+    #[test]
+    fn a_renamed_tensor_keeps_its_rank() {
+        let mut stress = field("STRESS", &[("S11", 1.0), ("S22", 0.0), ("S33", 0.0)]);
+        assert_eq!(
+            stress.rank,
+            FieldRank::Scalar,
+            "three components are no tensor"
+        );
+        stress = field("STRESS", &[("S11", 1.0); 6]);
+        stress.name = "S_CS".into();
+        add_derived_components(&mut stress);
+        assert!(stress.component("MISES").is_some());
     }
 
     #[test]
