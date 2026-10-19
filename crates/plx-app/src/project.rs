@@ -119,7 +119,7 @@ enum Block {
     Mesh(Box<MeshBlock>),
     /// The mesh linked to it made again with a factor on its fineness.
     RefineMesh(Box<RefineBlock>),
-    /// A fillet or chamfer of the geometry linked to it.
+    /// A fillet, chamfer or push/pull of the geometry linked to it.
     CadOperation(Box<CadBlock>),
     /// Named numbers that value links give to other blocks.
     Parameters(ParametersBlock),
@@ -3679,7 +3679,9 @@ impl ProjectApp {
 
     fn edit_cad(&mut self, id: u64) {
         let length = [links::PARAMETERS.to_owned(), CAD_LENGTH.to_owned()];
-        let length_linked = (self.links.iter()).any(|l| l.target == id && l.item == length);
+        let length_linked = (self.links.iter()).any(|l| {
+            l.target == id && (l.slot == length || (l.slot.is_empty() && l.item == length))
+        });
         let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
             return;
         };
@@ -8991,12 +8993,12 @@ impl BlockKind {
             Self::CadOperation => (
                 "Geometry",
                 "CAD Operation",
-                "fillet chamfer round bevel edge radius cad geometry modify parametric \
-                 opencascade",
+                "fillet chamfer round bevel edge radius push pull offset face move thickness \
+                 cad geometry modify parametric opencascade",
                 "Adds a block that changes the geometry linked to it: a fillet or a chamfer of \
-                 picked edges. Its radius or distance is a row with a pin, so a parameter \
-                 study can vary it; each design point makes the geometry again, and the \
-                 analyses after it mesh it anew.",
+                 picked edges, or planar faces moved along their normal. Its radius, distance \
+                 or offset is a row with a pin, so a parameter study can vary it; each design \
+                 point makes the geometry again, and the analyses after it mesh it anew.",
             ),
             Self::Parameters => (
                 "Parameters",

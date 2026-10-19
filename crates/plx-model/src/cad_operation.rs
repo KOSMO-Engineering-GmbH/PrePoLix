@@ -1,4 +1,5 @@
-//! CAD operations on geometry: a fillet or a chamfer of picked edges, which a block of the
+//! CAD operations on geometry: a fillet or a chamfer of picked edges or a planar face moved
+//! along its normal, which a block of the
 //! project schematic applies to the geometry linked to it, so that a parameter study can
 //! vary a radius like any other number.
 
@@ -15,15 +16,20 @@ pub enum CadOperationKind {
     Fillet,
     /// Bevels edges by a distance on both faces.
     Chamfer,
+    /// Moves planar faces along their normal by an offset, outwards when it is positive:
+    /// a prism on the face is added to the solid or cut from it, so that perpendicular
+    /// neighbours grow or shrink with it and sloped ones get a step.
+    PushPull,
 }
 
 impl CadOperationKind {
-    pub const ALL: [Self; 2] = [Self::Fillet, Self::Chamfer];
+    pub const ALL: [Self; 3] = [Self::Fillet, Self::Chamfer, Self::PushPull];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Fillet => "Fillet",
             Self::Chamfer => "Chamfer",
+            Self::PushPull => "Push/Pull",
         }
     }
 
@@ -32,6 +38,7 @@ impl CadOperationKind {
         match self {
             Self::Fillet => "Radius",
             Self::Chamfer => "Distance",
+            Self::PushPull => "Offset",
         }
     }
 
@@ -40,17 +47,37 @@ impl CadOperationKind {
         match self {
             Self::Fillet => "radius",
             Self::Chamfer => "distance",
+            Self::PushPull => "offset",
         }
     }
 
     /// Whether it acts on entities of this kind.
     pub fn picks(self, entity: CadEntity) -> bool {
-        matches!(entity, CadEntity::Edge(_))
+        match self {
+            Self::Fillet | Self::Chamfer => matches!(entity, CadEntity::Edge(_)),
+            Self::PushPull => matches!(entity, CadEntity::Face(_)),
+        }
     }
 
     /// What it acts on, for texts.
     pub fn picked_noun(self) -> &'static str {
-        "edges"
+        match self {
+            Self::Fillet | Self::Chamfer => "edges",
+            Self::PushPull => "faces",
+        }
+    }
+
+    /// One of what it acts on, for texts.
+    pub fn picked_one(self) -> &'static str {
+        match self {
+            Self::Fillet | Self::Chamfer => "edge",
+            Self::PushPull => "face",
+        }
+    }
+
+    /// Whether its length may be negative: an offset inwards.
+    pub fn signed(self) -> bool {
+        self == Self::PushPull
     }
 }
 
@@ -128,7 +155,14 @@ impl CadOperation {
 
     /// Why the operation cannot be applied as it is, before trying.
     pub fn problem(&self) -> Option<String> {
-        if !(self.value.is_finite() && self.value > 0.0) {
+        if self.kind.signed() {
+            if !(self.value.is_finite() && self.value != 0.0) {
+                return Some(format!(
+                    "the {} must not be zero",
+                    self.kind.value_label().to_lowercase()
+                ));
+            }
+        } else if !(self.value.is_finite() && self.value > 0.0) {
             return Some(format!(
                 "the {} must be greater than zero",
                 self.kind.value_label().to_lowercase()
@@ -198,5 +232,22 @@ mod tests {
             ..operation
         };
         assert!(flat.problem().unwrap().contains("radius"));
+        // An offset may point inwards, but not be zero.
+        let inwards = CadOperation {
+            kind: CadOperationKind::PushPull,
+            value: -2e-3,
+            ..flat
+        };
+        assert_eq!(inwards.problem(), None);
+        assert!(
+            CadOperation {
+                value: 0.0,
+                ..inwards
+            }
+            .problem()
+            .is_some()
+        );
+        assert!(CadOperationKind::PushPull.picks(CadEntity::Face(1)));
+        assert!(!CadOperationKind::PushPull.picks(CadEntity::Edge(1)));
     }
 }

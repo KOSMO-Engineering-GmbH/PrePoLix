@@ -258,7 +258,7 @@ fn closest_on_triangle(p: DVec3, a: DVec3, b: DVec3, c: DVec3) -> DVec3 {
 }
 
 /// The CAD face under the hit point.
-fn face_at(model: &Model, hit: &Hit) -> Option<i32> {
+pub fn face_at(model: &Model, hit: &Hit) -> Option<i32> {
     if hit.line {
         return None;
     }

@@ -1,5 +1,5 @@
-//! The CAD Operation block of the project schematic: a fillet or chamfer of picked edges of
-//! the geometry linked to it, which gives the changed geometry on to analyses or further
+//! The CAD Operation block of the project schematic: a fillet or chamfer of picked edges, or
+//! planar faces moved, of the geometry linked to it, which gives the changed geometry on to analyses or further
 //! operations, Blender-modifier-like. Its length is a row with a pin, so that a parameter
 //! study varies a radius like any other number; every change makes the geometry again in
 //! Update Project, and the analyses after it mesh it anew.
@@ -100,11 +100,15 @@ impl CadBlock {
         match Self::apply(input, &self.operation) {
             Ok(geometry) => {
                 self.take_result(geometry, wanted);
+                let (kind, count) = (self.operation.kind, self.operation.entities.len());
                 Ok(format!(
-                    "{} of {} {} made",
-                    self.operation.kind.label().to_lowercase(),
-                    self.operation.entities.len(),
-                    self.operation.kind.picked_noun()
+                    "{} of {count} {} made",
+                    kind.label().to_lowercase(),
+                    if count == 1 {
+                        kind.picked_one()
+                    } else {
+                        kind.picked_noun()
+                    }
                 ))
             }
             Err(why) => {
@@ -200,9 +204,10 @@ pub(super) fn cad_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<R
                    analysis for the changed geometry."
         .to_owned();
     match state {
-        CellState::Missing if block.input.is_some() => tip.push_str(
-            "\nNo edges picked yet: double-click the block to pick them on the geometry.",
-        ),
+        CellState::Missing if block.input.is_some() => tip.push_str(&format!(
+            "\nNo {} picked yet: double-click the block to pick them on the geometry.",
+            block.operation.kind.picked_noun()
+        )),
         CellState::Missing => {}
         CellState::OutOfDate => tip.push_str(
             "\nOut of date: Update Project makes it again, or Update Geometry in the context menu.",
@@ -241,7 +246,7 @@ pub(super) fn cad_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<R
                 "{}: {picked} {}",
                 operation.kind.label(),
                 if picked == 1 {
-                    "edge"
+                    operation.kind.picked_one()
                 } else {
                     operation.kind.picked_noun()
                 }
@@ -256,9 +261,11 @@ pub(super) fn cad_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<R
             collection: false,
             partial: false,
             widget: None,
-            tip: "What the operation does and to what: double-click the block to pick the \
-                  edges on the geometry and to see the result."
-                .to_owned(),
+            tip: format!(
+                "What the operation does and to what: double-click the block to pick the {} \
+                 on the geometry and to see the result.",
+                operation.kind.picked_noun()
+            ),
             path: vec![CAD_OPERATION_ROW.to_owned()],
         },
         Row {

@@ -509,6 +509,15 @@ impl Gmsh {
         Ok(inside > 0)
     }
 
+    /// Whether a point given by its coordinates lies inside an entity, e.g. a solid.
+    pub fn contains_point(&self, dim: i32, tag: i32, point: [f64; 3]) -> Result<bool, GmshError> {
+        let mut inside = 0;
+        self.call(|e| unsafe {
+            inside = (self.api.is_inside)(dim, tag, point.as_ptr(), 3, 0, e);
+        })?;
+        Ok(inside > 0)
+    }
+
     /// Shows or hides entities with what bounds them; meshing can be limited to the shown
     /// ones with the option `Mesh.MeshOnlyVisible`.
     pub fn set_visibility(&self, entities: &[(i32, i32)], visible: bool) -> Result<(), GmshError> {

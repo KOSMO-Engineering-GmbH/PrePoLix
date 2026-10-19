@@ -1,5 +1,5 @@
 //! The editor of a CAD Operation block of the project schematic: the geometry linked to the
-//! block in its own 3D view, where the edges the operation acts on are picked, with the
+//! block in its own 3D view, where the edges or faces the operation acts on are picked, with the
 //! kind of operation, its length and a preview of the result.
 
 use std::collections::BTreeSet;
@@ -31,7 +31,7 @@ pub struct CadOperationEditor {
     pub id: u64,
     name: String,
     input: Geometry,
-    /// The input as shown, where edges are picked; `None` when it cannot be shown.
+    /// The input as shown, where edges or faces are picked; `None` when it cannot be shown.
     view: Option<Model>,
     /// The result of the last preview and the operation it was made for.
     result: Option<(Model, Geometry, CadOperation)>,
@@ -41,8 +41,8 @@ pub struct CadOperationEditor {
     units: UnitSystem,
     /// A parameter study gives the length.
     length_linked: bool,
-    /// The picked edges by their tags in the input.
-    picks: BTreeSet<i32>,
+    /// The picked edges or faces of the input.
+    picks: BTreeSet<CadEntity>,
     /// Why the input cannot be shown or the preview failed.
     message: Option<String>,
     /// The view has to take the shown geometry anew.
@@ -71,10 +71,7 @@ impl CadOperationEditor {
             Err(error) => (None, Some(format!("The geometry cannot be shown: {error}"))),
         };
         let picks = (operation.resolve(&input).unwrap_or_default().into_iter())
-            .filter_map(|e| match e {
-                CadEntity::Edge(tag) => Some(tag),
-                _ => None,
-            })
+            .filter(|&e| operation.kind.picks(e))
             .collect();
         let mut editor = Self {
             id,
@@ -103,9 +100,12 @@ impl CadOperationEditor {
     /// The operation as set in the dialog.
     fn operation(&self) -> CadOperation {
         let entities = (self.picks.iter())
-            .filter_map(|&tag| {
-                (self.input.signatures.iter())
-                    .find(|s| s.entity == CadEntity::Edge(tag))
+            .filter(|&&e| self.kind.picks(e))
+            .filter_map(|&e| {
+                self.input
+                    .signatures
+                    .iter()
+                    .find(|s| s.entity == e)
                     .cloned()
             })
             .collect();
@@ -118,8 +118,7 @@ impl CadOperationEditor {
 
     fn update_highlight(&mut self) {
         if let Some(view) = &mut self.view {
-            let edges = self.picks.iter().map(|&t| CadEntity::Edge(t)).collect();
-            view.highlight = crate::meshing::entities_highlight(view, &edges);
+            view.highlight = crate::meshing::entities_highlight(view, &self.picks);
         }
         self.scene_due = true;
     }
@@ -132,14 +131,20 @@ impl CadOperationEditor {
         }
     }
 
-    /// The edge a click points at: the CAD edge near it, else the edge of the face under it
-    /// nearest to it.
-    fn edge_at(&self, click: &Click) -> Option<i32> {
+    /// What a click points at for the operation: the CAD edge near it, else the edge of
+    /// the face under it nearest to it; or the planar face under it.
+    fn entity_at(&self, click: &Click) -> Option<CadEntity> {
         let view = self.view.as_ref()?;
         let hit = view.pick_click(click)?;
+        if self.kind.picks(CadEntity::Face(0)) {
+            let face = crate::geometry_selection::face_at(view, &hit).map(CadEntity::Face)?;
+            let planar =
+                (self.input.signatures.iter()).any(|s| s.entity == face && s.kind == "Plane");
+            return planar.then_some(face);
+        }
         match crate::meshing::cad_pick(view, &hit, click.precision_at(hit.point)) {
-            Some(CadEntity::Edge(tag)) => Some(tag),
-            _ => crate::geometry_selection::edge_at(view, &hit),
+            Some(edge @ CadEntity::Edge(_)) => Some(edge),
+            _ => crate::geometry_selection::edge_at(view, &hit).map(CadEntity::Edge),
         }
     }
 
@@ -236,7 +241,14 @@ impl CadOperationEditor {
                 ui.label("Operation");
                 ui.horizontal(|ui| {
                     for kind in CadOperationKind::ALL {
-                        ui.selectable_value(&mut self.kind, kind, kind.label());
+                        if ui
+                            .selectable_value(&mut self.kind, kind, kind.label())
+                            .changed()
+                        {
+                            // Edges stay picked from fillet to chamfer, not for faces.
+                            self.picks.retain(|&e| kind.picks(e));
+                            self.update_highlight();
+                        }
                     }
                 });
                 ui.end_row();
@@ -254,12 +266,13 @@ impl CadOperationEditor {
                     }
                 });
                 ui.end_row();
-                ui.label("Edges");
+                let (one, many) = (self.kind.picked_one(), self.kind.picked_noun());
+                ui.label(capitalised(many));
                 ui.horizontal(|ui| {
                     ui.label(match self.picks.len() {
                         0 => "none picked".to_owned(),
-                        1 => "1 edge".to_owned(),
-                        n => format!("{n} edges"),
+                        1 => format!("1 {one}"),
+                        n => format!("{n} {many}"),
                     });
                     if ui
                         .add_enabled(!self.picks.is_empty(), egui::Button::new("Clear"))
@@ -307,13 +320,22 @@ impl CadOperationEditor {
                 ui.colored_label(crate::style::error(), message);
             }
             None if self.shown == Shown::Input => {
-                ui.weak(format!(
-                    "Click the edges to {}; a click on a picked edge removes it.",
-                    self.kind.label().to_lowercase()
-                ));
+                ui.weak(match self.kind {
+                    CadOperationKind::PushPull => "Click the planar faces to move along their \
+                        normal, outwards for a positive offset; a click on a picked face removes \
+                        it. Neighbours at right angles follow, sloped ones get a step."
+                        .to_owned(),
+                    kind => format!(
+                        "Click the edges to {}; a click on a picked edge removes it.",
+                        kind.label().to_lowercase()
+                    ),
+                });
             }
             None => {
-                ui.weak("The result of the operation; show the input to pick edges.");
+                ui.weak(format!(
+                    "The result of the operation; show the input to pick {}.",
+                    self.kind.picked_noun()
+                ));
             }
         }
     }
@@ -363,21 +385,28 @@ impl CadOperationEditor {
             return;
         }
         if let Some(click) = response.click
-            && let Some(edge) = self.edge_at(&click)
+            && let Some(entity) = self.entity_at(&click)
         {
-            if !self.picks.remove(&edge) {
-                self.picks.insert(edge);
+            if !self.picks.remove(&entity) {
+                self.picks.insert(entity);
             }
             self.update_highlight();
         }
         if let Some(hover) = response.hover {
-            viewport.preview = (hover.and_then(|click| self.edge_at(&click)))
+            viewport.preview = (hover.and_then(|click| self.entity_at(&click)))
                 .zip(self.view.as_ref())
-                .map(|(edge, view)| {
-                    crate::meshing::entities_preview(view, &BTreeSet::from([CadEntity::Edge(edge)]))
+                .map(|(entity, view)| {
+                    crate::meshing::entities_preview(view, &BTreeSet::from([entity]))
                 })
                 .unwrap_or_default();
             ui.ctx().request_repaint();
         }
     }
+}
+
+fn capitalised(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
 }

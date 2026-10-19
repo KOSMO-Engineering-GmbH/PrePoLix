@@ -1687,3 +1687,48 @@ fn fillets_and_chamfers_change_the_solid_and_keep_its_faces_findable() {
     assert!(apply_cad_operation(&input, Fillet, &[CadEntity::Edge(99)], 1.0).is_err());
     assert!(apply_cad_operation(&input, Fillet, &[edge], 0.0).is_err());
 }
+
+#[test]
+fn push_pull_moves_planar_faces_along_their_normal() {
+    use plx_model::CadOperationKind::{Fillet, PushPull};
+    if !gmsh_available() {
+        return;
+    }
+    let input = cube();
+    let face_at = |geometry: &Geometry, axis: usize, at: f64| {
+        (geometry.signatures.iter())
+            .find(|s| {
+                s.entity.dim() == 2 && s.kind == "Plane" && (s.centroid[axis] - at).abs() < 1e-6
+            })
+            .unwrap()
+            .entity
+    };
+    let top = face_at(&input, 2, 10.0);
+    // Pulled out: the cube grows to 15 high, and its sides stay one face each.
+    let pulled = apply_cad_operation(&input, PushPull, &[top], 5.0).unwrap();
+    assert!((solid_volume(&pulled) - 1500.0).abs() < 1e-3);
+    assert_eq!(part_names(&pulled).unwrap(), part_names(&input).unwrap());
+    let faces = pulled.signatures.iter().filter(|s| s.entity.dim() == 2);
+    assert_eq!(faces.count(), 6);
+    face_at(&pulled, 2, 15.0);
+    // Pushed in, and on a side face: the normal points out of the solid either way.
+    let pushed = apply_cad_operation(&input, PushPull, &[top], -3.0).unwrap();
+    assert!((solid_volume(&pushed) - 700.0).abs() < 1e-3);
+    let side = face_at(&input, 0, 0.0);
+    let wider = apply_cad_operation(&input, PushPull, &[side, top], 2.0).unwrap();
+    assert!((solid_volume(&wider) - 1440.0).abs() < 1e-3);
+    // Through the whole solid, a curved face, nothing to move: it fails.
+    assert!(apply_cad_operation(&input, PushPull, &[top], -10.0).is_err());
+    assert!(apply_cad_operation(&input, PushPull, &[top], 0.0).is_err());
+    let edge = (input.signatures.iter())
+        .find(|s| s.entity.dim() == 1)
+        .unwrap()
+        .entity;
+    let rounded = apply_cad_operation(&input, Fillet, &[edge], 2.0).unwrap();
+    let curved = (rounded.signatures.iter())
+        .find(|s| s.kind == "Cylinder")
+        .unwrap()
+        .entity;
+    let error = apply_cad_operation(&rounded, PushPull, &[curved], 1.0).unwrap_err();
+    assert!(error.to_string().contains("planar"), "{error}");
+}
