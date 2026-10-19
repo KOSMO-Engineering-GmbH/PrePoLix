@@ -4162,6 +4162,51 @@ fn calculix_cools_the_bar_by_radiation() {
     );
 }
 
+/// Without the physical constants CalculiX rejects the radiation, and the model check explains
+/// its message.
+#[test]
+fn calculix_without_physical_constants_rejects_radiation() {
+    let (mesh, model) = thermal_bar(
+        steady(),
+        vec![temperature(
+            "Temperature-1",
+            Region::NodeSet("FIX".into()),
+            500.0,
+        )],
+        vec![heat_load(
+            "Radiation-1",
+            Region::Surface("TIP".into()),
+            LoadKind::Radiation {
+                sink: 20.0,
+                emissivity: 0.8,
+            },
+        )],
+    );
+    let Some(dir) = ccx_dir("ohne-konstanten") else {
+        return;
+    };
+    std::fs::write(
+        dir.join("radiate.inp"),
+        write_inp(&mesh, &model, "").unwrap(),
+    )
+    .unwrap();
+    let output = Command::new("ccx")
+        .args(["-i", "radiate"])
+        .current_dir(&dir)
+        .env("OMP_NUM_THREADS", "1")
+        .output()
+        .unwrap();
+    remove_ccx_dir(&dir);
+    let lines: Vec<String> = (String::from_utf8_lossy(&output.stdout).lines())
+        .map(String::from)
+        .collect();
+    let findings = plx_model::diagnose_solver_output(&lines, &mesh);
+    assert!(
+        (findings.iter()).any(|f| f.problem == plx_model::Problem::NoPhysicalConstants),
+        "{lines:?}"
+    );
+}
+
 /// A bar heated at x = 0 and insulated elsewhere warms up as the series solution of the
 /// heat equation says: T(L, t) / T_0 = 1 - sum 4 (-1)^n / ((2n+1) pi) exp(-l_n^2 a t).
 #[test]
