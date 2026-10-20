@@ -227,6 +227,10 @@ impl BackgroundSolve {
         if let Some(analysis) = (self.analysis.as_mut()).filter(|a| a.is_running()) {
             analysis.kill();
         }
+        // Dropping the meshing job kills the mesher.
+        if matches!(self.stage, Stage::Meshing(_)) {
+            self.after.push(crate::meshing::CANCELLED.into());
+        }
         self.after.push("Stopped".into());
         self.finish(Outcome::Stopped);
     }

@@ -2,15 +2,19 @@
 //! meshing parameters and the mesh generation part by part on a worker thread.
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
-use plx_mesh::{ElementShape, NodeId};
+use plx_mesh::{ElementShape, FeMesh, NodeId};
 use plx_mesher::{CadEntity, GeneratedMesh};
 use plx_model::{
     Algorithm2d, Algorithm3d, ExtrudeLayers, ExtrudeMesh, Geometry, MeshSetupItem, MeshSetupKind,
     MeshingParameters, Quantity, Recombination, UnitSystem, next_name,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::geometry_selection;
 use crate::model::{Highlight, Hit, Model};
@@ -1012,13 +1016,160 @@ pub struct PartMeshes {
     pub meshes: Vec<GeneratedMesh>,
 }
 
-/// Mesh generation running on a worker thread.
+/// The argument that makes the program a meshing worker instead of opening its window.
+const WORKER_ARGUMENT: &str = "--mesh-worker";
+
+/// The program meshes run in, set by `main`; without one (in tests) they run on a thread.
+static WORKER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Meshes run in a separate process of `program`, which [`worker_main`] handles, so that
+/// cancelling ends them at once: Gmsh itself cannot be interrupted.
+pub fn set_worker(program: PathBuf) {
+    let _ = WORKER.set(program);
+}
+
+/// What the worker meshes, written to `request.ron` in its folder.
+#[derive(Serialize, Deserialize)]
+struct WorkerRequest {
+    /// Gmsh library of the program, so that both mesh alike.
+    library: Option<PathBuf>,
+    geometry: Geometry,
+    /// The parts to mesh, all with `None`.
+    parts: Option<Vec<String>>,
+}
+
+/// The worker's answer in `result.ron`: per part the mesh and Gmsh's warnings.
+type WorkerResult = Result<Vec<(FeMesh, Vec<String>)>, String>;
+
+/// Meshes the named parts, or all with `None`, one after the other.
+fn mesh_parts(geometry: &Geometry, parts: Option<Vec<String>>) -> Result<PartMeshes, String> {
+    let parts = match parts {
+        Some(parts) => parts,
+        None => plx_mesher::part_names(geometry).map_err(|e| e.to_string())?,
+    };
+    let mut meshes = Vec::with_capacity(parts.len());
+    for part in parts {
+        let mesh = plx_mesher::generate_part_mesh(geometry, &part).map_err(|e| e.to_string())?;
+        meshes.push(mesh);
+    }
+    Ok(PartMeshes { meshes })
+}
+
+/// Runs the meshing worker if the program was started as one, and returns its exit code;
+/// `None` for a normal start.
+pub fn worker_main() -> Option<i32> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next()? != WORKER_ARGUMENT {
+        return None;
+    }
+    let dir = PathBuf::from(args.next()?);
+    // The program keeps the worker's input open; it closes when the program ends, even if
+    // it crashes, and the worker must not mesh on for nobody.
+    std::thread::spawn(|| {
+        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+        std::process::exit(2);
+    });
+    let result: WorkerResult = (|| {
+        let text = std::fs::read_to_string(dir.join("request.ron")).map_err(|e| e.to_string())?;
+        let request: WorkerRequest = ron::from_str(&text).map_err(|e| e.to_string())?;
+        if request.library.is_some() {
+            plx_mesher::set_library_path(request.library);
+        }
+        let generated = mesh_parts(&request.geometry, request.parts)?;
+        Ok((generated.meshes.into_iter())
+            .map(|g| (g.mesh, g.warnings))
+            .collect())
+    })();
+    let written = ron::to_string(&result)
+        .map_err(|e| e.to_string())
+        .and_then(|text| std::fs::write(dir.join("result.ron"), text).map_err(|e| e.to_string()));
+    Some(if written.is_ok() { 0 } else { 1 })
+}
+
+/// A folder of its own for one worker, removed when dropped.
+struct WorkerDir(PathBuf);
+
+impl WorkerDir {
+    fn new() -> std::io::Result<Self> {
+        static COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let count = COUNT.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("prepolix-mesh-{}-{count}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        Ok(Self(dir))
+    }
+}
+
+impl Drop for WorkerDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Meshes in a worker process of `program` until it is done or `cancel` is set, which kills
+/// it.
+fn mesh_in_worker(
+    program: &Path,
+    geometry: Geometry,
+    parts: Option<Vec<String>>,
+    cancel: &AtomicBool,
+) -> Result<PartMeshes, String> {
+    let dir = WorkerDir::new().map_err(|e| format!("No folder for the mesher: {e}"))?;
+    let request = WorkerRequest {
+        library: plx_mesher::library_path(),
+        geometry,
+        parts,
+    };
+    let text = ron::to_string(&request).map_err(|e| e.to_string())?;
+    std::fs::write(dir.0.join("request.ron"), text)
+        .map_err(|e| format!("Cannot write the mesher's input: {e}"))?;
+    let mut command = std::process::Command::new(program);
+    command
+        .arg(WORKER_ARGUMENT)
+        .arg(&dir.0)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    plx_job::hide_console(&mut command);
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Cannot start the mesher: {e}"))?;
+    let status = loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CANCELLED.into());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => return Err(format!("The mesher could not be watched: {e}")),
+        }
+    };
+    let text = match std::fs::read_to_string(dir.0.join("result.ron")) {
+        Ok(text) => text,
+        Err(_) => return Err(format!("The mesher stopped unexpectedly ({status})")),
+    };
+    let result: WorkerResult = ron::from_str(&text).map_err(|e| e.to_string())?;
+    Ok(PartMeshes {
+        meshes: (result?.into_iter())
+            .map(|(mesh, warnings)| GeneratedMesh { mesh, warnings })
+            .collect(),
+    })
+}
+
+/// What a cancelled job reports.
+pub const CANCELLED: &str = "Meshing cancelled";
+
+/// Mesh generation running on a worker thread, which waits for the worker process. Dropping
+/// the job cancels it.
 pub struct MeshingJob {
     pub started: Instant,
     /// The geometry as it is meshed, with its meshing settings: what the new meshes are
     /// made from, even if the settings change while they are generated.
     pub geometry: Geometry,
     receiver: Receiver<Result<PartMeshes, String>>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl MeshingJob {
@@ -1027,20 +1178,13 @@ impl MeshingJob {
         let (sender, receiver) = std::sync::mpsc::channel();
         let meshed = geometry.clone();
         let ctx = ctx.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::clone(&cancel);
         std::thread::spawn(move || {
-            let result = (|| {
-                let parts = match parts {
-                    Some(parts) => parts,
-                    None => plx_mesher::part_names(&geometry).map_err(|e| e.to_string())?,
-                };
-                let mut meshes = Vec::with_capacity(parts.len());
-                for part in parts {
-                    let mesh = plx_mesher::generate_part_mesh(&geometry, &part)
-                        .map_err(|e| e.to_string())?;
-                    meshes.push(mesh);
-                }
-                Ok(PartMeshes { meshes })
-            })();
+            let result = match WORKER.get() {
+                Some(program) => mesh_in_worker(program, geometry, parts, &cancelled),
+                None => mesh_parts(&geometry, parts),
+            };
             let _ = sender.send(result);
             ctx.request_repaint();
         });
@@ -1048,6 +1192,7 @@ impl MeshingJob {
             started: Instant::now(),
             geometry: meshed,
             receiver,
+            cancel,
         }
     }
 
@@ -1056,10 +1201,14 @@ impl MeshingJob {
         match self.receiver.try_recv() {
             Ok(result) => Some(result),
             Err(std::sync::mpsc::TryRecvError::Empty) => None,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Some(Err("Meshing cancelled".into()))
-            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(Err(CANCELLED.into())),
         }
+    }
+}
+
+impl Drop for MeshingJob {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
     }
 }
 
