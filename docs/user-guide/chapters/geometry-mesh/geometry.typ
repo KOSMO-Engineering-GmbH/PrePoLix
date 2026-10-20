@@ -49,7 +49,8 @@ parts*, for example a mesh written by #menu("File", "Export Deformed Mesh (.inp)
 === Parts
 
 Every solid becomes a part. Faces that do not belong to a solid become shell parts, edges that do
-not belong to a face become line parts (for beams and trusses). Part names are taken from the
+not belong to a face become line parts (for beams and trusses). Faces that share an edge form one
+shell part, as a surface split into several faces in the CAD program. Part names are taken from the
 CAD file where it has names, otherwise they are `SOLID-1`, `SHELL-1`, `LINE-1` and so on.
 
 The context menu of a geometry part has #ui("Create Mesh"), #ui("Properties ..."),
@@ -65,6 +66,12 @@ like any other edge although the surface does not bend there. Pick them with the
 selection (@selection) like any other face.
 
 #screenshot("split-face.png", [A ring split off the shaft in the CAD program, outlined and picked on the mesh])
+
+The same holds for surfaces: a plate with areas split out of it for supports stays one shell part.
+Its faces are meshed together, so the nodes on their borders are shared and no tie or contact is
+needed between them, and each face can still be picked on its own.
+
+#screenshot("split-shell.png", [A plate with discs split out of it: one part, one common mesh, one disc picked])
 
 === Geometry for 2D models
 
