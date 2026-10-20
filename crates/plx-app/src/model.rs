@@ -1192,7 +1192,7 @@ impl Model {
             SMOOTH_ANGLE_DEG,
             scalars,
         );
-        self.highlight_outline(index, &mut mesh);
+        self.highlight_outline(index, skin, &mut mesh);
         if let Some(thick) = shells {
             mesh.append(thick_shell_mesh(
                 coords,
@@ -1394,15 +1394,19 @@ impl Model {
         self.origin
     }
 
-    /// Recolours the vertices of highlighted faces; vertices are laid out face by face.
-    fn highlight_outline(&self, part: usize, mesh: &mut RenderMesh) {
+    /// Draws the outline of an outlined part red and wide; a highlighted part whose faces turn
+    /// red gets its line elements red and wide, as they have no faces to colour.
+    fn highlight_outline(&self, part: usize, skin: &PartSkin, mesh: &mut RenderMesh) {
+        let red = |vertex: &Vertex| Vertex {
+            color: HIGHLIGHT_COLOR,
+            ..*vertex
+        };
         if self.highlight.outlines.contains(&part) {
-            mesh.wide_edges = (mesh.feature_edges.iter())
-                .map(|&vertex| Vertex {
-                    color: HIGHLIGHT_COLOR,
-                    ..vertex
-                })
-                .collect();
+            mesh.wide_edges = mesh.feature_edges.iter().map(red).collect();
+        } else if self.highlight.parts.contains(&part) {
+            // The segments of line elements come last in the feature edges.
+            let lines = mesh.feature_edges.len() - 2 * skin.lines.len();
+            mesh.wide_edges = mesh.feature_edges[lines..].iter().map(red).collect();
         }
     }
 
@@ -1435,6 +1439,14 @@ impl Model {
             .iter()
             .flat_map(|skin| &skin.faces)
             .map(|f| (elements[f.element].id, f.face as u8 + 1))
+    }
+
+    /// The segments of all line elements (beams, trusses, CAD edges) with their element.
+    pub fn line_segments(&self) -> impl Iterator<Item = (ElementId, [NodeId; 2])> + '_ {
+        let (elements, ids) = (self.mesh.elements(), self.mesh.node_ids());
+        (self.skins.iter())
+            .flat_map(|skin| skin.lines.iter().zip(&skin.line_elements))
+            .map(move |(&[a, b], &element)| (elements[element].id, [ids[a], ids[b]]))
     }
 
     /// All element faces on the surface with the ids of their corner nodes.
@@ -1960,6 +1972,32 @@ mod tests {
         assert_eq!(loaded.render_meshes.len(), 2);
         let (min, max) = model.visible_bounds().unwrap();
         assert_eq!(max - min, Vec3::new(20.0, 20.0, 15.0));
+    }
+
+    #[test]
+    fn highlighted_line_parts_are_drawn_red_and_wide() {
+        let mut model = load(&testdata("rahmen_b32.inp"), UnitSystem::Unitless)
+            .unwrap()
+            .model;
+        assert!(model.render_meshes()[0].wide_edges.is_empty());
+        // A section region of parts colours the faces, of which line parts have none.
+        model.highlight.parts.insert(0);
+        let meshes = model.render_meshes();
+        let segments = model.skin(0).lines.len();
+        assert!(segments > 0);
+        assert_eq!(meshes[0].wide_edges.len(), 2 * segments);
+        assert!(
+            meshes[0]
+                .wide_edges
+                .iter()
+                .all(|v| v.color == HIGHLIGHT_COLOR)
+        );
+        assert!(meshes[1].wide_edges.is_empty());
+        // Nodes and element sets on lines show their segments.
+        let nodes = model.mesh.node_ids()[..3].to_vec();
+        let region = plx_model::Region::Nodes(nodes);
+        let highlight = crate::setup::region_highlight(&model, &region);
+        assert!(!highlight.lines.is_empty());
     }
 
     #[test]
