@@ -273,6 +273,13 @@ impl Viewport {
         self.scene_version += 1;
     }
 
+    /// Replaces the mesh of one part and keeps the others.
+    pub fn set_part(&mut self, index: usize, mesh: &RenderMesh) {
+        self.renderer
+            .set_part(&self.render_state.device, index, mesh);
+        self.scene_version += 1;
+    }
+
     pub fn scene_version(&self) -> u64 {
         self.scene_version
     }

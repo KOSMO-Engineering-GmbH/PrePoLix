@@ -76,8 +76,9 @@ The three behaviors match those of Ansys:
 
 You define no reference point, rigid body or equation for it. When the input file is written,
 PrePoLix adds a reference node and a rotation node at the point. #ui("Rigid") writes a
-`*RIGID BODY` on the selection; #ui("Deformable") and #ui("Coupled") write `*EQUATION`s
-between the nodes and the point. The values go on these two nodes, with a `*TRANSFORM` when a
+`*RIGID BODY` on the selection, with nodes of beams and shells coupled by `*EQUATION`s
+(@rigid-body); #ui("Deformable") and #ui("Coupled") write `*EQUATION`s between the nodes and
+the point. The values go on these two nodes, with a `*TRANSFORM` when a
 coordinate system is chosen. The point is computed on the current mesh, so a selection of
 geometry faces keeps working after remeshing. In the 3D view the supports are drawn at the point
 with lines to the selection.
@@ -124,8 +125,9 @@ Loads are created like boundary conditions, with #ui("Create ...") on #ui("Loads
 #fields(
   [Force], [The default load: a *total* force `F1`, `F2`, `F3` on whatever the region holds,
     faces, edges or points (@force-region). When the input file is written it is distributed
-    to the nodes (`*CLOAD`). With #ui("Apply to all nodes") the whole force acts at every node
-    of the region instead, as a concentrated force in CalculiX; it is off by default.],
+    to the nodes (`*CLOAD`). With #ui("Apply to all nodes individually") the whole force acts
+    at every node of the region instead, as a concentrated force in CalculiX; it is off by
+    default.],
   [Moment], [`M1`, `M2`, `M3` at the reference point of a rigid body (@rigid-body) or at every
     node of beams and shells, which have rotations. 3D models only.],
   [Pressure], [Pressure on faces; positive values push into the material (`*DLOAD`).],

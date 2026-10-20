@@ -44,6 +44,11 @@ pub enum Problem {
     /// Nodes in two rigid bodies, of rigid body constraints or remote displacements:
     /// CalculiX keeps them in the first and only warns.
     SharedRigidBody,
+    /// Beam, truss, shell or membrane nodes in a rigid body or rigid remote displacement:
+    /// CalculiX 2.23 refuses them in a `*RIGID BODY`, so they are coupled by linear
+    /// equations, which hold for small rotations only. Warned of in steps with large
+    /// deformations, and found in the output of a CalculiX run of another input file.
+    RigidBeamNodes,
     /// A plastic hardening curve CalculiX rejects: no elasticity, a row without a yield
     /// stress, or plastic strains that do not start at 0 and grow.
     InvalidPlastic,
@@ -135,6 +140,7 @@ impl Problem {
             | Problem::ContactWithCoriolis
             | Problem::WheelOffSurface
             | Problem::DesignRegionIgnored
+            | Problem::RigidBeamNodes
             | Problem::NoCreep => Severity::Warning,
             _ => Severity::Error,
         }
@@ -168,6 +174,7 @@ impl Problem {
             Problem::NoPhysicalConstants => "Physical constants missing",
             Problem::NoRigidBody => "Reference point without rigid body",
             Problem::SharedRigidBody => "Nodes in several rigid bodies or remote points",
+            Problem::RigidBeamNodes => "Beam or shell nodes in a rigid body",
             Problem::InvalidPlastic => "Invalid plasticity",
             Problem::InvalidCreep => "Invalid creep law",
             Problem::NoExpansion => "Temperature without thermal expansion",
@@ -219,6 +226,16 @@ impl Problem {
                 "A Frequency step, a Dynamic step, a transient heat transfer as well as \
                  gravity and centrifugal loads need the mass of the model. Without a \
                  density CalculiX aborts with \"no density was assigned\"."
+            }
+            Problem::RigidBeamNodes => {
+                "CalculiX refuses nodes of beams, trusses, shells and membranes in a rigid \
+                 body (\"nodes belonging to beam elements must not be subject to a RIGID \
+                 MPC\"), because it expands these elements into solids. PrePoLix therefore \
+                 couples such nodes of a Rigid Body constraint or a rigid Remote Displacement \
+                 with linear equations to the point. They are exact for small rotations, as \
+                 in a linear analysis; with large deformations (NLGEOM) and large rotations \
+                 of the point these nodes lag behind the rigid motion. As with a rigid body, \
+                 the rotations of beam and shell nodes are not coupled."
             }
             Problem::SharedRigidBody => {
                 "A node can follow one rigid body or remote point only. Rigid body constraints \
@@ -274,9 +291,11 @@ impl Problem {
             }
             Problem::RigidBodyMotion => {
                 "These parts can move as a rigid body: the boundary conditions and \
-                 springs do not fix all displacements and rotations, and no Tie \
-                 connects them to supported parts. The stiffness matrix is then \
-                 singular. Depending on the matrix solver CalculiX aborts with \"zero \
+                 springs do not fix all displacements and rotations, and no Tie or \
+                 tied contact connects them to supported parts. A Compression Only \
+                 support holds only perpendicular to its surface: on a flat face the \
+                 part can still slide and turn in the plane. The stiffness matrix is \
+                 then singular. Depending on the matrix solver CalculiX aborts with \"zero \
                  pivot\" or returns huge, useless displacements without an error."
             }
             Problem::Mechanism => {
@@ -288,7 +307,8 @@ impl Problem {
                  displacements."
             }
             Problem::HeldOnlyByContact => {
-                "These parts are held only by contact pairs. At the start of the \
+                "These parts are held only by contact pairs without tied surface \
+                 behavior. At the start of the \
                  analysis a contact carries load only once it is closed; until then the \
                  parts can drift away freely. This often leads to \"zero pivot\", to \
                  \"too many cutbacks\" or to very long analyses."
@@ -484,6 +504,13 @@ impl Problem {
                 "Enter a Young's modulus greater than 0 and a Poisson's ratio less than \
                  0.5 (steel: 210000 MPa, 0.3)."
             }
+            Problem::RigidBeamNodes => {
+                "If the point turns by more than a few degrees, select solid faces or nodes \
+                 for the rigid body, or join the beams with a Node Tie (rigid) at a shared \
+                 node instead of a rigid body. For small rotations nothing needs to change. \
+                 A run that stopped with this message used an input file from an older \
+                 PrePoLix: run the analysis again."
+            }
             Problem::SharedRigidBody => {
                 "Make the selections of the rigid bodies and remote displacements separate, or \
                  use one remote displacement or rigid body for the joint selection."
@@ -508,7 +535,7 @@ impl Problem {
             Problem::RigidBodyMotion => {
                 "Add a boundary condition that blocks the listed motions, tie the parts \
                  to supported parts with a Tie, or add weak springs (Constraints \
-                 > Point Spring) to ground."
+                 > Spring) to ground."
             }
             Problem::Mechanism => {
                 "Mesh every truss with exactly one element (Mesh Setup > Meshing \
@@ -518,7 +545,7 @@ impl Problem {
                  Section."
             }
             Problem::HeldOnlyByContact => {
-                "Additionally support the parts weakly (Point Spring with a small \
+                "Additionally support the parts weakly (a Spring with a small \
                  stiffness), let the contact surfaces touch at the start (Adjust in the \
                  contact pair) or bring the parts into contact with a small \
                  displacement in a first step."
@@ -980,6 +1007,23 @@ impl FeModel {
                 if let Ok(point) = remote.resolve(self, mesh, &bc.region) {
                     let nodes = point.nodes.into_iter().collect();
                     bodies.push((ModelItem::BoundaryCondition(s, i), &bc.name, nodes));
+                }
+            }
+        }
+        if let Some(step) = (self.steps.iter()).find(|s| s.active && s.kind.nlgeom()) {
+            let expanded = crate::expanded_nodes(mesh);
+            for (item, name, nodes) in &bodies {
+                let count = nodes.iter().filter(|n| expanded.contains(n)).count();
+                if count > 0 {
+                    findings.push(Finding::new(
+                        *item,
+                        Problem::RigidBeamNodes,
+                        format!(
+                            "{name}: {count} beam or shell nodes coupled by equations, {} \
+                             with large deformations",
+                            step.name
+                        ),
+                    ));
                 }
             }
         }
@@ -1591,7 +1635,9 @@ impl FeModel {
     /// Finds pieces of the model that can move as a rigid body in a static step: the rigid
     /// body motions a support at point x in direction n prevents are those with
     /// n . (t + w x (x - c)) != 0, so a piece is held when the rows [n, (x - c) x n] of its
-    /// supports have full rank. Ties join pieces; contact pairs join them only loosely.
+    /// supports have full rank. Ties join pieces; contact pairs join them only loosely,
+    /// except tied ones: CalculiX activates tied contact from the first iteration,
+    /// whatever the gap, so it joins pieces like a tie.
     #[allow(clippy::too_many_arguments)]
     fn check_rigid_body(
         &self,
@@ -1674,14 +1720,7 @@ impl FeModel {
         };
         for constraint in self.constraints.iter().filter(|c| c.active()) {
             match constraint {
-                Constraint::PointSpring(c) => {
-                    for node in c.region.nodes(mesh) {
-                        for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
-                            support(node, axis(d), false);
-                        }
-                    }
-                }
-                Constraint::SurfaceSpring(c) => {
+                Constraint::Spring(c) if c.master.is_none() => {
                     for node in c.region.nodes(mesh) {
                         for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
                             support(node, axis(d), false);
@@ -1693,7 +1732,7 @@ impl FeModel {
                         support(node, normal, false);
                     }
                 }
-                Constraint::Tie(_) | Constraint::SurfaceToSurfaceSpring(_) => {
+                Constraint::Tie(_) | Constraint::Spring(_) => {
                     if let Some([master, slave]) = constraint.master_slave() {
                         let (a, b) = (pieces(master), pieces(slave));
                         join(&mut ties, &a, &b);
@@ -1774,7 +1813,13 @@ impl FeModel {
             join(&mut contacts, &a, &b);
         }
         for pair in self.contact_pairs.iter().filter(|c| c.active) {
-            join(&mut contacts, &pieces(&pair.master), &pieces(&pair.slave));
+            let (a, b) = (pieces(&pair.master), pieces(&pair.slave));
+            let tied = (self.surface_interactions.iter())
+                .any(|s| s.name == pair.interaction && s.is_tied());
+            if tied {
+                join(&mut ties, &a, &b);
+            }
+            join(&mut contacts, &a, &b);
         }
         let sum = |union: &mut UnionFind| {
             let mut sums: HashMap<usize, [[f64; 6]; 6]> = HashMap::new();
@@ -1895,14 +1940,7 @@ impl FeModel {
             match constraint {
                 // Moved to the node ties when the project was read.
                 Constraint::NodeTie(_) => {}
-                Constraint::PointSpring(c) => {
-                    for node in c.region.nodes(mesh) {
-                        for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
-                            add(&mut gram, node, axis(d));
-                        }
-                    }
-                }
-                Constraint::SurfaceSpring(c) => {
+                Constraint::Spring(c) if c.master.is_none() => {
                     for node in c.region.nodes(mesh) {
                         for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
                             add(&mut gram, node, axis(d));
@@ -1910,7 +1948,7 @@ impl FeModel {
                     }
                 }
                 Constraint::CompressionOnly(c) => mark(&c.region, &mut held_otherwise),
-                Constraint::Tie(_) | Constraint::SurfaceToSurfaceSpring(_) => {
+                Constraint::Tie(_) | Constraint::Spring(_) => {
                     for region in constraint.master_slave().into_iter().flatten() {
                         mark(region, &mut held_otherwise);
                     }
@@ -2348,7 +2386,7 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             }
         }
     }
-    let known: [(Problem, &[&str]); 13] = [
+    let known: [(Problem, &[&str]); 14] = [
         (Problem::NoElastic, &["no elastic constants"]),
         (
             Problem::InvalidPlastic,
@@ -2388,6 +2426,7 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
         ),
         (Problem::MpcAndSpc, &["dependent side of a mpc and a spc"]),
         (Problem::RotationIn2d, &["usermpc: mpc of type"]),
+        (Problem::RigidBeamNodes, &["must not be subject to a rigid"]),
     ];
     for (problem, markers) in known {
         if let Some(marker) = markers.iter().find(|m| text.contains(*m)) {
@@ -2840,15 +2879,11 @@ mod tests {
         let detail = &check(&model, &mesh)[0].detail;
         assert!(detail.ends_with(": rotation about X free"), "{detail}");
         // A spring on a third corner holds it.
-        model
-            .constraints
-            .push(Constraint::PointSpring(crate::PointSpring {
-                name: "Spring-1".into(),
-                active: true,
-                visible: true,
-                region: Region::Nodes(vec![7]),
-                stiffness: [0.0, 0.0, 1.0],
-            }));
+        model.constraints.push(Constraint::Spring(crate::Spring {
+            region: Region::Nodes(vec![7]),
+            stiffness: [0.0, 0.0, 1.0],
+            ..crate::Spring::new("Spring-1")
+        }));
         assert_eq!(check(&model, &mesh), []);
     }
 
@@ -2888,6 +2923,49 @@ mod tests {
         tie.slave = Region::Surface("LEFT".into());
         model.ties.push(tie);
         assert_eq!(check(&model, &mesh), []);
+        // Tied contact holds from the first iteration, like a tie.
+        model.ties.clear();
+        model.surface_interactions[0].properties = vec![
+            InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tied { k: 1e7 }),
+            InteractionProperty::Friction(crate::Friction::default()),
+        ];
+        assert_eq!(check(&model, &mesh), []);
+    }
+
+    #[test]
+    fn ties_and_tied_contact_hold_a_chain_of_parts_from_one_support() {
+        let count = 6;
+        let mesh = cubes(count, false);
+        let mut model = model(&mesh);
+        model.surface_interactions.push(SurfaceInteraction {
+            name: "Tied".into(),
+            properties: vec![
+                InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tied { k: 1e7 }),
+                InteractionProperty::Friction(crate::Friction::default()),
+            ],
+        });
+        // Only the first cube is fixed; each cube is tied to the next, alternately by a
+        // tie and by tied contact.
+        for c in 0..count - 1 {
+            let right = Region::Nodes([2, 3, 6, 7].map(|n| 8 * c + n).to_vec());
+            let left = Region::Nodes([1, 4, 5, 8].map(|n| 8 * (c + 1) + n).to_vec());
+            if c % 2 == 0 {
+                let mut tie = Tie::new(format!("Tie-{c}"));
+                (tie.master, tie.slave) = (right, left);
+                model.ties.push(tie);
+            } else {
+                let mut pair = ContactPair::new(format!("Contact_Pair-{c}"), "Tied");
+                (pair.master, pair.slave) = (right, left);
+                model.contact_pairs.push(pair);
+            }
+        }
+        assert_eq!(check(&model, &mesh), []);
+        // Without the link in the middle the far half moves freely.
+        model.ties.remove(1);
+        assert!(
+            problems(&check(&model, &mesh))
+                .contains(&(ModelItem::Part(5), Problem::RigidBodyMotion))
+        );
     }
 
     #[test]
@@ -3406,6 +3484,54 @@ mod tests {
         assert_eq!(check(&model, &mesh)[0].problem, Problem::RigidBodyMotion);
     }
 
+    #[test]
+    fn beam_nodes_in_a_rigid_remote_displacement_are_warned_of_with_nlgeom() {
+        let mut mesh = FeMesh::default();
+        for (id, x) in [0.0, 1.0, 2.0].into_iter().enumerate() {
+            mesh.set_node(id as u32 + 1, [x, 0.0, 0.0]);
+        }
+        for (id, nodes) in [(1, vec![1, 2]), (2, vec![2, 3])] {
+            mesh.add_element(Element {
+                id,
+                type_name: "B31".into(),
+                shape: ElementShape::Line2,
+                nodes,
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "BEAM".into(),
+            elements: vec![1, 2],
+        });
+        let mut model = model(&mesh);
+        model.sections[0].kind = crate::SectionKind::Beam(crate::BeamSection::DEFAULT);
+        let bc = &mut model.steps[0].boundary_conditions[0];
+        bc.region = Region::Nodes(vec![1]);
+        bc.kind = BoundaryKind::RemoteDisplacement(crate::RemoteDisplacement::new([Some(0.0); 6]));
+        model.steps[0].loads[0].region = Region::Nodes(vec![3]);
+        // Linear: the equations replacing the rigid body are exact.
+        let rigid = |found: &[Finding]| {
+            (found.iter())
+                .filter(|f| f.problem == Problem::RigidBeamNodes)
+                .map(|f| (f.item, f.detail.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rigid(&check(&model, &mesh)), []);
+        let StepKind::Static(settings) = &mut model.steps[0].kind else {
+            unreachable!()
+        };
+        settings.nlgeom = true;
+        assert_eq!(
+            rigid(&check(&model, &mesh)),
+            [(
+                ModelItem::BoundaryCondition(0, 0),
+                "Fixed-1: 1 beam or shell nodes coupled by equations, Step-1 with large \
+                 deformations"
+                    .to_string()
+            )]
+        );
+    }
+
     /// A plane truss triangle in the XZ plane, as meshed lines (`B31`) with a truss section:
     /// nodes 1 (0, 0, 0), 2 (2, 0, 0) and 3 (1, 0, 1), the bottom bar split into
     /// `bottom` elements, held statically determinate in the plane and at every node in Y.
@@ -3611,6 +3737,16 @@ mod tests {
         assert_eq!(
             findings[0].detail,
             "CalculiX reports \"*ERROR reading *RADIATE: *RADIATE card was selected\""
+        );
+        let rigid = [
+            " *ERROR in gen3dmpc: nodes belonging to",
+            "        beam elements must not be",
+            "        subject to a RIGID                MPC.",
+        ]
+        .map(String::from);
+        assert_eq!(
+            problems(&diagnose_solver_output(&rigid, &mesh)),
+            [(ModelItem::Analysis, Problem::RigidBeamNodes)]
         );
         let unknown = [" *ERROR in something: new message".to_string()];
         assert_eq!(

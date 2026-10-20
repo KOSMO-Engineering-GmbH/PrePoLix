@@ -2960,6 +2960,13 @@ fn blocks(na: u32, nb: u32) -> Blocks {
     }
 }
 
+impl Blocks {
+    /// The nodes of the bottom face of block b.
+    fn b_bottom_nodes(&self) -> Vec<NodeId> {
+        Region::Faces(self.b_bottom.clone()).nodes(&self.mesh)
+    }
+}
+
 /// Steel on both blocks and one static step with a surface traction on top of block `b`,
 /// block `a` held at its bottom.
 fn blocks_model(
@@ -3018,21 +3025,29 @@ fn mean_top(blocks: &Blocks, frd: &FrdImport, component: &str) -> f64 {
     sum / nodes.len() as f64
 }
 
+/// A spring constraint on the region with the stiffness of the whole region.
+fn spring(name: &str, region: Region, stiffness: [f64; 3]) -> plx_model::Spring {
+    plx_model::Spring {
+        region,
+        stiffness,
+        ..plx_model::Spring::new(name)
+    }
+}
+
 #[test]
 fn calculix_carries_a_block_on_springs_between_two_surfaces() {
-    use plx_model::SurfaceToSurfaceSpring;
     // Different meshes on the two sides: the springs end on points between nodes.
     let blocks = blocks(2, 3);
-    let spring = Constraint::SurfaceToSurfaceSpring(SurfaceToSurfaceSpring {
-        name: "Bearing-1".into(),
-        active: true,
-        visible: true,
-        master: Region::Faces(blocks.a_top.clone()),
-        slave: Region::Faces(blocks.b_bottom.clone()),
-        stiffness: [1000.0, 1000.0, 2000.0],
-        per_area: false,
-    });
-    let model = blocks_model(&blocks, vec![spring], [0.0, 0.0, 100.0]);
+    let bearing = plx_model::Spring {
+        master: Some(Region::Faces(blocks.a_top.clone())),
+        ..spring(
+            "Bearing-1",
+            Region::Faces(blocks.b_bottom.clone()),
+            [1000.0, 1000.0, 2000.0],
+        )
+    };
+    let load = [0.0, 0.0, 100.0];
+    let model = blocks_model(&blocks, vec![Constraint::Spring(bearing.clone())], load);
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
     assert!(
         text.contains("*Element, Type=SPRING2, Elset=Bearing-1_All\n"),
@@ -3045,33 +3060,43 @@ fn calculix_carries_a_block_on_springs_between_two_surfaces() {
     // 100 N on 2000 N/mm, the steel itself barely stretches.
     let lift = mean_top(&blocks, &frd, "U3");
     assert!((lift - 0.05).abs() < 0.001, "{lift}");
+    // Applied to the 16 nodes of the bottom individually: 32000 N/mm, so stiff that the
+    // steel of the two blocks adds about 0.001 mm.
+    let each = plx_model::Spring {
+        each_node: true,
+        ..bearing
+    };
+    let model = blocks_model(&blocks, vec![Constraint::Spring(each)], load);
+    let frd = run_ccx(
+        "feder-flaeche-einzeln",
+        &write_inp(&blocks.mesh, &model, "").unwrap(),
+    );
+    let lift = mean_top(&blocks, &frd.unwrap(), "U3");
+    let springs = 100.0 / 32000.0;
+    assert!(lift > springs && lift < springs + 0.0012, "{lift}");
 }
 
 #[test]
-fn calculix_carries_a_block_on_surface_and_point_springs() {
-    use plx_model::{PointSpring, SurfaceSpring};
+fn calculix_carries_a_block_on_springs_to_ground() {
     let blocks = blocks(2, 2);
-    let surface = Constraint::SurfaceSpring(SurfaceSpring {
-        name: "Surface_Spring-1".into(),
-        active: true,
-        visible: true,
-        region: Region::Faces(blocks.b_bottom.clone()),
-        stiffness: [1000.0, 1000.0, 1000.0],
-        per_area: false,
-    });
-    // Nine nodes on the bottom of block b, 100 N/mm each in z.
-    let point = Constraint::PointSpring(PointSpring {
-        name: "Point_Spring-1".into(),
-        active: true,
-        visible: true,
-        region: Region::Faces(blocks.b_bottom.clone()),
-        stiffness: [0.0, 0.0, 100.0],
-    });
-    let model = blocks_model(&blocks, vec![surface, point], [0.0, 0.0, 95.0]);
+    // 1000 N/mm of the whole face, spread by area.
+    let face = spring(
+        "Spring-1",
+        Region::Faces(blocks.b_bottom.clone()),
+        [1000.0, 1000.0, 1000.0],
+    );
+    // 100 N/mm at each of the nine nodes of the bottom of block b.
+    let nodes = Region::Nodes(blocks.b_bottom_nodes());
+    let each = plx_model::Spring {
+        each_node: true,
+        ..spring("Spring-2", nodes.clone(), [0.0, 0.0, 100.0])
+    };
+    let springs = vec![Constraint::Spring(face), Constraint::Spring(each)];
+    let model = blocks_model(&blocks, springs, [0.0, 0.0, 95.0]);
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
-    assert!(text.contains("*Element, Type=SPRING1, Elset=Point_Spring-1_All\n"));
+    assert!(text.contains("*Element, Type=SPRING1, Elset=Spring-2_All\n"));
     assert!(
-        text.contains("*Spring, Elset=Point_Spring-1_DOF_3\n3\n100.\n"),
+        text.contains("*Spring, Elset=Spring-2_DOF_3\n3\n100.\n"),
         "{text}"
     );
     let Some(frd) = run_ccx("federn", &text) else {
@@ -3079,43 +3104,73 @@ fn calculix_carries_a_block_on_surface_and_point_springs() {
     };
     let lift = mean_top(&blocks, &frd, "U3");
     assert!((lift - 0.05).abs() < 0.001, "{lift}");
+    // On nodes the stiffness is shared equally: 900 N/mm in all.
+    let shared = spring("Spring-1", nodes, [0.0, 0.0, 900.0]);
+    let model = blocks_model(&blocks, vec![Constraint::Spring(shared)], [0.0, 0.0, 90.0]);
+    let text = write_inp(&blocks.mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Spring, Elset=Spring-1_DOF_3\n3\n100.\n"),
+        "{text}"
+    );
+    let lift = mean_top(&blocks, &run_ccx("federn-knoten", &text).unwrap(), "U3");
+    assert!((lift - 0.1).abs() < 0.001, "{lift}");
+}
+
+#[test]
+fn springs_on_edges_are_spread_by_length() {
+    let blocks = blocks(2, 2);
+    // The bottom front edge of block b: two element edges, the middle node takes half.
+    let bottom = blocks.b_bottom_nodes();
+    let edge_nodes: Vec<NodeId> = (bottom.iter().copied())
+        .filter(|&n| blocks.mesh.node(n).unwrap()[1] == 0.0)
+        .collect();
+    let edges = edge_nodes.windows(2).map(|w| [w[0], w[1]]).collect();
+    let line = spring("Spring-1", Region::Edges(edges), [0.0, 0.0, 400.0]);
+    let model = blocks_model(&blocks, vec![Constraint::Spring(line)], [0.0; 3]);
+    let text = write_inp(&blocks.mesh, &model, "").unwrap();
+    let [a, b, c] = edge_nodes[..] else {
+        panic!("{edge_nodes:?}")
+    };
+    assert!(
+        text.contains(&format!("Spring-1_{a}_DOF_3\n3\n100.\n")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("Spring-1_{b}_DOF_3\n3\n200.\n")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("Spring-1_{c}_DOF_3\n3\n100.\n")),
+        "{text}"
+    );
 }
 
 #[test]
 fn springs_of_a_2d_model_have_no_z_direction() {
-    use plx_model::PointSpring;
     let blocks = blocks(2, 2);
-    let spring = Constraint::PointSpring(PointSpring {
-        name: "Point_Spring-1".into(),
-        active: true,
-        visible: true,
-        region: Region::Faces(blocks.b_bottom.clone()),
-        stiffness: [1.0, 2.0, 3.0],
-    });
+    let region = Region::Faces(blocks.b_bottom.clone());
+    let spring = Constraint::Spring(spring("Spring-1", region, [1.0, 2.0, 3.0]));
     let mut model = blocks_model(&blocks, vec![spring], [0.0, 0.0, 0.0]);
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
-    assert!(text.contains("Point_Spring-1_DOF_3"), "{text}");
+    assert!(text.contains("_DOF_3"), "{text}");
     // ccx crashes on a spring in a degree of freedom above 2 in a 2D model.
     model.properties.space = ModelSpace::PlaneStress;
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
-    assert!(text.contains("Point_Spring-1_DOF_2"), "{text}");
-    assert!(!text.contains("Point_Spring-1_DOF_3"), "{text}");
+    assert!(text.contains("_DOF_2"), "{text}");
+    assert!(!text.contains("_DOF_3"), "{text}");
 }
 
 #[test]
 fn calculix_compression_only_support_takes_only_pressure() {
-    use plx_model::{CompressionOnly, SurfaceSpring};
+    use plx_model::CompressionOnly;
     let blocks = blocks(2, 2);
-    let support = |force: [f64; 3]| {
-        let springs = Constraint::SurfaceSpring(SurfaceSpring {
-            name: "Surface_Spring-1".into(),
-            active: true,
-            visible: true,
-            region: Region::Faces(blocks.b_bottom.clone()),
-            stiffness: [1000.0, 1000.0, 1000.0],
-            per_area: false,
-        });
-        let gaps = Constraint::CompressionOnly(CompressionOnly {
+    let support = |force: [f64; 3], edit: &dyn Fn(&mut CompressionOnly)| {
+        let springs = Constraint::Spring(spring(
+            "Spring-1",
+            Region::Faces(blocks.b_bottom.clone()),
+            [1000.0, 1000.0, 1000.0],
+        ));
+        let mut gaps = CompressionOnly {
             name: "Compression_Only-1".into(),
             active: true,
             visible: true,
@@ -3123,12 +3178,22 @@ fn calculix_compression_only_support_takes_only_pressure() {
             clearance: 0.0,
             spring_stiffness: None,
             tensile_force: None,
+            each_node: false,
+            flipped: false,
             offset: 0.0,
             nonlinear: true,
-        });
-        blocks_model(&blocks, vec![springs, gaps], force)
+        };
+        edit(&mut gaps);
+        let model = blocks_model(
+            &blocks,
+            vec![springs, Constraint::CompressionOnly(gaps)],
+            force,
+        );
+        write_inp(&blocks.mesh, &model, "").unwrap()
     };
-    let pulled = write_inp(&blocks.mesh, &support([0.0, 0.0, 100.0]), "").unwrap();
+    let up = [0.0, 0.0, 100.0];
+    let down = [0.0, 0.0, -100.0];
+    let pulled = support(up, &|_| {});
     assert!(pulled.contains("*Element, Type=GAPUNI\n"));
     assert!(pulled.contains("*Plastic\n"));
     let Some(frd) = run_ccx("druck-nur-zug", &pulled) else {
@@ -3137,11 +3202,38 @@ fn calculix_compression_only_support_takes_only_pressure() {
     // Pulled away, only the springs hold the block.
     let lift = mean_top(&blocks, &frd, "U3");
     assert!((lift - 0.1).abs() < 0.002, "{lift}");
-    let pushed = write_inp(&blocks.mesh, &support([0.0, 0.0, -100.0]), "").unwrap();
-    let frd = run_ccx("druck-nur-druck", &pushed).unwrap();
+    let frd = run_ccx("druck-nur-druck", &support(down, &|_| {})).unwrap();
     // Pushed down, the gaps carry the load.
     let sink = mean_top(&blocks, &frd, "U3");
     assert!(sink.abs() < 0.002, "{sink}");
+
+    // Flipped, the support pushes the bottom face up from inside the block: it holds the
+    // block pulled up and lets it sink.
+    let flip = |c: &mut CompressionOnly| c.flipped = true;
+    let frd = run_ccx("druck-nur-umgedreht-zug", &support(up, &flip)).unwrap();
+    let lift = mean_top(&blocks, &frd, "U3");
+    assert!(lift.abs() < 0.002, "{lift}");
+    let frd = run_ccx("druck-nur-umgedreht-druck", &support(down, &flip)).unwrap();
+    let sink = mean_top(&blocks, &frd, "U3");
+    assert!((sink + 0.1).abs() < 0.002, "{sink}");
+
+    // A stiffness given is that of the whole face, spread over its nodes: 1000 of the gaps
+    // and 1000 of the springs.
+    let soft = |c: &mut CompressionOnly| c.spring_stiffness = Some(1000.0);
+    let text = support(down, &soft);
+    let frd = run_ccx("druck-nur-verteilt", &text).unwrap();
+    let sink = mean_top(&blocks, &frd, "U3");
+    assert!((sink + 0.05).abs() < 0.001, "{sink}");
+    // Applied to the 9 nodes individually, each gap has the whole stiffness.
+    let each = |c: &mut CompressionOnly| {
+        c.spring_stiffness = Some(1000.0);
+        c.each_node = true;
+    };
+    let text = support(down, &each);
+    assert_eq!(text.matches(", , 1000, ").count(), 9, "{text}");
+    let frd = run_ccx("druck-nur-einzeln", &text).unwrap();
+    let sink = mean_top(&blocks, &frd, "U3");
+    assert!((sink + 0.01).abs() < 0.001, "{sink}");
 }
 
 /// A straight chain of `n` line elements along `axis` from 0 to `length`, numbered from 1;
@@ -3633,6 +3725,97 @@ fn calculix_bends_a_rectangular_beam_like_beam_theory() {
             "{name}: {deflection} instead of {expected}"
         );
     }
+}
+
+#[test]
+fn a_rigid_remote_displacement_couples_beam_nodes_by_equations() {
+    // CalculiX 2.23 stops on beam nodes in a *Rigid body ("nodes belonging to beam elements
+    // must not be subject to a RIGID MPC"); they are coupled by equations instead.
+    let mesh = line_chain(4, 0, 100.0, true);
+    let tip = *mesh.node_ids().last().unwrap();
+    let mut model = line_model(
+        &mesh,
+        rect_beam(BeamOrientation::Automatic),
+        LoadKind::force([0.0, 0.0, 0.0]),
+    );
+    model.steps[0].loads.clear();
+    // The point 20 above the tip, its rotations held: the tip moves like the point.
+    let values = [None, Some(-1.0), None, Some(0.0), Some(0.0), Some(0.0)];
+    let mut bc = remote_with(values, |r| r.location = Some([100.0, 0.0, 20.0]));
+    bc.region = Region::Nodes(vec![tip]);
+    model.steps[0].boundary_conditions.push(bc);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Rigid body"), "{text}");
+    let (reference, rotation) = (tip + 1, tip + 2);
+    // u_tip = u_point + theta x (0, 0, -20)
+    for expected in [
+        format!("*Equation\n3\n{tip}, 1, 1, {reference}, 1, -1, {rotation}, 2, 20\n"),
+        format!("*Equation\n3\n{tip}, 2, 1, {reference}, 2, -1, {rotation}, 1, -20\n"),
+        format!("*Equation\n2\n{tip}, 3, 1, {reference}, 3, -1\n"),
+    ] {
+        assert!(text.contains(&expected), "{expected}\n{text}");
+    }
+    if let Some(frd) = run_ccx("balken_starr", &text) {
+        let u2 = min_u2(&frd);
+        assert!((u2 + 1.0).abs() < 1e-6, "{u2}");
+    }
+
+    // The same for a rigid body constraint on the tip.
+    model.steps[0].boundary_conditions.truncate(1);
+    model
+        .reference_points
+        .push(ReferencePoint::new("RP-1", [100.0, 0.0, 0.0]));
+    let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+    body.region = Region::Nodes(vec![tip]);
+    model.constraints.push(Constraint::RigidBody(body));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Rigid body"), "{text}");
+    assert!(
+        text.contains(&format!("*Equation\n2\n{tip}, 1, 1, {reference}, 1, -1\n")),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_rigid_body_keeps_its_solid_nodes_and_couples_beam_nodes_by_equations() {
+    // The cantilever's tip face and a beam node beside it in one rigid body.
+    let (mut mesh, mut model) = rigid_tip(None, None);
+    let start = mesh.node_ids().iter().max().unwrap() + 1;
+    mesh.set_node(start, [100.0, 5.0, 5.0]);
+    mesh.set_node(start + 1, [150.0, 5.0, 5.0]);
+    let id = mesh.elements().iter().map(|e| e.id).max().unwrap() + 1;
+    mesh.add_element(plx_mesh::Element {
+        id,
+        type_name: "B31".into(),
+        shape: plx_mesh::ElementShape::Line2,
+        nodes: vec![start, start + 1],
+    })
+    .unwrap();
+    let tip = Region::Surface("TIP".into()).nodes(&mesh);
+    let Constraint::RigidBody(body) = &mut model.constraints[0] else {
+        unreachable!()
+    };
+    body.region = Region::Nodes([tip.clone(), vec![start]].concat());
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Rigid body").count(), 1, "{text}");
+    let set = text
+        .split("*Rigid body, Nset=")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .unwrap();
+    let members = text
+        .split(&format!("*Nset, Nset={set}\n"))
+        .nth(1)
+        .unwrap()
+        .split('*')
+        .next()
+        .unwrap();
+    assert!(!members.contains(&start.to_string()), "{members}");
+    assert_eq!(text.matches("*Equation\n").count(), 3, "{text}");
+    assert!(
+        text.contains(&format!("*Equation\n2\n{start}, 1, 1, ")),
+        "{text}"
+    );
 }
 
 #[test]

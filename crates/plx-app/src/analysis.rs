@@ -11,8 +11,9 @@ use plx_model::EquationSolver;
 use crate::model::Model;
 use crate::settings::Solver;
 
-/// Lines of solver output kept for the monitor.
-const MAX_OUTPUT_LINES: usize = 5000;
+/// Lines of solver output kept for the monitor; older ones are dropped, see
+/// [`Analysis::dropped`].
+pub const MAX_OUTPUT_LINES: usize = 20_000;
 
 pub struct Analysis {
     job: Job,
@@ -24,6 +25,8 @@ pub struct Analysis {
     /// The fingerprint of each step's results, see [`plx_model::fingerprint::step_inputs`].
     pub steps: Vec<u64>,
     output: Vec<String>,
+    /// Lines dropped from the front of `output` to keep it at [`MAX_OUTPUT_LINES`].
+    dropped: usize,
     /// Text typed into the monitor's filter field; only output lines containing it are shown.
     filter: String,
     started: Instant,
@@ -68,10 +71,29 @@ pub struct RunView {
     pub seconds: f32,
     pub progress: Option<String>,
     pub lines: Vec<String>,
+    /// Lines of the solve copied so far, also those dropped from `lines` since.
+    pub copied: usize,
     pub filter: String,
 }
 
 impl RunView {
+    /// Copies the new lines of `output`, of which `total` were ever written (the first ones
+    /// may be dropped already), and keeps the last [`MAX_OUTPUT_LINES`].
+    pub fn copy<S: AsRef<str>>(&mut self, output: &[S], total: usize) {
+        if total < self.copied {
+            self.lines.clear();
+            self.copied = 0;
+        }
+        let new = (total - self.copied).min(output.len());
+        (self.lines).extend(
+            output[output.len() - new..]
+                .iter()
+                .map(|l| l.as_ref().to_owned()),
+        );
+        self.copied = total;
+        keep_last(&mut self.lines, MAX_OUTPUT_LINES);
+    }
+
     /// The monitor of the solve, like that of a run: Stop, Results, the filter and the
     /// output.
     pub fn monitor(&mut self, ui: &mut egui::Ui, name: &str) -> MonitorEvent {
@@ -113,6 +135,7 @@ impl RunView {
                 ui.separator();
                 ui.label(text);
             }
+            dropped_note(ui, self.copied - self.lines.len().min(self.copied));
         });
         let area = egui::ScrollArea::both()
             .id_salt("solve output")
@@ -340,6 +363,7 @@ impl Analysis {
         }
         Ok(Self {
             output,
+            dropped: 0,
             filter: String::new(),
             job,
             name: name.to_owned(),
@@ -355,7 +379,7 @@ impl Analysis {
 
     /// Adds a line of prepolix's own to the monitor output.
     pub fn note(&mut self, line: String) {
-        self.output.push(line);
+        self.collect([line]);
     }
 
     /// The keywords of the input file CalculiX runs on.
@@ -363,9 +387,20 @@ impl Analysis {
         &self.keywords
     }
 
-    /// The solver output collected so far.
+    /// The solver output collected so far, without the lines [`Self::dropped`].
     pub fn output(&self) -> &[String] {
         &self.output
+    }
+
+    /// The number of lines dropped from the front of [`Self::output`] in a long run.
+    pub fn dropped(&self) -> usize {
+        self.dropped
+    }
+
+    /// Adds `lines` to the output and drops the oldest ones over [`MAX_OUTPUT_LINES`].
+    fn collect(&mut self, lines: impl IntoIterator<Item = String>) {
+        self.output.extend(lines);
+        self.dropped += keep_last(&mut self.output, MAX_OUTPUT_LINES);
     }
 
     pub fn is_running(&self) -> bool {
@@ -374,10 +409,8 @@ impl Analysis {
 
     /// Collects new output; returns the final status once, when the job has just ended.
     pub fn poll(&mut self) -> Option<JobStatus> {
-        self.output.extend(self.job.new_output());
-        if self.output.len() > MAX_OUTPUT_LINES {
-            self.output.drain(..self.output.len() - MAX_OUTPUT_LINES);
-        }
+        let lines = self.job.new_output();
+        self.collect(lines);
         if self.finished.is_some() {
             return None;
         }
@@ -385,13 +418,14 @@ impl Analysis {
         if status == JobStatus::Running {
             return None;
         }
-        self.output.extend(self.job.new_output());
+        let lines = self.job.new_output();
+        self.collect(lines);
         if self.solve_in_full_after_failed_restart(status) {
             return None;
         }
         if let Some(run) = &self.restart {
             let notes = run.finish(&self.job, status);
-            self.output.extend(notes);
+            self.collect(notes);
         }
         self.finished = Some(self.started.elapsed().as_secs_f32());
         self.status = status;
@@ -479,6 +513,7 @@ impl Analysis {
                 ui.separator();
                 ui.label(text);
             }
+            dropped_note(ui, self.dropped);
         });
         let area = egui::ScrollArea::both()
             .id_salt("analysis output")
@@ -653,6 +688,24 @@ impl RestartRun {
 }
 
 /// Step, increment and iteration from the latest `STEP n`, `INCREMENT n` and `iteration n`
+/// Drops the first lines of `lines` over `max`; returns how many.
+fn keep_last<T>(lines: &mut Vec<T>, max: usize) -> usize {
+    let over = lines.len().saturating_sub(max);
+    lines.drain(..over);
+    over
+}
+
+/// Tells in the monitor's row that the first `dropped` lines of a long output are not kept.
+pub fn dropped_note(ui: &mut egui::Ui, dropped: usize) {
+    if dropped > 0 {
+        ui.separator();
+        ui.weak(format!("{dropped} earlier lines not kept"))
+            .on_hover_text(format!(
+                "The monitor keeps the last {MAX_OUTPUT_LINES} lines"
+            ));
+    }
+}
+
 /// lines of CalculiX's output, for the time before the first `.sta` line exists.
 fn live_progress(output: &[String]) -> Option<String> {
     let number = |line: &str, key: &str| -> Option<u32> {
@@ -1020,6 +1073,27 @@ mod tests {
         let input = before_first_step("*Node\n1, 0, 0, 0\n*Step\n*Static\n", &keyword);
         assert!(input.find("*Initial").unwrap() < input.find("*Step").unwrap());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Past the line limit the oldest lines go and the new ones still reach the view: it
+    /// stood still once the output had as many lines as it keeps.
+    #[test]
+    fn long_output_keeps_coming_in() {
+        let mut output: Vec<String> = Vec::new();
+        let mut dropped = 0;
+        let mut view = RunView::default();
+        for chunk in 0..5 {
+            let new = (0..MAX_OUTPUT_LINES / 2).map(|i| format!("{chunk} {i}"));
+            output.extend(new);
+            dropped += keep_last(&mut output, MAX_OUTPUT_LINES);
+            view.copy(&output, dropped + output.len());
+            assert_eq!(view.lines, output);
+        }
+        assert_eq!(dropped, 3 * MAX_OUTPUT_LINES / 2);
+        assert_eq!(view.copied - view.lines.len(), dropped);
+        // A new solve starts over.
+        view.copy(&["first".to_owned()], 1);
+        assert_eq!(view.lines, ["first"]);
     }
 
     #[test]
