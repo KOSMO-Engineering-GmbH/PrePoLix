@@ -7,7 +7,7 @@ use plx_mesh::CadEntity;
 use plx_model::{CadOperationKind, EntitySignature, Geometry, match_entities};
 
 use crate::gmsh::{Boolean, Gmsh, GmshError, with_gmsh};
-use crate::{Entity, TempFile, default_parts, parts, signatures};
+use crate::{Shape, TempFile, default_parts, parts, signatures};
 
 /// The geometry with the operation applied to the entities, which are those of `input` as
 /// Gmsh reads its BREP; its length is in metres like the geometry. The parts keep their
@@ -75,10 +75,10 @@ pub fn apply_cad_operation(
         // dimension.
         let after = default_parts(gmsh)?;
         let mut names = Vec::with_capacity(after.len());
-        for ((dim, tag), name) in after {
-            let place = place_of(gmsh, dim, tag)?;
+        for (shape, name) in after {
+            let place = place_of(gmsh, &shape)?;
             let nearest = (before.iter())
-                .filter(|(d, _, _)| *d == dim)
+                .filter(|(d, _, _)| *d == shape.dim)
                 .min_by(|a, b| distance(a.2, place).total_cmp(&distance(b.2, place)))
                 .map(|(_, n, _)| n.clone());
             names.push(nearest.unwrap_or(name));
@@ -269,15 +269,15 @@ fn capitalised(text: &str) -> String {
 /// Each part as (dimension, name, centre).
 fn named_places(
     gmsh: &Gmsh,
-    parts: &[(Entity, String)],
+    parts: &[(Shape, String)],
 ) -> Result<Vec<(i32, String, [f64; 3])>, GmshError> {
     (parts.iter())
-        .map(|&((dim, tag), ref name)| Ok((dim, name.clone(), place_of(gmsh, dim, tag)?)))
+        .map(|(shape, name)| Ok((shape.dim, name.clone(), place_of(gmsh, shape)?)))
         .collect()
 }
 
-fn place_of(gmsh: &Gmsh, dim: i32, tag: i32) -> Result<[f64; 3], GmshError> {
-    let (min, max) = gmsh.entity_bounding_box(dim, tag)?;
+fn place_of(gmsh: &Gmsh, shape: &Shape) -> Result<[f64; 3], GmshError> {
+    let (min, max) = shape.bounding_box(gmsh)?;
     Ok([0, 1, 2].map(|k| 0.5 * (min[k] + max[k])))
 }
 
