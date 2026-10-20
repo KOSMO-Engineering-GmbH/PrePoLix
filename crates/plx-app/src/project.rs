@@ -6863,9 +6863,17 @@ impl ProjectApp {
                 ui.horizontal(|ui| {
                     ui.label("Name:");
                     let edit = ui.text_edit_singleline(&mut name);
-                    edit.request_focus();
-                    if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && valid {
-                        done = true;
+                    // Asking for the focus on the frame it is lost would keep Enter from
+                    // being seen.
+                    if !edit.has_focus() && !edit.lost_focus() {
+                        edit.request_focus();
+                    }
+                    if edit.lost_focus() {
+                        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            done = valid;
+                        } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            cancelled = true;
+                        }
                     }
                 });
                 if taken {
