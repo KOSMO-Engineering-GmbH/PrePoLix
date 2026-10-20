@@ -15,7 +15,9 @@ plates (rotations).
     (length) and `UR1`, `UR2`, `UR3` (angle in radians). Unticked components are free. A new
     one holds all components at zero, a fixed support; in 2D only `U1` and `U2` are shown.
     Rotations act on nodes of beams and shells only; solid nodes have none, so zero rotations
-    there change nothing. On a reference point of a rigid body (@rigid-body) in a 2D plane
+    there change nothing. On a beam node give all three rotations (a clamp) or none (a pin):
+    CalculiX holds all of them as soon as one is given, and in Nlgeom steps such a node mostly
+    stops the step from converging, so the model check warns "Beam rotations partly held". On a reference point of a rigid body (@rigid-body) in a 2D plane
     stress or plane strain model, `UR3` is shown too: it prescribes the rotation about z of the
     point and so of the rigid body (axisymmetric models have no rotation).],
   [Remote Displacement], [Moves the selection with a point at its centre or elsewhere, rigidly or
