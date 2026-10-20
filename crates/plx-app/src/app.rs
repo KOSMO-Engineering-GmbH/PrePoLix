@@ -525,13 +525,7 @@ impl AnalysisWindow {
         run.state = solve.state_text();
         run.seconds = solve.seconds();
         run.progress = solve.progress();
-        let output = solve.output();
-        if output.len() < run.lines.len() {
-            run.lines.clear();
-        }
-        let from = run.lines.len();
-        run.lines
-            .extend(output[from..].iter().map(|l| (*l).to_owned()));
+        run.copy(&solve.output(), solve.output_total());
     }
 
     /// The project's solve is done: the analysis takes the mesh it made and the results it
