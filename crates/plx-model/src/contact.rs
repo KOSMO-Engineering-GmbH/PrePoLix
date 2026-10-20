@@ -4,9 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    CompressionOnly, NodeTie, PointSpring, Region, RigidBody, SurfaceSpring, SurfaceToSurfaceSpring,
-};
+use crate::{CompressionOnly, NodeTie, Region, RigidBody, Spring};
 
 /// PrePoMax's default colour of contact and constraint surfaces, yellow.
 pub const DEFAULT_SURFACE_COLOR: [u8; 3] = [255, 255, 0];
@@ -297,13 +295,11 @@ impl ContactPair {
 /// A constraint between parts of the model or to ground, PrePoMax's Constraints.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Constraint {
-    PointSpring(PointSpring),
-    SurfaceSpring(SurfaceSpring),
+    Spring(Spring),
     CompressionOnly(CompressionOnly),
     /// Only in projects saved while ties were constraints; [`crate::FeModel::migrate`] moves
     /// them to the model's ties, listed with the contact pairs.
     Tie(Tie),
-    SurfaceToSurfaceSpring(SurfaceToSurfaceSpring),
     RigidBody(RigidBody),
     /// Only in projects saved while node ties were constraints; [`crate::FeModel::migrate`]
     /// moves them to the model's node ties, where they belong with the contact pairs.
@@ -313,11 +309,9 @@ pub enum Constraint {
 impl Constraint {
     pub fn name(&self) -> &str {
         match self {
-            Constraint::PointSpring(c) => &c.name,
-            Constraint::SurfaceSpring(c) => &c.name,
+            Constraint::Spring(c) => &c.name,
             Constraint::CompressionOnly(c) => &c.name,
             Constraint::Tie(tie) => &tie.name,
-            Constraint::SurfaceToSurfaceSpring(c) => &c.name,
             Constraint::RigidBody(c) => &c.name,
             Constraint::NodeTie(c) => &c.name,
         }
@@ -325,11 +319,9 @@ impl Constraint {
 
     pub fn active(&self) -> bool {
         match self {
-            Constraint::PointSpring(c) => c.active,
-            Constraint::SurfaceSpring(c) => c.active,
+            Constraint::Spring(c) => c.active,
             Constraint::CompressionOnly(c) => c.active,
             Constraint::Tie(tie) => tie.active,
-            Constraint::SurfaceToSurfaceSpring(c) => c.active,
             Constraint::RigidBody(c) => c.active,
             Constraint::NodeTie(c) => c.active,
         }
@@ -337,11 +329,9 @@ impl Constraint {
 
     pub fn active_mut(&mut self) -> &mut bool {
         match self {
-            Constraint::PointSpring(c) => &mut c.active,
-            Constraint::SurfaceSpring(c) => &mut c.active,
+            Constraint::Spring(c) => &mut c.active,
             Constraint::CompressionOnly(c) => &mut c.active,
             Constraint::Tie(tie) => &mut tie.active,
-            Constraint::SurfaceToSurfaceSpring(c) => &mut c.active,
             Constraint::RigidBody(c) => &mut c.active,
             Constraint::NodeTie(c) => &mut c.active,
         }
@@ -350,10 +340,8 @@ impl Constraint {
     /// Whether the constraint's symbol is shown; ties have none.
     pub fn visible(&self) -> bool {
         match self {
-            Constraint::PointSpring(c) => c.visible,
-            Constraint::SurfaceSpring(c) => c.visible,
+            Constraint::Spring(c) => c.visible,
             Constraint::CompressionOnly(c) => c.visible,
-            Constraint::SurfaceToSurfaceSpring(c) => c.visible,
             Constraint::RigidBody(c) => c.visible,
             Constraint::Tie(_) | Constraint::NodeTie(_) => true,
         }
@@ -362,10 +350,8 @@ impl Constraint {
     /// The visibility of the constraint's symbol, for constraints that have one.
     pub fn visible_mut(&mut self) -> Option<&mut bool> {
         match self {
-            Constraint::PointSpring(c) => Some(&mut c.visible),
-            Constraint::SurfaceSpring(c) => Some(&mut c.visible),
+            Constraint::Spring(c) => Some(&mut c.visible),
             Constraint::CompressionOnly(c) => Some(&mut c.visible),
-            Constraint::SurfaceToSurfaceSpring(c) => Some(&mut c.visible),
             Constraint::RigidBody(c) => Some(&mut c.visible),
             Constraint::Tie(_) | Constraint::NodeTie(_) => None,
         }
@@ -373,11 +359,9 @@ impl Constraint {
 
     pub fn name_mut(&mut self) -> &mut String {
         match self {
-            Constraint::PointSpring(c) => &mut c.name,
-            Constraint::SurfaceSpring(c) => &mut c.name,
+            Constraint::Spring(c) => &mut c.name,
             Constraint::CompressionOnly(c) => &mut c.name,
             Constraint::Tie(tie) => &mut tie.name,
-            Constraint::SurfaceToSurfaceSpring(c) => &mut c.name,
             Constraint::RigidBody(c) => &mut c.name,
             Constraint::NodeTie(c) => &mut c.name,
         }
@@ -388,7 +372,12 @@ impl Constraint {
     pub fn swap_master_slave(&mut self) -> bool {
         let (name, master, slave) = match self {
             Constraint::Tie(tie) => (&mut tie.name, &mut tie.master, &mut tie.slave),
-            Constraint::SurfaceToSurfaceSpring(c) => (&mut c.name, &mut c.master, &mut c.slave),
+            Constraint::Spring(Spring {
+                name,
+                master: Some(master),
+                region,
+                ..
+            }) => (name, master, region),
             _ => return false,
         };
         std::mem::swap(master, slave);
@@ -400,7 +389,7 @@ impl Constraint {
     pub fn master_slave(&self) -> Option<[&Region; 2]> {
         match self {
             Constraint::Tie(tie) => Some([&tie.master, &tie.slave]),
-            Constraint::SurfaceToSurfaceSpring(c) => Some([&c.master, &c.slave]),
+            Constraint::Spring(c) => Some([c.master.as_ref()?, &c.region]),
             _ => None,
         }
     }
@@ -408,11 +397,9 @@ impl Constraint {
     /// The regions the constraint is defined on, master before slave.
     pub fn regions(&self) -> Vec<&Region> {
         match self {
-            Constraint::PointSpring(c) => vec![&c.region],
-            Constraint::SurfaceSpring(c) => vec![&c.region],
+            Constraint::Spring(c) => c.master.iter().chain([&c.region]).collect(),
             Constraint::CompressionOnly(c) => vec![&c.region],
             Constraint::Tie(tie) => vec![&tie.master, &tie.slave],
-            Constraint::SurfaceToSurfaceSpring(c) => vec![&c.master, &c.slave],
             Constraint::RigidBody(c) => vec![&c.region],
             Constraint::NodeTie(c) => vec![&c.region],
         }
@@ -420,11 +407,9 @@ impl Constraint {
 
     pub fn regions_mut(&mut self) -> Vec<&mut Region> {
         match self {
-            Constraint::PointSpring(c) => vec![&mut c.region],
-            Constraint::SurfaceSpring(c) => vec![&mut c.region],
+            Constraint::Spring(c) => c.master.iter_mut().chain([&mut c.region]).collect(),
             Constraint::CompressionOnly(c) => vec![&mut c.region],
             Constraint::Tie(tie) => vec![&mut tie.master, &mut tie.slave],
-            Constraint::SurfaceToSurfaceSpring(c) => vec![&mut c.master, &mut c.slave],
             Constraint::RigidBody(c) => vec![&mut c.region],
             Constraint::NodeTie(c) => vec![&mut c.region],
         }

@@ -54,12 +54,11 @@ pub enum Kind {
     RigidBody {
         reference_point: String,
     },
-    /// Springs to ground at the nodes of the region, with their stiffness K1..K3.
-    PointSpring([f64; 3]),
-    /// Springs to ground at the centre of the region.
-    SurfaceSpring([f64; 3]),
-    /// Springs from points spread over the region, the slave surface of a connection.
-    SurfaceToSurfaceSpring([f64; 3]),
+    /// Springs with their stiffness K1..K3, to ground or to a surface.
+    Spring {
+        stiffness: [f64; 3],
+        to_surface: bool,
+    },
     /// Gaps that only take pressure, on the faces of the region; flipped they push outward.
     CompressionOnly {
         flipped: bool,
@@ -76,15 +75,12 @@ impl Kind {
                 },
                 body.region.clone(),
             ),
-            Constraint::PointSpring(spring) => {
-                (Kind::PointSpring(spring.stiffness), spring.region.clone())
-            }
-            Constraint::SurfaceSpring(spring) => {
-                (Kind::SurfaceSpring(spring.stiffness), spring.region.clone())
-            }
-            Constraint::SurfaceToSurfaceSpring(spring) => (
-                Kind::SurfaceToSurfaceSpring(spring.stiffness),
-                spring.slave.clone(),
+            Constraint::Spring(spring) => (
+                Kind::Spring {
+                    stiffness: spring.stiffness,
+                    to_surface: spring.master.is_some(),
+                },
+                spring.region.clone(),
             ),
             Constraint::CompressionOnly(support) => (
                 Kind::CompressionOnly {
@@ -181,32 +177,33 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     });
                 }
             }
-            // A spring for each direction with stiffness: at each node, or at the centre of
-            // many nodes.
-            Kind::PointSpring(stiffness) => {
-                let mut points = node_points(model, &item.region, &visible);
-                if points.len() >= POINT_SPRING_NODES {
+            // A spring for each direction with stiffness. To a surface at points spread over
+            // the region; to ground at the centre of faces, or at each node and at the
+            // centre of many nodes.
+            Kind::Spring {
+                stiffness,
+                to_surface,
+            } => {
+                let faces = face_geometry(model, &item.region, &visible);
+                let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
+                let mut points = if centers.is_empty() {
+                    node_points(model, &item.region, &visible)
+                } else if to_surface {
+                    centers
+                } else {
+                    region_center(model, &item.region, &visible)
+                        .into_iter()
+                        .collect()
+                };
+                if to_surface {
+                    let picked = sample(&points, DIVISIONS / 2.0);
+                    points = picked.into_iter().map(|i| points[i]).collect();
+                } else if points.len() >= POINT_SPRING_NODES {
                     points = vec![points.iter().sum::<DVec3>() / points.len() as f64];
                 }
                 for point in points {
                     for axis in acting(stiffness) {
                         add(point, axis, SymbolShape::Spring);
-                    }
-                }
-            }
-            Kind::SurfaceSpring(stiffness) => {
-                if let Some(center) = region_center(model, &item.region, &visible) {
-                    for axis in acting(stiffness) {
-                        add(center, axis, SymbolShape::Spring);
-                    }
-                }
-            }
-            Kind::SurfaceToSurfaceSpring(stiffness) => {
-                let faces = face_geometry(model, &item.region, &visible);
-                let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
-                for index in sample(&centers, DIVISIONS / 2.0) {
-                    for axis in acting(stiffness) {
-                        add(centers[index], axis, SymbolShape::Spring);
                     }
                 }
             }
@@ -891,7 +888,10 @@ mod tests {
         let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
         let model = Model::new(&path, mesh);
         let spring = |nodes: Vec<NodeId>| Item {
-            kind: Kind::PointSpring([1.0, 0.0, 2.0]),
+            kind: Kind::Spring {
+                stiffness: [1.0, 0.0, 2.0],
+                to_surface: false,
+            },
             region: Region::Nodes(nodes),
             selected: false,
         };

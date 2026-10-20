@@ -1,5 +1,5 @@
-//! PrePoMax's spring and support constraints, and prepolix's spring connection between two
-//! surfaces. Ties are in [`crate::contact`].
+//! PrePoMax's spring and support constraints, with springs also between two surfaces. Ties
+//! are in [`crate::contact`].
 //!
 //! Like everything in the model they store what the user defined. The spring and gap elements,
 //! extra nodes and equations CalculiX needs for them are generated when the input file is
@@ -63,36 +63,50 @@ impl RigidBody {
     }
 }
 
-/// Springs from every node of the region to ground (`SPRING1`), PrePoMax's point spring.
+/// Springs in the global directions from the nodes of a region to ground (`SPRING1`), or to
+/// the closest points of a target surface (`SPRING2`), which PrePoMax lacks. One spring
+/// constraint covers PrePoMax's point and surface springs: like a force, the stiffness is
+/// that of the whole region and spread over its nodes, on faces by area, on edges by length
+/// and on points in equal shares.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct PointSpring {
+pub struct Spring {
     pub name: String,
     #[serde(default = "crate::active")]
     pub active: bool,
     /// Hidden constraints have no symbol in the 3D view unless selected, as in PrePoMax.
     #[serde(default = "crate::active")]
     pub visible: bool,
+    /// The nodes that get springs: the slave side of a connection to a surface.
     pub region: Region,
-    /// K1..K3 of each node's spring in force per length; a zero adds no spring in that
-    /// direction.
-    pub stiffness: [f64; 3],
-}
-
-/// Springs from the nodes of a surface to ground, spread over the nodes by area, PrePoMax's
-/// surface spring.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SurfaceSpring {
-    pub name: String,
-    #[serde(default = "crate::active")]
-    pub active: bool,
-    /// Hidden constraints have no symbol in the 3D view unless selected, as in PrePoMax.
-    #[serde(default = "crate::active")]
-    pub visible: bool,
-    pub region: Region,
-    /// K1..K3 of the whole surface (force per length), or per area of it (force per volume)
-    /// with `per_area`.
+    /// The surface the springs end on, the master side; `None` connects them to ground.
+    pub master: Option<Region>,
+    /// K1..K3 of the whole region in force per length, or per area of its faces (force per
+    /// volume) with `per_area`, or of every node with `each_node`; a zero adds no spring
+    /// in that direction.
     pub stiffness: [f64; 3],
     pub per_area: bool,
+    /// The whole stiffness acts at every node instead of being spread over the nodes.
+    pub each_node: bool,
+}
+
+impl Spring {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(Vec::new()),
+            master: None,
+            stiffness: [0.0; 3],
+            per_area: false,
+            each_node: false,
+        }
+    }
+
+    /// The stiffness is per area of the faces of the region.
+    pub fn is_per_area(&self) -> bool {
+        self.per_area && !self.each_node
+    }
 }
 
 /// Gap elements on a surface that only take pressure (`GAPUNI`), PrePoMax's compression only
@@ -142,24 +156,4 @@ impl CompressionOnly {
             outward.map(|v| -v)
         }
     }
-}
-
-/// Springs between two surfaces instead of to ground; not in PrePoMax. Every node of the
-/// slave surface is connected to the closest point of the master surface by springs in the
-/// global directions.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SurfaceToSurfaceSpring {
-    pub name: String,
-    #[serde(default = "crate::active")]
-    pub active: bool,
-    /// Hidden constraints have no symbol in the 3D view unless selected, as in PrePoMax.
-    #[serde(default = "crate::active")]
-    pub visible: bool,
-    /// The surface the springs end on.
-    pub master: Region,
-    /// The surface whose nodes get the springs.
-    pub slave: Region,
-    /// K1..K3 of the whole connection, or per area of the slave surface with `per_area`.
-    pub stiffness: [f64; 3],
-    pub per_area: bool,
 }

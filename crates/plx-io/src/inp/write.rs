@@ -1222,10 +1222,7 @@ fn constraints(
             continue;
         }
         match constraint {
-            Constraint::PointSpring(_)
-            | Constraint::SurfaceSpring(_)
-            | Constraint::CompressionOnly(_)
-            | Constraint::SurfaceToSurfaceSpring(_) => {}
+            Constraint::Spring(_) | Constraint::CompressionOnly(_) => {}
             // Moved to the model's node ties when the project was read.
             Constraint::NodeTie(_) => {}
             Constraint::RigidBody(body) => {

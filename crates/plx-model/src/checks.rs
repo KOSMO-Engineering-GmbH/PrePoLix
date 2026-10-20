@@ -511,7 +511,7 @@ impl Problem {
             Problem::RigidBodyMotion => {
                 "Add a boundary condition that blocks the listed motions, tie the parts \
                  to supported parts with a Tie, or add weak springs (Constraints \
-                 > Point Spring) to ground."
+                 > Spring) to ground."
             }
             Problem::Mechanism => {
                 "Mesh every truss with exactly one element (Mesh Setup > Meshing \
@@ -521,7 +521,7 @@ impl Problem {
                  Section."
             }
             Problem::HeldOnlyByContact => {
-                "Additionally support the parts weakly (Point Spring with a small \
+                "Additionally support the parts weakly (a Spring with a small \
                  stiffness), let the contact surfaces touch at the start (Adjust in the \
                  contact pair) or bring the parts into contact with a small \
                  displacement in a first step."
@@ -1679,14 +1679,7 @@ impl FeModel {
         };
         for constraint in self.constraints.iter().filter(|c| c.active()) {
             match constraint {
-                Constraint::PointSpring(c) => {
-                    for node in c.region.nodes(mesh) {
-                        for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
-                            support(node, axis(d), false);
-                        }
-                    }
-                }
-                Constraint::SurfaceSpring(c) => {
+                Constraint::Spring(c) if c.master.is_none() => {
                     for node in c.region.nodes(mesh) {
                         for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
                             support(node, axis(d), false);
@@ -1698,7 +1691,7 @@ impl FeModel {
                         support(node, normal, false);
                     }
                 }
-                Constraint::Tie(_) | Constraint::SurfaceToSurfaceSpring(_) => {
+                Constraint::Tie(_) | Constraint::Spring(_) => {
                     if let Some([master, slave]) = constraint.master_slave() {
                         let (a, b) = (pieces(master), pieces(slave));
                         join(&mut ties, &a, &b);
@@ -1906,14 +1899,7 @@ impl FeModel {
             match constraint {
                 // Moved to the node ties when the project was read.
                 Constraint::NodeTie(_) => {}
-                Constraint::PointSpring(c) => {
-                    for node in c.region.nodes(mesh) {
-                        for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
-                            add(&mut gram, node, axis(d));
-                        }
-                    }
-                }
-                Constraint::SurfaceSpring(c) => {
+                Constraint::Spring(c) if c.master.is_none() => {
                     for node in c.region.nodes(mesh) {
                         for d in (0..3).filter(|&d| c.stiffness[d] > 0.0) {
                             add(&mut gram, node, axis(d));
@@ -1921,7 +1907,7 @@ impl FeModel {
                     }
                 }
                 Constraint::CompressionOnly(c) => mark(&c.region, &mut held_otherwise),
-                Constraint::Tie(_) | Constraint::SurfaceToSurfaceSpring(_) => {
+                Constraint::Tie(_) | Constraint::Spring(_) => {
                     for region in constraint.master_slave().into_iter().flatten() {
                         mark(region, &mut held_otherwise);
                     }
@@ -2851,15 +2837,11 @@ mod tests {
         let detail = &check(&model, &mesh)[0].detail;
         assert!(detail.ends_with(": rotation about X free"), "{detail}");
         // A spring on a third corner holds it.
-        model
-            .constraints
-            .push(Constraint::PointSpring(crate::PointSpring {
-                name: "Spring-1".into(),
-                active: true,
-                visible: true,
-                region: Region::Nodes(vec![7]),
-                stiffness: [0.0, 0.0, 1.0],
-            }));
+        model.constraints.push(Constraint::Spring(crate::Spring {
+            region: Region::Nodes(vec![7]),
+            stiffness: [0.0, 0.0, 1.0],
+            ..crate::Spring::new("Spring-1")
+        }));
         assert_eq!(check(&model, &mesh), []);
     }
 

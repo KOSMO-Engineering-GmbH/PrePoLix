@@ -6,17 +6,18 @@ Parts meshed separately share no nodes. Constraints connect them or attach sprin
 Create them with #menu("Interaction", "Create Constraint ...") or with #ui("Create ...") on
 #ui("Constraints").
 
-#screenshot("constraint.png", [Constraint dialog])
-
-#screenshot("constraint-spring-2d.png", [Point spring in a plane stress model: only #ui("K1") and #ui("K2")]) <spring-2d>
+#screenshot("constraint.png", [Spring dialog: springs from a surface to ground])
 
 #fields(
-  [Point Spring], [Springs from every node of the region to ground. #ui("K1"), #ui("K2"),
-    #ui("K3") are the stiffnesses in the global directions; 0 means no spring in that direction.
-    In a 2D model (plane stress, plane strain, axisymmetric) there is no #ui("K3"): the dialog
-    offers the first two directions only (@spring-2d). Written as `SPRING1` elements.],
-  [Surface Spring], [Springs on a face region. The stiffness is given #ui("Total") or
-    #ui("Per area") and distributed over the nodes by area.],
+  [Spring], [Springs in the global directions on the nodes of the region. #ui("K1"),
+    #ui("K2"), #ui("K3") are the stiffnesses; 0 means no spring in that direction. Like a
+    force, the stiffness is that of the whole region and is spread over its nodes: on faces
+    by area, on edges by length, on points in equal shares. #ui("Per area") gives a
+    stiffness per area of the faces instead (force per volume, a bedding modulus). With
+    #ui("Apply to all nodes individually") every node gets the whole stiffness. A single
+    node or point is a point spring. In a 2D model (plane stress, plane strain,
+    axisymmetric) there is no #ui("K3"): the dialog offers the first two directions only
+    (@spring-2d).],
   [Compression Only], [A support that only takes pressure, like a part resting on a rigid floor.
     By default it pushes onto the surface from outside; #ui("Flip") under #ui("Direction")
     makes it push the surface outward from inside the material. #ui("Clearance") is the
@@ -26,22 +27,30 @@ Create them with #menu("Interaction", "Create Constraint ...") or with #ui("Crea
     every gap gets CalculiX's default, practically rigid. With #ui("Nonlinear") the contact
     is solved nonlinearly, otherwise it is linearised in a linear step. Written as `GAPUNI`
     elements to fixed ground nodes, one per node.],
-  [Surface To Surface Spring], [Springs between the nodes of a slave surface and the closest
-    points of a master surface, with total or per-area stiffness.],
 )
 
-Surface-to-surface springs have a #ui("Master") and a #ui("Slave") region, each with its own
-#ui("...") button. Choose the finer mesh as slave. #ui("Swap Master/Slave") in the context
-menu exchanges the two.
+#ui("Connection") at the bottom of the spring dialog decides where the springs end.
+#ui("Surface to World") connects them to ground (`SPRING1` elements). #ui("Surface to Surface")
+adds a #ui("Target surface"): every node of the region is connected to the closest point of
+the target surface (`SPRING2` elements and `*EQUATION`s), for example an elastic bearing
+between two parts. The region is the slave and the target surface the master side: choose the
+finer mesh as region. #ui("Swap Master/Slave") in the context menu exchanges the two.
+
+#screenshot("constraint-spring-surface.png", [Spring between two surfaces: the target surface
+  in red, the region in purple])
+
+#screenshot("constraint-spring-2d.png", [Spring in a plane stress model: only #ui("K1") and
+  #ui("K2")]) <spring-2d>
 
 The 3D view of the FE model shows active constraints in yellow, together with
-the symbols of any step: a coil spring for each direction with stiffness, at each node of a
-point spring (at their centre for ten nodes or more), at the centre of a surface spring and at
-points spread over the slave surface of a surface-to-surface spring; cones with a ground plate on
-the side a compression only support pushes from (@compression-only); and lines to the reference point of a rigid body
-(@rigid-body). The selected or edited constraint is red. Ties have no symbol.
+the symbols of any step: a coil spring for each direction with stiffness, at the centre of
+the faces of a spring to ground or at each of its nodes (at their centre for ten nodes or
+more), and at points spread over the region of a spring to a surface; cones with a ground plate
+on the side a compression only support pushes from (@compression-only); and lines to the
+reference point of a rigid body (@rigid-body). The selected or edited constraint is red. Ties
+have no symbol.
 
-#screenshot("constraint-symbols.png", [Point spring, surface spring, compression only support
+#screenshot("constraint-symbols.png", [Springs on nodes and on a surface, compression only support
   and rigid body on a cantilever])
 
 #ui("Hide") in the context menu of a constraint removes its symbol from the 3D view, #ui("Show")
@@ -58,7 +67,7 @@ constraint out of the input file.
   pushing onto the end face from outside (right) and a flipped one pushing the top face
   outward from inside the material])
 
-#screenshot("constraint-hide.png", [Hidden point spring and the context menu of Constraints])
+#screenshot("constraint-hide.png", [Hidden spring and the context menu of Constraints])
 
 #limitation[User-defined equations are not available yet.]
 
