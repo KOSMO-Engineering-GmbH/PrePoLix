@@ -84,6 +84,17 @@ The same holds for results and states taken from another analysis: when the sour
 out of date, so is the analysis that takes its results or continues from its state, and
 #ui("Solve") in its window solves the source again first instead of taking its old results.
 
+This is decided per step. CalculiX solves the steps one after the other, so the results of a step
+depend only on the model and the steps up to it. A link from the results or the state of a step
+therefore only turns out of date when the model, that step or a step before it changes: adding
+a frequency step after the static step a submodel takes its global results from makes the global
+analysis out of date, but the submodel stays up to date, and #ui("Update Project") solves only
+the global analysis. Eigenmodes are the exception: CalculiX writes them anew with every frequency
+step, so an analysis that takes them is out of date with any change of the source.
+
+#screenshot("later-step-keeps-submodel.png", [#ui("Step-2") was added to #ui("Global") after
+the submodel #ui("Local") was solved from #ui("Step-1"): only #ui("Global") is out of date])
+
 #screenshot("mesh-block-out-of-date.png", [After #ui("nx") of the box changed from 10 to 20, the
 mesh, solution and results of the analysis that takes the box's mesh are out of date])
 

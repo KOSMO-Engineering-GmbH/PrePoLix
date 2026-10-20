@@ -479,6 +479,11 @@ pub struct BoundResults {
     /// the results are out of date once the analysis' fingerprint differs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<u64>,
+    /// Fingerprint of what the results of each step were solved from, see
+    /// [`plx_model::fingerprint::step_inputs`]: the results of a step stay up to date while
+    /// only later steps change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<u64>,
     /// CalculiX reported errors but wrote results.
     #[serde(default)]
     pub with_errors: bool,
@@ -614,6 +619,7 @@ pub fn bind_results(
     let mut bound = BoundResults {
         analysis: analysis.to_owned(),
         input: None,
+        steps: Vec::new(),
         with_errors,
         files: Vec::new(),
         settings: None,

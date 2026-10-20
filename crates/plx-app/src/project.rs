@@ -1434,6 +1434,55 @@ impl Node {
             })
     }
 
+    /// Whether the results of `step` that the analysis keeps were made from data that
+    /// changed since. CalculiX solves the steps one after the other, so they depend only on
+    /// the model and the steps up to `step`: steps added or changed after it leave them up to
+    /// date, while the analysis itself is out of date.
+    fn step_results_out_of_date(&self, step: &str) -> bool {
+        let (Some(bound), Some(status), Some(data)) =
+            (self.bound_results(), self.status(), self.link_data())
+        else {
+            return self.results_out_of_date();
+        };
+        if status.mesh == status::CellState::OutOfDate || !status.stale_results.is_empty() {
+            return true;
+        }
+        match data.fe.steps.iter().position(|s| s.name == step) {
+            // Results solved before they kept the fingerprints of their steps count whole.
+            Some(index) if !bound.steps.is_empty() => {
+                let input = plx_model::fingerprint::steps_input(data.mesh, data.fe, index + 1);
+                bound.steps.get(index) != Some(&input)
+            }
+            _ => self.results_out_of_date(),
+        }
+    }
+
+    /// Whether what `link` takes of the analysis' results is out of date: the results of its
+    /// step for results and state links, all of them for anything else. Eigenmodes count
+    /// whole, as the file holding them is written anew by every frequency step.
+    fn out_of_date_for(&self, link: &Link) -> bool {
+        let by_step = links::is_state(link)
+            || (links::is_results(link)
+                && links::ResultsUse::of(link) != Some(links::ResultsUse::Modes));
+        match link.item.get(1) {
+            Some(step) if by_step => self.step_results_out_of_date(step),
+            _ => self.results_out_of_date(),
+        }
+    }
+
+    /// The fingerprint naming the copy of the results of `step` a link takes: the one of the
+    /// step, so that a run that solved only later steps anew keeps the copy.
+    fn step_key(&self, step: &str) -> u64 {
+        let Some(bound) = self.bound_results() else {
+            return 0;
+        };
+        (self.link_data())
+            .and_then(|data| data.fe.steps.iter().position(|s| s.name == step))
+            .and_then(|index| bound.steps.get(index).copied())
+            .or(bound.input)
+            .unwrap_or_default()
+    }
+
     /// The results the analysis keeps.
     fn bound_results(&self) -> Option<&plx_io::project::BoundResults> {
         let analysis = self.as_analysis()?;
@@ -2174,9 +2223,9 @@ impl ProjectApp {
         let Some(key) = self.measure_key(id) else {
             return CellState::Missing;
         };
-        let fresh = (self.measured(id))
-            .and_then(|(source, _, _)| source.status())
-            .is_some_and(|s| s.results == CellState::UpToDate);
+        let fresh = (self.links.iter().find(|l| l.target == id))
+            .zip(self.measured(id))
+            .is_some_and(|(link, (source, _, _))| !source.out_of_date_for(link));
         match measure.value {
             _ if measure.evaluated != Some(key) => CellState::OutOfDate,
             None => CellState::Missing,
@@ -6161,7 +6210,7 @@ impl ProjectApp {
                     upstream.missing_results.push(source.name.clone());
                     return None;
                 };
-                if source.results_out_of_date() {
+                if source.out_of_date_for(link) {
                     // Its results were made from data that changed since: the target waits
                     // for it to be solved again rather than take them.
                     upstream.stale_results.push(source.name.clone());
@@ -6170,6 +6219,7 @@ impl ProjectApp {
                 let data = data?;
                 let global = links::global_step_number(data.fe, step)?;
                 let usage = links::ResultsUse::of(link)?;
+                let key = source.step_key(step);
                 if usage != links::ResultsUse::Submodel
                     && target.link_data()?.mesh.input_fingerprint() != data.mesh.input_fingerprint()
                 {
@@ -6228,7 +6278,7 @@ impl ProjectApp {
                     .join(format!(
                         "Global-{}-{:016x}",
                         crate::analysis::job_name(&source.name),
-                        bound.input.unwrap_or_default()
+                        key
                     ));
                 let file = dir.join(&frd.name);
                 if !file.is_file() {
@@ -6254,7 +6304,7 @@ impl ProjectApp {
                 if source.bound_results().is_none() {
                     // Solved first, so that this one continues from its states.
                     upstream.missing_results.push(source.name.clone());
-                } else if source.results_out_of_date() {
+                } else if source.out_of_date_for(link) {
                     // Its states belong to data that changed since.
                     upstream.stale_results.push(source.name.clone());
                 }
@@ -6476,23 +6526,28 @@ impl ProjectApp {
         // The solve waits for the links to bring a new mesh.
         self.generate_meshes();
         let mut sources = Vec::new();
+        let mut taken = Vec::new();
         let mut queue = vec![id];
         while let Some(target) = queue.pop() {
             for link in self.links.iter().filter(|l| l.target == target) {
                 let solved_first = links::is_results(link) || links::is_state(link);
-                if solved_first && !sources.contains(&link.source) {
-                    sources.push(link.source);
-                    queue.push(link.source);
+                if solved_first {
+                    taken.push(link);
+                    if !sources.contains(&link.source) {
+                        sources.push(link.source);
+                        queue.push(link.source);
+                    }
                 }
             }
         }
-        // Those with results made from data that changed since are solved again too; a
-        // file block is read, not solved.
+        // Those with results made from data that changed since are solved again too, unless
+        // only steps after the ones taken changed; a file block is read, not solved.
         sources.retain(|s| {
             (self.nodes.iter()).any(|n| {
                 n.id == *s
                     && n.kind() == Kind::Analysis
-                    && (n.bound_results().is_none() || n.results_out_of_date())
+                    && (n.bound_results().is_none()
+                        || (taken.iter()).any(|l| l.source == *s && n.out_of_date_for(l)))
             })
         });
         sources.push(id);
@@ -11578,6 +11633,49 @@ mod tests {
             Some(ProjectNode::Measure(written)) => assert_eq!(written, block),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn later_steps_leave_the_results_of_earlier_steps_up_to_date() {
+        let mut model = plx_model::FeModel::default();
+        model.steps.push(plx_model::Step::new_static("Step-1"));
+        let mesh = plx_mesh::FeMesh::default();
+        let results = plx_io::project::BoundResults {
+            input: Some(plx_model::fingerprint::solve_input(&mesh, &model)),
+            steps: plx_model::fingerprint::step_inputs(&mesh, &model),
+            ..Default::default()
+        };
+        model.steps.push(plx_model::Step::new_static("Step-2"));
+        let data = ProjectAnalysis {
+            mesh,
+            model,
+            results: Some(results),
+            ..Default::default()
+        };
+        let mut node = Node::analysis(1, "Global".into(), data);
+        node.refresh_closed();
+        // The analysis has a step to solve anew ...
+        assert!(node.results_out_of_date());
+        // ... but a submodel taking the results of the first step keeps them.
+        let link = |step: &str, input: &str| Link {
+            source: 1,
+            target: 2,
+            item: vec![links::RESULTS.into(), step.into()],
+            slot: ["Setup", "Steps", "Step-1", input]
+                .map(String::from)
+                .to_vec(),
+            ..Default::default()
+        };
+        assert!(!node.out_of_date_for(&link("Step-1", "Global results")));
+        assert!(node.out_of_date_for(&link("Step-2", "Global results")));
+        // Eigenmodes are written anew by every frequency step.
+        assert!(node.out_of_date_for(&link("Step-1", "Eigenmodes")));
+        // So does a changed first step.
+        if let Some(data) = node.as_analysis_mut().and_then(|a| a.data.as_mut()) {
+            data.model.steps[0].name = "Load".into();
+        }
+        node.refresh_closed();
+        assert!(node.out_of_date_for(&link("Load", "Global results")));
     }
 
     #[test]
