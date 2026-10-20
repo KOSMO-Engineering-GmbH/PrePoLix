@@ -5175,15 +5175,25 @@ impl Workbench {
             return;
         };
         let feature = self.feature_dialog.as_ref().filter(|d| d.results.is_none());
+        if (self.section_dialog.is_some() || feature.is_some())
+            && let Some(dialog) = &mut self.contact_search
+        {
+            // Shows its pairs again once the other dialog has closed.
+            dialog.forget_highlight();
+        }
         let highlight = if let Some(dialog) = &self.section_dialog {
             self.highlighted = None;
             dialog.highlight()
         } else if let Some(dialog) = feature {
             self.highlighted = None;
             dialog.highlight(model)
-        } else if let Some(dialog) = &self.contact_search {
+        } else if let Some(dialog) = &mut self.contact_search {
             self.highlighted = None;
-            dialog.highlight(model)
+            // Built anew only when the selected pairs change, as for the tree selection.
+            match dialog.changed_highlight(model) {
+                Some(highlight) => highlight,
+                None => return,
+            }
         } else if let Some(editor) = &self.editor {
             self.highlighted = None;
             editor.highlight(model)
