@@ -274,9 +274,11 @@ impl Problem {
             }
             Problem::RigidBodyMotion => {
                 "These parts can move as a rigid body: the boundary conditions and \
-                 springs do not fix all displacements and rotations, and no Tie \
-                 connects them to supported parts. The stiffness matrix is then \
-                 singular. Depending on the matrix solver CalculiX aborts with \"zero \
+                 springs do not fix all displacements and rotations, and no Tie or \
+                 tied contact connects them to supported parts. A Compression Only \
+                 support holds only perpendicular to its surface: on a flat face the \
+                 part can still slide and turn in the plane. The stiffness matrix is \
+                 then singular. Depending on the matrix solver CalculiX aborts with \"zero \
                  pivot\" or returns huge, useless displacements without an error."
             }
             Problem::Mechanism => {
@@ -2904,6 +2906,42 @@ mod tests {
             InteractionProperty::Friction(crate::Friction::default()),
         ];
         assert_eq!(check(&model, &mesh), []);
+    }
+
+    #[test]
+    fn ties_and_tied_contact_hold_a_chain_of_parts_from_one_support() {
+        let count = 6;
+        let mesh = cubes(count, false);
+        let mut model = model(&mesh);
+        model.surface_interactions.push(SurfaceInteraction {
+            name: "Tied".into(),
+            properties: vec![
+                InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tied { k: 1e7 }),
+                InteractionProperty::Friction(crate::Friction::default()),
+            ],
+        });
+        // Only the first cube is fixed; each cube is tied to the next, alternately by a
+        // tie and by tied contact.
+        for c in 0..count - 1 {
+            let right = Region::Nodes([2, 3, 6, 7].map(|n| 8 * c + n).to_vec());
+            let left = Region::Nodes([1, 4, 5, 8].map(|n| 8 * (c + 1) + n).to_vec());
+            if c % 2 == 0 {
+                let mut tie = Tie::new(format!("Tie-{c}"));
+                (tie.master, tie.slave) = (right, left);
+                model.ties.push(tie);
+            } else {
+                let mut pair = ContactPair::new(format!("Contact_Pair-{c}"), "Tied");
+                (pair.master, pair.slave) = (right, left);
+                model.contact_pairs.push(pair);
+            }
+        }
+        assert_eq!(check(&model, &mesh), []);
+        // Without the link in the middle the far half moves freely.
+        model.ties.remove(1);
+        assert!(
+            problems(&check(&model, &mesh))
+                .contains(&(ModelItem::Part(5), Problem::RigidBodyMotion))
+        );
     }
 
     #[test]
