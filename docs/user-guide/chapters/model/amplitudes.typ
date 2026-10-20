@@ -19,5 +19,10 @@ condition or load.
 The factor is interpolated linearly between the points and stays constant before the first and
 after the last point. Times must not decrease. The amplitude is written as `*AMPLITUDE`.
 
+An amplitude that no boundary condition, load or defined field uses has no effect. The model check
+(@model-check) warns of it in the tree, so that you do not wonder why nothing moves.
+
+#screenshot("model-check-amplitude.png", [Warning for an amplitude that nothing refers to])
+
 With #ui("Default") instead of an amplitude, CalculiX ramps the value up linearly over a static
 step and applies it at once in a heat transfer step.
