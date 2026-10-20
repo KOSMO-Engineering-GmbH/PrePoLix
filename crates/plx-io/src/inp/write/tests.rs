@@ -3106,7 +3106,7 @@ fn springs_of_a_2d_model_have_no_z_direction() {
 fn calculix_compression_only_support_takes_only_pressure() {
     use plx_model::{CompressionOnly, SurfaceSpring};
     let blocks = blocks(2, 2);
-    let support = |force: [f64; 3]| {
+    let support = |force: [f64; 3], edit: &dyn Fn(&mut CompressionOnly)| {
         let springs = Constraint::SurfaceSpring(SurfaceSpring {
             name: "Surface_Spring-1".into(),
             active: true,
@@ -3115,7 +3115,7 @@ fn calculix_compression_only_support_takes_only_pressure() {
             stiffness: [1000.0, 1000.0, 1000.0],
             per_area: false,
         });
-        let gaps = Constraint::CompressionOnly(CompressionOnly {
+        let mut gaps = CompressionOnly {
             name: "Compression_Only-1".into(),
             active: true,
             visible: true,
@@ -3123,12 +3123,22 @@ fn calculix_compression_only_support_takes_only_pressure() {
             clearance: 0.0,
             spring_stiffness: None,
             tensile_force: None,
+            each_node: false,
+            flipped: false,
             offset: 0.0,
             nonlinear: true,
-        });
-        blocks_model(&blocks, vec![springs, gaps], force)
+        };
+        edit(&mut gaps);
+        let model = blocks_model(
+            &blocks,
+            vec![springs, Constraint::CompressionOnly(gaps)],
+            force,
+        );
+        write_inp(&blocks.mesh, &model, "").unwrap()
     };
-    let pulled = write_inp(&blocks.mesh, &support([0.0, 0.0, 100.0]), "").unwrap();
+    let up = [0.0, 0.0, 100.0];
+    let down = [0.0, 0.0, -100.0];
+    let pulled = support(up, &|_| {});
     assert!(pulled.contains("*Element, Type=GAPUNI\n"));
     assert!(pulled.contains("*Plastic\n"));
     let Some(frd) = run_ccx("druck-nur-zug", &pulled) else {
@@ -3137,11 +3147,38 @@ fn calculix_compression_only_support_takes_only_pressure() {
     // Pulled away, only the springs hold the block.
     let lift = mean_top(&blocks, &frd, "U3");
     assert!((lift - 0.1).abs() < 0.002, "{lift}");
-    let pushed = write_inp(&blocks.mesh, &support([0.0, 0.0, -100.0]), "").unwrap();
-    let frd = run_ccx("druck-nur-druck", &pushed).unwrap();
+    let frd = run_ccx("druck-nur-druck", &support(down, &|_| {})).unwrap();
     // Pushed down, the gaps carry the load.
     let sink = mean_top(&blocks, &frd, "U3");
     assert!(sink.abs() < 0.002, "{sink}");
+
+    // Flipped, the support pushes the bottom face up from inside the block: it holds the
+    // block pulled up and lets it sink.
+    let flip = |c: &mut CompressionOnly| c.flipped = true;
+    let frd = run_ccx("druck-nur-umgedreht-zug", &support(up, &flip)).unwrap();
+    let lift = mean_top(&blocks, &frd, "U3");
+    assert!(lift.abs() < 0.002, "{lift}");
+    let frd = run_ccx("druck-nur-umgedreht-druck", &support(down, &flip)).unwrap();
+    let sink = mean_top(&blocks, &frd, "U3");
+    assert!((sink + 0.1).abs() < 0.002, "{sink}");
+
+    // A stiffness given is that of the whole face, spread over its nodes: 1000 of the gaps
+    // and 1000 of the springs.
+    let soft = |c: &mut CompressionOnly| c.spring_stiffness = Some(1000.0);
+    let text = support(down, &soft);
+    let frd = run_ccx("druck-nur-verteilt", &text).unwrap();
+    let sink = mean_top(&blocks, &frd, "U3");
+    assert!((sink + 0.05).abs() < 0.001, "{sink}");
+    // Applied to the 9 nodes individually, each gap has the whole stiffness.
+    let each = |c: &mut CompressionOnly| {
+        c.spring_stiffness = Some(1000.0);
+        c.each_node = true;
+    };
+    let text = support(down, &each);
+    assert_eq!(text.matches(", , 1000, ").count(), 9, "{text}");
+    let frd = run_ccx("druck-nur-einzeln", &text).unwrap();
+    let sink = mean_top(&blocks, &frd, "U3");
+    assert!((sink + 0.01).abs() < 0.001, "{sink}");
 }
 
 /// A straight chain of `n` line elements along `axis` from 0 to `length`, numbered from 1;

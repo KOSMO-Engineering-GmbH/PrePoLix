@@ -18,9 +18,14 @@ Create them with #menu("Interaction", "Create Constraint ...") or with #ui("Crea
   [Surface Spring], [Springs on a face region. The stiffness is given #ui("Total") or
     #ui("Per area") and distributed over the nodes by area.],
   [Compression Only], [A support that only takes pressure, like a part resting on a rigid floor.
-    #ui("Clearance") is the initial gap, #ui("Spring stiffness") and #ui("Tensile force")
-    are optional. With #ui("Nonlinear") the contact is solved nonlinearly, otherwise it is
-    linearised in a linear step. Written as `GAPUNI` elements to fixed ground nodes.],
+    By default it pushes onto the surface from outside; #ui("Flip") under #ui("Direction")
+    makes it push the surface outward from inside the material. #ui("Clearance") is the
+    initial gap. #ui("Spring stiffness") and #ui("Tensile force") are optional and belong to
+    the whole surface, spread over its nodes by area; with
+    #ui("Apply to all nodes individually") every node gets the whole value. Without a value
+    every gap gets CalculiX's default, practically rigid. With #ui("Nonlinear") the contact
+    is solved nonlinearly, otherwise it is linearised in a linear step. Written as `GAPUNI`
+    elements to fixed ground nodes, one per node.],
   [Surface To Surface Spring], [Springs between the nodes of a slave surface and the closest
     points of a master surface, with total or per-area stiffness.],
 )
@@ -32,8 +37,8 @@ menu exchanges the two.
 The 3D view of the FE model shows active constraints in yellow, together with
 the symbols of any step: a coil spring for each direction with stiffness, at each node of a
 point spring (at their centre for ten nodes or more), at the centre of a surface spring and at
-points spread over the slave surface of a surface-to-surface spring; cones pushing onto the
-surface of a compression only support; and lines to the reference point of a rigid body
+points spread over the slave surface of a surface-to-surface spring; cones with a ground plate on
+the side a compression only support pushes from (@compression-only); and lines to the reference point of a rigid body
 (@rigid-body). The selected or edited constraint is red. Ties have no symbol.
 
 #screenshot("constraint-symbols.png", [Point spring, surface spring, compression only support
@@ -45,6 +50,13 @@ brings it back; the tree marks a hidden constraint with an eye. #ui("Hide All") 
 A hidden constraint is still drawn while it is selected, and the setting is saved
 with the project. Hiding changes only the view, not the analysis; #ui("Deactivate") leaves a
 constraint out of the input file.
+
+#screenshot("compression-only-dialog.png", [Compression only support with flipped direction])
+  <compression-only>
+
+#screenshot("compression-only.png", [Front view of a cantilever: a compression only support
+  pushing onto the end face from outside (right) and a flipped one pushing the top face
+  outward from inside the material])
 
 #screenshot("constraint-hide.png", [Hidden point spring and the context menu of Constraints])
 

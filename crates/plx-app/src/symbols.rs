@@ -60,8 +60,10 @@ pub enum Kind {
     SurfaceSpring([f64; 3]),
     /// Springs from points spread over the region, the slave surface of a connection.
     SurfaceToSurfaceSpring([f64; 3]),
-    /// Gaps that only take pressure, on the faces of the region.
-    CompressionOnly,
+    /// Gaps that only take pressure, on the faces of the region; flipped they push outward.
+    CompressionOnly {
+        flipped: bool,
+    },
 }
 
 impl Kind {
@@ -84,7 +86,12 @@ impl Kind {
                 Kind::SurfaceToSurfaceSpring(spring.stiffness),
                 spring.slave.clone(),
             ),
-            Constraint::CompressionOnly(support) => (Kind::CompressionOnly, support.region.clone()),
+            Constraint::CompressionOnly(support) => (
+                Kind::CompressionOnly {
+                    flipped: support.flipped,
+                },
+                support.region.clone(),
+            ),
             Constraint::Tie(_) | Constraint::NodeTie(_) => return None,
         })
     }
@@ -128,6 +135,9 @@ pub enum SymbolShape {
     LineTo(Vec3),
     /// Coil spring ending at the point.
     Spring,
+    /// Cone with its tip at the point and a ground plate behind its base: a support that
+    /// pushes along the direction from the side of the plate.
+    GapSupport,
 }
 
 /// Symbols of the items, on the visible parts of the model.
@@ -200,12 +210,15 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     }
                 }
             }
-            // Cones from outside with their tips on the faces, like PrePoMax's.
-            Kind::CompressionOnly => {
+            // Cones with their tips on the faces and a ground plate behind them, on the side
+            // the support pushes from: outside, or inside the material when flipped.
+            Kind::CompressionOnly { flipped } => {
                 let faces = face_geometry(model, &item.region, &visible);
                 let centers: Vec<DVec3> = faces.iter().map(|f| f.center).collect();
+                let sign = if flipped { 1.0 } else { -1.0 };
                 for index in sample(&centers, DIVISIONS) {
-                    add(faces[index].center, -faces[index].normal, SymbolShape::Cone);
+                    let face = &faces[index];
+                    add(face.center, face.normal * sign, SymbolShape::GapSupport);
                 }
             }
             Kind::Load(LoadKind::Moment(moment)) => {
@@ -665,7 +678,10 @@ struct Solid {
 fn solids(shape: SymbolShape, direction: Vec3) -> Vec<Solid> {
     let size = match shape {
         SymbolShape::Arrow | SymbolShape::ArrowOnto | SymbolShape::MomentArrow => ARROW_SIZE,
-        SymbolShape::Cone | SymbolShape::RotationLock | SymbolShape::Ball => SUPPORT_SIZE,
+        SymbolShape::Cone
+        | SymbolShape::RotationLock
+        | SymbolShape::Ball
+        | SymbolShape::GapSupport => SUPPORT_SIZE,
         SymbolShape::LineTo(_) | SymbolShape::Spring => return Vec::new(),
     };
     let axis = direction * size;
@@ -704,6 +720,21 @@ fn solids(shape: SymbolShape, direction: Vec3) -> Vec<Solid> {
             cone(0.8, 1.05, 0.1),
         ],
         SymbolShape::Cone => vec![cone(-1.0, 0.0, 0.5)],
+        SymbolShape::GapSupport => {
+            let mut plate = Vec::new();
+            for along in [-1.2, -1.45] {
+                for (a, b) in [(1.0, 1.0), (1.0, -1.0), (-1.0, -1.0), (-1.0, 1.0)] {
+                    plate.push(axis * along + (u * a + v * b) * 0.6 * size);
+                }
+            }
+            vec![
+                cone(-1.0, 0.0, 0.4),
+                Solid {
+                    points: plate,
+                    depth: axis * -1.325,
+                },
+            ]
+        }
         SymbolShape::Ball => {
             // Three great circles; their outline is round from every side.
             let radius = 0.3 * size;
@@ -872,19 +903,23 @@ mod tests {
                 .all(|s| s.shape == SymbolShape::Spring && s.direction.y == 0.0)
         );
         assert_eq!(build(&model, &[spring((1..=20).collect())]).len(), 2);
-        // Cones onto the faces of a compression only support, from outside.
-        let support = Item {
-            kind: Kind::CompressionOnly,
+        // Cones onto the faces of a compression only support, from outside, or out of them
+        // when flipped.
+        let support = |flipped| Item {
+            kind: Kind::CompressionOnly { flipped },
             region: Region::Surface("TIP".into()),
             selected: false,
         };
-        let cones = build(&model, &[support]);
+        let cones = build(&model, &[support(false)]);
         assert!(!cones.is_empty());
         assert!(
             cones
                 .iter()
-                .all(|s| s.shape == SymbolShape::Cone && s.direction.x < -0.99)
+                .all(|s| s.shape == SymbolShape::GapSupport && s.direction.x < -0.99)
         );
+        let flipped = build(&model, &[support(true)]);
+        assert_eq!(flipped.len(), cones.len());
+        assert!(flipped.iter().all(|s| s.direction.x > 0.99));
         // The spring's wire ends just before the point.
         let wire = spring_wire(Vec3::X);
         assert!((wire.last().unwrap().x / ARROW_SIZE + 0.05).abs() < 1e-5);

@@ -237,23 +237,22 @@ impl Writer {
                 }
             }
         }
-        let stiffness = support
-            .spring_stiffness
-            .unwrap_or(CompressionOnly::DEFAULT_STIFFNESS)
-            / area;
-        let force = support
-            .tensile_force
-            .unwrap_or(CompressionOnly::DEFAULT_TENSILE_FORCE)
-            / area;
+        // A value given is spread over the nodes by area, or acts whole at every node; one
+        // not given is CalculiX's default for each gap.
+        let share = |value: Option<f64>, default: f64, w: f64| match value {
+            Some(v) if support.each_node => v,
+            Some(v) => v * w / area,
+            None => default,
+        };
         let name = super::name(&support.name);
         for (count, (&node, &w)) in (1..).zip(weights.iter().filter(|(_, w)| **w != 0.0)) {
             let (Some(coords), Some(normal)) = (mesh.node(node), normals.get(&node)) else {
                 continue;
             };
-            // Like PrePoMax the gap points into the material, from the ground node outside
-            // the surface to the surface node, so that it closes when the surface moves
-            // towards the ground.
-            let normal = normalized(*normal).map(|v| -v);
+            // Like PrePoMax the gap points the way the support pushes, from the ground node
+            // to the surface node, so that it closes when the surface moves towards the
+            // ground: into the material from outside, or out of it when flipped.
+            let normal = support.push_direction(normalized(*normal));
             let ground = self.node(std::array::from_fn(|k| {
                 coords[k] - support.offset * normal[k]
             }));
@@ -265,7 +264,19 @@ impl Writer {
                 .push((set.clone(), Members::Ids(vec![element])));
             let properties =
                 if support.spring_stiffness.is_some() || support.tensile_force.is_some() {
-                    format!(", , {}, {}", number(stiffness * w), number(force * w))
+                    format!(
+                        ", , {}, {}",
+                        number(share(
+                            support.spring_stiffness,
+                            CompressionOnly::DEFAULT_STIFFNESS,
+                            w
+                        )),
+                        number(share(
+                            support.tensile_force,
+                            CompressionOnly::DEFAULT_TENSILE_FORCE,
+                            w
+                        ))
+                    )
                 } else {
                     String::new()
                 };

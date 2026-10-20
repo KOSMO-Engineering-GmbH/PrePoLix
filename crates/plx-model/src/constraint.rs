@@ -108,11 +108,20 @@ pub struct CompressionOnly {
     pub region: Region,
     /// Distance the surface can move away before the support takes load.
     pub clearance: f64,
-    /// Stiffness of the closed gaps of the whole surface; `None` is PrePoMax's default.
+    /// Stiffness of the closed gaps of the whole surface, or of each gap with `each_node`;
+    /// `None` is CalculiX's default for each gap, practically rigid.
     pub spring_stiffness: Option<f64>,
-    /// Tensile force of the whole surface at negative infinity; `None` is PrePoMax's
-    /// default.
+    /// Tensile force at negative infinity of the whole surface, or of each gap with
+    /// `each_node`; `None` is CalculiX's default for each gap.
     pub tensile_force: Option<f64>,
+    /// Stiffness and tensile force act at every node instead of being spread over the
+    /// nodes by area.
+    #[serde(default)]
+    pub each_node: bool,
+    /// The support pushes the surface outwards, from inside the material, instead of
+    /// pushing onto it from outside.
+    #[serde(default)]
+    pub flipped: bool,
     /// Distance by which the ground node of each gap lies outside the surface.
     pub offset: f64,
     /// Solves the support nonlinearly; otherwise it is linearized in a linear step.
@@ -124,6 +133,15 @@ impl CompressionOnly {
     pub const DEFAULT_STIFFNESS: f64 = 1e12;
     /// PrePoMax's `GapSectionData.InitialTensileForceAtNegativeInfinity`.
     pub const DEFAULT_TENSILE_FORCE: f64 = 1e-3;
+
+    /// The direction the support pushes a face with the given outward normal in.
+    pub fn push_direction(&self, outward: [f64; 3]) -> [f64; 3] {
+        if self.flipped {
+            outward
+        } else {
+            outward.map(|v| -v)
+        }
+    }
 }
 
 /// Springs between two surfaces instead of to ground; not in PrePoMax. Every node of the
