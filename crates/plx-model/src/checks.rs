@@ -288,7 +288,8 @@ impl Problem {
                  displacements."
             }
             Problem::HeldOnlyByContact => {
-                "These parts are held only by contact pairs. At the start of the \
+                "These parts are held only by contact pairs without tied surface \
+                 behavior. At the start of the \
                  analysis a contact carries load only once it is closed; until then the \
                  parts can drift away freely. This often leads to \"zero pivot\", to \
                  \"too many cutbacks\" or to very long analyses."
@@ -1591,7 +1592,9 @@ impl FeModel {
     /// Finds pieces of the model that can move as a rigid body in a static step: the rigid
     /// body motions a support at point x in direction n prevents are those with
     /// n . (t + w x (x - c)) != 0, so a piece is held when the rows [n, (x - c) x n] of its
-    /// supports have full rank. Ties join pieces; contact pairs join them only loosely.
+    /// supports have full rank. Ties join pieces; contact pairs join them only loosely,
+    /// except tied ones: CalculiX activates tied contact from the first iteration,
+    /// whatever the gap, so it joins pieces like a tie.
     #[allow(clippy::too_many_arguments)]
     fn check_rigid_body(
         &self,
@@ -1774,7 +1777,13 @@ impl FeModel {
             join(&mut contacts, &a, &b);
         }
         for pair in self.contact_pairs.iter().filter(|c| c.active) {
-            join(&mut contacts, &pieces(&pair.master), &pieces(&pair.slave));
+            let (a, b) = (pieces(&pair.master), pieces(&pair.slave));
+            let tied = (self.surface_interactions.iter())
+                .any(|s| s.name == pair.interaction && s.is_tied());
+            if tied {
+                join(&mut ties, &a, &b);
+            }
+            join(&mut contacts, &a, &b);
         }
         let sum = |union: &mut UnionFind| {
             let mut sums: HashMap<usize, [[f64; 6]; 6]> = HashMap::new();
@@ -2887,6 +2896,13 @@ mod tests {
         tie.master = Region::Surface("RIGHT".into());
         tie.slave = Region::Surface("LEFT".into());
         model.ties.push(tie);
+        assert_eq!(check(&model, &mesh), []);
+        // Tied contact holds from the first iteration, like a tie.
+        model.ties.clear();
+        model.surface_interactions[0].properties = vec![
+            InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tied { k: 1e7 }),
+            InteractionProperty::Friction(crate::Friction::default()),
+        ];
         assert_eq!(check(&model, &mesh), []);
     }
 

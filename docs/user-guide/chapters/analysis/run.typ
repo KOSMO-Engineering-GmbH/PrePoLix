@@ -149,7 +149,7 @@ density, conductivity, specific heat), invalid material constants, distorted ele
 initial temperature in a transient heat transfer step, an increment larger than the step, rigid
 body motion of a part in a static step, truss structures that are mechanisms, radiation without
 the physical constants (@model-properties) and missing references (a deleted material, part or set that an item still uses). Warnings include parts held
-only by contact, conflicting boundary conditions, loads on fixed nodes, rotations without effect
+only by contact (contact pairs without tied surface behavior; tied contact holds like a tie), conflicting boundary conditions, loads on fixed nodes, rotations without effect
 and steps without load.
 
 When a run starts, PrePoLix also checks that the configured CalculiX knows every keyword of the
