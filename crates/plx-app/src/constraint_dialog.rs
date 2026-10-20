@@ -101,6 +101,8 @@ impl Type {
                 clearance: 0.0,
                 spring_stiffness: None,
                 tensile_force: None,
+                each_node: false,
+                flipped: false,
                 offset: 0.0,
                 nonlinear: false,
             }),
@@ -453,6 +455,22 @@ fn stiffness_rows(
 }
 
 fn compression_only_rows(ui: &mut Ui, support: &mut CompressionOnly, units: UnitSystem) {
+    ui.label("Direction");
+    ui.horizontal(|ui| {
+        if ui
+            .button("Flip")
+            .on_hover_text("Swaps the side the support pushes from.")
+            .clicked()
+        {
+            support.flipped = !support.flipped;
+        }
+        ui.label(if support.flipped {
+            "Pushes outward, from inside the material"
+        } else {
+            "Pushes onto the surface, from outside"
+        });
+    });
+    ui.end_row();
     length_row(ui, "Clearance", &mut support.clearance, units);
     optional_row(
         ui,
@@ -468,6 +486,9 @@ fn compression_only_rows(ui: &mut Ui, support: &mut CompressionOnly, units: Unit
         CompressionOnly::DEFAULT_TENSILE_FORCE,
         (units, Quantity::Force),
     );
+    ui.label("");
+    ui.checkbox(&mut support.each_node, "Apply to all nodes individually");
+    ui.end_row();
     length_row(ui, "Offset", &mut support.offset, units);
     ui.label("Nonlinear");
     ui.checkbox(&mut support.nonlinear, "")
@@ -475,8 +496,15 @@ fn compression_only_rows(ui: &mut Ui, support: &mut CompressionOnly, units: Unit
     ui.end_row();
     hint(
         ui,
-        "Gap elements carry compression only; the small tensile force in the open state keeps the \
-         model solvable. Stiffness and tensile force apply to the whole surface.",
+        if support.each_node {
+            "Gap elements carry compression only; the small tensile force in the open state \
+             keeps the model solvable. Stiffness and tensile force act whole at every node."
+        } else {
+            "Gap elements carry compression only; the small tensile force in the open state \
+             keeps the model solvable. Stiffness and tensile force are those of the whole \
+             surface, spread over its nodes by area. Without a value every gap gets \
+             CalculiX's default, practically rigid."
+        },
     );
 }
 

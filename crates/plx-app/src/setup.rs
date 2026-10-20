@@ -2522,7 +2522,7 @@ impl Editor {
                     LoadKind::Force { value, each_node } => {
                         force_rows(ui, value, two_d, units);
                         ui.label("");
-                        ui.checkbox(each_node, "Apply to all nodes");
+                        ui.checkbox(each_node, "Apply to all nodes individually");
                         ui.end_row();
                         ui.label("");
                         ui.weak(if *each_node {
