@@ -53,6 +53,7 @@ impl Region {
             Region::Faces(faces) => ids.extend(faces.iter().map(|(e, _)| *e)),
             Region::Geometry(entities) => {
                 ids.extend(mesh.cad_faces(entities).iter().map(|(e, _)| *e));
+                ids.extend(mesh.cad_line_elements(entities));
             }
             Region::Nodes(_) | Region::NodeSet(_) | Region::Surface(_) => {}
             Region::Edges(_) | Region::ReferencePoint(_) | Region::RemotePoint(_) => {}

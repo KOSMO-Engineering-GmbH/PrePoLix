@@ -20,6 +20,8 @@ pub struct CadIndex {
     face_edges: BTreeMap<i32, Vec<i32>>,
     /// The CAD vertices at the ends of each CAD edge.
     edge_vertices: BTreeMap<i32, Vec<i32>>,
+    /// The CAD edge of each mesh segment along one by its end nodes, the smaller first.
+    segment_edge: HashMap<[NodeId; 2], i32>,
 }
 
 impl CadIndex {
@@ -62,10 +64,18 @@ impl CadIndex {
                     .collect(),
             );
         }
+        let segment_edge = (cad.segments.iter())
+            .flat_map(|(&edge, segments)| {
+                segments
+                    .iter()
+                    .map(move |&[a, b]| ([a.min(b), a.max(b)], edge))
+            })
+            .collect();
         Self {
             face_of: cad.face_of().into_iter().collect(),
             face_edges,
             edge_vertices,
+            segment_edge,
         }
     }
 
@@ -104,16 +114,14 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
     if hit.line {
         // A line part is the mesh of a free CAD edge: the hit names one of its elements. A
         // click near an end of the edge picks the vertex there, as on a solid's edge.
-        let element = *model.skin(hit.part).line_elements.get(hit.face)?;
-        let entity = model.cad_entity(model.mesh.elements()[element].id)?;
+        let edge = line_edge(model, hit)?;
         if target == Target::Nodes
-            && let CadEntity::Edge(edge) = entity
             && let Some(vertex) = index.nearest_vertex(model, edge, hit.point, precision)
         {
             return Some(CadEntity::Vertex(vertex));
         }
         return (!matches!(target, Target::Faces | Target::Surfaces | Target::Lines))
-            .then_some(entity);
+            .then_some(CadEntity::Edge(edge));
     }
     let skin_face = model.skin(hit.part).faces.get(hit.face)?;
     let element = model.mesh.elements()[skin_face.element].id;
@@ -166,11 +174,7 @@ pub fn pick(model: &Model, hit: &Hit, target: Target, precision: f32) -> Option<
 pub fn nearest_corner(model: &Model, hit: &Hit) -> Option<i32> {
     let index = model.cad_index();
     let edges: Vec<i32> = if hit.line {
-        let element = *model.skin(hit.part).line_elements.get(hit.face)?;
-        match model.cad_entity(model.mesh.elements()[element].id)? {
-            CadEntity::Edge(edge) => vec![edge],
-            _ => return None,
-        }
+        vec![line_edge(model, hit)?]
     } else {
         let skin_face = model.skin(hit.part).faces.get(hit.face)?;
         let element = model.mesh.elements()[skin_face.element].id;
@@ -190,6 +194,25 @@ pub fn nearest_corner(model: &Model, hit: &Hit) -> Option<i32> {
         })
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(v, _)| v)
+}
+
+/// The CAD edge of a hit line segment: the edge an element of the geometry display shows,
+/// else the edge of the mesh the element's segment lies along, by the CAD map.
+fn line_edge(model: &Model, hit: &Hit) -> Option<i32> {
+    let element = &model.mesh.elements()[*model.skin(hit.part).line_elements.get(hit.face)?];
+    if let Some(entity) = model.cad_entity(element.id) {
+        return match entity {
+            CadEntity::Edge(edge) => Some(edge),
+            _ => None,
+        };
+    }
+    // Quadratic lines have their midside node between the ends.
+    let (a, b) = (*element.nodes.first()?, *element.nodes.last()?);
+    model
+        .cad_index()
+        .segment_edge
+        .get(&[a.min(b), a.max(b)])
+        .copied()
 }
 
 /// Distance of a point to the mesh segments along a CAD edge, in render coordinates.
@@ -524,6 +547,218 @@ mod tests {
             }
             assert!((fine - coarse).abs() < 0.03 * fine, "{coarse} -> {fine}");
         }
+    }
+
+    /// A cantilever of two CAD lines along x, 0..60 and 60..100, meshed as beams: fixed at
+    /// x = 0, the lines tied at x = 60 and pulled down at x = 100, all picked on the lines
+    /// in the geometry mode. Meshed coarse, then both lines remeshed fine: the picks are CAD
+    /// vertices and edges, which find their nodes on both meshes, and CalculiX gives the
+    /// beam theory's tip deflection both times.
+    #[test]
+    fn selections_on_lines_survive_remeshing() {
+        if !gmsh_available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("prepolix-lines-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("kragarm.brep");
+        plx_mesher::gmsh::with_gmsh(|gmsh| {
+            let a = gmsh.add_point([0.0, 0.0, 0.0])?;
+            let b = gmsh.add_point([60.0, 0.0, 0.0])?;
+            let c = gmsh.add_point([100.0, 0.0, 0.0])?;
+            gmsh.add_line(a, b)?;
+            gmsh.add_line(b, c)?;
+            gmsh.write(&file)
+        })
+        .unwrap();
+        let mut model = load(&file, plx_model::UnitSystem::Unitless).unwrap().model;
+        std::fs::remove_dir_all(&dir).unwrap();
+        let mut geometry = model.geometry.clone().unwrap();
+        geometry.meshing.max_size = 20.0;
+        model.set_mesh(plx_mesher::generate_mesh(&geometry).unwrap().mesh);
+        let lines: Vec<String> = model.mesh.parts.iter().map(|p| p.name.clone()).collect();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+
+        // Looking down onto the lines at x, within 1 of them.
+        let hit_at = |model: &Model, x: f64| {
+            let origin = model.to_render([x, 0.5, 50.0]);
+            model.pick_line(origin, Vec3::NEG_Z, |_| 1.0).unwrap().1
+        };
+        let click = |model: &Model, target: Target, x: f64| {
+            let sources = if target == Target::Nodes {
+                NODE_SOURCES
+            } else {
+                FACE_SOURCES
+            };
+            let mut draft = RegionDraft::new(sources, target);
+            let hit = hit_at(model, x);
+            draft.click(
+                model,
+                &Picker::default(),
+                Some((&hit, 1.0)),
+                Operation::Replace,
+            );
+            draft.region()
+        };
+        let vertex = |region: &Region| matches!(region, Region::Geometry(e) if matches!(e[..], [CadEntity::Vertex(_)]));
+        let fixed = click(&model, Target::Nodes, 0.5);
+        let tied = click(&model, Target::Nodes, 60.5);
+        let pulled = click(&model, Target::Nodes, 99.5);
+        for region in [&fixed, &tied, &pulled] {
+            assert!(vertex(region), "{region:?}");
+        }
+        // Away from its ends a click picks the whole line.
+        let line = click(&model, Target::Nodes, 30.0);
+        assert!(
+            matches!(&line, Region::Geometry(e) if matches!(e[..], [CadEntity::Edge(_)])),
+            "{line:?}"
+        );
+        // A point, e.g. of a remote displacement, is the nearest end.
+        let point = Picker::default().pick(&model, &hit_at(&model, 80.0), Target::Point, 1.0);
+        let crate::selection::Items::Geometry(point) = point else {
+            panic!("{point:?}");
+        };
+        assert_eq!(Region::Geometry(point.into_iter().collect()), pulled);
+
+        model.fe = FeModel {
+            materials: vec![Material {
+                name: "Steel".into(),
+                density: None,
+                elastic: Some(Elastic {
+                    young: 210000.0,
+                    poisson: 0.3,
+                }),
+                conductivity: None,
+                specific_heat: None,
+                expansion: None,
+                plastic: None,
+                creep: None,
+            }],
+            sections: vec![Section {
+                name: "Section-1".into(),
+                material: "Steel".into(),
+                region: line.clone(),
+                thickness: 1.0,
+                kind: SectionKind::Beam(plx_model::BeamSection {
+                    profile: plx_model::BeamProfile::Rect { a: 10.0, b: 10.0 },
+                    ..plx_model::BeamSection::DEFAULT
+                }),
+            }],
+            node_ties: vec![plx_model::NodeTie {
+                region: tied.clone(),
+                ..plx_model::NodeTie::new("Node_Tie-1")
+            }],
+            steps: vec![Step::new_static("Step-1")],
+            ..FeModel::default()
+        };
+        // The other line by its part.
+        let other = (lines.iter())
+            .find(|name| {
+                let part = Region::Parts(vec![(*name).clone()]);
+                part.elements(&model.mesh) != line.elements(&model.mesh)
+            })
+            .unwrap();
+        let mut second = model.fe.sections[0].clone();
+        second.name = "Section-2".into();
+        second.region = Region::Parts(vec![other.clone()]);
+        model.fe.sections.push(second);
+        let step = &mut model.fe.steps[0];
+        step.boundary_conditions.push(BoundaryCondition {
+            name: "Fix".into(),
+            active: true,
+            visible: true,
+            region: fixed.clone(),
+            kind: BoundaryKind::Displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        step.loads.push(Load {
+            name: "Pull".into(),
+            active: true,
+            visible: true,
+            region: pulled.clone(),
+            kind: LoadKind::Force {
+                value: [0.0, 0.0, -100.0],
+                each_node: false,
+            },
+            amplitude: None,
+            factor_amplitude: None,
+        });
+
+        let check = |model: &Model| {
+            let mesh = &model.mesh;
+            for (region, x, count) in [(&fixed, 0.0, 1), (&tied, 60.0, 2), (&pulled, 100.0, 1)] {
+                assert!(region.missing_reference(mesh).is_none(), "{region:?}");
+                let nodes = region.nodes(mesh);
+                assert_eq!(nodes.len(), count, "{region:?}");
+                assert!(coords(mesh, &nodes).iter().all(|c| (c[0] - x).abs() < 1e-9));
+            }
+            let elements = line.elements(mesh);
+            assert!(!elements.is_empty());
+            assert_eq!(
+                elements,
+                Region::Parts(vec![lines.iter().find(|n| *n != other).unwrap().clone()])
+                    .elements(mesh)
+            );
+            elements.len()
+        };
+        let coarse = check(&model);
+        let coarse_deflection = tip_deflection(&model);
+
+        for part in &lines {
+            geometry.mesh_items.push(plx_model::MeshSetupItem {
+                name: format!("Meshing_Parameters-{part}"),
+                kind: plx_model::MeshSetupKind::MeshingParameters {
+                    parts: vec![part.clone()],
+                    parameters: plx_model::MeshingParameters {
+                        max_size: 4.0,
+                        ..geometry.meshing
+                    },
+                },
+            });
+        }
+        for part in &lines {
+            let fine = plx_mesher::generate_part_mesh(&geometry, part).unwrap();
+            let mesh = plx_mesher::merge_part(&model.mesh, fine.mesh);
+            model.set_mesh(mesh);
+        }
+        let fine = check(&model);
+        assert!(fine > 3 * coarse, "{coarse} -> {fine}");
+        let fine_deflection = tip_deflection(&model);
+
+        if let (Some(coarse), Some(fine)) = (coarse_deflection, fine_deflection) {
+            // F L^3 / (3 E I) with I = 10^4 / 12.
+            let theory = 100.0 * 100f32.powi(3) / (3.0 * 210000.0 * 1e4 / 12.0);
+            for value in [coarse, fine] {
+                assert!(
+                    (value - theory).abs() < 0.03 * theory,
+                    "{value} vs. {theory}"
+                );
+            }
+        }
+    }
+
+    /// The largest downward displacement CalculiX computes, if ccx is installed.
+    fn tip_deflection(model: &Model) -> Option<f32> {
+        std::process::Command::new("ccx").arg("-v").output().ok()?;
+        let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Kragarm").unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "prepolix-lines-remesh-{}-{}",
+            std::process::id(),
+            model.mesh.element_count()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("kragarm.inp"), inp).unwrap();
+        let status = std::process::Command::new("ccx")
+            .args(["-i", "kragarm"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "ccx: {status:?}");
+        let results = read_frd(&dir.join("kragarm.frd")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let disp = results.increments.last().unwrap().field("DISP").unwrap();
+        let values = &disp.component("U3").unwrap().values;
+        Some(-values.iter().copied().fold(f32::MAX, f32::min))
     }
 
     /// The largest displacement along x CalculiX computes, if ccx is installed.
