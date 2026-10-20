@@ -641,6 +641,8 @@ struct Sets<'a> {
     /// Local coordinate systems (`*Transform`, type R) of node sets whose symmetry plane is
     /// no coordinate plane: the set with the local x and y axes.
     transforms: Vec<(String, [f64; 3], [f64; 3])>,
+    /// Nodes of line, shell and membrane elements, see [`rigid_body`].
+    expanded: BTreeSet<NodeId>,
 }
 
 /// The nodes CalculiX's `*Rigid body` adds for a reference point: the reference node takes
@@ -675,6 +677,7 @@ impl<'a> Sets<'a> {
             cut_originals: BTreeMap::new(),
             submodel_sets: Vec::new(),
             transforms: Vec::new(),
+            expanded: plx_model::expanded_nodes(mesh),
         };
         for (name, ids) in &mesh.node_sets {
             sets.node_sets.push((name.clone(), ids.clone()));
@@ -1235,7 +1238,6 @@ fn constraints(
                         point: body.reference_point.clone(),
                     });
                 };
-                let set = sets.node_set(&body.name, &body.region)?;
                 // Both nodes sit on the reference point, as PrePoMax writes them.
                 let (reference, rotation) = (next_node, next_node + 1);
                 next_node += 2;
@@ -1249,10 +1251,17 @@ fn constraints(
                         set: None,
                     },
                 );
-                keywords.push(Keyword::generated(format!(
-                    "** Name: {}\n*Rigid body, Nset={set}, Ref node={reference}, Rot node={rotation}\n",
-                    body.name
-                )));
+                let mut text = format!("** Name: {}\n", body.name);
+                rigid_body(
+                    &mut text,
+                    sets,
+                    &body.name,
+                    &body.region,
+                    point.position,
+                    None,
+                    [reference, rotation],
+                )?;
+                keywords.push(Keyword::generated(text));
             }
             Constraint::Tie(t) => keywords.push(tie(sets, t)?),
         }
@@ -1304,11 +1313,15 @@ fn constraints(
                     } else {
                         bc.region.clone()
                     };
-                    let set = sets.node_set(&bc.name, &region)?;
-                    let _ = writeln!(
-                        text,
-                        "*Rigid body, Nset={set}, Ref node={reference}, Rot node={rotation}"
-                    );
+                    rigid_body(
+                        &mut text,
+                        sets,
+                        &bc.name,
+                        &region,
+                        point.position,
+                        point.axes,
+                        [reference, rotation],
+                    )?;
                 }
                 RemoteBehavior::Deformable | RemoteBehavior::Coupled => {
                     let space = model.properties.space;
@@ -1779,6 +1792,43 @@ fn write_step(sets: &mut Sets, step: &Step, context: &StepContext) -> Result<Key
         blocks.push(block);
     }
     Ok(Keyword::title(&step.name, blocks))
+}
+
+/// A rigid body of the nodes of `region` driven by a reference and a rotation node at
+/// `position`: a `*Rigid body`, but with the nodes of beams, trusses, shells and membranes
+/// rigidly coupled by `*Equation`s. CalculiX 2.23 stops on a rigid body containing such a
+/// node ("nodes belonging to beam elements must not be subject to a RIGID MPC"); the
+/// equations hold them for small rotations as the rigid body does in a linear analysis.
+fn rigid_body(
+    text: &mut String,
+    sets: &mut Sets,
+    item: &str,
+    region: &Region,
+    position: [f64; 3],
+    axes: Option<[[f64; 3]; 3]>,
+    nodes: [NodeId; 2],
+) -> Result<(), WriteError> {
+    let [reference, rotation] = nodes;
+    let (expanded, others): (Vec<NodeId>, Vec<NodeId>) =
+        (region.nodes(sets.mesh).into_iter()).partition(|n| sets.expanded.contains(n));
+    let rigid = |text: &mut String, set: String| {
+        let _ = writeln!(
+            text,
+            "*Rigid body, Nset={set}, Ref node={reference}, Rot node={rotation}"
+        );
+    };
+    if expanded.is_empty() {
+        rigid(text, sets.node_set(item, region)?);
+        return Ok(());
+    }
+    if !others.is_empty() {
+        rigid(text, sets.node_set(item, &Region::Nodes(others))?);
+    }
+    text.push_str("** Nodes of beams and shells, which CalculiX refuses in a rigid body\n");
+    for row in plx_model::rigid_rows(sets.mesh, &expanded, position) {
+        remote_equation(text, &row, axes, nodes);
+    }
+    Ok(())
 }
 
 /// An `*Equation` of a remote point: its terms with the point's translations and rotations

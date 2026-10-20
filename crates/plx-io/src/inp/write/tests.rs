@@ -3636,6 +3636,97 @@ fn calculix_bends_a_rectangular_beam_like_beam_theory() {
 }
 
 #[test]
+fn a_rigid_remote_displacement_couples_beam_nodes_by_equations() {
+    // CalculiX 2.23 stops on beam nodes in a *Rigid body ("nodes belonging to beam elements
+    // must not be subject to a RIGID MPC"); they are coupled by equations instead.
+    let mesh = line_chain(4, 0, 100.0, true);
+    let tip = *mesh.node_ids().last().unwrap();
+    let mut model = line_model(
+        &mesh,
+        rect_beam(BeamOrientation::Automatic),
+        LoadKind::force([0.0, 0.0, 0.0]),
+    );
+    model.steps[0].loads.clear();
+    // The point 20 above the tip, its rotations held: the tip moves like the point.
+    let values = [None, Some(-1.0), None, Some(0.0), Some(0.0), Some(0.0)];
+    let mut bc = remote_with(values, |r| r.location = Some([100.0, 0.0, 20.0]));
+    bc.region = Region::Nodes(vec![tip]);
+    model.steps[0].boundary_conditions.push(bc);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Rigid body"), "{text}");
+    let (reference, rotation) = (tip + 1, tip + 2);
+    // u_tip = u_point + theta x (0, 0, -20)
+    for expected in [
+        format!("*Equation\n3\n{tip}, 1, 1, {reference}, 1, -1, {rotation}, 2, 20\n"),
+        format!("*Equation\n3\n{tip}, 2, 1, {reference}, 2, -1, {rotation}, 1, -20\n"),
+        format!("*Equation\n2\n{tip}, 3, 1, {reference}, 3, -1\n"),
+    ] {
+        assert!(text.contains(&expected), "{expected}\n{text}");
+    }
+    if let Some(frd) = run_ccx("balken_starr", &text) {
+        let u2 = min_u2(&frd);
+        assert!((u2 + 1.0).abs() < 1e-6, "{u2}");
+    }
+
+    // The same for a rigid body constraint on the tip.
+    model.steps[0].boundary_conditions.truncate(1);
+    model
+        .reference_points
+        .push(ReferencePoint::new("RP-1", [100.0, 0.0, 0.0]));
+    let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+    body.region = Region::Nodes(vec![tip]);
+    model.constraints.push(Constraint::RigidBody(body));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Rigid body"), "{text}");
+    assert!(
+        text.contains(&format!("*Equation\n2\n{tip}, 1, 1, {reference}, 1, -1\n")),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_rigid_body_keeps_its_solid_nodes_and_couples_beam_nodes_by_equations() {
+    // The cantilever's tip face and a beam node beside it in one rigid body.
+    let (mut mesh, mut model) = rigid_tip(None, None);
+    let start = mesh.node_ids().iter().max().unwrap() + 1;
+    mesh.set_node(start, [100.0, 5.0, 5.0]);
+    mesh.set_node(start + 1, [150.0, 5.0, 5.0]);
+    let id = mesh.elements().iter().map(|e| e.id).max().unwrap() + 1;
+    mesh.add_element(plx_mesh::Element {
+        id,
+        type_name: "B31".into(),
+        shape: plx_mesh::ElementShape::Line2,
+        nodes: vec![start, start + 1],
+    })
+    .unwrap();
+    let tip = Region::Surface("TIP".into()).nodes(&mesh);
+    let Constraint::RigidBody(body) = &mut model.constraints[0] else {
+        unreachable!()
+    };
+    body.region = Region::Nodes([tip.clone(), vec![start]].concat());
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Rigid body").count(), 1, "{text}");
+    let set = text
+        .split("*Rigid body, Nset=")
+        .nth(1)
+        .and_then(|rest| rest.split(',').next())
+        .unwrap();
+    let members = text
+        .split(&format!("*Nset, Nset={set}\n"))
+        .nth(1)
+        .unwrap()
+        .split('*')
+        .next()
+        .unwrap();
+    assert!(!members.contains(&start.to_string()), "{members}");
+    assert_eq!(text.matches("*Equation\n").count(), 3, "{text}");
+    assert!(
+        text.contains(&format!("*Equation\n2\n{start}, 1, 1, ")),
+        "{text}"
+    );
+}
+
+#[test]
 fn calculix_bends_a_pipe_like_beam_theory() {
     let (r, t) = (5.0f64, 1.0f64);
     let inertia = std::f64::consts::PI * (r.powi(4) - (r - t).powi(4)) / 4.0;
