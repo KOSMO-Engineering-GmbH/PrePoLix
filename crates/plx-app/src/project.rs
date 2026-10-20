@@ -4711,12 +4711,9 @@ impl ProjectApp {
         let mut filter = self.monitor.filter.clone();
         let (mut pick, mut stop, mut stop_all, mut open_analysis, mut clear) =
             (None, None, false, None, false);
-        let output: Vec<String> = match selected {
-            Some(id) => (self.solves.iter().find(|s| s.id == id))
-                .map(|solve| solve.output().into_iter().map(str::to_owned).collect())
-                .unwrap_or_default(),
-            None => Vec::new(),
-        };
+        let solve = selected.and_then(|id| self.solves.iter().find(|s| s.id == id));
+        let output: Vec<&str> = solve.map(|s| s.output()).unwrap_or_default();
+        let dropped = solve.map_or(0, |s| s.dropped());
         ui.horizontal(|ui| {
             let row = rows.iter().find(|r| Some(r.id) == selected);
             let active = row.is_some_and(|r| r.active);
@@ -4763,6 +4760,7 @@ impl ProjectApp {
             {
                 filter.clear();
             }
+            crate::analysis::dropped_note(ui, dropped);
         });
         ui.horizontal_top(|ui| {
             let height = ui.available_height();
@@ -4827,7 +4825,7 @@ impl ProjectApp {
                     crate::virtual_table::lines(ui, area, &output);
                 } else {
                     let needle = filter.to_lowercase();
-                    let shown: Vec<&String> = (output.iter())
+                    let shown: Vec<&str> = (output.iter().copied())
                         .filter(|line| line.to_lowercase().contains(&needle))
                         .collect();
                     crate::virtual_table::lines(ui, area, &shown);

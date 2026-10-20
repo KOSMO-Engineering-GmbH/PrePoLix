@@ -219,6 +219,19 @@ impl BackgroundSolve {
             .collect()
     }
 
+    /// The number of lines [`Self::output`] has had, also those dropped since.
+    pub fn output_total(&self) -> usize {
+        let solver = (self.analysis.as_ref()).map_or(0, |a| a.dropped() + a.output().len());
+        self.before.len() + solver + self.after.len()
+    }
+
+    /// The lines dropped from the front of CalculiX's output in a long run.
+    pub fn dropped(&self) -> usize {
+        self.analysis
+            .as_ref()
+            .map_or(0, crate::analysis::Analysis::dropped)
+    }
+
     /// Stops it: CalculiX is killed, a model being built or meshed is dropped.
     pub fn stop(&mut self) {
         if !self.active() {

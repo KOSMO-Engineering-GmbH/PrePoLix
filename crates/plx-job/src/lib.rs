@@ -64,10 +64,9 @@ pub struct Job {
     name: String,
     work_dir: PathBuf,
     child: Child,
+    /// Lines of output not yet handed out by [`Job::new_output`].
     output: Arc<Mutex<Vec<String>>>,
     readers: Vec<JoinHandle<()>>,
-    /// Lines of output already handed out by [`Job::new_output`].
-    read: usize,
     status: JobStatus,
 }
 
@@ -109,7 +108,6 @@ impl Job {
             child,
             output,
             readers,
-            read: 0,
             status: JobStatus::Running,
         })
     }
@@ -153,10 +151,8 @@ impl Job {
 
     /// Output lines written since the last call.
     pub fn new_output(&mut self) -> Vec<String> {
-        let output = self.output.lock().unwrap_or_else(|e| e.into_inner());
-        let lines = output[self.read.min(output.len())..].to_vec();
-        self.read = output.len();
-        lines
+        let mut output = self.output.lock().unwrap_or_else(|e| e.into_inner());
+        std::mem::take(&mut *output)
     }
 
     /// The last increment CalculiX reported in the `.sta` file.
