@@ -32,6 +32,7 @@ fehlgeschlagenen Lauf aus der Ausgabe von CalculiX erkennt. Nachgestellt mit Cal
 | Vorgegebene Temperatur ohne Wärmeausdehnung im Material | keine | Temperatur ohne Wirkung | Warnung |
 | Anfangsgeschwindigkeit (Initial Condition Velocity) ohne Dynamic Step | keine | ignoriert | Warnung an der Anfangsbedingung; im Dynamic Step zählt sie als Last |
 | Frequency Step ohne Lagerung | keine | sechs Starrkörpermoden nahe 0 Hz | keine (gewollt) |
+| Balken-, Fachwerk- oder Schalenknoten in einem `*RIGID BODY` (Rigid Body Constraint, Remote Displacement Rigid) | 2.21: keine; 2.23 (mitgeliefert): `gen3dmpc: nodes belonging to beam elements must not be subject to a RIGID MPC` (Schalen ebenso), außer der Knoten ist ein Knot | Abbruch mit 2.23 | Writer koppelt diese Knoten über lineare `*EQUATION`s an Referenz- und Rotationsknoten (gleiche Ergebnisse wie `*RIGID BODY` in 2.21); Warnung nur bei NLGEOM (kleine Rotationen); Ausgabe wird erkannt |
 
 Quellen: CalculiX-Handbuch (ccx 2.21), [PrePoMax-Forum: Known CalculiX limitations](https://prepomax.discourse.group/t/known-calculix-limitations/3050),
 [PrePoMax-Forum: too many cutbacks](https://prepomax.discourse.group/t/error-too-many-cutbacks/2602),

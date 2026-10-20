@@ -26,6 +26,15 @@ rigid body is drawn in red; a deactivated one has no lines.
 Written as `*RIGID BODY, NSET=..., REF NODE=..., ROT NODE=...`: PrePoLix adds a reference node at
 the point for the translations and a rotation node for the rotations, as CalculiX requires.
 
+Nodes of beams, trusses, shells and membranes in the region are an exception: CalculiX expands
+these elements into solids internally and stops on such a node in a rigid body ("nodes
+belonging to beam elements must not be subject to a RIGID MPC"). PrePoLix couples these nodes
+to the reference point with `*EQUATION`s instead, $u = u_"RP" + theta times (x - x_"RP")$, and
+keeps the other nodes in the `*RIGID BODY`. In a linear analysis this is the same as a rigid
+body. With large deformations (NLGEOM) the equations only hold for small rotations of the
+point, and the model check (@model-check) warns "Beam or shell nodes in a rigid body". As in a rigid body, the rotations of beam and shell
+nodes are not coupled: to join beams rigidly, give them a shared node with a #ui("Node Tie").
+
 === Loads and supports on a reference point
 
 Boundary conditions and loads can act on a reference point instead of on nodes: choose

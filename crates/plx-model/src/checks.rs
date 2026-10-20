@@ -44,6 +44,11 @@ pub enum Problem {
     /// Nodes in two rigid bodies, of rigid body constraints or remote displacements:
     /// CalculiX keeps them in the first and only warns.
     SharedRigidBody,
+    /// Beam, truss, shell or membrane nodes in a rigid body or rigid remote displacement:
+    /// CalculiX 2.23 refuses them in a `*RIGID BODY`, so they are coupled by linear
+    /// equations, which hold for small rotations only. Warned of in steps with large
+    /// deformations, and found in the output of a CalculiX run of another input file.
+    RigidBeamNodes,
     /// A plastic hardening curve CalculiX rejects: no elasticity, a row without a yield
     /// stress, or plastic strains that do not start at 0 and grow.
     InvalidPlastic,
@@ -135,6 +140,7 @@ impl Problem {
             | Problem::ContactWithCoriolis
             | Problem::WheelOffSurface
             | Problem::DesignRegionIgnored
+            | Problem::RigidBeamNodes
             | Problem::NoCreep => Severity::Warning,
             _ => Severity::Error,
         }
@@ -168,6 +174,7 @@ impl Problem {
             Problem::NoPhysicalConstants => "Physical constants missing",
             Problem::NoRigidBody => "Reference point without rigid body",
             Problem::SharedRigidBody => "Nodes in several rigid bodies or remote points",
+            Problem::RigidBeamNodes => "Beam or shell nodes in a rigid body",
             Problem::InvalidPlastic => "Invalid plasticity",
             Problem::InvalidCreep => "Invalid creep law",
             Problem::NoExpansion => "Temperature without thermal expansion",
@@ -219,6 +226,16 @@ impl Problem {
                 "A Frequency step, a Dynamic step, a transient heat transfer as well as \
                  gravity and centrifugal loads need the mass of the model. Without a \
                  density CalculiX aborts with \"no density was assigned\"."
+            }
+            Problem::RigidBeamNodes => {
+                "CalculiX refuses nodes of beams, trusses, shells and membranes in a rigid \
+                 body (\"nodes belonging to beam elements must not be subject to a RIGID \
+                 MPC\"), because it expands these elements into solids. PrePoLix therefore \
+                 couples such nodes of a Rigid Body constraint or a rigid Remote Displacement \
+                 with linear equations to the point. They are exact for small rotations, as \
+                 in a linear analysis; with large deformations (NLGEOM) and large rotations \
+                 of the point these nodes lag behind the rigid motion. As with a rigid body, \
+                 the rotations of beam and shell nodes are not coupled."
             }
             Problem::SharedRigidBody => {
                 "A node can follow one rigid body or remote point only. Rigid body constraints \
@@ -486,6 +503,13 @@ impl Problem {
             Problem::InvalidElastic => {
                 "Enter a Young's modulus greater than 0 and a Poisson's ratio less than \
                  0.5 (steel: 210000 MPa, 0.3)."
+            }
+            Problem::RigidBeamNodes => {
+                "If the point turns by more than a few degrees, select solid faces or nodes \
+                 for the rigid body, or join the beams with a Node Tie (rigid) at a shared \
+                 node instead of a rigid body. For small rotations nothing needs to change. \
+                 A run that stopped with this message used an input file from an older \
+                 PrePoLix: run the analysis again."
             }
             Problem::SharedRigidBody => {
                 "Make the selections of the rigid bodies and remote displacements separate, or \
@@ -983,6 +1007,23 @@ impl FeModel {
                 if let Ok(point) = remote.resolve(self, mesh, &bc.region) {
                     let nodes = point.nodes.into_iter().collect();
                     bodies.push((ModelItem::BoundaryCondition(s, i), &bc.name, nodes));
+                }
+            }
+        }
+        if let Some(step) = (self.steps.iter()).find(|s| s.active && s.kind.nlgeom()) {
+            let expanded = crate::expanded_nodes(mesh);
+            for (item, name, nodes) in &bodies {
+                let count = nodes.iter().filter(|n| expanded.contains(n)).count();
+                if count > 0 {
+                    findings.push(Finding::new(
+                        *item,
+                        Problem::RigidBeamNodes,
+                        format!(
+                            "{name}: {count} beam or shell nodes coupled by equations, {} \
+                             with large deformations",
+                            step.name
+                        ),
+                    ));
                 }
             }
         }
@@ -2345,7 +2386,7 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
             }
         }
     }
-    let known: [(Problem, &[&str]); 13] = [
+    let known: [(Problem, &[&str]); 14] = [
         (Problem::NoElastic, &["no elastic constants"]),
         (
             Problem::InvalidPlastic,
@@ -2385,6 +2426,7 @@ pub fn diagnose_solver_output(lines: &[String], mesh: &FeMesh) -> Vec<Finding> {
         ),
         (Problem::MpcAndSpc, &["dependent side of a mpc and a spc"]),
         (Problem::RotationIn2d, &["usermpc: mpc of type"]),
+        (Problem::RigidBeamNodes, &["must not be subject to a rigid"]),
     ];
     for (problem, markers) in known {
         if let Some(marker) = markers.iter().find(|m| text.contains(*m)) {
@@ -3442,6 +3484,54 @@ mod tests {
         assert_eq!(check(&model, &mesh)[0].problem, Problem::RigidBodyMotion);
     }
 
+    #[test]
+    fn beam_nodes_in_a_rigid_remote_displacement_are_warned_of_with_nlgeom() {
+        let mut mesh = FeMesh::default();
+        for (id, x) in [0.0, 1.0, 2.0].into_iter().enumerate() {
+            mesh.set_node(id as u32 + 1, [x, 0.0, 0.0]);
+        }
+        for (id, nodes) in [(1, vec![1, 2]), (2, vec![2, 3])] {
+            mesh.add_element(Element {
+                id,
+                type_name: "B31".into(),
+                shape: ElementShape::Line2,
+                nodes,
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "BEAM".into(),
+            elements: vec![1, 2],
+        });
+        let mut model = model(&mesh);
+        model.sections[0].kind = crate::SectionKind::Beam(crate::BeamSection::DEFAULT);
+        let bc = &mut model.steps[0].boundary_conditions[0];
+        bc.region = Region::Nodes(vec![1]);
+        bc.kind = BoundaryKind::RemoteDisplacement(crate::RemoteDisplacement::new([Some(0.0); 6]));
+        model.steps[0].loads[0].region = Region::Nodes(vec![3]);
+        // Linear: the equations replacing the rigid body are exact.
+        let rigid = |found: &[Finding]| {
+            (found.iter())
+                .filter(|f| f.problem == Problem::RigidBeamNodes)
+                .map(|f| (f.item, f.detail.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rigid(&check(&model, &mesh)), []);
+        let StepKind::Static(settings) = &mut model.steps[0].kind else {
+            unreachable!()
+        };
+        settings.nlgeom = true;
+        assert_eq!(
+            rigid(&check(&model, &mesh)),
+            [(
+                ModelItem::BoundaryCondition(0, 0),
+                "Fixed-1: 1 beam or shell nodes coupled by equations, Step-1 with large \
+                 deformations"
+                    .to_string()
+            )]
+        );
+    }
+
     /// A plane truss triangle in the XZ plane, as meshed lines (`B31`) with a truss section:
     /// nodes 1 (0, 0, 0), 2 (2, 0, 0) and 3 (1, 0, 1), the bottom bar split into
     /// `bottom` elements, held statically determinate in the plane and at every node in Y.
@@ -3647,6 +3737,16 @@ mod tests {
         assert_eq!(
             findings[0].detail,
             "CalculiX reports \"*ERROR reading *RADIATE: *RADIATE card was selected\""
+        );
+        let rigid = [
+            " *ERROR in gen3dmpc: nodes belonging to",
+            "        beam elements must not be",
+            "        subject to a RIGID                MPC.",
+        ]
+        .map(String::from);
+        assert_eq!(
+            problems(&diagnose_solver_output(&rigid, &mesh)),
+            [(ModelItem::Analysis, Problem::RigidBeamNodes)]
         );
         let unknown = [" *ERROR in something: new message".to_string()];
         assert_eq!(

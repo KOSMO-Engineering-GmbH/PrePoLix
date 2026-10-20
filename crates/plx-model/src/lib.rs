@@ -67,7 +67,9 @@ pub use parameter::{Parameter, ValueKind};
 pub use primitive::{MAX_PRIMITIVE_ELEMENTS, MeshPrimitive, Param, ParamSlot, ParamValue};
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
-pub use remote::{RemoteBehavior, RemoteDisplacement, RemoteDof, RemotePoint};
+pub use remote::{
+    RemoteBehavior, RemoteDisplacement, RemoteDof, RemotePoint, expanded_nodes, rigid_rows,
+};
 pub use section::{
     BeamOrientation, BeamProfile, BeamSection, Section, SectionKind, line_tangent, membrane_type,
     unit_thickness,
@@ -634,6 +636,17 @@ pub enum StepKind {
 }
 
 impl StepKind {
+    /// Whether the step is computed with large deformations (`NLGEOM`).
+    pub fn nlgeom(&self) -> bool {
+        match self {
+            StepKind::Static(settings) => settings.nlgeom,
+            StepKind::CoupledTempDisp(settings) => settings.increments.nlgeom,
+            StepKind::Dynamic(settings) => settings.increments.nlgeom,
+            StepKind::Visco(settings) => settings.increments.nlgeom,
+            _ => false,
+        }
+    }
+
     /// The equation solver of the step; a complex frequency step chooses none, it works
     /// on the stored eigenmodes.
     pub fn solver_mut(&mut self) -> Option<&mut EquationSolver> {
