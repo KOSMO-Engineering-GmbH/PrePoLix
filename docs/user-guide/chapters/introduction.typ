@@ -32,8 +32,10 @@ are still possible (@mesh-sets).
 This has two consequences you will notice:
 
 - When you remesh a part, loads and boundary conditions that were picked on the CAD geometry
-  stay where they are, because they refer to faces and edges of the geometry, not to element
-  numbers.
+  stay where they are, because they refer to faces, edges and points of the geometry, not to
+  element numbers. This includes beam and truss lines: a click on a line picks its CAD edge, a
+  click near its end the CAD point there, so node ties and supports at line ends survive a
+  remesh as well.
 - The `.inp` file contains sets you never named. You can inspect it at any time by exporting it
   (#menu("File", "Export CalculiX Input File ...")).
 
