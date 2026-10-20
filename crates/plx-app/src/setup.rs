@@ -2135,7 +2135,7 @@ impl Editor {
         let mut result = EditorResult::Open;
         let mut open = true;
         let mut window = egui::Window::new(self.title())
-            .id(egui::Id::new("item editor"))
+            .id(crate::ids::window(ctx, "item editor"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false);

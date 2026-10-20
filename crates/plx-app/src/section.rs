@@ -363,7 +363,7 @@ impl SectionDialog {
         let mut result = SectionResult::Open;
         let mut open = true;
         let window = egui::Window::new("Section View")
-            .id(egui::Id::new("section view"))
+            .id(crate::ids::window(ctx, "section view"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

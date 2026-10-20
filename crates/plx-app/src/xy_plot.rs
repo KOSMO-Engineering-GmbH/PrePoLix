@@ -364,7 +364,7 @@ pub fn window(ctx: &egui::Context, data: &XyData, shown: bool) -> WindowResponse
     let mut export = None;
     let mut plot = Rect::NOTHING;
     egui::Window::new(format!("Plot: {}", data.title))
-        .id(egui::Id::new("history plot"))
+        .id(crate::ids::window(ctx, "history plot"))
         .open(&mut open)
         .collapsible(false)
         .resizable(true)

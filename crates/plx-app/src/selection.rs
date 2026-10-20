@@ -372,7 +372,7 @@ impl Picker {
         // egui's own constraint uses a default size before the first layout and pins the
         // window there; keep it on screen with its real size instead. It follows the dialog,
         // so it is not movable: egui keeps a movable window where it first was.
-        let id = egui::Id::new("selection window");
+        let id = crate::ids::window(ctx, "selection window");
         let width = egui::AreaState::load(ctx, id)
             .and_then(|s| s.size)
             .map_or(350.0, |s| s.x);

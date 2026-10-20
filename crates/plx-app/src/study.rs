@@ -227,7 +227,7 @@ impl StudyEditor {
         let mut edits = Vec::new();
         let mut open = true;
         egui::Window::new(format!("Parameter Study - {}", self.name))
-            .id(egui::Id::new(("study", self.id)))
+            .id(crate::ids::window(ctx, ("study", self.id)))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -379,7 +379,7 @@ impl StudyEditor {
         let Some(fill) = &mut self.fill else {
             return;
         };
-        let id = egui::Id::new(("study fill", self.id));
+        let id = crate::ids::window(ctx, ("study fill", self.id));
         if self.raise > 0 {
             self.raise -= 1;
             ctx.request_repaint();
@@ -507,7 +507,7 @@ impl StudyEditor {
         let Some(import) = &mut self.import else {
             return;
         };
-        let id = egui::Id::new(("study import", self.id));
+        let id = crate::ids::window(ctx, ("study import", self.id));
         if self.raise > 0 {
             self.raise -= 1;
             ctx.request_repaint();

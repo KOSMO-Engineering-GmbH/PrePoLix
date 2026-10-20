@@ -6852,6 +6852,7 @@ impl ProjectApp {
         let valid = !name.trim().is_empty() && !taken;
         let noun = (self.nodes.iter().find(|n| n.id == id)).map_or("analysis", |n| n.kind().noun());
         egui::Window::new(format!("Rename {}", title_case(noun)))
+            .id(crate::ids::window(ctx, "rename"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -6960,6 +6961,7 @@ impl ProjectApp {
         };
         let mut answer = None;
         egui::Window::new(title)
+            .id(crate::ids::window(ctx, "confirm block delete"))
             .collapsible(false)
             .resizable(false)
             .pivot(egui::Align2::CENTER_CENTER)

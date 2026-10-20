@@ -255,7 +255,7 @@ impl TransformationDialog {
         let mut action = TransformationAction::Open;
         let mut open = true;
         let window = egui::Window::new("Create Transformation")
-            .id(egui::Id::new("transformation dialog"))
+            .id(crate::ids::window(ctx, "transformation dialog"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

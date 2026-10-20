@@ -2243,6 +2243,7 @@ impl Workbench {
         let mut close = false;
         let mut open = true;
         egui::Window::new("Linked Item")
+            .id(crate::ids::window(ctx, "linked item"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -2433,6 +2434,7 @@ impl Workbench {
         let mut open = true;
         let mut close = false;
         egui::Window::new("Model Check")
+            .id(crate::ids::window(ctx, "model check"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -4630,7 +4632,7 @@ impl Workbench {
             [name] => format!("Delete the selected part?\n{name}"),
             names => format!("Delete the selected parts?\n{}", names.join(", ")),
         };
-        egui::Modal::new(egui::Id::new("confirm delete")).show(ctx, |ui| {
+        egui::Modal::new(crate::ids::window(ctx, "confirm delete")).show(ctx, |ui| {
             ui.label(question);
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -5998,7 +6000,7 @@ impl Workbench {
             TreeView::FeModel => self.model.as_ref(),
         };
         egui::Window::new(properties::title(shown, &item))
-            .id(egui::Id::new("properties window"))
+            .id(crate::ids::window(ctx, "properties window"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -6905,6 +6907,7 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
     let mut open = true;
     let mut restart = None;
     egui::Window::new("Animation")
+        .id(crate::ids::window(ctx, "animation"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)

@@ -72,7 +72,7 @@ impl NodePicker {
                 .map_or(Outcome::Closed, |&i| Outcome::Picked(i));
         }
         let mut picked = None;
-        let area = egui::Area::new(egui::Id::new("node picker"))
+        let area = egui::Area::new(crate::ids::window(ctx, "node picker"))
             .order(egui::Order::Foreground)
             .fixed_pos(self.screen)
             .constrain(true)

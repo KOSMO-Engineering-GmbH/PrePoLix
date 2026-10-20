@@ -385,7 +385,7 @@ impl FieldOutputDialog {
         let mut action = DialogAction::Open;
         let mut open = true;
         egui::Window::new(self.title())
-            .id(egui::Id::new("field output dialog"))
+            .id(crate::ids::window(ctx, "field output dialog"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

@@ -51,7 +51,7 @@ impl ColorScaleDialog {
         let draft = &mut self.draft;
         let range = &mut self.range;
         egui::Window::new("Color Scale")
-            .id(egui::Id::new("color scale dialog"))
+            .id(crate::ids::window(ctx, "color scale dialog"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

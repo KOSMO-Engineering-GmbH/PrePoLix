@@ -336,7 +336,7 @@ impl HistoryOutputDialog {
         let mut action = DialogAction::Open;
         let mut open = true;
         let window = egui::Window::new(self.title())
-            .id(egui::Id::new("history output dialog"))
+            .id(crate::ids::window(ctx, "history output dialog"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

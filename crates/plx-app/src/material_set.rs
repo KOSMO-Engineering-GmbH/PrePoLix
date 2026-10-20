@@ -97,7 +97,7 @@ impl MaterialSetEditor {
         let mut result = MaterialSetResult::Open;
         let mut open = true;
         egui::Window::new(format!("Materials - {}", self.name))
-            .id(egui::Id::new(("material set", self.id)))
+            .id(crate::ids::window(ctx, ("material set", self.id)))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

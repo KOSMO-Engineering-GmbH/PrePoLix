@@ -75,7 +75,7 @@ impl VtkExportDialog {
         let format = self.format;
         let shown = increments.get(current);
         egui::Window::new(title)
-            .id(egui::Id::new("vtk export dialog"))
+            .id(crate::ids::window(ctx, "vtk export dialog"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
