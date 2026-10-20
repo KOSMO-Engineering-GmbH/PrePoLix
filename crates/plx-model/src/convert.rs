@@ -362,9 +362,10 @@ impl Constraint {
             }
         };
         match self {
-            Constraint::PointSpring(s) => c.all(&mut s.stiffness, Quantity::ForcePerLength),
-            Constraint::SurfaceSpring(s) => c.all(&mut s.stiffness, stiffness(s.per_area)),
-            Constraint::SurfaceToSurfaceSpring(s) => c.all(&mut s.stiffness, stiffness(s.per_area)),
+            Constraint::Spring(s) => {
+                let quantity = stiffness(s.is_per_area());
+                c.all(&mut s.stiffness, quantity)
+            }
             Constraint::CompressionOnly(s) => {
                 c.value(&mut s.clearance, Quantity::Length);
                 c.value(&mut s.offset, Quantity::Length);

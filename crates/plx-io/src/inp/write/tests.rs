@@ -2960,6 +2960,13 @@ fn blocks(na: u32, nb: u32) -> Blocks {
     }
 }
 
+impl Blocks {
+    /// The nodes of the bottom face of block b.
+    fn b_bottom_nodes(&self) -> Vec<NodeId> {
+        Region::Faces(self.b_bottom.clone()).nodes(&self.mesh)
+    }
+}
+
 /// Steel on both blocks and one static step with a surface traction on top of block `b`,
 /// block `a` held at its bottom.
 fn blocks_model(
@@ -3018,21 +3025,29 @@ fn mean_top(blocks: &Blocks, frd: &FrdImport, component: &str) -> f64 {
     sum / nodes.len() as f64
 }
 
+/// A spring constraint on the region with the stiffness of the whole region.
+fn spring(name: &str, region: Region, stiffness: [f64; 3]) -> plx_model::Spring {
+    plx_model::Spring {
+        region,
+        stiffness,
+        ..plx_model::Spring::new(name)
+    }
+}
+
 #[test]
 fn calculix_carries_a_block_on_springs_between_two_surfaces() {
-    use plx_model::SurfaceToSurfaceSpring;
     // Different meshes on the two sides: the springs end on points between nodes.
     let blocks = blocks(2, 3);
-    let spring = Constraint::SurfaceToSurfaceSpring(SurfaceToSurfaceSpring {
-        name: "Bearing-1".into(),
-        active: true,
-        visible: true,
-        master: Region::Faces(blocks.a_top.clone()),
-        slave: Region::Faces(blocks.b_bottom.clone()),
-        stiffness: [1000.0, 1000.0, 2000.0],
-        per_area: false,
-    });
-    let model = blocks_model(&blocks, vec![spring], [0.0, 0.0, 100.0]);
+    let bearing = plx_model::Spring {
+        master: Some(Region::Faces(blocks.a_top.clone())),
+        ..spring(
+            "Bearing-1",
+            Region::Faces(blocks.b_bottom.clone()),
+            [1000.0, 1000.0, 2000.0],
+        )
+    };
+    let load = [0.0, 0.0, 100.0];
+    let model = blocks_model(&blocks, vec![Constraint::Spring(bearing.clone())], load);
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
     assert!(
         text.contains("*Element, Type=SPRING2, Elset=Bearing-1_All\n"),
@@ -3045,33 +3060,43 @@ fn calculix_carries_a_block_on_springs_between_two_surfaces() {
     // 100 N on 2000 N/mm, the steel itself barely stretches.
     let lift = mean_top(&blocks, &frd, "U3");
     assert!((lift - 0.05).abs() < 0.001, "{lift}");
+    // Applied to the 16 nodes of the bottom individually: 32000 N/mm, so stiff that the
+    // steel of the two blocks adds about 0.001 mm.
+    let each = plx_model::Spring {
+        each_node: true,
+        ..bearing
+    };
+    let model = blocks_model(&blocks, vec![Constraint::Spring(each)], load);
+    let frd = run_ccx(
+        "feder-flaeche-einzeln",
+        &write_inp(&blocks.mesh, &model, "").unwrap(),
+    );
+    let lift = mean_top(&blocks, &frd.unwrap(), "U3");
+    let springs = 100.0 / 32000.0;
+    assert!(lift > springs && lift < springs + 0.0012, "{lift}");
 }
 
 #[test]
-fn calculix_carries_a_block_on_surface_and_point_springs() {
-    use plx_model::{PointSpring, SurfaceSpring};
+fn calculix_carries_a_block_on_springs_to_ground() {
     let blocks = blocks(2, 2);
-    let surface = Constraint::SurfaceSpring(SurfaceSpring {
-        name: "Surface_Spring-1".into(),
-        active: true,
-        visible: true,
-        region: Region::Faces(blocks.b_bottom.clone()),
-        stiffness: [1000.0, 1000.0, 1000.0],
-        per_area: false,
-    });
-    // Nine nodes on the bottom of block b, 100 N/mm each in z.
-    let point = Constraint::PointSpring(PointSpring {
-        name: "Point_Spring-1".into(),
-        active: true,
-        visible: true,
-        region: Region::Faces(blocks.b_bottom.clone()),
-        stiffness: [0.0, 0.0, 100.0],
-    });
-    let model = blocks_model(&blocks, vec![surface, point], [0.0, 0.0, 95.0]);
+    // 1000 N/mm of the whole face, spread by area.
+    let face = spring(
+        "Spring-1",
+        Region::Faces(blocks.b_bottom.clone()),
+        [1000.0, 1000.0, 1000.0],
+    );
+    // 100 N/mm at each of the nine nodes of the bottom of block b.
+    let nodes = Region::Nodes(blocks.b_bottom_nodes());
+    let each = plx_model::Spring {
+        each_node: true,
+        ..spring("Spring-2", nodes.clone(), [0.0, 0.0, 100.0])
+    };
+    let springs = vec![Constraint::Spring(face), Constraint::Spring(each)];
+    let model = blocks_model(&blocks, springs, [0.0, 0.0, 95.0]);
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
-    assert!(text.contains("*Element, Type=SPRING1, Elset=Point_Spring-1_All\n"));
+    assert!(text.contains("*Element, Type=SPRING1, Elset=Spring-2_All\n"));
     assert!(
-        text.contains("*Spring, Elset=Point_Spring-1_DOF_3\n3\n100.\n"),
+        text.contains("*Spring, Elset=Spring-2_DOF_3\n3\n100.\n"),
         "{text}"
     );
     let Some(frd) = run_ccx("federn", &text) else {
@@ -3079,42 +3104,72 @@ fn calculix_carries_a_block_on_surface_and_point_springs() {
     };
     let lift = mean_top(&blocks, &frd, "U3");
     assert!((lift - 0.05).abs() < 0.001, "{lift}");
+    // On nodes the stiffness is shared equally: 900 N/mm in all.
+    let shared = spring("Spring-1", nodes, [0.0, 0.0, 900.0]);
+    let model = blocks_model(&blocks, vec![Constraint::Spring(shared)], [0.0, 0.0, 90.0]);
+    let text = write_inp(&blocks.mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Spring, Elset=Spring-1_DOF_3\n3\n100.\n"),
+        "{text}"
+    );
+    let lift = mean_top(&blocks, &run_ccx("federn-knoten", &text).unwrap(), "U3");
+    assert!((lift - 0.1).abs() < 0.001, "{lift}");
+}
+
+#[test]
+fn springs_on_edges_are_spread_by_length() {
+    let blocks = blocks(2, 2);
+    // The bottom front edge of block b: two element edges, the middle node takes half.
+    let bottom = blocks.b_bottom_nodes();
+    let edge_nodes: Vec<NodeId> = (bottom.iter().copied())
+        .filter(|&n| blocks.mesh.node(n).unwrap()[1] == 0.0)
+        .collect();
+    let edges = edge_nodes.windows(2).map(|w| [w[0], w[1]]).collect();
+    let line = spring("Spring-1", Region::Edges(edges), [0.0, 0.0, 400.0]);
+    let model = blocks_model(&blocks, vec![Constraint::Spring(line)], [0.0; 3]);
+    let text = write_inp(&blocks.mesh, &model, "").unwrap();
+    let [a, b, c] = edge_nodes[..] else {
+        panic!("{edge_nodes:?}")
+    };
+    assert!(
+        text.contains(&format!("Spring-1_{a}_DOF_3\n3\n100.\n")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("Spring-1_{b}_DOF_3\n3\n200.\n")),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("Spring-1_{c}_DOF_3\n3\n100.\n")),
+        "{text}"
+    );
 }
 
 #[test]
 fn springs_of_a_2d_model_have_no_z_direction() {
-    use plx_model::PointSpring;
     let blocks = blocks(2, 2);
-    let spring = Constraint::PointSpring(PointSpring {
-        name: "Point_Spring-1".into(),
-        active: true,
-        visible: true,
-        region: Region::Faces(blocks.b_bottom.clone()),
-        stiffness: [1.0, 2.0, 3.0],
-    });
+    let region = Region::Faces(blocks.b_bottom.clone());
+    let spring = Constraint::Spring(spring("Spring-1", region, [1.0, 2.0, 3.0]));
     let mut model = blocks_model(&blocks, vec![spring], [0.0, 0.0, 0.0]);
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
-    assert!(text.contains("Point_Spring-1_DOF_3"), "{text}");
+    assert!(text.contains("_DOF_3"), "{text}");
     // ccx crashes on a spring in a degree of freedom above 2 in a 2D model.
     model.properties.space = ModelSpace::PlaneStress;
     let text = write_inp(&blocks.mesh, &model, "").unwrap();
-    assert!(text.contains("Point_Spring-1_DOF_2"), "{text}");
-    assert!(!text.contains("Point_Spring-1_DOF_3"), "{text}");
+    assert!(text.contains("_DOF_2"), "{text}");
+    assert!(!text.contains("_DOF_3"), "{text}");
 }
 
 #[test]
 fn calculix_compression_only_support_takes_only_pressure() {
-    use plx_model::{CompressionOnly, SurfaceSpring};
+    use plx_model::CompressionOnly;
     let blocks = blocks(2, 2);
     let support = |force: [f64; 3], edit: &dyn Fn(&mut CompressionOnly)| {
-        let springs = Constraint::SurfaceSpring(SurfaceSpring {
-            name: "Surface_Spring-1".into(),
-            active: true,
-            visible: true,
-            region: Region::Faces(blocks.b_bottom.clone()),
-            stiffness: [1000.0, 1000.0, 1000.0],
-            per_area: false,
-        });
+        let springs = Constraint::Spring(spring(
+            "Spring-1",
+            Region::Faces(blocks.b_bottom.clone()),
+            [1000.0, 1000.0, 1000.0],
+        ));
         let mut gaps = CompressionOnly {
             name: "Compression_Only-1".into(),
             active: true,

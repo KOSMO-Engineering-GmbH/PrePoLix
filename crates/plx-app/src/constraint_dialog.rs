@@ -4,11 +4,11 @@
 use egui::Ui;
 use plx_mesh::FeMesh;
 use plx_model::{
-    CompressionOnly, Constraint, FeModel, PointSpring, Quantity, Region, RigidBody, SurfaceSpring,
-    SurfaceToSurfaceSpring, UnitSystem, next_name,
+    CompressionOnly, Constraint, FeModel, Quantity, Region, RigidBody, Spring, UnitSystem,
+    next_name,
 };
 
-use crate::contacts::MasterSlave;
+use crate::contacts::{MasterSlave, Side};
 use crate::model::{Highlight, Model};
 use crate::numeric;
 use crate::selection::Target;
@@ -17,36 +17,27 @@ use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft, face_target};
 /// The fixed width of the dialog's content, so it does not change with the type.
 pub(crate) const WIDTH: f32 = 440.0;
 
-/// PrePoMax's list of constraint types, with prepolix's spring connection added; `None` for
-/// those prepolix does not have yet.
-const TYPES: [(&str, Option<Type>); 5] = [
-    ("Point Spring", Some(Type::PointSpring)),
-    ("Surface Spring", Some(Type::SurfaceSpring)),
-    ("Compression Only", Some(Type::CompressionOnly)),
-    ("Rigid Body", Some(Type::RigidBody)),
-    (
-        "Surface To Surface Spring",
-        Some(Type::SurfaceToSurfaceSpring),
-    ),
+/// PrePoMax's list of constraint types, its point and surface springs merged into one spring
+/// that also connects two surfaces.
+const TYPES: [(&str, Type); 3] = [
+    ("Spring", Type::Spring),
+    ("Compression Only", Type::CompressionOnly),
+    ("Rigid Body", Type::RigidBody),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Type {
-    PointSpring,
-    SurfaceSpring,
+    Spring,
     CompressionOnly,
     RigidBody,
-    SurfaceToSurfaceSpring,
 }
 
 impl Type {
     fn of(constraint: &Constraint) -> Self {
         match constraint {
-            Constraint::PointSpring(_) => Type::PointSpring,
-            Constraint::SurfaceSpring(_) => Type::SurfaceSpring,
+            Constraint::Spring(_) => Type::Spring,
             Constraint::CompressionOnly(_) => Type::CompressionOnly,
             Constraint::RigidBody(_) => Type::RigidBody,
-            Constraint::SurfaceToSurfaceSpring(_) => Type::SurfaceToSurfaceSpring,
             // Moved to the ties and node ties when the project was read; never edited here.
             Constraint::Tie(_) => unreachable!("ties are not constraints"),
             Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
@@ -56,43 +47,17 @@ impl Type {
     /// PrePoMax's default name without the number.
     fn prefix(self) -> &'static str {
         match self {
-            Type::PointSpring => "Point_Spring",
-            Type::SurfaceSpring => "Surface_Spring",
+            Type::Spring => "Spring",
             Type::CompressionOnly => "Compression_Only",
             Type::RigidBody => "Rigid_Body",
-            Type::SurfaceToSurfaceSpring => "Surface_To_Surface_Spring",
         }
-    }
-
-    /// Point springs and node ties sit on nodes, all other single-region constraints on
-    /// faces.
-    fn on_nodes(self) -> bool {
-        matches!(self, Type::PointSpring)
-    }
-
-    fn has_master_slave(self) -> bool {
-        matches!(self, Type::SurfaceToSurfaceSpring)
     }
 
     /// The constraint with PrePoMax's default values and empty regions.
     fn create(self, name: String) -> Constraint {
         let faces = || Region::Faces(Vec::new());
         match self {
-            Type::PointSpring => Constraint::PointSpring(PointSpring {
-                name,
-                active: true,
-                visible: true,
-                region: Region::Nodes(Vec::new()),
-                stiffness: [0.0; 3],
-            }),
-            Type::SurfaceSpring => Constraint::SurfaceSpring(SurfaceSpring {
-                name,
-                active: true,
-                visible: true,
-                region: faces(),
-                stiffness: [0.0; 3],
-                per_area: false,
-            }),
+            Type::Spring => Constraint::Spring(Spring::new(name)),
             Type::CompressionOnly => Constraint::CompressionOnly(CompressionOnly {
                 name,
                 active: true,
@@ -107,83 +72,83 @@ impl Type {
                 nonlinear: false,
             }),
             Type::RigidBody => Constraint::RigidBody(RigidBody::new(name, "")),
-            Type::SurfaceToSurfaceSpring => {
-                Constraint::SurfaceToSurfaceSpring(SurfaceToSurfaceSpring {
-                    name,
-                    active: true,
-                    visible: true,
-                    master: faces(),
-                    slave: faces(),
-                    stiffness: [0.0; 3],
-                    per_area: false,
-                })
-            }
         }
     }
+}
 
-    /// Point springs sit on nodes, all other single-region constraints on `faces`, the
-    /// element faces or, in 2D models, the element edges.
-    fn region_draft(self, faces: Target) -> RegionDraft {
-        if self.on_nodes() {
-            RegionDraft::new(NODE_SOURCES, Target::Nodes)
-        } else {
-            RegionDraft::new(FACE_SOURCES, faces)
-        }
+/// The regions of a spring: the nodes that get springs, like a force's region the points,
+/// edges or faces they are on, as slave, and the target surface as master.
+fn spring_regions(faces: Target, mesh: &FeMesh, spring: Option<&Spring>) -> MasterSlave {
+    let (slave, master) = match spring {
+        // Element faces stay faces, e.g. the master side of a swapped connection.
+        Some(s) => (
+            match &s.region {
+                Region::Faces(_) => RegionDraft::from_region(&s.region, NODE_SOURCES, faces, mesh),
+                region => RegionDraft::from_region(region, NODE_SOURCES, Target::Nodes, mesh),
+            },
+            match &s.master {
+                Some(m) => RegionDraft::from_region(m, FACE_SOURCES, faces, mesh),
+                None => RegionDraft::new(FACE_SOURCES, faces),
+            },
+        ),
+        None => (
+            RegionDraft::new(NODE_SOURCES, Target::Nodes),
+            RegionDraft::new(FACE_SOURCES, faces),
+        ),
+    };
+    MasterSlave {
+        master,
+        slave,
+        side: Side::Slave,
     }
 }
 
 /// A constraint while its dialog is open.
 pub(crate) struct ConstraintDraft {
     pub(crate) constraint: Constraint,
-    /// The region of a spring or support.
+    /// The region of a support or rigid body.
     region: RegionDraft,
-    /// Master and slave of a tie or spring connection.
+    /// The region (slave) and target surface (master) of a spring.
     pair: MasterSlave,
-    /// What the faces of the model are: element faces, or element edges in 2D models.
-    faces: Target,
 }
 
 impl ConstraintDraft {
     pub(crate) fn new(fe: &FeModel) -> Self {
-        let kind = Type::PointSpring;
+        let kind = Type::Spring;
         let faces = face_target(fe);
         Self {
             constraint: kind.create(next_name(kind.prefix(), names(fe))),
-            region: kind.region_draft(faces),
-            pair: MasterSlave::new(faces),
-            faces,
+            region: RegionDraft::new(FACE_SOURCES, faces),
+            pair: spring_regions(faces, &FeMesh::default(), None),
         }
     }
 
     /// `faces` is what the faces of the model are, see [`face_target`].
     pub(crate) fn edit(constraint: &Constraint, faces: Target, mesh: &FeMesh) -> Self {
-        let kind = Type::of(constraint);
-        let regions = constraint.regions();
-        let (region, pair) = match constraint.master_slave() {
-            Some([master, slave]) => (
-                kind.region_draft(faces),
-                MasterSlave::from_regions(master, slave, faces, mesh),
+        let (region, pair) = match constraint {
+            Constraint::Spring(spring) => (
+                RegionDraft::new(FACE_SOURCES, faces),
+                spring_regions(faces, mesh, Some(spring)),
             ),
-            None => {
-                let (sources, target) = if kind.on_nodes() {
-                    (NODE_SOURCES, Target::Nodes)
-                } else {
-                    (FACE_SOURCES, faces)
-                };
-                let region = RegionDraft::from_region(regions[0], sources, target, mesh);
-                (region, MasterSlave::new(faces))
-            }
+            _ => (
+                RegionDraft::from_region(constraint.regions()[0], FACE_SOURCES, faces, mesh),
+                spring_regions(faces, mesh, None),
+            ),
         };
         Self {
             constraint: constraint.clone(),
             region,
             pair,
-            faces,
         }
     }
 
     fn kind(&self) -> Type {
         Type::of(&self.constraint)
+    }
+
+    /// A spring to a surface, whose target surface can be picked too.
+    fn to_surface(&self) -> bool {
+        matches!(&self.constraint, Constraint::Spring(s) if s.master.is_some())
     }
 
     pub(crate) fn name(&self) -> &str {
@@ -192,7 +157,7 @@ impl ConstraintDraft {
 
     /// The region that clicks in the 3D view pick.
     pub(crate) fn region(&self) -> &RegionDraft {
-        if self.kind().has_master_slave() {
+        if self.kind() == Type::Spring {
             self.pair.current()
         } else {
             &self.region
@@ -200,7 +165,7 @@ impl ConstraintDraft {
     }
 
     pub(crate) fn region_mut(&mut self) -> &mut RegionDraft {
-        if self.kind().has_master_slave() {
+        if self.kind() == Type::Spring {
             self.pair.current_mut()
         } else {
             &mut self.region
@@ -208,10 +173,15 @@ impl ConstraintDraft {
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
-        if self.kind().has_master_slave() {
-            self.pair.validate()
-        } else if self.region.is_empty() {
+        let region = if self.kind() == Type::Spring {
+            &self.pair.slave
+        } else {
+            &self.region
+        };
+        if region.is_empty() {
             Err("The region is empty.".into())
+        } else if self.to_surface() && self.pair.master.is_empty() {
+            Err("The target surface is empty.".into())
         } else if matches!(&self.constraint, Constraint::RigidBody(b) if b.reference_point.is_empty())
         {
             Err("Choose the reference point that drives the rigid body.".into())
@@ -220,12 +190,13 @@ impl ConstraintDraft {
         }
     }
 
-    /// Master in the primary, slave in the secondary highlight colour.
+    /// The region in the primary highlight colour; for a spring to a surface the target
+    /// surface in the primary and the springs' region in the secondary colour.
     pub(crate) fn highlight(&self, model: &Model) -> Highlight {
-        if self.kind().has_master_slave() {
-            self.pair.highlight(model)
-        } else {
-            self.region.highlight(model)
+        match self.kind() {
+            Type::Spring if self.to_surface() => self.pair.highlight(model),
+            Type::Spring => self.pair.slave.highlight(model),
+            _ => self.region.highlight(model),
         }
     }
 
@@ -245,15 +216,19 @@ impl ConstraintDraft {
     }
 
     fn current(&self) -> Constraint {
-        let regions = if self.kind().has_master_slave() {
-            let (master, slave) = self.pair.regions();
-            vec![master, slave]
-        } else {
-            vec![self.region.region()]
-        };
         let mut constraint = self.constraint.clone();
-        for (slot, region) in constraint.regions_mut().into_iter().zip(regions) {
-            *slot = region;
+        match &mut constraint {
+            Constraint::Spring(spring) => {
+                spring.region = self.pair.slave.region();
+                if spring.master.is_some() {
+                    spring.master = Some(self.pair.master.region());
+                }
+            }
+            _ => {
+                for slot in constraint.regions_mut() {
+                    *slot = self.region.region();
+                }
+            }
         }
         constraint
     }
@@ -265,21 +240,17 @@ impl ConstraintDraft {
             ui.set_width(200.0);
             ui.vertical(|ui| {
                 for (label, kind) in TYPES {
-                    let selected = kind == Some(current);
-                    let enabled = creating && kind.is_some();
+                    let selected = kind == current;
                     let response =
-                        ui.add_enabled(enabled, egui::Button::selectable(selected, label));
-                    let response = match kind {
-                        None => response.on_disabled_hover_text("Not available yet"),
-                        Some(_) if !selected => response.on_disabled_hover_text(
+                        ui.add_enabled(creating, egui::Button::selectable(selected, label));
+                    let response = if selected {
+                        response
+                    } else {
+                        response.on_disabled_hover_text(
                             "The type of a constraint cannot be changed when editing.",
-                        ),
-                        Some(_) => response,
+                        )
                     };
-                    if let Some(kind) = kind
-                        && response.clicked()
-                        && !selected
-                    {
+                    if response.clicked() && !selected {
                         self.switch(kind, taken);
                     }
                 }
@@ -300,27 +271,7 @@ impl ConstraintDraft {
             3
         };
         match &mut self.constraint {
-            Constraint::PointSpring(spring) => {
-                self.region.ui(ui, model);
-                stiffness_rows(ui, &mut spring.stiffness, units, stiffness(false), dofs);
-                hint(ui, "Each node of the region gets these springs to ground.");
-            }
-            Constraint::SurfaceSpring(spring) => {
-                self.region.ui(ui, model);
-                per_area_row(ui, &mut spring.per_area);
-                stiffness_rows(
-                    ui,
-                    &mut spring.stiffness,
-                    units,
-                    stiffness(spring.per_area),
-                    dofs,
-                );
-                hint(
-                    ui,
-                    "Springs to ground, distributed area-weighted to the nodes on \
-                     export.",
-                );
-            }
+            Constraint::Spring(spring) => spring_rows(ui, model, spring, &mut self.pair, dofs),
             Constraint::CompressionOnly(support) => {
                 self.region.ui(ui, model);
                 compression_only_rows(ui, support, units);
@@ -360,24 +311,6 @@ impl ConstraintDraft {
             }
             Constraint::Tie(_) => unreachable!("ties are not constraints"),
             Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
-            Constraint::SurfaceToSurfaceSpring(spring) => {
-                self.pair.ui(ui, model);
-                per_area_row(ui, &mut spring.per_area);
-                stiffness_rows(
-                    ui,
-                    &mut spring.stiffness,
-                    units,
-                    stiffness(spring.per_area),
-                    dofs,
-                );
-                hint(
-                    ui,
-                    "Each node of the slave surface is connected by springs in the global directions \
-                     to the nearest point of the master surface. The stiffness \
-                     applies to the whole connection and is distributed area-weighted to the \
-                     nodes.",
-                );
-            }
         }
     }
 
@@ -393,10 +326,73 @@ impl ConstraintDraft {
             self.constraint.name().to_owned()
         };
         self.constraint = kind.create(name);
-        if old.on_nodes() != kind.on_nodes() {
-            self.region = kind.region_draft(self.faces);
+    }
+}
+
+/// The region, stiffness and connection of a spring: to ground ("Surface to World") or to
+/// the closest points of a target surface ("Surface to Surface").
+fn spring_rows(
+    ui: &mut Ui,
+    model: &Model,
+    spring: &mut Spring,
+    pair: &mut MasterSlave,
+    dofs: usize,
+) {
+    let units = model.fe.properties.units;
+    let to_surface = spring.master.is_some();
+    let slave = !to_surface || pair.side == Side::Slave;
+    if pair.slave.ui_labeled(ui, model, "Region", "slave", slave) {
+        pair.side = Side::Slave;
+    }
+    ui.label("Stiffness");
+    ui.add_enabled_ui(!spring.each_node, |ui| {
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut spring.per_area, false, "Total");
+            ui.radio_value(&mut spring.per_area, true, "Per area")
+                .on_hover_text("Stiffness per area of the faces of the region.");
+        });
+    });
+    ui.end_row();
+    let quantity = stiffness(spring.is_per_area());
+    stiffness_rows(ui, &mut spring.stiffness, units, quantity, dofs);
+    ui.label("");
+    ui.checkbox(&mut spring.each_node, "Apply to all nodes individually");
+    ui.end_row();
+    ui.label("Connection");
+    let mut surface = to_surface;
+    ui.horizontal(|ui| {
+        ui.radio_value(&mut surface, false, "Surface to World");
+        ui.radio_value(&mut surface, true, "Surface to Surface");
+    });
+    ui.end_row();
+    if surface != to_surface {
+        spring.master = surface.then(|| pair.master.region());
+        pair.side = if surface { Side::Master } else { Side::Slave };
+    }
+    if surface {
+        let master = pair.side == Side::Master;
+        if pair
+            .master
+            .ui_labeled(ui, model, "Target surface", "master", master)
+        {
+            pair.side = Side::Master;
         }
     }
+    let distribution = if spring.each_node {
+        "Every node of the region gets the whole stiffness."
+    } else if spring.is_per_area() {
+        "The stiffness per area is spread over the nodes of the faces by area."
+    } else {
+        "The stiffness of the whole region is spread over its nodes like a force: on faces \
+         by area, on edges by length, on points in equal shares."
+    };
+    let connection = if surface {
+        " Each node is connected by springs in the global directions to the closest point \
+         of the target surface."
+    } else {
+        " The springs act in the global directions to ground."
+    };
+    hint(ui, &format!("{distribution}{connection}"));
 }
 
 fn names(fe: &FeModel) -> impl Iterator<Item = &str> {
@@ -405,12 +401,10 @@ fn names(fe: &FeModel) -> impl Iterator<Item = &str> {
 
 fn name_row(ui: &mut Ui, constraint: &mut Constraint) {
     let name = match constraint {
-        Constraint::PointSpring(c) => &mut c.name,
-        Constraint::SurfaceSpring(c) => &mut c.name,
+        Constraint::Spring(c) => &mut c.name,
         Constraint::CompressionOnly(c) => &mut c.name,
-        Constraint::Tie(_) => unreachable!("ties are not constraints"),
-        Constraint::SurfaceToSurfaceSpring(c) => &mut c.name,
         Constraint::RigidBody(c) => &mut c.name,
+        Constraint::Tie(_) => unreachable!("ties are not constraints"),
         Constraint::NodeTie(_) => unreachable!("node ties are not constraints"),
     };
     ui.label("Name");
@@ -425,15 +419,6 @@ fn stiffness(per_area: bool) -> Quantity {
     } else {
         Quantity::ForcePerLength
     }
-}
-
-fn per_area_row(ui: &mut Ui, per_area: &mut bool) {
-    ui.label("Stiffness");
-    ui.horizontal(|ui| {
-        ui.radio_value(per_area, false, "Total");
-        ui.radio_value(per_area, true, "Per area");
-    });
-    ui.end_row();
 }
 
 fn stiffness_rows(
@@ -552,21 +537,15 @@ mod tests {
     #[test]
     fn switching_the_type_proposes_its_default_name() {
         let mut fe = FeModel::default();
-        fe.constraints
-            .push(Type::SurfaceSpring.create("Surface_Spring-1".into()));
+        fe.constraints.push(Type::Spring.create("Spring-1".into()));
         let mut draft = ConstraintDraft::new(&fe);
-        assert_eq!(draft.name(), "Point_Spring-1");
-        assert_eq!(draft.region.target, Target::Nodes);
-        draft.switch(Type::SurfaceSpring, &["Surface_Spring-1"]);
-        assert_eq!(draft.name(), "Surface_Spring-2");
+        assert_eq!(draft.name(), "Spring-2");
+        assert_eq!(draft.pair.slave.target, Target::Nodes);
+        draft.switch(Type::CompressionOnly, &["Spring-1"]);
+        assert_eq!(draft.name(), "Compression_Only-1");
         assert_eq!(draft.region.target, Target::Faces);
-        draft.switch(Type::SurfaceToSurfaceSpring, &[]);
-        assert_eq!(draft.name(), "Surface_To_Surface_Spring-1");
-        let Constraint::SurfaceToSurfaceSpring(spring) = &mut draft.constraint else {
-            unreachable!()
-        };
-        spring.name = "Lager".into();
-        draft.switch(Type::CompressionOnly, &[]);
+        *draft.constraint.name_mut() = "Lager".into();
+        draft.switch(Type::RigidBody, &[]);
         assert_eq!(draft.name(), "Lager");
     }
 
@@ -575,33 +554,31 @@ mod tests {
         let mut fe = FeModel::default();
         fe.properties.space = plx_model::ModelSpace::PlaneStrain;
         let mut draft = ConstraintDraft::new(&fe);
-        draft.switch(Type::SurfaceSpring, &[]);
-        assert_eq!(draft.region.target, Target::Edges);
-        draft.switch(Type::SurfaceToSurfaceSpring, &[]);
         assert_eq!(draft.pair.master.target, Target::Edges);
-        assert_eq!(draft.pair.slave.target, Target::Edges);
+        draft.switch(Type::CompressionOnly, &[]);
+        assert_eq!(draft.region.target, Target::Edges);
     }
 
     #[test]
     fn regions_survive_the_dialog() {
         let mesh = FeMesh::default();
-        let connection = Constraint::SurfaceToSurfaceSpring(SurfaceToSurfaceSpring {
-            name: "Lager".into(),
+        let connection = Constraint::Spring(Spring {
             active: false,
-            visible: true,
-            master: Region::Surface("BORE".into()),
-            slave: Region::Faces(vec![(1, 2)]),
+            region: Region::Faces(vec![(1, 2)]),
+            master: Some(Region::Surface("BORE".into())),
             stiffness: [1.0, 2.0, 3.0],
             per_area: true,
+            ..Spring::new("Lager")
         });
-        let spring = Constraint::PointSpring(PointSpring {
-            name: "Point_Spring-1".into(),
-            active: true,
-            visible: true,
+        let spring = Constraint::Spring(Spring {
             region: Region::NodeSet("FIX".into()),
             stiffness: [1.0, 0.0, 0.0],
+            each_node: true,
+            ..Spring::new("Spring-1")
         });
-        for constraint in [connection, spring] {
+        let mut support = Type::CompressionOnly.create("Compression_Only-1".into());
+        *support.regions_mut().remove(0) = Region::Surface("FLOOR".into());
+        for constraint in [connection, spring, support] {
             let draft = ConstraintDraft::edit(&constraint, Target::Faces, &mesh);
             assert_eq!(draft.validate(), Ok(()));
             assert_eq!(draft.finish(), constraint);
