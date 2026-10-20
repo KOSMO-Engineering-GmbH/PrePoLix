@@ -138,8 +138,7 @@ circumference.
 
 #limitation[Line loads (force per length) are not available in the dialogs; a
 #ui("Force") along edges takes the total force (@force-region). Bolt pre-tension:
-@pre-tension. Defined temperature fields: @defined-fields. They can be added with the keyword
-editor (@keyword-editor).]
+@pre-tension. Defined temperature fields: @defined-fields.]
 
 === What a force acts on <force-region>
 

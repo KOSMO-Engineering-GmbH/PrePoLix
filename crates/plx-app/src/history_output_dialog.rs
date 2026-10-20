@@ -7,11 +7,11 @@ use plx_model::next_name;
 use plx_results::history_output::{HistoryOutput, HistoryOutputKind, SizeKind};
 
 use crate::field_output_dialog::DialogAction;
-use crate::keywords::{frame, tree_row};
 use crate::model::{Highlight, Hit, Model};
 use crate::results::ResultsView;
 use crate::selection::{Operation, Picker, Target};
 use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft, SOLID_SOURCES};
+use crate::tree_rows::{frame, tree_row};
 use crate::viewport::{BoxSelect, Preview};
 
 /// The types of the list, in PrePoMax's order, with the prefix of their default names.

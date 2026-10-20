@@ -9,7 +9,7 @@ use plx_model::library::{LibraryNode, LibraryPath, ROOT_NAME, name_for_model};
 use plx_model::{Material, MaterialLibrary, Quantity, UnitSystem};
 
 use crate::icons::{self, Icon};
-use crate::keywords::{frame, tree_row};
+use crate::tree_rows::{frame, tree_row};
 
 /// Name of the library file in prepolix's data directory.
 const FILE_NAME: &str = "materials.ron";

@@ -34,8 +34,8 @@ This has two consequences you will notice:
 - When you remesh a part, loads and boundary conditions that were picked on the CAD geometry
   stay where they are, because they refer to faces and edges of the geometry, not to element
   numbers.
-- The `.inp` file contains sets you never named. You can inspect it at any time in the keyword
-  editor (@keyword-editor) or export it (#menu("File", "Export CalculiX Input File ...")).
+- The `.inp` file contains sets you never named. You can inspect it at any time by exporting it
+  (#menu("File", "Export CalculiX Input File ...")).
 
 The project, including geometry, mesh and model, is saved as a PrePoLix project file (`.plx`).
 

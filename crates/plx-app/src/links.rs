@@ -27,7 +27,6 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use plx_io::inp::anchor;
 use plx_io::project::Link;
 use plx_mesh::{FeMesh, Fnv};
 use plx_model::{
@@ -304,7 +303,6 @@ fn chain_fingerprint(fe: &FeModel, steps: &[Step]) -> u64 {
     for category in CATEGORIES.iter().filter(|c| **c != "Steps") {
         category_fingerprint(&mut hash, fe, category, None);
     }
-    hash.add_debug(&anchor::anchor(fe).of_steps(&names(steps)));
     hash.add_debug(&fe.properties.kind);
     hash.add_debug(&fe.properties.global_results);
     hash.add_debug(&steps);
@@ -323,9 +321,8 @@ pub fn chain_up_to_date(source: &FeModel, step: usize, target: &FeModel, link: &
 }
 
 /// Makes `target` continue `source` after its step `step`: the setup but the steps is the
-/// source's, the steps are the source's up to `step` followed by the target's own. The user
-/// keywords of the model definition and of the steps taken are the source's, those of the
-/// own steps stay. Returns the names of the steps taken, for [`Link::inherited`].
+/// source's, the steps are the source's up to `step` followed by the target's own. Returns
+/// the names of the steps taken, for [`Link::inherited`].
 pub fn apply_chain(
     target: &mut FeModel,
     source: &FeModel,
@@ -333,7 +330,6 @@ pub fn apply_chain(
     link: &Link,
 ) -> Vec<String> {
     let own = own_steps(target, link);
-    let own_keywords = anchor::anchor(target).steps_only(&names(&own));
     for category in CATEGORIES.iter().filter(|c| **c != "Steps") {
         copy_category(target, source, category, Mode::All);
     }
@@ -342,8 +338,6 @@ pub fn apply_chain(
     target.steps = source.steps[..=step].to_vec();
     let inherited = names(&target.steps);
     target.steps.extend(own);
-    let taken = anchor::anchor(source).of_steps(&inherited);
-    target.user_keywords = anchor::place(target, &taken.with(own_keywords));
     inherited
 }
 
@@ -352,26 +346,20 @@ fn names(steps: &[Step]) -> Vec<String> {
 }
 
 /// Splits `fe` after its step `index`: returns it with the steps up to that one, and gives
-/// the steps after it to `new`, the analysis that continues it. The user keywords of each
-/// step go with the step.
+/// the steps after it to `new`, the analysis that continues it.
 pub fn split_after(fe: &FeModel, index: usize, new: &mut FeModel) -> FeModel {
-    let anchored = anchor::anchor(fe);
     let mut kept = fe.clone();
     kept.steps.truncate(index + 1);
-    kept.user_keywords = anchor::place(&kept, &anchored.of_steps(&names(&kept.steps)));
     new.steps = fe.steps[index + 1..].to_vec();
-    new.user_keywords = anchor::place(new, &anchored.steps_only(&names(&new.steps)));
     kept
 }
 
 /// Gives the own steps of `target`, which continues `source` after its last step, to
-/// `source`, with their user keywords; returns their names.
+/// `source`; returns their names.
 pub fn merge_into(source: &mut FeModel, target: &FeModel, link: &Link) -> Vec<String> {
     let own = own_steps(target, link);
     let moved = names(&own);
-    let keywords = anchor::anchor(source).with(anchor::anchor(target).steps_only(&moved));
     source.steps.extend(own);
-    source.user_keywords = anchor::place(source, &keywords);
     moved
 }
 
@@ -744,7 +732,6 @@ fn setup_fingerprint(hash: &mut Fnv, fe: &FeModel, path: &[String]) {
             for category in CATEGORIES {
                 category_fingerprint(hash, fe, category, None);
             }
-            hash.add_debug(&fe.user_keywords);
         }
         [category] => category_fingerprint(hash, fe, category, None),
         [category, name] => category_fingerprint(hash, fe, category, Some(name)),
@@ -808,7 +795,6 @@ pub fn apply_setup(target: &mut FeModel, source: &FeModel, path: &[String]) {
             for category in CATEGORIES {
                 copy_category(target, source, category, Mode::All);
             }
-            target.user_keywords = source.user_keywords.clone();
         }
         [cell, category] if cell == SETUP => copy_category(target, source, category, Mode::All),
         [cell, category, name] if cell == SETUP => {
@@ -1896,112 +1882,16 @@ mod tests {
         assert!(!is_collection(&path(&["Mesh"])));
     }
 
-    /// Gives `fe` an amplitude keyword in its model definition and a keyword in the history
-    /// outputs of each step, whose text names the step.
-    fn with_keywords(mut fe: FeModel, model: &str) -> FeModel {
-        use anchor::{Anchored, ModelPlace, StepPlace, Text};
-        let text = |text: &str| Text {
-            text: text.into(),
-            active: true,
-        };
-        let anchored = Anchored {
-            model: vec![(ModelPlace::Under("Amplitudes".into(), vec![0]), text(model))],
-            steps: (fe.steps.iter())
-                .map(|s| {
-                    (
-                        s.name.clone(),
-                        StepPlace::Inside(vec![0, 6, 0]),
-                        text(&s.name),
-                    )
-                })
-                .collect(),
-        };
-        fe.user_keywords = anchor::place(&fe, &anchored);
-        fe
-    }
-
-    /// The step each keyword of a step is in, by its text, and the keywords of the model.
-    fn keywords_of(fe: &FeModel) -> (Vec<(String, String)>, Vec<String>) {
-        let anchored = anchor::anchor(fe);
-        let steps = (anchored.steps.iter())
-            .map(|(step, _, k)| (step.clone(), k.text.clone()))
-            .collect();
-        let model = anchored.model.iter().map(|(_, k)| k.text.clone()).collect();
-        (steps, model)
-    }
-
-    fn pairs(names: &[(&str, &str)]) -> Vec<(String, String)> {
-        (names.iter())
-            .map(|(a, b)| (a.to_string(), b.to_string()))
-            .collect()
-    }
-
     #[test]
-    fn a_continuation_keeps_the_keywords_of_its_own_steps() {
-        let mut source = FeModel::default();
-        for name in ["Preload", "Service", "Overload"] {
-            source.steps.push(Step::new_static(name));
-        }
-        let mut source = with_keywords(source, "*Amplitude, Name=Ramp");
-        let mut target = FeModel::default();
-        target.steps.push(Step::new_static("Unload"));
-        let mut target = with_keywords(target, "*Amplitude, Name=Old");
-        let mut link = Link {
-            source: 1,
-            target: 2,
-            item: path(&["State", "Service"]),
-            slot: path(&["State"]),
-            ..Default::default()
-        };
-        let step = state_step(&source, &link).unwrap();
-        link.inherited = apply_chain(&mut target, &source, step, &link);
-        // The model definition and the steps taken are the source's, the own step keeps its
-        // keyword at its own place, the third step.
-        let (steps, model) = keywords_of(&target);
-        assert_eq!(
-            steps,
-            pairs(&[
-                ("Preload", "Preload"),
-                ("Service", "Service"),
-                ("Unload", "Unload")
-            ])
-        );
-        assert_eq!(model, ["*Amplitude, Name=Ramp"]);
-        let unload = (target.user_keywords.iter())
-            .find(|k| k.text == "Unload")
-            .unwrap();
-        assert_eq!(unload.position[1], 2);
-        // So it stays up to date: keywords of the own steps and of later steps of the
-        // source do not count, those of the steps taken do.
-        assert!(chain_up_to_date(&source, step, &target, &link));
-        let overload = (source.user_keywords.iter_mut())
-            .find(|k| k.text == "Overload")
-            .unwrap();
-        overload.active = false;
-        assert!(chain_up_to_date(&source, step, &target, &link));
-        target.user_keywords.retain(|k| k.text != "Unload");
-        assert!(chain_up_to_date(&source, step, &target, &link));
-        let preload = (source.user_keywords.iter_mut())
-            .find(|k| k.text == "Preload")
-            .unwrap();
-        preload.text = "Preload changed".into();
-        assert!(!chain_up_to_date(&source, step, &target, &link));
-    }
-
-    #[test]
-    fn split_and_merge_take_the_keywords_of_the_moved_steps_along() {
+    fn split_and_merge_move_the_steps() {
         let mut fe = FeModel::default();
         for name in ["Preload", "Service", "Unload"] {
             fe.steps.push(Step::new_static(name));
         }
-        let fe = with_keywords(fe, "*Amplitude, Name=Ramp");
         let mut new = FeModel::default();
         let mut kept = split_after(&fe, 0, &mut new);
-        assert_eq!(keywords_of(&kept).0, pairs(&[("Preload", "Preload")]));
-        assert_eq!(
-            keywords_of(&new).0,
-            pairs(&[("Service", "Service"), ("Unload", "Unload")])
-        );
+        assert_eq!(names(&kept.steps), ["Preload"]);
+        assert_eq!(names(&new.steps), ["Service", "Unload"]);
         // The new analysis continues the kept one, as the sync after the split makes it.
         let mut link = Link {
             source: 1,
@@ -2011,12 +1901,11 @@ mod tests {
             ..Default::default()
         };
         link.inherited = apply_chain(&mut new, &kept, 0, &link);
-        assert_eq!(keywords_of(&new), keywords_of(&fe));
+        assert_eq!(new.steps, fe.steps);
         assert!(chain_up_to_date(&kept, 0, &new, &link));
         // Merging gives back what was split.
         let moved = merge_into(&mut kept, &new, &link);
         assert_eq!(moved, ["Service", "Unload"]);
         assert_eq!(kept.steps, fe.steps);
-        assert_eq!(kept.user_keywords, fe.user_keywords);
     }
 }

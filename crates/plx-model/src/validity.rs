@@ -428,7 +428,6 @@ mod tests {
                 kind: SectionKind::Solid,
             }],
             steps: vec![step],
-            user_keywords: Vec::new(),
             ..FeModel::default()
         }
     }

@@ -76,8 +76,7 @@ portable Windows version in the folder `Settings` next to `prepolix.exe` (@porta
 at an unknown keyword: it skips the card with a warning and computes without it. The test
 therefore reads each keyword PrePoLix can write on its own and lists the unknown ones by the
 feature that needs them, e.g. `Complex frequency step (*COMPLEX FREQUENCY)`. Every analysis
-checks the keywords of its own input file in the same way, including those of the keyword editor
-(@model-check).
+checks the keywords of its own input file in the same way (@model-check).
 
 === Gmsh
 

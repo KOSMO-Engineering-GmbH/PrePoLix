@@ -31,7 +31,7 @@ without editing input files by hand.
   initial conditions and defined fields.
 - Contact pairs and ties, constraints, rigid bodies, pre-tension, submodeling.
 - Node and element sets are created implicitly from your selection.
-- Unit systems with unit-aware input, model check, and a keyword editor for anything the GUI does not cover.
+- Unit systems with unit-aware input and model check.
 
 **Analysis**
 - Static, frequency, buckling, dynamic, modal dynamics, steady-state dynamics, heat transfer and

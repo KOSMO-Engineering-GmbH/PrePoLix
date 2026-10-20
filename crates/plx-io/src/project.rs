@@ -738,7 +738,7 @@ mod tests {
     use plx_model::{
         Algorithm2d, Algorithm3d, Constraint, ContactPair, Friction, InteractionProperty, Material,
         MeshSetupItem, MeshSetupKind, MeshingParameters, Region, Step, SurfaceBehavior,
-        SurfaceInteraction, Tie, UserKeyword,
+        SurfaceInteraction, Tie,
     };
 
     use super::*;
@@ -795,11 +795,6 @@ mod tests {
             }],
             sections: Vec::new(),
             steps: vec![Step::new_static("Step-1"), Step::new_coupled("Step-2")],
-            user_keywords: vec![UserKeyword {
-                position: vec![14, 0],
-                text: "*Amplitude, Name=A\n0, 0, 1, 1".into(),
-                active: false,
-            }],
             reference_points: vec![plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])],
             coordinate_systems: vec![plx_model::CoordinateSystem {
                 kind: plx_model::CoordinateSystemKind::Cylindrical,
@@ -1257,7 +1252,11 @@ mod tests {
         let hot_spots = "hot_spots:[(name:\"Hot_Spot-1\",toe:Nodes([3,7]),\
             direction:(1.0,0.0,0.0),thickness:10.0,extrapolation:Custom([2.0,6.0]),\
             component:Perpendicular)],";
-        let older = text.replacen("user_keywords:", &format!("{hot_spots}user_keywords:"), 1);
+        let older = text.replacen(
+            "reference_points:",
+            &format!("{hot_spots}reference_points:"),
+            1,
+        );
         assert_ne!(older, text);
         let model: FeModel = ron::from_str(&older).unwrap();
         assert_eq!(model, FeModel::default());

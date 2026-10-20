@@ -2079,7 +2079,6 @@ mod tests {
                 kind: SectionKind::Solid,
             }],
             steps: vec![step],
-            user_keywords: Vec::new(),
             ..FeModel::default()
         };
         let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Platte").unwrap();

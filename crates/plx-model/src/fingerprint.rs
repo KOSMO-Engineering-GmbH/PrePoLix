@@ -26,7 +26,6 @@ pub fn solve_input(mesh: &FeMesh, fe: &FeModel) -> u64 {
         amplitudes,
         initial_conditions,
         steps,
-        user_keywords,
         reference_points,
         coordinate_systems,
         planes,
@@ -67,7 +66,6 @@ pub fn solve_input(mesh: &FeMesh, fe: &FeModel) -> u64 {
         }
     }
     hash.add_debug(&steps);
-    hash.add_debug(user_keywords);
     hash.add_debug(reference_points);
     hash.add_debug(coordinate_systems);
     hash.add_debug(planes);
