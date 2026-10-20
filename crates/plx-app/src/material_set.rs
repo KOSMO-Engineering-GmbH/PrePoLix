@@ -162,7 +162,7 @@ impl MaterialSetEditor {
         );
         ui.add_space(4.0);
         ui.horizontal_top(|ui| {
-            crate::keywords::frame().show(ui, |ui| {
+            crate::tree_rows::frame().show(ui, |ui| {
                 ui.set_min_size(egui::vec2(220.0, 240.0));
                 ui.set_max_width(220.0);
                 egui::ScrollArea::vertical()
@@ -252,7 +252,7 @@ impl MaterialSetEditor {
         for (index, material) in self.model.fe.materials.iter().enumerate() {
             let selected = self.selected == Some(index);
             let text = egui::RichText::new(&material.name);
-            let row = crate::keywords::tree_row(ui, 0, None, selected, text);
+            let row = crate::tree_rows::tree_row(ui, 0, None, selected, text);
             if row.clicked() {
                 self.selected = Some(index);
             }

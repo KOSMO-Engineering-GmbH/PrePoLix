@@ -9,10 +9,10 @@ use plx_mesh::NodeId;
 use plx_results::transformation::{SymmetryPlane, Transformation, TransformationKind};
 
 use crate::icons::{self, Icon};
-use crate::keywords::{frame, tree_row};
 use crate::model::{Highlight, Hit, Model};
 use crate::numeric;
 use crate::selection::{Items, Operation, Picker, PickerAction, Target};
+use crate::tree_rows::{frame, tree_row};
 use crate::viewport::Preview;
 
 /// An entry of the Available tree.

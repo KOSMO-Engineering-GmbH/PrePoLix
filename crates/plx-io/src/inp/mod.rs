@@ -3,7 +3,6 @@
 //! The reader currently takes the mesh: nodes, elements, node and element sets, and surfaces.
 //! Every other keyword is skipped and reported in [`InpImport::skipped_keywords`].
 
-pub mod anchor;
 pub mod keywords;
 mod lines;
 mod write;
@@ -14,8 +13,8 @@ use std::path::{Path, PathBuf};
 use plx_mesh::{Element, ElementId, ElementShape, FeMesh, NodeId, Part, SurfaceDefinition};
 
 pub use write::{
-    Keyword, KeywordKind, WriteError, insert_user_keywords, model_keywords, user_keywords,
-    write_check_inp, write_deformed_mesh_inp, write_inp, write_inp_with_sets_of, write_keywords,
+    Keyword, KeywordKind, WriteError, model_keywords, write_check_inp, write_deformed_mesh_inp,
+    write_inp, write_inp_with_sets_of, write_keywords,
 };
 
 use lines::{Keyword as KeywordLine, SourceLine, fields, is_keyword, parse_f64};

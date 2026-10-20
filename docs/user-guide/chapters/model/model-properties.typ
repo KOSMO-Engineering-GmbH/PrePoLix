@@ -66,8 +66,7 @@ SI units (m, kg, s, N, Pa; temperatures in °C), whatever the unit system of the
 unit system only decides how values are *shown and typed*: a dialog of an analysis in mm, ton,
 s shows lengths in mm and stresses in MPa, and converts what you type. A value typed with
 another unit is converted too, for example `3 cm` in a length field becomes 30 mm. The input
-file CalculiX gets is therefore always in SI units, which the keyword editor says above its
-text (@keyword-editor); results are shown in the unit system of the analysis (legend, scale bar,
+file CalculiX gets is therefore always in SI units; results are shown in the unit system of the analysis (legend, scale bar,
 queries, tables). Because of this, analyses of one project may use different unit systems and
 still share meshes, materials and results through links (@links).
 

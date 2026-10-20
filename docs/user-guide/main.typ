@@ -52,7 +52,6 @@
 #include "chapters/model/pre-tension.typ"
 #include "chapters/model/moving-load.typ"
 #include "chapters/model/defined-fields.typ"
-#include "chapters/model/keywords.typ"
 
 #include "chapters/analysis/run.typ"
 

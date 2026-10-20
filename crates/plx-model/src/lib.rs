@@ -99,8 +99,9 @@ use serde::{Deserialize, Serialize};
 /// Format 11 adds notes, frames and compact blocks to the schematic, format 12 the Math and
 /// Switch blocks; formats 10 and 11 read as they are. Format 13 records the signatures of
 /// the geometry's entities, to find them again in changed shapes; format 12 reads as it is,
+/// without them. Format 14 drops the user keywords of the keyword editor; older formats read
 /// without them.
-pub const PROJECT_FORMAT: u32 = 13;
+pub const PROJECT_FORMAT: u32 = 14;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -130,10 +131,6 @@ pub struct FeModel {
     #[serde(default)]
     pub initial_conditions: Vec<InitialCondition>,
     pub steps: Vec<Step>,
-    /// CalculiX keywords the user added to the input file in the keyword editor, in the order
-    /// they appear in it. They cover what the model cannot express yet.
-    #[serde(default)]
-    pub user_keywords: Vec<UserKeyword>,
     /// PrePoMax's features: points and coordinate systems other items refer to by name.
     #[serde(default)]
     pub reference_points: Vec<ReferencePoint>,
@@ -419,19 +416,6 @@ impl FeModel {
             }
         }
     }
-}
-
-/// Lines of the user's own written into the input file at a fixed place, like PrePoMax's
-/// `CalculixUserKeyword`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct UserKeyword {
-    /// Place in the keyword tree of the input file: the index of each enclosing keyword among
-    /// its siblings, then the index the keyword is inserted at. Keywords are inserted in list
-    /// order, so the indices count the user keywords before it as well.
-    pub position: Vec<usize>,
-    pub text: String,
-    /// An inactive keyword is written commented out.
-    pub active: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

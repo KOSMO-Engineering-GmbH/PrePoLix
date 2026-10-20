@@ -618,14 +618,10 @@ impl Problem {
                 "Remove the boundary condition from the dependent nodes of the equation \
                  or reformulate the equation."
             }
-            Problem::RotationIn2d => {
-                "In 2D models prescribe only U1 and U2; check user *BOUNDARY keywords in \
-                 the Keyword Editor."
-            }
+            Problem::RotationIn2d => "In 2D models prescribe only U1 and U2.",
             Problem::UnknownKeyword => {
                 "Install a newer CalculiX or select it under Tools > Settings > CalculiX; \
-                 \"Test CalculiX\" there lists the features it supports. Check user \
-                 keywords in the Keyword Editor for typing errors."
+                 \"Test CalculiX\" there lists the features it supports."
             }
             Problem::NoPhysicalConstants => {
                 "Open Model > Model Properties and enter Absolute zero and Stefan-Boltzmann \
@@ -1419,7 +1415,6 @@ impl FeModel {
                 ));
             }
         }
-        let user_keywords = self.user_keywords.iter().any(|k| k.active);
         // A defined temperature strains the model like a load, if the materials expand.
         let mut temperatures = false;
         if step.kind.supports_defined_fields() {
@@ -1488,7 +1483,7 @@ impl FeModel {
             // A Dynamic step may start from an initial velocity instead of a load.
             let started = matches!(step.kind, StepKind::Dynamic(_))
                 && (self.initial_conditions.iter()).any(|c| c.active && c.kind.is_velocity());
-            if !loaded && !displaced && !started && !user_keywords {
+            if !loaded && !displaced && !started {
                 findings.push(Finding::new(
                     ModelItem::Step(s),
                     Problem::NoLoad,
@@ -1496,22 +1491,7 @@ impl FeModel {
                 ));
             }
         }
-        // Free-free eigenfrequencies are fine; a static or buckle step needs every part held. Own
-        // keywords may hold parts in ways the model does not know of.
-        let constrained_by_keywords = self.user_keywords.iter().any(|k| {
-            let text = k.text.to_ascii_uppercase();
-            k.active
-                && [
-                    "*BOUNDARY",
-                    "*EQUATION",
-                    "*RIGID",
-                    "*COUPLING",
-                    "*MPC",
-                    "*SPRING",
-                ]
-                .iter()
-                .any(|w| text.contains(w))
-        });
+        // Free-free eigenfrequencies are fine; a static or buckle step needs every part held.
         let contact_pairs = (self.contact_pairs.iter()).filter(|c| c.active).count();
         if let StepKind::Frequency(settings) = &step.kind
             && !settings.perturbation
@@ -1571,7 +1551,7 @@ impl FeModel {
                 | StepKind::CoupledTempDisp(_)
                 | StepKind::UncoupledTempDisp(_)
         );
-        if static_mechanical && !constrained_by_keywords {
+        if static_mechanical {
             self.check_rigid_body(s, mesh, check, trusses, &fixed, &skewed_supports, findings);
             self.check_trusses(s, mesh, trusses, &fixed, findings);
         }

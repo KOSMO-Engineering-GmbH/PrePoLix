@@ -3,8 +3,7 @@
 //! The mesh is written together with the analysis of a [`FeModel`]. Regions the user picked in
 //! the GUI become node sets, element sets and surfaces named like PrePoMax's internal
 //! selections (`Internal_Selection-1_Fixed-1`), so the user never defines sets by hand. The
-//! file is built as a [`Keyword`] tree first, which is where the keyword editor inserts the
-//! user's own keywords.
+//! file is built as a [`Keyword`] tree first.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -17,8 +16,8 @@ use plx_model::{
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
     ModelSpace, MovingFrame, NodeTie, OutputDimension, OutputKind, Region, RemoteBehavior,
     RemoteDof, Section, SectionKind, SensitivityStep, StaticStep, SteadyStateDynamicsStep, Step,
-    StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals, UserKeyword, ViscoStep,
-    line_tangent, symmetry_dofs, symmetry_plane,
+    StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals, ViscoStep, line_tangent,
+    symmetry_dofs, symmetry_plane,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -69,13 +68,12 @@ pub enum WriteError {
     NoSymmetryPlane { item: String, reason: String },
 }
 
-/// One entry of the keyword tree of an input file, the structure PrePoMax's keyword editor
-/// shows: section titles hold the keywords written under them, a step holds its loads and
+/// One entry of the keyword tree of an input file: section titles hold the keywords written under them, a step holds its loads and
 /// outputs. The text of the file is the tree written depth first.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Keyword {
     pub kind: KeywordKind,
-    /// The lines of a generated keyword, each ending in a newline, or the user's text.
+    /// The lines of a generated keyword, each ending in a newline.
     pub text: String,
     pub children: Vec<Keyword>,
 }
@@ -86,8 +84,6 @@ pub enum KeywordKind {
     Title(String),
     /// Written from the mesh and the FE model.
     Generated,
-    /// Added by the user; written commented out when inactive.
-    User { active: bool },
 }
 
 impl Keyword {
@@ -111,41 +107,18 @@ impl Keyword {
         }
     }
 
-    pub fn user(keyword: &UserKeyword) -> Self {
-        Self {
-            kind: KeywordKind::User {
-                active: keyword.active,
-            },
-            text: keyword.text.clone(),
-            children: Vec::new(),
-        }
-    }
-
     /// What this keyword adds to the file, without its children.
     pub fn output(&self) -> String {
         match &self.kind {
             KeywordKind::Title(name) => format!("**\n{:+<60}\n**\n", format!("** {name} ")),
             KeywordKind::Generated => self.text.clone(),
-            KeywordKind::User { active } => {
-                let mut out = String::new();
-                for line in self.text.lines() {
-                    if !active {
-                        out.push_str("** ");
-                    }
-                    out.push_str(line);
-                    out.push('\n');
-                }
-                out
-            }
         }
     }
 }
 
-/// Writes the mesh and the analysis as the text of an input file, with the user's keywords.
+/// Writes the mesh and the analysis as the text of an input file.
 pub fn write_inp(mesh: &FeMesh, model: &FeModel, heading: &str) -> Result<String, WriteError> {
-    let mut tree = model_keywords(mesh, model, heading)?;
-    insert_user_keywords(&mut tree, &model.user_keywords);
-    Ok(write_keywords(&tree))
+    Ok(write_keywords(&model_keywords(mesh, model, heading)?))
 }
 
 /// Writes the input file of `model` with the sets of `extra` steps too, which are not
@@ -185,7 +158,6 @@ pub fn write_inp_with_sets_of(
         let mut written = written.into_iter();
         steps.children.retain(|_| written.next().unwrap_or(true));
     }
-    insert_user_keywords(&mut tree, &model.user_keywords);
     Ok(write_keywords(&tree))
 }
 
@@ -237,7 +209,6 @@ pub fn write_check_inp(
                 .push(Keyword::title("CheckModel", vec![header]));
         }
     }
-    insert_user_keywords(&mut tree, &model.user_keywords);
     Ok(write_keywords(&tree))
 }
 
@@ -256,57 +227,8 @@ pub fn write_keywords(tree: &[Keyword]) -> String {
     out
 }
 
-/// Inserts the user keywords at their positions, the way PrePoMax's
-/// `AddUserKeywordByIndices` does. Returns whether each one found its place; a keyword whose
-/// place no longer exists because the model changed is left out.
-pub fn insert_user_keywords(tree: &mut Vec<Keyword>, keywords: &[UserKeyword]) -> Vec<bool> {
-    keywords
-        .iter()
-        .map(|keyword| {
-            let Some((&index, parents)) = keyword.position.split_last() else {
-                return false;
-            };
-            let mut siblings = &mut *tree;
-            for &parent in parents {
-                match siblings.get_mut(parent) {
-                    Some(p) if !matches!(p.kind, KeywordKind::User { .. }) => {
-                        siblings = &mut p.children
-                    }
-                    _ => return false,
-                }
-            }
-            if index > siblings.len() {
-                return false;
-            }
-            siblings.insert(index, Keyword::user(keyword));
-            true
-        })
-        .collect()
-}
-
-/// The user keywords of a tree with their positions, in the order they are inserted again.
-pub fn user_keywords(tree: &[Keyword]) -> Vec<UserKeyword> {
-    fn collect(siblings: &[Keyword], path: &mut Vec<usize>, out: &mut Vec<UserKeyword>) {
-        for (index, keyword) in siblings.iter().enumerate() {
-            path.push(index);
-            if let KeywordKind::User { active } = keyword.kind {
-                out.push(UserKeyword {
-                    position: path.clone(),
-                    text: keyword.text.clone(),
-                    active,
-                });
-            }
-            collect(&keyword.children, path, out);
-            path.pop();
-        }
-    }
-    let mut out = Vec::new();
-    collect(tree, &mut Vec::new(), &mut out);
-    out
-}
-
-/// The keyword tree written from mesh and model, without user keywords. Like PrePoMax it
-/// always has every section title, so the user can add keywords under any of them.
+/// The keyword tree written from mesh and model. Like PrePoMax it always has every section
+/// title.
 pub fn model_keywords(
     mesh: &FeMesh,
     model: &FeModel,

@@ -18,7 +18,6 @@ use crate::history_output_dialog::HistoryOutputDialog;
 use crate::history_table::HistoryTable;
 use crate::hot_spot_dialog::HotSpotDialog;
 use crate::icons::{self, Icon};
-use crate::keywords::KeywordEditor;
 use crate::material_library::{LibraryResult, MaterialLibraryEditor};
 use crate::mesh_tools::{MeshTool, MeshToolDialog, MeshToolResult};
 use crate::meshing::{
@@ -152,8 +151,6 @@ struct Workbench {
     /// Item asked to be deleted, waiting for the user's confirmation.
     /// Items to delete once the user agrees: several parts, or one item.
     confirm_delete: Option<(TreeView, Vec<TreeItem>)>,
-    /// Open CalculiX keyword editor.
-    keyword_editor: Option<KeywordEditor>,
     /// Open search for contact pairs.
     contact_search: Option<ContactSearchDialog>,
     /// Open mesh tool: transform parts, merge nodes or renumber.
@@ -296,7 +293,6 @@ impl AnalysisWindow {
                 frame_cache: Default::default(),
                 editor: None,
                 confirm_delete: None,
-                keyword_editor: None,
                 contact_search: None,
                 mesh_tool: None,
                 query: None,
@@ -377,13 +373,6 @@ impl AnalysisWindow {
             crate::links::apply_setup(&mut model.fe, source, path);
             self.workbench.results_changed = true;
             self.workbench.symbols_shown = None;
-        }
-    }
-
-    /// Replaces the user keywords of the analysis, after its steps moved.
-    pub fn set_user_keywords(&mut self, keywords: Vec<plx_model::UserKeyword>) {
-        if let Some(model) = &mut self.workbench.model {
-            model.fe.user_keywords = keywords;
         }
     }
 
@@ -1579,7 +1568,6 @@ impl AnalysisWindow {
         self.workbench.query_window(&ctx);
         self.workbench.section_window(&ctx);
         self.workbench.exploded_window(&ctx);
-        self.workbench.keyword_editor_window(&ctx);
         self.workbench.material_library_window(&ctx);
         self.workbench.mesh_setup_window(&ctx);
         self.workbench.mesh_item_window(&ctx);
@@ -3259,9 +3247,6 @@ impl Workbench {
         if ui.button("Model Properties …").clicked() {
             self.edit_model_properties();
         }
-        if ui.button("Edit CalculiX Keywords …").clicked() {
-            self.open_keyword_editor();
-        }
         ui.separator();
         let Some(model) = self.setup_model() else {
             return;
@@ -3323,20 +3308,6 @@ impl Workbench {
         }
     }
 
-    /// PrePoMax's Model > Edit CalculiX Keywords.
-    fn open_keyword_editor(&mut self) {
-        let Some(model) = self.setup_model() else {
-            return;
-        };
-        let heading = format!("PrePoLix: {}", model.file_name());
-        match KeywordEditor::new(&model.mesh, &model.fe, &heading) {
-            Ok(editor) => self.keyword_editor = Some(editor),
-            Err(error) => self
-                .output
-                .push(format!("Keyword Editor not available: {error}")),
-        }
-    }
-
     /// PrePoMax's Material Library Editor, from the context menu of Materials.
     fn open_material_library(&mut self) {
         if let Some(model) = self.setup_model() {
@@ -3365,22 +3336,6 @@ impl Workbench {
                 }
             }
             LibraryResult::Cancel => self.material_library = None,
-        }
-    }
-
-    fn keyword_editor_window(&mut self, ctx: &egui::Context) {
-        let Some(editor) = &mut self.keyword_editor else {
-            return;
-        };
-        match editor.show(ctx) {
-            crate::keywords::EditorResult::Open => {}
-            crate::keywords::EditorResult::Ok(keywords) => {
-                self.keyword_editor = None;
-                if let Some(model) = self.model.as_mut() {
-                    model.fe.user_keywords = keywords;
-                }
-            }
-            crate::keywords::EditorResult::Cancel => self.keyword_editor = None,
         }
     }
 
@@ -5056,7 +5011,6 @@ impl Workbench {
             || self.mesh_setup.is_some()
             || self.mesh_item_editor.is_some()
             || self.confirm_delete.is_some()
-            || self.keyword_editor.is_some()
             || self.contact_search.is_some()
             || self.mesh_tool.is_some()
             || self.material_library.is_some()

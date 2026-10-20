@@ -157,7 +157,7 @@ pub fn unknown_of<'a>(
 }
 
 /// One entry per feature, "Feature (*KEYWORD, *KEYWORD)", for a list of keywords; keywords
-/// PrePoLix does not write, such as user keywords, stand alone.
+/// of no known feature stand alone.
 pub fn by_feature(keywords: &[String]) -> Vec<String> {
     let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
     for keyword in keywords {
@@ -520,7 +520,6 @@ pub(crate) fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeMod
             kind: SectionKind::Solid,
         }],
         steps: vec![step],
-        user_keywords: Vec::new(),
         ..FeModel::default()
     }
 }

@@ -253,13 +253,6 @@ impl FeModel {
                     .into(),
             );
         }
-        if !self.user_keywords.is_empty() {
-            notes.push(format!(
-                "User keywords of the Keyword Editor were not converted; please check them: \
-                 they have to be in {}.",
-                c.to.label()
-            ));
-        }
         notes
     }
 

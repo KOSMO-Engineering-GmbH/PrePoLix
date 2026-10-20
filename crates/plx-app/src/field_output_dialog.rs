@@ -7,9 +7,9 @@ use plx_model::next_name;
 use plx_results::Principal;
 use plx_results::field_output::{FieldOutput, FieldOutputKind, LimitBasis};
 
-use crate::keywords::{frame, tree_row};
 use crate::numeric;
 use crate::results::ResultsView;
+use crate::tree_rows::{frame, tree_row};
 
 /// The types of the list, PrePoMax's first in its order, with the prefix of their default
 /// names.

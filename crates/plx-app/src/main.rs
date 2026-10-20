@@ -25,7 +25,6 @@ mod history_table;
 mod hot_spot_dialog;
 mod hot_spots;
 mod icons;
-mod keywords;
 mod lic;
 mod links;
 mod material_library;
@@ -64,6 +63,7 @@ mod symbols;
 mod transformation_dialog;
 mod tree;
 mod tree_icons;
+mod tree_rows;
 mod undo;
 mod update;
 mod viewport;
@@ -145,7 +145,6 @@ mod tests {
             ),
             ("history_table.rs", include_str!("history_table.rs")),
             ("icons.rs", include_str!("icons.rs")),
-            ("keywords.rs", include_str!("keywords.rs")),
             ("links.rs", include_str!("links.rs")),
             ("material_library.rs", include_str!("material_library.rs")),
             ("main.rs", include_str!("main.rs")),
@@ -171,6 +170,7 @@ mod tests {
             ("update.rs", include_str!("update.rs")),
             ("tree.rs", include_str!("tree.rs")),
             ("tree_icons.rs", include_str!("tree_icons.rs")),
+            ("tree_rows.rs", include_str!("tree_rows.rs")),
             ("viewport.rs", include_str!("viewport.rs")),
         ];
         for (file, text) in sources {

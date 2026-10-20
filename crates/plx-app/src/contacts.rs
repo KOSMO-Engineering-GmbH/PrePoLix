@@ -11,11 +11,11 @@ use plx_model::{
 };
 
 use crate::icons::{self, Icon};
-use crate::keywords::{frame, tree_row};
 use crate::model::{Highlight, Model};
 use crate::numeric;
 use crate::selection::Target;
 use crate::setup::{FACE_SOURCES, RegionDraft, region_highlight};
+use crate::tree_rows::{frame, tree_row};
 
 /// Which of the two regions clicks in the 3D view pick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

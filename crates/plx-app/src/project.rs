@@ -5839,20 +5839,16 @@ impl ProjectApp {
         self.sync_due = true;
     }
 
-    /// Replaces the steps and the user keywords of an analysis with those of `fe`.
+    /// Replaces the steps of an analysis with those of `fe`.
     fn set_steps(&mut self, id: u64, fe: &plx_model::FeModel, path: &[String]) {
         let Some(node) = self.node(id) else {
             return;
         };
         match node.window_mut() {
-            Some(window) => {
-                window.apply_setup(fe, path);
-                window.set_user_keywords(fe.user_keywords.clone());
-            }
+            Some(window) => window.apply_setup(fe, path),
             None => {
                 if let Some(data) = (node.as_analysis_mut()).and_then(|a| a.data.as_mut()) {
                     links::apply_setup(&mut data.model, fe, path);
-                    data.model.user_keywords = fe.user_keywords.clone();
                 }
                 node.refresh_closed();
             }
