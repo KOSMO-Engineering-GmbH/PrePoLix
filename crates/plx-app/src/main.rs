@@ -72,7 +72,13 @@ mod vtk_export_dialog;
 mod xy_plot;
 
 fn main() -> eframe::Result {
+    if let Some(code) = meshing::worker_main() {
+        std::process::exit(code);
+    }
     env_logger::init();
+    if let Ok(program) = std::env::current_exe() {
+        meshing::set_worker(program);
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("PrePoLix")

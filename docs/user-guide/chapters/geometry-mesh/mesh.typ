@@ -12,6 +12,17 @@ with ties, contacts or node ties (@constraints).
 The output pane lists each part with its element count and size range. Afterwards PrePoLix
 switches to the #ui("FE Model") tab.
 
+=== Cancelling the meshing <cancel-meshing>
+
+Gmsh runs in a separate process, so a meshing that takes too long, for example because the
+element size is too small, can be cancelled at any time. While it runs, the status bar shows
+#ui("Meshing ...") with a #ui("Cancel") button; #menu("Mesh", "Cancel Meshing") and the
+#ui("Stop") button of the toolbar do the same. The mesher stops at once and the parts keep
+the mesh they had before. During #ui("Update Project") the #ui("Stop") buttons of the
+Solution Monitor and the project toolbar cancel a meshing in the same way.
+
+#screenshot("meshing-cancel.png", [The status bar while meshing, with the Cancel button])
+
 === Element types
 
 #table(

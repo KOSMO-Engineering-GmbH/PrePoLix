@@ -1079,8 +1079,17 @@ impl AnalysisWindow {
         if icons::button(ui, Icon::Solve, SOLVE_TIP, can_solve, false).clicked() {
             workbench.solve();
         }
-        if icons::button(ui, Icon::Stop, "Stop the analysis", running, false).clicked() {
-            workbench.stop();
+        let (tip, can_stop) = if meshing && !running {
+            ("Cancel the meshing", true)
+        } else {
+            ("Stop the analysis", running)
+        };
+        if icons::button(ui, Icon::Stop, tip, can_stop, false).clicked() {
+            if running {
+                workbench.stop();
+            } else {
+                workbench.cancel_meshing();
+            }
         }
         let tip = "Monitor: the output of CalculiX in the Analysis tab below the 3D view";
         let shown = workbench.analysis_tab;
@@ -1125,7 +1134,9 @@ impl AnalysisWindow {
         }
     }
 
-    fn status_bar(&self, ui: &mut egui::Ui) {
+    /// The status bar; returns whether the meshing was cancelled there.
+    fn status_bar(&self, ui: &mut egui::Ui) -> bool {
+        let mut cancel = false;
         ui.horizontal(|ui| {
             // PrePoMax shows the unit system of the model at the right.
             if let Some(model) = &self.workbench.model {
@@ -1137,16 +1148,19 @@ impl AnalysisWindow {
                         properties.space.label()
                     ));
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        self.status_text(ui);
+                        cancel = self.status_text(ui);
                     });
                 });
             } else {
-                self.status_text(ui);
+                cancel = self.status_text(ui);
             }
         });
+        cancel
     }
 
-    fn status_text(&self, ui: &mut egui::Ui) {
+    /// What the program does or shows; returns whether the meshing was cancelled.
+    fn status_text(&self, ui: &mut egui::Ui) -> bool {
+        let mut cancel = false;
         ui.horizontal(|ui| match (&self.loading, self.workbench.shown()) {
             (Some(path), _) => {
                 ui.spinner();
@@ -1172,6 +1186,9 @@ impl AnalysisWindow {
             (None, _) if self.workbench.meshing.is_some() => {
                 ui.spinner();
                 ui.label("Meshing …");
+                cancel = (ui.small_button("Cancel"))
+                    .on_hover_text("Stop the meshing; the parts keep their old mesh.")
+                    .clicked();
             }
             (None, Some(model)) if model.is_geometry() => {
                 ui.label(format!(
@@ -1197,6 +1214,7 @@ impl AnalysisWindow {
                 });
             }
         });
+        cancel
     }
 }
 
@@ -1491,7 +1509,10 @@ impl AnalysisWindow {
         });
         self.workbench.animate(&ctx);
         self.workbench.play_sound(&ctx);
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        let cancel = egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        if cancel.inner {
+            self.workbench.cancel_meshing();
+        }
         // PrePoMax's fixed layout: tree on the left over the full height, 3D view with the
         // output below it; only the separators move.
         let pane = egui::Frame::new()
@@ -2977,6 +2998,10 @@ impl Workbench {
             if ui.add_enabled(self.meshing.is_none(), mesh).clicked() {
                 self.generate_mesh(ui.ctx(), None);
             }
+            let cancel = egui::Button::new("Cancel Meshing");
+            if ui.add_enabled(self.meshing.is_some(), cancel).clicked() {
+                self.cancel_meshing();
+            }
         }
         if has_mesh {
             if has_geometry {
@@ -3178,6 +3203,13 @@ impl Workbench {
         self.output.push(format!("Meshing {what} …"));
         self.meshing = Some(MeshingJob::start(geometry, parts, ctx));
         self.mesh_failure.clear();
+    }
+
+    /// Cancels the meshing under way: the mesher is killed and the parts keep their mesh.
+    fn cancel_meshing(&mut self) {
+        if self.meshing.take().is_some() {
+            self.output.push(crate::meshing::CANCELLED.into());
+        }
     }
 
     fn poll_meshing(&mut self) {

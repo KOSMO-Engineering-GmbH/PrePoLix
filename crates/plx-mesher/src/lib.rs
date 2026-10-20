@@ -24,7 +24,7 @@ use plx_model::{
 };
 
 use gmsh::{Gmsh, with_gmsh};
-pub use gmsh::{GmshError, LibraryInfo, loaded_library, set_library_path};
+pub use gmsh::{GmshError, LibraryInfo, library_path, loaded_library, set_library_path};
 
 /// File extensions of the CAD formats that can be imported.
 pub const CAD_EXTENSIONS: [&str; 5] = ["step", "stp", "iges", "igs", "brep"];

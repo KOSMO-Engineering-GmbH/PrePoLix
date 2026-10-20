@@ -89,6 +89,16 @@ pub fn loaded_library() -> Option<LibraryInfo> {
     state.loaded.as_ref().map(|g| g.info.clone())
 }
 
+/// The library another process should load to mesh like this one: the loaded one, else the
+/// configured one; `None` searches the default places there too.
+pub fn library_path() -> Option<PathBuf> {
+    let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+    match &state.loaded {
+        Some(gmsh) => Some(gmsh.info.path.clone()),
+        None => state.configured.clone(),
+    }
+}
+
 /// Runs `f` with Gmsh, loading the library on first use. Calls from several threads wait for
 /// each other, because Gmsh has one global model.
 pub fn with_gmsh<T>(f: impl FnOnce(&Gmsh) -> Result<T, GmshError>) -> Result<T, GmshError> {
