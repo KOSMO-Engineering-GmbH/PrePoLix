@@ -21,6 +21,8 @@ pub struct Analysis {
     /// Fingerprint of the model the run solves, see [`plx_model::fingerprint::solve_input`];
     /// kept with its results to tell when they are out of date.
     pub input: u64,
+    /// The fingerprint of each step's results, see [`plx_model::fingerprint::step_inputs`].
+    pub steps: Vec<u64>,
     output: Vec<String>,
     /// Text typed into the monitor's filter field; only output lines containing it are shown.
     filter: String,
@@ -342,6 +344,7 @@ impl Analysis {
             job,
             name: name.to_owned(),
             input: plx_model::fingerprint::solve_input(&model.mesh, &model.fe),
+            steps: plx_model::fingerprint::step_inputs(&model.mesh, &model.fe),
             started: Instant::now(),
             finished: None,
             status: JobStatus::Running,

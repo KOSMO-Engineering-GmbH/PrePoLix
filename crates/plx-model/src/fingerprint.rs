@@ -12,6 +12,21 @@ use crate::{FeModel, Geometry, MeshSetupKind, ModelSpace};
 /// mesh and the model definition. Items only used to evaluate results, result paths and
 /// planes, are left out: they never need a new solution.
 pub fn solve_input(mesh: &FeMesh, fe: &FeModel) -> u64 {
+    steps_input(mesh, fe, fe.steps.len())
+}
+
+/// The inputs of the results of each step, in the order of the steps: the model and the
+/// steps up to it. CalculiX solves the steps one after the other, so steps after a step never
+/// change its results. The last one is [`solve_input`].
+pub fn step_inputs(mesh: &FeMesh, fe: &FeModel) -> Vec<u64> {
+    (1..=fe.steps.len())
+        .map(|count| steps_input(mesh, fe, count))
+        .collect()
+}
+
+/// The inputs of the results of the first `count` steps: [`solve_input`] of the model with
+/// only these steps.
+pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
     let mut hash = Fnv::new();
     hash.add(&mesh.input_fingerprint().to_le_bytes());
     let FeModel {
@@ -59,7 +74,7 @@ pub fn solve_input(mesh: &FeMesh, fe: &FeModel) -> u64 {
     hash.add_debug(amplitudes);
     hash.add_debug(initial_conditions);
     // Temperatures read from results files count by their folder and file name too.
-    let mut steps = steps.clone();
+    let mut steps = steps[..count.min(steps.len())].to_vec();
     for field in steps.iter_mut().flat_map(|s| s.defined_fields.iter_mut()) {
         if let crate::DefinedFieldKind::TemperatureFromFile { file, .. } = &mut field.kind {
             *file = short(file);
@@ -124,6 +139,28 @@ mod tests {
         assert_eq!(solve_input(&mesh, &fe), before);
         fe.steps.push(Step::new_static("Step-1"));
         assert_ne!(solve_input(&mesh, &fe), before);
+    }
+
+    #[test]
+    fn later_steps_leave_the_results_of_earlier_ones_up_to_date() {
+        let mesh = FeMesh::default();
+        let mut fe = FeModel::default();
+        fe.steps.push(Step::new_static("Step-1"));
+        let before = step_inputs(&mesh, &fe);
+        assert_eq!(before, [solve_input(&mesh, &fe)]);
+        fe.steps.push(Step::new_static("Step-2"));
+        let after = step_inputs(&mesh, &fe);
+        assert_eq!(after[0], before[0]);
+        assert_eq!(after[1], solve_input(&mesh, &fe));
+        assert_ne!(after[1], before[0]);
+        // A changed earlier step changes the results of the later ones too.
+        fe.steps[0].name = "Load".into();
+        let changed = step_inputs(&mesh, &fe);
+        assert!(changed[0] != after[0] && changed[1] != after[1]);
+        // So does the model.
+        fe.steps[0].name = "Step-1".into();
+        fe.materials.push(Default::default());
+        assert_ne!(step_inputs(&mesh, &fe)[0], before[0]);
     }
 
     #[test]

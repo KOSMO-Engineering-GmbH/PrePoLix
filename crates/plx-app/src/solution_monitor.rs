@@ -462,11 +462,13 @@ impl BackgroundSolve {
         // The eigenmodes of a frequency step go with them, for analyses that take them.
         let files = ["inp", "frd", "dat", "eig"].map(|e| frd.with_extension(e));
         let (name, input) = (self.name.clone(), analysis.input);
+        let steps = analysis.steps.clone();
         let with_errors = status == JobStatus::FailedWithResults;
         std::thread::spawn(move || {
             let bound = plx_io::project::bind_results(&name, &files, with_errors)
                 .map(|mut bound| {
                     bound.input = Some(input);
+                    bound.steps = steps;
                     bound
                 })
                 .map_err(|e| e.to_string());
