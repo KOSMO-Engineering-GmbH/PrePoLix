@@ -142,6 +142,10 @@ struct Workbench {
     view_command: Option<ViewCommand>,
     /// The result selection or deformation changed; the scene must be rebuilt.
     results_changed: bool,
+    /// The highlight of the shown scene changed, drawn differently on these parts: only
+    /// their meshes are rebuilt, so that a click in a large assembly doesn't build all parts
+    /// anew. Without any, only the highlighted nodes and lines over the scene changed.
+    highlight_changed: Option<BTreeSet<usize>>,
     /// Only the animation frame changed; frames already built are reused.
     frame_changed: bool,
     /// Scene of each animation frame shown so far, cleared when anything else changes.
@@ -289,6 +293,7 @@ impl AnalysisWindow {
                 analysis_tab: false,
                 view_command: None,
                 results_changed: false,
+                highlight_changed: None,
                 frame_changed: false,
                 frame_cache: Default::default(),
                 editor: None,
@@ -5211,8 +5216,15 @@ impl Workbench {
             }
         };
         if highlight != model.highlight {
+            if self.tree_view == TreeView::FeModel {
+                match model.highlight_changed_parts(&model.highlight, &highlight) {
+                    Some(parts) => self.highlight_changed.get_or_insert_default().extend(parts),
+                    None => self.results_changed = true,
+                }
+            } else {
+                self.results_changed |= !on_results;
+            }
             model.highlight = highlight;
-            self.results_changed |= !on_results;
         }
     }
 
@@ -5238,8 +5250,13 @@ impl Workbench {
             _ => crate::meshing::entities_highlight(view, &self.mesh_failure),
         };
         if highlight != view.highlight {
+            if self.tree_view == TreeView::Geometry {
+                match view.highlight_changed_parts(&view.highlight, &highlight) {
+                    Some(parts) => self.highlight_changed.get_or_insert_default().extend(parts),
+                    None => self.results_changed = true,
+                }
+            }
             view.highlight = highlight;
-            self.results_changed |= self.tree_view == TreeView::Geometry;
         }
     }
 
@@ -6345,6 +6362,13 @@ impl Workbench {
 
     /// Rebuilds the scene after the result selection or deformation changed.
     fn rebuild_if_results_changed(&mut self) {
+        let highlighted = self.highlight_changed.take();
+        if !(self.results_changed || self.frame_changed)
+            && let Some(parts) = highlighted
+        {
+            self.rebuild_highlighted_parts(parts);
+            return;
+        }
         let frame_only = !self.results_changed && self.frame_changed;
         if !(std::mem::take(&mut self.results_changed) | std::mem::take(&mut self.frame_changed)) {
             return;
@@ -6388,6 +6412,31 @@ impl Workbench {
             && let Some(bounds) = model.visible_bounds()
         {
             self.viewport.cover(bounds);
+        }
+        self.update_contour();
+    }
+
+    /// Rebuilds only the meshes of the parts whose highlight changed, or the whole scene
+    /// where the shown model can't draw a single part.
+    fn rebuild_highlighted_parts(&mut self, parts: BTreeSet<usize>) {
+        let model = match self.tree_view {
+            TreeView::Results => self.results.get(self.current_result),
+            TreeView::Geometry => self.geometry.as_ref(),
+            TreeView::FeModel => self.model.as_ref(),
+        };
+        let Some(model) = model else {
+            return;
+        };
+        let meshes: Option<Vec<(usize, RenderMesh)>> = (parts.into_iter())
+            .map(|index| Some((index, model.part_scene_mesh(index)?)))
+            .collect();
+        let Some(meshes) = meshes else {
+            self.results_changed = true;
+            self.rebuild_if_results_changed();
+            return;
+        };
+        for (index, mesh) in &meshes {
+            self.viewport.set_part(*index, mesh);
         }
         self.update_contour();
     }

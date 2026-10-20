@@ -57,7 +57,7 @@ pub fn part_render_mesh(
     let mut render = RenderMesh::default();
     let normals = smooth_vertex_normals(coords, skin, smooth_angle_deg);
 
-    let mut shared = SharedVertices::new(coords.len());
+    let mut shared = SharedVertices::new(node_span(skin));
     let mut normals = normals.into_iter();
     let mut local = Vec::with_capacity(8);
     for (index, face) in skin.faces.iter().enumerate() {
@@ -120,8 +120,22 @@ pub fn part_render_mesh(
     render
 }
 
+/// The node indices a skin uses lie in this range. A part of a large assembly uses few of
+/// the nodes of the mesh, mostly numbered in one block, so tables by node are kept to it:
+/// tables over all nodes would make building every part as slow as the whole mesh.
+pub(crate) fn node_span(skin: &PartSkin) -> std::ops::Range<usize> {
+    let faces = skin.faces.iter().flat_map(nodes);
+    let edges = (skin.edges.iter()).flat_map(|e| [e.a, e.b].into_iter().chain(e.mid));
+    let lines = skin.lines.iter().flatten().copied();
+    let (lo, hi) = (faces.chain(edges).chain(lines))
+        .fold((usize::MAX, 0), |(lo, hi), n| (lo.min(n), hi.max(n + 1)));
+    lo.min(hi)..hi
+}
+
 /// The vertices of each node as a linked list: the first one, and per vertex the next.
 struct SharedVertices {
+    /// The first node of the table.
+    offset: usize,
     first: Vec<u32>,
     next: Vec<u32>,
 }
@@ -129,16 +143,18 @@ struct SharedVertices {
 impl SharedVertices {
     const NONE: u32 = u32::MAX;
 
-    fn new(nodes: usize) -> Self {
+    fn new(nodes: std::ops::Range<usize>) -> Self {
         Self {
-            first: vec![Self::NONE; nodes],
+            offset: nodes.start,
+            first: vec![Self::NONE; nodes.len()],
             next: Vec::new(),
         }
     }
 
     /// Index of a vertex of the node with the same normal and colour, added if there is none.
     fn index(&mut self, render: &mut RenderMesh, node: usize, vertex: Vertex) -> u32 {
-        let mut index = self.first[node];
+        let slot = node - self.offset;
+        let mut index = self.first[slot];
         while index != Self::NONE {
             let other = &render.vertices[index as usize];
             if other.normal == vertex.normal && other.color == vertex.color {
@@ -149,14 +165,14 @@ impl SharedVertices {
         let index = render.vertices.len() as u32;
         render.vertices.push(vertex);
         render.origins.push(NodeBlend::at(node));
-        self.next.push(self.first[node]);
-        self.first[node] = index;
+        self.next.push(self.first[slot]);
+        self.first[slot] = index;
         index
     }
 
     /// Index of some vertex of the node.
     fn any(&self, node: usize) -> Option<u32> {
-        Some(self.first[node]).filter(|&i| i != Self::NONE)
+        Some(self.first[node - self.offset]).filter(|&i| i != Self::NONE)
     }
 }
 
@@ -225,25 +241,28 @@ pub(crate) fn smooth_vertex_normals(
         .iter()
         .map(|f| polygon_area(coords, &f.corners))
         .collect();
-    // The faces at each node, as one list in node order: those of node n start at start[n].
-    let mut start = vec![0usize; coords.len() + 1];
+    // The faces at each node, as one list in node order: those of node n start at
+    // start[n - offset].
+    let span = node_span(skin);
+    let offset = span.start;
+    let mut start = vec![0usize; span.len() + 1];
     for node in skin.faces.iter().flat_map(nodes) {
-        start[node + 1] += 1;
+        start[node - offset + 1] += 1;
     }
-    for n in 0..coords.len() {
+    for n in 0..span.len() {
         start[n + 1] += start[n];
     }
     let mut filled = start.clone();
-    let mut faces_at_node = vec![0usize; start[coords.len()]];
+    let mut faces_at_node = vec![0usize; start[span.len()]];
     for (index, face) in skin.faces.iter().enumerate() {
         for node in nodes(face) {
-            faces_at_node[filled[node]] = index;
-            filled[node] += 1;
+            faces_at_node[filled[node - offset]] = index;
+            filled[node - offset] += 1;
         }
     }
     let mut normals = Vec::with_capacity(faces_at_node.len());
     for (face, &own) in skin.faces.iter().zip(&face_normals) {
-        for node in nodes(face) {
+        for node in nodes(face).map(|n| n - offset) {
             let sum: DVec3 = faces_at_node[start[node]..start[node + 1]]
                 .iter()
                 .filter(|&&other| {
