@@ -1232,7 +1232,9 @@ fn remote_rows(
             if cylindrical && k == 1 {
                 ui.add(numeric::drag_value(value).speed(1.0).suffix(" °"));
             } else {
-                ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1));
+                expose::field(ui, Field::LOCATION[k], |ui| {
+                    ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1))
+                });
             }
             ui.end_row();
         }
@@ -1291,10 +1293,12 @@ fn remote_rows(
             remote.pinball = Some(rounded.unwrap_or(0.0));
         }
         let mut radius = remote.pinball.unwrap_or(0.0);
-        ui.add_enabled(
-            limited,
-            numeric::quantity(&mut radius, units, Quantity::Length).speed(0.1),
-        );
+        expose::field(ui, Field::Pinball, |ui| {
+            ui.add_enabled(
+                limited,
+                numeric::quantity(&mut radius, units, Quantity::Length).speed(0.1),
+            )
+        });
         remote.pinball = limited.then_some(radius.max(0.0));
     });
     ui.end_row();
@@ -2049,7 +2053,11 @@ impl Editor {
     /// The item as the dialog has it now, by its new name, in a model of only that item; for
     /// an item whose numbers can be exposed.
     fn draft_item(&self, fe: &FeModel) -> Option<(ItemRef, FeModel)> {
-        let mut model = FeModel::default();
+        let mut model = FeModel {
+            // The location of a remote displacement depends on the kind of its system.
+            coordinate_systems: fe.coordinate_systems.clone(),
+            ..FeModel::default()
+        };
         let step = |s: usize| {
             let name = fe.steps.get(s)?.name.clone();
             Some(Step {
