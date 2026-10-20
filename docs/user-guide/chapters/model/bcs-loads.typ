@@ -55,6 +55,14 @@ new one holds all components at zero, which clamps the selection rigidly in plac
     follow it. Ticking it starts with the distance of the farthest node.],
 )
 
+The ticked components, the coordinates of the location and the pinball radius have a #ui("P")
+button, so a parameter study can vary them (@exposed-parameters). Only numbers that are set can
+be exposed: tick the component, choose #ui("Coordinates") or tick the pinball region first. The
+angle Theta of a cylindrical system is the one number that cannot be exposed.
+
+#screenshot("remote-displacement-expose.png", [The #ui("P") buttons of a remote displacement:
+  the location, the pinball radius and the prescribed components can be exposed])
+
 The three behaviors match those of Ansys:
 
 - #ui("Rigid"): the selection keeps its shape and moves with the point as a rigid body. This
@@ -77,7 +85,10 @@ with lines to the selection.
 - In plane stress and plane strain models the point has `U1`, `U2` and `UR3` (rotation about
   z); in axisymmetric models `U1` and `U2`.
 - Remote displacements of several steps on the same selection with the same behavior,
-  coordinate system, location and pinball region share one point. The rigid body or the
+  coordinate system, location and pinball region share one point. A study that varies the
+  location or the pinball radius in one step only gives that step a point of its own on the
+  same nodes, which the model check reports; expose the number in every step and link all of
+  them to the same value to keep one point. The rigid body or the
   equations belong to the whole model, so they still act in steps without the boundary
   condition.
 - A node can belong to only one rigid body or remote point: do not let the selection overlap

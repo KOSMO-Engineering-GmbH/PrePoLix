@@ -129,6 +129,12 @@ pub enum Field {
     InitialIncrement,
     /// The number of eigenfrequencies of a frequency step.
     Modes,
+    /// The coordinates of the point of a remote displacement, in its coordinate system.
+    LocationX,
+    LocationY,
+    LocationZ,
+    /// The pinball radius of a remote displacement.
+    Pinball,
 }
 
 impl Field {
@@ -160,12 +166,17 @@ impl Field {
             Self::TimePeriod => "Time period",
             Self::InitialIncrement => "Initial increment",
             Self::Modes => "Modes",
+            Self::LocationX => "Location X",
+            Self::LocationY => "Location Y",
+            Self::LocationZ => "Location Z",
+            Self::Pinball => "Pinball",
         }
     }
 
     pub const VECTOR: [Self; 3] = [Self::X, Self::Y, Self::Z];
     pub const ROTATION: [Self; 3] = [Self::RotationX, Self::RotationY, Self::RotationZ];
-    pub const ALL: [Self; 25] = [
+    pub const LOCATION: [Self; 3] = [Self::LocationX, Self::LocationY, Self::LocationZ];
+    pub const ALL: [Self; 29] = [
         Self::Value,
         Self::X,
         Self::Y,
@@ -191,6 +202,10 @@ impl Field {
         Self::TimePeriod,
         Self::InitialIncrement,
         Self::Modes,
+        Self::LocationX,
+        Self::LocationY,
+        Self::LocationZ,
+        Self::Pinball,
     ];
 
     /// The component of a vector it names.
@@ -249,18 +264,27 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
             load_slot(&mut load.kind, field)
         }
         ItemRef::BoundaryCondition { step, name } => {
+            // The angle of a location in a cylindrical system is in degrees, no quantity.
+            let cylindrical: Vec<String> = (fe.coordinate_systems.iter())
+                .filter(|c| c.kind == crate::CoordinateSystemKind::Cylindrical)
+                .map(|c| c.name.clone())
+                .collect();
             let bc =
                 (step_named(fe, step)?.boundary_conditions.iter_mut()).find(|b| &b.name == name)?;
             match (&mut bc.kind, field) {
                 (BoundaryKind::Temperature(t), Field::Value) => real(t, Quantity::Temperature),
-                (BoundaryKind::Displacement(values), field) => {
-                    if let Some(axis) = field.axis() {
-                        real(values[axis].as_mut()?, Quantity::Length)
-                    } else {
-                        let axis = Field::ROTATION.iter().position(|f| *f == field)?;
-                        real(values[3 + axis].as_mut()?, Quantity::Angle)
+                (BoundaryKind::Displacement(values), field) => dof_slot(values, field),
+                (BoundaryKind::RemoteDisplacement(remote), field) => match field {
+                    Field::Pinball => real(remote.pinball.as_mut()?, Quantity::Length),
+                    Field::LocationX | Field::LocationY | Field::LocationZ => {
+                        let axis = Field::LOCATION.iter().position(|f| *f == field)?;
+                        if axis == 1 && cylindrical.contains(&remote.system) {
+                            return None;
+                        }
+                        real(&mut remote.location.as_mut()?[axis], Quantity::Length)
                     }
-                }
+                    field => dof_slot(&mut remote.values, field),
+                },
                 _ => None,
             }
         }
@@ -368,6 +392,21 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
     }
 }
 
+/// A prescribed displacement (U1..U3) or rotation (UR1..UR3); `None` when it is free.
+fn dof_slot(values: &mut [Option<f64>; 6], field: Field) -> Option<(Slot<'_>, ValueKind)> {
+    let (index, quantity) = match field.axis() {
+        Some(axis) => (axis, Quantity::Length),
+        None => {
+            let axis = Field::ROTATION.iter().position(|f| *f == field)?;
+            (3 + axis, Quantity::Angle)
+        }
+    };
+    Some((
+        Slot::Real(values[index].as_mut()?),
+        ValueKind::Quantity(quantity),
+    ))
+}
+
 fn load_slot(kind: &mut LoadKind, field: Field) -> Option<(Slot<'_>, ValueKind)> {
     fn real(value: &mut f64, quantity: Quantity) -> (Slot<'_>, ValueKind) {
         (Slot::Real(value), ValueKind::Quantity(quantity))
@@ -417,8 +456,13 @@ impl FeModel {
     fn item_copy(&self, item: &ItemRef) -> Option<FeModel> {
         let mut fe = FeModel::default();
         match item {
+            ItemRef::BoundaryCondition { step, .. } => {
+                fe.steps
+                    .push(self.steps.iter().find(|s| &s.name == step)?.clone());
+                // A remote displacement's location depends on the kind of its system.
+                fe.coordinate_systems = self.coordinate_systems.clone();
+            }
             ItemRef::Load { step, .. }
-            | ItemRef::BoundaryCondition { step, .. }
             | ItemRef::DefinedField { step, .. }
             | ItemRef::Step(step) => {
                 fe.steps
@@ -575,6 +619,50 @@ mod tests {
         assert!(!fe.set_value(&young, 2e11));
         let missing = ValuePath::new(ItemRef::Material("Copper".into()), Field::Density);
         assert_eq!(fe.value_at(&missing), None);
+    }
+
+    #[test]
+    fn remote_displacements_expose_their_numbers() {
+        let mut fe = model();
+        let mut remote =
+            crate::RemoteDisplacement::new([Some(0.5), None, Some(0.0), None, None, Some(0.1)]);
+        remote.location = Some([1.0, 2.0, 3.0]);
+        fe.steps[0]
+            .boundary_conditions
+            .push(crate::BoundaryCondition {
+                name: "Remote-1".into(),
+                active: true,
+                visible: true,
+                region: Region::Nodes(Vec::new()),
+                kind: BoundaryKind::RemoteDisplacement(remote),
+                amplitude: None,
+            });
+        let item = ItemRef::BoundaryCondition {
+            step: "Step-1".into(),
+            name: "Remote-1".into(),
+        };
+        let exposable = fe.exposable(&item);
+        for field in [
+            Field::X,
+            Field::Z,
+            Field::RotationZ,
+            Field::LocationX,
+            Field::LocationY,
+        ] {
+            assert!(exposable.contains(&field), "{field:?}");
+        }
+        // Free directions and a pinball region that is off have no number to expose.
+        for field in [Field::Y, Field::RotationX, Field::Pinball] {
+            assert!(!exposable.contains(&field), "{field:?}");
+        }
+        let path = |field| ValuePath::new(item.clone(), field);
+        assert_eq!(fe.value_at(&path(Field::X)), Some(0.5));
+        assert!(fe.set_value(&path(Field::LocationY), 4.0));
+        assert_eq!(fe.value_at(&path(Field::LocationY)), Some(4.0));
+        assert_eq!(
+            fe.value_kind(&path(Field::RotationZ)),
+            Some(ValueKind::Quantity(Quantity::Angle))
+        );
     }
 
     #[test]
