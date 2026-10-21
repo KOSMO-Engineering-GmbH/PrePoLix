@@ -48,6 +48,16 @@ the messages, and the pane can be made taller by dragging its upper edge.
 
 #screenshot("monitor.png", [The Analysis tab after a completed run])
 
+The progress next to the running time follows the output of CalculiX from its first iteration
+on: the step, the increment, the attempt once CalculiX has cut the increment back (attempt 2
+and later), the iteration, the size of the increment and the time reached in the step. So a
+nonlinear step that needs several cutbacks before its first increment converges still shows
+where it is, long before the status file has a line. After the run, the progress shows the
+last converged increment from the status file (`.sta`).
+
+#screenshot("monitor-progress.png", [A nonlinear step on its third attempt of the first
+  increment, with the increment size cut back to 0.0625])
+
 The #ui("Filter") field shows only the lines that contain the text you type,
 ignoring upper and lower case. With "average force", for example, you see the average force of
 every increment one below the other. The filter applies while CalculiX is still running, and

@@ -437,16 +437,23 @@ impl Analysis {
         (self.finished).unwrap_or_else(|| self.started.elapsed().as_secs_f32())
     }
 
-    /// Where the run is: step, increment, iterations and time, once CalculiX tells.
+    /// Where the run is: step, increment, attempt, iteration and time, once CalculiX tells.
     pub fn progress(&self) -> Option<String> {
-        match self.job.progress() {
-            Some(p) => Some(format!(
-                "Step {}, increment {}, iterations {}, time {}",
-                p.step, p.increment, p.iterations, p.total_time
-            )),
-            // The .sta file only changes when an increment ends; until then the solver
-            // output tells where the run is.
-            None => live_progress(&self.output),
+        let finished = || {
+            self.job.progress().map(|p| {
+                format!(
+                    "Step {}, increment {}, iterations {}, time {}",
+                    p.step, p.increment, p.iterations, p.total_time
+                )
+            })
+        };
+        // The .sta file only changes when an increment has converged; while the run goes on
+        // its output tells about every attempt and iteration.
+        let live = || self.job.live_progress().text();
+        if self.is_running() {
+            live().or_else(finished)
+        } else {
+            finished().or_else(live)
         }
     }
 
@@ -687,7 +694,6 @@ impl RestartRun {
     }
 }
 
-/// Step, increment and iteration from the latest `STEP n`, `INCREMENT n` and `iteration n`
 /// Drops the first lines of `lines` over `max`; returns how many.
 fn keep_last<T>(lines: &mut Vec<T>, max: usize) -> usize {
     let over = lines.len().saturating_sub(max);
@@ -704,33 +710,6 @@ pub fn dropped_note(ui: &mut egui::Ui, dropped: usize) {
                 "The monitor keeps the last {MAX_OUTPUT_LINES} lines"
             ));
     }
-}
-
-/// lines of CalculiX's output, for the time before the first `.sta` line exists.
-fn live_progress(output: &[String]) -> Option<String> {
-    let number = |line: &str, key: &str| -> Option<u32> {
-        line.trim().strip_prefix(key)?.trim().parse().ok()
-    };
-    let (mut step, mut increment, mut iteration) = (None, None, None);
-    for line in output.iter().rev() {
-        if iteration.is_none() && increment.is_none() {
-            iteration = number(line, "iteration");
-        }
-        if increment.is_none() {
-            increment = number(line, "INCREMENT");
-        }
-        if step.is_none() {
-            step = number(line, "STEP");
-        }
-        if step.is_some() && increment.is_some() {
-            break;
-        }
-    }
-    let (step, increment) = (step?, increment?);
-    Some(match iteration {
-        Some(iteration) => format!("Step {step}, increment {increment}, iterations {iteration}"),
-        None => format!("Step {step}, increment {increment}"),
-    })
 }
 
 /// Copies the result files the defined fields read next to the input file, where CalculiX
@@ -1094,28 +1073,5 @@ mod tests {
         // A new solve starts over.
         view.copy(&["first".to_owned()], 1);
         assert_eq!(view.lines, ["first"]);
-    }
-
-    #[test]
-    fn progress_follows_the_solver_output() {
-        let lines = |text: &str| text.lines().map(String::from).collect::<Vec<_>>();
-        assert_eq!(live_progress(&lines("started\nCalculiX")), None);
-        assert_eq!(
-            live_progress(&lines(" STEP 2\n\n INCREMENT 3\n\n ATTEMPT 1\n")),
-            Some("Step 2, increment 3".into())
-        );
-        assert_eq!(
-            live_progress(&lines(
-                " STEP 1\n INCREMENT 4\n iteration 2\n x\n iteration 5\n"
-            )),
-            Some("Step 1, increment 4, iterations 5".into())
-        );
-        // An iteration of an earlier increment does not count.
-        assert_eq!(
-            live_progress(&lines(
-                " STEP 1\n INCREMENT 1\n iteration 7\n INCREMENT 2\n"
-            )),
-            Some("Step 1, increment 2".into())
-        );
     }
 }
