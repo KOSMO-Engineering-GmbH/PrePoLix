@@ -83,6 +83,8 @@ pub enum Problem {
     SkewedSymmetryShared,
     IncrementExceedsStep,
     NoLoad,
+    /// An amplitude that no boundary condition, load or defined field uses.
+    UnusedAmplitude,
     /// A radiation load in a model without absolute zero or Stefan-Boltzmann constant.
     NoPhysicalConstants,
     /// A defined temperature in a step whose materials have no thermal expansion.
@@ -140,6 +142,7 @@ impl Problem {
             | Problem::SkewedSymmetryShared
             | Problem::VelocityIgnored
             | Problem::NoLoad
+            | Problem::UnusedAmplitude
             | Problem::NoExpansion
             | Problem::NoRotation
             | Problem::ContactIgnored
@@ -179,6 +182,7 @@ impl Problem {
             Problem::SkewedSymmetryShared => "Nodes of a skewed symmetry plane shared",
             Problem::IncrementExceedsStep => "Increment larger than the step",
             Problem::NoLoad => "No load",
+            Problem::UnusedAmplitude => "Amplitude not used",
             Problem::NoPhysicalConstants => "Physical constants missing",
             Problem::NoRigidBody => "Reference point without rigid body",
             Problem::SharedRigidBody => "Nodes in several rigid bodies or remote points",
@@ -394,6 +398,11 @@ impl Problem {
             Problem::NoLoad => {
                 "The step has neither an active load nor a prescribed displacement. The \
                  analysis runs, but all results are zero."
+            }
+            Problem::UnusedAmplitude => {
+                "No boundary condition, load or defined field refers to this amplitude, so it \
+                 has no effect. Loads and boundary conditions without an amplitude follow \
+                 CalculiX's default ramp or step."
             }
             Problem::NoExpansion => {
                 "A defined temperature (Defined Field) deforms the model only through the \
@@ -620,6 +629,10 @@ impl Problem {
                 "In the step choose an initial increment no larger than the time period."
             }
             Problem::NoLoad => "Under Loads create a load or activate a deactivated one.",
+            Problem::UnusedAmplitude => {
+                "Choose the amplitude in the Amplitude field of the boundary condition, load or \
+                 defined field it belongs to, or delete it."
+            }
             Problem::WheelOffSurface => {
                 "If the wheels should stay on the surface, check the start and end of the \
                  path, the wheel offsets and the coordinate system, or select all faces the \
@@ -913,6 +926,7 @@ impl FeModel {
         }
         self.check_cyclic_symmetry(&mut findings);
         self.check_tied_contacts(&mut findings);
+        self.check_amplitudes(&mut findings);
         self.check_shared_rigid_bodies(mesh, &mut findings);
         let trusses = Trusses::new(self, mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
@@ -1070,6 +1084,32 @@ impl FeModel {
                         format!("{name}: {shared} nodes also in {other}"),
                     ));
                 }
+            }
+        }
+    }
+
+    /// Amplitudes that nothing refers to: a forgotten choice in a load or boundary condition
+    /// leaves the model without the motion the amplitude was made for.
+    fn check_amplitudes(&self, findings: &mut Vec<Finding>) {
+        let used: HashSet<&str> = (self.steps.iter())
+            .flat_map(|step| {
+                let bcs = step.boundary_conditions.iter().map(|b| &b.amplitude);
+                let loads = (step.loads.iter()).flat_map(|l| [&l.amplitude, &l.factor_amplitude]);
+                let fields = step.defined_fields.iter().map(|f| &f.amplitude);
+                bcs.chain(loads).chain(fields)
+            })
+            .filter_map(|name| name.as_deref())
+            .collect();
+        for (i, amplitude) in self.amplitudes.iter().enumerate() {
+            if !used.contains(amplitude.name.as_str()) {
+                findings.push(Finding::new(
+                    ModelItem::Amplitude(i),
+                    Problem::UnusedAmplitude,
+                    format!(
+                        "{} is not used by any boundary condition, load or defined field",
+                        amplitude.name
+                    ),
+                ));
             }
         }
     }
@@ -2715,6 +2755,22 @@ mod tests {
             problems(&check(&model, &mesh)),
             [(ModelItem::Section(0), Problem::MissingReference)]
         );
+    }
+
+    #[test]
+    fn an_amplitude_nobody_uses_is_reported() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        model.amplitudes.push(crate::Amplitude::new("Ramp"));
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Amplitude(0), Problem::UnusedAmplitude)]
+        );
+        model.steps[0].loads[0].amplitude = Some("Ramp".into());
+        assert_eq!(check(&model, &mesh), []);
+        model.steps[0].loads[0].amplitude = None;
+        model.steps[0].loads[0].factor_amplitude = Some("Ramp".into());
+        assert_eq!(check(&model, &mesh), []);
     }
 
     #[test]

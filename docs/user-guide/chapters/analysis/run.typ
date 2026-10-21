@@ -158,7 +158,8 @@ the physical constants (@model-properties) and missing references (a deleted mat
 only by contact (contact pairs without tied surface behavior; tied contact holds like a tie), conflicting boundary conditions, loads on fixed nodes, rotations without effect,
 beam nodes with only some of their rotations given (CalculiX holds them all, and nonlinear steps
 mostly fail to converge), beams held by pins only, which are free to turn about the line
-through the pins (CalculiX solves them all the same), and steps without load.
+through the pins (CalculiX solves them all the same), steps without load and amplitudes that
+nothing uses.
 
 #screenshot("beam-rotations-partly-held.png", [A beam end that holds only the rotation about Z])
 
