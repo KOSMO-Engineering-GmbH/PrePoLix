@@ -8,7 +8,7 @@
 //! [`MeshCheck`]. CalculiX's own error messages after a failed run are mapped to the same
 //! explanations by [`diagnose_solver_output`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 
@@ -62,10 +62,14 @@ pub enum Problem {
     RigidBodyMotion,
     /// Truss nodes that no bar or support holds in some direction.
     Mechanism,
+    /// Beams held by pins only, free to turn about the line through them.
+    SpinAboutPins,
     HeldOnlyByContact,
     ConflictingBoundaries,
     LoadOnFixedNodes,
     RotationsIgnored,
+    /// Beam nodes with some but not all of their rotations given: CalculiX holds them all.
+    PartialBeamRotations,
     /// A submodel boundary condition in a model without a global results file.
     NoGlobalResults,
     /// A symmetry boundary condition whose nodes do not fix a plane.
@@ -129,6 +133,8 @@ impl Problem {
             | Problem::ConflictingBoundaries
             | Problem::LoadOnFixedNodes
             | Problem::RotationsIgnored
+            | Problem::PartialBeamRotations
+            | Problem::SpinAboutPins
             | Problem::SymmetryNotPlanar
             | Problem::SymmetryOffAxis
             | Problem::SkewedSymmetryShared
@@ -160,10 +166,12 @@ impl Problem {
             Problem::DistortedElements => "Distorted elements",
             Problem::RigidBodyMotion => "Rigid body motion possible",
             Problem::Mechanism => "Truss structure is a mechanism",
+            Problem::SpinAboutPins => "Beams free to turn about their pins",
             Problem::HeldOnlyByContact => "Held only by contact",
             Problem::ConflictingBoundaries => "Conflicting boundary conditions",
             Problem::LoadOnFixedNodes => "Load on fixed nodes",
             Problem::RotationsIgnored => "Rotations without effect",
+            Problem::PartialBeamRotations => "Beam rotations partly held",
             Problem::NoGlobalResults => "No global results",
             Problem::NoSymmetryPlane => "No symmetry plane",
             Problem::SymmetryNotPlanar => "Symmetry region not planar",
@@ -289,6 +297,13 @@ impl Problem {
                  curved face, very thin regions, or 2D elements whose nodes are numbered \
                  clockwise."
             }
+            Problem::SpinAboutPins => {
+                "These beams are held by pins, nodes with all displacements and no rotation \
+                 given, which leave them free to turn about the line through the pins. \
+                 Nothing loads this rotation, and CalculiX solves such models in linear and \
+                 nonlinear steps alike; the results are valid. Only a moment about that line \
+                 would turn the beams without limit."
+            }
             Problem::RigidBodyMotion => {
                 "These parts can move as a rigid body: the boundary conditions and \
                  springs do not fix all displacements and rotations, and no Tie or \
@@ -327,6 +342,14 @@ impl Problem {
                 "Only beam and shell nodes have rotations (UR1 to UR3). Solid and 2D \
                  elements have displacements only; prescribed rotations are ignored or \
                  abort the run in 2D models (\"mpc of type is unknown\")."
+            }
+            Problem::PartialBeamRotations => {
+                "CalculiX expands beams into solid elements. A beam node with a given \
+                 rotation becomes a rigid knot of its cross section, and the knot is held \
+                 in all three rotations even if only one of them is given: a pin that \
+                 should only stop the twist acts as a clamp, and its reaction forces are \
+                 wrong. In geometrically nonlinear steps (Nlgeom) the knot turns, and the \
+                 increments mostly shrink until the step aborts without convergence."
             }
             Problem::NoGlobalResults => {
                 "A submodel boundary condition takes its displacements from the results \
@@ -532,6 +555,11 @@ impl Problem {
                  or linear instead of quadratic elements. For imported meshes check the \
                  node order."
             }
+            Problem::SpinAboutPins => {
+                "Nothing to do for a beam between two ball joints. To hold the rotation, \
+                 give all three rotations at one of the pins; only one of them is not \
+                 enough, see \"Beam rotations partly held\"."
+            }
             Problem::RigidBodyMotion => {
                 "Add a boundary condition that blocks the listed motions, tie the parts \
                  to supported parts with a Tie, or add weak springs (Constraints \
@@ -561,6 +589,11 @@ impl Problem {
             Problem::RotationsIgnored => {
                 "Leave UR1 to UR3 free in the boundary condition. Prescribe rotations of \
                  solids by displacements of several nodes."
+            }
+            Problem::PartialBeamRotations => {
+                "Give all three rotations UR1 to UR3 of the node (a clamp) or none of them \
+                 (a pin). A pin at each end of a beam may leave it free to spin about the \
+                 line through both; CalculiX copes with that."
             }
             Problem::NoSymmetryPlane => {
                 "Select the planar faces of the cut (or the edge of shells), or enter the \
@@ -1395,6 +1428,35 @@ impl FeModel {
                 ));
             }
         }
+        // The rotations given at each beam node, with the first boundary condition giving one.
+        let mut beam_rotations: BTreeMap<NodeId, (usize, [bool; 3])> = BTreeMap::new();
+        for (&(node, dof), &(i, _)) in &fixed {
+            if (3..6).contains(&dof) && mesh.node_index(node).is_some_and(|k| trusses.beam[k]) {
+                let entry = beam_rotations.entry(node).or_insert((i, [false; 3]));
+                entry.0 = entry.0.min(i);
+                entry.1[dof - 3] = true;
+            }
+        }
+        let mut partial: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
+        for (&node, &(i, given)) in &beam_rotations {
+            if given.iter().any(|&g| !g) {
+                partial.entry(i).or_default().push(node);
+            }
+        }
+        for (i, nodes) in partial {
+            let shown: Vec<String> = nodes.iter().take(5).map(|n| n.to_string()).collect();
+            findings.push(Finding::new(
+                ModelItem::BoundaryCondition(s, i),
+                Problem::PartialBeamRotations,
+                format!(
+                    "{}: not all rotations given at beam node{} {}{}",
+                    step.boundary_conditions[i].name,
+                    if nodes.len() == 1 { "" } else { "s" },
+                    shown.join(", "),
+                    if nodes.len() > 5 { ", ..." } else { "" }
+                ),
+            ));
+        }
         // Supports of the skewed symmetry planes: the normal displacement and the rotations
         // about the in-plane axes.
         let mut skewed_supports: Vec<(NodeId, [f64; 3], bool)> = Vec::new();
@@ -1860,8 +1922,23 @@ impl FeModel {
                 .filter_map(|&p| mesh.parts.get(p).map(|p| p.name.as_str()))
                 .collect();
             let contact_root = contacts.root(group[0]);
+            // Beam nodes held in all displacements: a single free motion that keeps two of
+            // them in place is the turn about the line through them.
+            let members: HashSet<usize> = group.iter().copied().collect();
+            let pins = (fixed.keys())
+                .filter(|&&(node, dof)| dof == 0 && fixed.contains_key(&(node, 1)))
+                .filter(|&&(node, _)| fixed.contains_key(&(node, 2)))
+                .filter(|&&(node, _)| mesh.node_index(node).is_some_and(|i| trusses.beam[i]))
+                .filter(|&&(node, _)| {
+                    check
+                        .piece_of(mesh, node)
+                        .is_some_and(|p| members.contains(&(p as usize)))
+                })
+                .count();
             let problem = if free_motions(&held_by_contact[&contact_root], unknowns).is_empty() {
                 Problem::HeldOnlyByContact
+            } else if space == ModelSpace::ThreeD && free.len() == 1 && pins >= 2 {
+                Problem::SpinAboutPins
             } else {
                 Problem::RigidBodyMotion
             };
@@ -2080,6 +2157,8 @@ struct Trusses {
     other: Vec<bool>,
     /// Whether each node, by node index, has rotations.
     rotational: Vec<bool>,
+    /// Whether each node, by node index, belongs to a beam.
+    beam: Vec<bool>,
 }
 
 impl Trusses {
@@ -2092,6 +2171,7 @@ impl Trusses {
         let mut truss = vec![false; mesh.node_count()];
         let mut other = vec![false; mesh.node_count()];
         let mut rotational = vec![false; mesh.node_count()];
+        let mut beam = vec![false; mesh.node_count()];
         for element in mesh.elements() {
             if element.shape.family() == ElementFamily::Line && ids.contains(&element.id) {
                 // The midside node of a 3-node line is left out of the written truss.
@@ -2104,9 +2184,11 @@ impl Trusses {
                 continue;
             }
             let rotations = has_rotations(element);
+            let line = element.shape.family() == ElementFamily::Line;
             for index in element.nodes.iter().filter_map(|&n| mesh.node_index(n)) {
                 other[index] = true;
                 rotational[index] |= rotations;
+                beam[index] |= rotations && line;
             }
         }
         Self {
@@ -2114,6 +2196,7 @@ impl Trusses {
             truss,
             other,
             rotational,
+            beam,
         }
     }
 }
@@ -3530,6 +3613,83 @@ mod tests {
                     .to_string()
             )]
         );
+    }
+
+    /// CalculiX holds all rotations of a beam node as soon as one is given, so a beam node
+    /// with some rotations left free is not what it seems.
+    #[test]
+    fn beam_nodes_take_all_rotations_or_none() {
+        let mut mesh = FeMesh::default();
+        for (id, x) in [0.0, 1.0, 2.0].into_iter().enumerate() {
+            mesh.set_node(id as u32 + 1, [x, 0.0, 0.0]);
+        }
+        for (id, nodes) in [(1, vec![1, 2]), (2, vec![2, 3])] {
+            mesh.add_element(Element {
+                id,
+                type_name: "B31".into(),
+                shape: ElementShape::Line2,
+                nodes,
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "BEAM".into(),
+            elements: vec![1, 2],
+        });
+        let mut model = model(&mesh);
+        model.sections[0].kind = crate::SectionKind::Beam(crate::BeamSection::DEFAULT);
+        model.steps[0].loads[0].region = Region::Nodes(vec![2]);
+        let bcs = &mut model.steps[0].boundary_conditions;
+        bcs[0].region = Region::Nodes(vec![1]);
+        bcs.push(BoundaryCondition {
+            name: "Pin".into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(vec![3]),
+            kind: BoundaryKind::Displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]),
+            amplitude: None,
+        });
+        // A clamp and a pin.
+        assert_eq!(check(&model, &mesh), []);
+        // The pin also stops the twist: CalculiX makes a clamp of it.
+        model.steps[0].boundary_conditions[1].kind =
+            BoundaryKind::Displacement([Some(0.0), Some(0.0), Some(0.0), Some(0.0), None, None]);
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(
+                ModelItem::BoundaryCondition(0, 1),
+                Problem::PartialBeamRotations
+            )]
+        );
+        // The missing rotations given by another boundary condition make a clamp.
+        model.steps[0].boundary_conditions.push(BoundaryCondition {
+            name: "Rotations".into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(vec![3]),
+            kind: BoundaryKind::Displacement([None, None, None, None, Some(0.0), Some(0.0)]),
+            amplitude: None,
+        });
+        assert_eq!(check(&model, &mesh), []);
+        // Two pins leave the beam free to turn about the line through them, which CalculiX
+        // copes with.
+        model.steps[0].boundary_conditions.truncate(2);
+        model.steps[0].boundary_conditions[0].kind =
+            BoundaryKind::Displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
+        model.steps[0].boundary_conditions[1].kind =
+            BoundaryKind::Displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
+        let findings = check(&model, &mesh);
+        assert_eq!(
+            problems(&findings),
+            [
+                (ModelItem::BoundaryConditions(0), Problem::SpinAboutPins),
+                (ModelItem::Part(0), Problem::SpinAboutPins),
+            ]
+        );
+        assert_eq!(findings[0].severity(), Severity::Warning);
+        // A single pin leaves more free: that stays an error.
+        model.steps[0].boundary_conditions.truncate(1);
+        assert_eq!(check(&model, &mesh)[0].problem, Problem::RigidBodyMotion);
     }
 
     /// A plane truss triangle in the XZ plane, as meshed lines (`B31`) with a truss section:
