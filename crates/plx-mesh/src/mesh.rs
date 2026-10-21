@@ -471,6 +471,95 @@ impl FeMesh {
             || self.surfaces.keys().any(same)
     }
 
+    /// Removes the parts named `names` (in any case) with their elements and the nodes no
+    /// other element uses, PrePoMax's Delete of mesh parts; sets, surfaces and the CAD map
+    /// lose them too. The rest keep their numbers. In place, as a large mesh takes long to
+    /// copy.
+    pub fn remove_parts(&mut self, names: &[String]) {
+        let gone = |p: &Part| names.iter().any(|n| p.name.eq_ignore_ascii_case(n));
+        let mut removed = vec![false; self.elements.len()];
+        for part in self.parts.iter().filter(|p| gone(p)) {
+            for id in &part.elements {
+                if let Some(&index) = self.element_lookup.get(id) {
+                    removed[index] = true;
+                }
+            }
+        }
+        self.parts.retain(|p| !gone(p));
+        if !removed.contains(&true) {
+            return;
+        }
+        // The nodes of the removed elements that no kept element uses go.
+        let mut used = vec![false; self.node_ids.len()];
+        let mut touched = vec![false; self.node_ids.len()];
+        for (element, &removed) in self.elements.iter().zip(&removed) {
+            let flags = if removed { &mut touched } else { &mut used };
+            for node in &element.nodes {
+                if let Some(&index) = self.node_lookup.get(node) {
+                    flags[index] = true;
+                }
+            }
+        }
+        let node_gone: Vec<bool> = (touched.iter().zip(&used))
+            .map(|(&touched, &used)| touched && !used)
+            .collect();
+        // Only sets, surfaces and the CAD map need the ids.
+        if !(self.node_sets.is_empty()
+            && self.element_sets.is_empty()
+            && self.surfaces.is_empty()
+            && self.cad.is_empty())
+        {
+            let elements: BTreeSet<ElementId> = (self.elements.iter().zip(&removed))
+                .filter(|(_, removed)| **removed)
+                .map(|(e, _)| e.id)
+                .collect();
+            let nodes: BTreeSet<NodeId> = (self.node_ids.iter().zip(&node_gone))
+                .filter(|(_, gone)| **gone)
+                .map(|(&id, _)| id)
+                .collect();
+            for set in self.node_sets.values_mut() {
+                set.retain(|n| !nodes.contains(n));
+            }
+            for set in self.element_sets.values_mut() {
+                set.retain(|e| !elements.contains(e));
+            }
+            for surface in self.surfaces.values_mut() {
+                match surface {
+                    SurfaceDefinition::ElementFaces(faces) => {
+                        faces.retain(|(e, _)| !elements.contains(e));
+                    }
+                    SurfaceDefinition::Nodes(set) => set.retain(|n| !nodes.contains(n)),
+                }
+            }
+            self.cad = self.cad.without(&elements, &nodes);
+        }
+        let mut index = 0;
+        self.elements.retain(|_| {
+            index += 1;
+            !removed[index - 1]
+        });
+        let mut index = 0;
+        self.node_ids.retain(|_| {
+            index += 1;
+            !node_gone[index - 1]
+        });
+        let mut index = 0;
+        self.coords.retain(|_| {
+            index += 1;
+            !node_gone[index - 1]
+        });
+        self.element_lookup =
+            FastMap::with_capacity_and_hasher(self.elements.len(), Default::default());
+        for (index, element) in self.elements.iter().enumerate() {
+            self.element_lookup.insert(element.id, index);
+        }
+        self.node_lookup =
+            FastMap::with_capacity_and_hasher(self.node_ids.len(), Default::default());
+        for (index, &id) in self.node_ids.iter().enumerate() {
+            self.node_lookup.insert(id, index);
+        }
+    }
+
     /// Merges parts into the first of them (by index), as PrePoMax's Merge of mesh parts:
     /// the others' elements join it and their element sets of the same name join its set.
     /// Returns the name kept and the names that went.

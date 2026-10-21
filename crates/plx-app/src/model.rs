@@ -668,20 +668,27 @@ impl Model {
     /// The CAD geometry for the Geometry tab: its faces shaded each on its own, outlined by
     /// its edges, without the triangles of the display mesh.
     pub fn geometry_view(path: &Path, display: GeometryDisplay) -> Self {
-        let mesh = display.mesh;
-        let skins = (mesh.parts.iter())
-            .map(|part| {
-                // Only the CAD edges, drawn as line elements, outline the geometry.
-                let mut skin = extract_part_skin(&mesh, part, 180.0);
-                for face in &mut skin.faces {
-                    let id = mesh.elements()[face.element].id;
-                    if let Some(CadEntity::Face(tag)) = display.entities.get(id as usize - 1) {
-                        face.region = *tag as usize;
-                    }
-                }
-                skin
-            })
+        // Only the CAD edges, drawn as line elements, outline the geometry.
+        let skins = (display.mesh.parts.iter())
+            .map(|part| extract_part_skin(&display.mesh, part, 180.0))
             .collect();
+        Self::geometry_view_with_skins(path, display, skins)
+    }
+
+    /// [`Model::geometry_view`] with the skins of the parts already extracted; their faces
+    /// take the CAD faces as regions here.
+    fn geometry_view_with_skins(
+        path: &Path,
+        display: GeometryDisplay,
+        mut skins: Vec<PartSkin>,
+    ) -> Self {
+        let mesh = display.mesh;
+        for face in skins.iter_mut().flat_map(|skin| &mut skin.faces) {
+            let id = mesh.elements()[face.element].id;
+            if let Some(CadEntity::Face(tag)) = display.entities.get(id as usize - 1) {
+                face.region = *tag as usize;
+            }
+        }
         let mut model = Self::with_skins(path, mesh, skins);
         model.is_geometry = true;
         for (part, dimension) in model.parts.iter_mut().zip(display.part_dimensions) {
@@ -691,6 +698,79 @@ impl Model {
         model.geometry_solids = display.solids;
         model.geometry_topology = display.topology;
         model
+    }
+
+    /// The view of `smaller`, the geometry left after deleting the parts `deleted`, made
+    /// from this one, see [`GeometryDisplay::without_parts`]: the parts that stay keep their
+    /// triangles and skins, which take long to make anew for a large assembly. `None` if
+    /// the geometry has to be tessellated anew.
+    pub fn geometry_view_without(
+        mut self,
+        deleted: &[String],
+        smaller: &Geometry,
+        tags: &BTreeMap<CadEntity, CadEntity>,
+    ) -> Option<Self> {
+        let path = self.path.clone();
+        let kept: Vec<bool> = (self.parts.iter())
+            .map(|p| !deleted.iter().any(|d| p.name.eq_ignore_ascii_case(d)))
+            .collect();
+        let skins = std::mem::take(&mut self.skins);
+        let elements: Vec<ElementId> = self.mesh.elements().iter().map(|e| e.id).collect();
+        let nodes = self.mesh.node_ids().to_vec();
+        let display = (self.into_geometry_display()).without_parts(deleted, smaller, tags)?;
+        // The skins index the elements and nodes, which move up in the smaller mesh.
+        let element: Vec<Option<usize>> = (elements.iter())
+            .map(|&id| display.mesh.element_index(id))
+            .collect();
+        let node: Vec<Option<usize>> = (nodes.iter())
+            .map(|&id| display.mesh.node_index(id))
+            .collect();
+        let node = |index: &mut usize| -> Option<()> {
+            *index = (*node.get(*index)?)?;
+            Some(())
+        };
+        let element = |index: &mut usize| -> Option<()> {
+            *index = (*element.get(*index)?)?;
+            Some(())
+        };
+        let mut kept_skins = Vec::new();
+        for (mut skin, _) in skins.into_iter().zip(kept).filter(|(_, kept)| *kept) {
+            for face in &mut skin.faces {
+                element(&mut face.element)?;
+                face.corners.iter_mut().try_for_each(node)?;
+                face.mids.iter_mut().try_for_each(node)?;
+            }
+            for edge in &mut skin.edges {
+                node(&mut edge.a)?;
+                node(&mut edge.b)?;
+                edge.mid.as_mut().map_or(Some(()), node)?;
+            }
+            skin.lines.iter_mut().flatten().try_for_each(node)?;
+            skin.line_elements.iter_mut().try_for_each(element)?;
+            kept_skins.push(skin);
+        }
+        if kept_skins.len() != display.mesh.parts.len() {
+            return None;
+        }
+        Some(Self::geometry_view_with_skins(&path, display, kept_skins))
+    }
+
+    /// The geometry display this view was made from, see [`Model::geometry_view`].
+    pub fn into_geometry_display(self) -> GeometryDisplay {
+        let topology = self.geometry_topology;
+        GeometryDisplay {
+            part_dimensions: self
+                .parts
+                .iter()
+                .map(|p| p.dimension.unwrap_or(3))
+                .collect(),
+            mesh: self.mesh,
+            entities: self.cad_entities,
+            solids: self.geometry_solids,
+            faces: topology.face_edges.len(),
+            edges: topology.edge_vertices.len(),
+            topology,
+        }
     }
 
     /// The CAD face or edge an element of the geometry display shows.
@@ -2324,6 +2404,45 @@ mod tests {
         drop(meshes);
     }
 
+    /// Times deleting half the parts of a large assembly from its geometry:
+    /// `PREPOLIX_DELETE_BENCH=file.step cargo test --release -p plx-app delete_bench --
+    /// --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn delete_bench() {
+        use std::time::Instant;
+        let Some(path) = std::env::var_os("PREPOLIX_DELETE_BENCH") else {
+            return;
+        };
+        let start = Instant::now();
+        let loaded = load(std::path::Path::new(&path), UnitSystem::Unitless).unwrap();
+        let geometry = loaded.model.geometry.unwrap();
+        let view = loaded.geometry_view.unwrap();
+        eprintln!(
+            "loaded in {:?}: {} parts",
+            start.elapsed(),
+            view.parts.len()
+        );
+        let names: Vec<String> = (view.parts.iter().step_by(2))
+            .map(|p| p.name.clone())
+            .collect();
+        let start = Instant::now();
+        let (smaller, tags) = plx_mesher::delete_parts_renumbered(&geometry, &names).unwrap();
+        eprintln!(
+            "{} parts deleted in {:?} ({} tags)",
+            names.len(),
+            start.elapsed(),
+            tags.len()
+        );
+        let smaller = smaller.unwrap();
+        let start = Instant::now();
+        let view = view.geometry_view_without(&names, &smaller, &tags).unwrap();
+        eprintln!("view kept in {:?}", start.elapsed());
+        let start = Instant::now();
+        let meshes = view.scene_meshes();
+        eprintln!("scene in {:?} ({} meshes)", start.elapsed(), meshes.len());
+    }
+
     #[test]
     fn picking_finds_faces_and_nodes() {
         let model = load(&testdata("kragbalken_c3d8.inp"), UnitSystem::Unitless)
@@ -2432,6 +2551,37 @@ mod tests {
         );
         assert!(reopened.geometry_view.is_some());
         assert!(!reopened.render_meshes[0].mesh_edges.is_empty());
+    }
+
+    #[test]
+    fn deleting_geometry_parts_keeps_the_skins_of_the_others() {
+        if !gmsh_available() {
+            return;
+        }
+        let path = testdata("zwei_bloecke.step");
+        let import = plx_mesher::import_cad(&path, UnitSystem::Unitless).unwrap();
+        let deleted = ["SOLID-1".to_string()];
+        let (smaller, tags) =
+            plx_mesher::delete_parts_renumbered(&import.geometry, &deleted).unwrap();
+        let smaller = smaller.unwrap();
+        let display = (import.display.clone())
+            .without_parts(&deleted, &smaller, &tags)
+            .unwrap();
+        let made = Model::geometry_view(&path, display);
+        let kept = Model::geometry_view(&path, import.display)
+            .geometry_view_without(&deleted, &smaller, &tags)
+            .unwrap();
+        assert_eq!(kept.parts.len(), 1);
+        assert_eq!(kept.parts[0].name, "SOLID-2");
+        assert_eq!(kept.skins, made.skins);
+        assert_eq!(kept.cad_entities, made.cad_entities);
+        assert_eq!(kept.mesh.node_ids(), made.mesh.node_ids());
+        assert_eq!(kept.parts[0].dimension, Some(3));
+        assert_eq!(kept.geometry_solids, 1);
+        // Faces of the block that stays take their new tags as regions.
+        let regions: BTreeSet<usize> = kept.skin(0).faces.iter().map(|f| f.region).collect();
+        assert_eq!(regions.len(), 6);
+        assert!(regions.iter().all(|&r| (1..=6).contains(&r)));
     }
 
     /// Meshes the plate with a hole, sets up a tension test and checks CalculiX's stress.

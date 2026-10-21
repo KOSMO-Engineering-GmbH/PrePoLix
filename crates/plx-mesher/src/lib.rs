@@ -111,6 +111,83 @@ impl GeometryDisplay {
             .get(usize::try_from(element).ok()?.checked_sub(1)?)
             .copied()
     }
+
+    /// The display of `smaller`, the geometry left after deleting the parts `deleted`, made
+    /// from this one rather than tessellated anew, which takes long for a large assembly: the
+    /// triangles and lines of the parts that stay are kept, their faces, edges and vertices
+    /// renumbered by `tags` as [`delete_parts_renumbered`] gives them. `None` if any of them
+    /// was not found again, or if the smaller geometry has a face or edge the display would
+    /// lack; then the geometry has to be tessellated.
+    pub fn without_parts(
+        mut self,
+        deleted: &[String],
+        smaller: &Geometry,
+        tags: &BTreeMap<CadEntity, CadEntity>,
+    ) -> Option<GeometryDisplay> {
+        let kept: Vec<bool> = (self.mesh.parts.iter())
+            .map(|p| !deleted.iter().any(|d| p.name.eq_ignore_ascii_case(d)))
+            .collect();
+        self.mesh.remove_parts(deleted);
+        let mut entities = std::mem::take(&mut self.entities);
+        for element in self.mesh.elements() {
+            let entity = entities.get_mut(usize::try_from(element.id).ok()?.checked_sub(1)?)?;
+            *entity = *tags.get(entity)?;
+        }
+        let face_tag = |tag: &i32| match tags.get(&CadEntity::Face(*tag))? {
+            CadEntity::Face(new) => Some(*new),
+            _ => None,
+        };
+        let edge_tag = |tag: &i32| match tags.get(&CadEntity::Edge(*tag))? {
+            CadEntity::Edge(new) => Some(*new),
+            _ => None,
+        };
+        let vertex_tag = |tag: &i32| match tags.get(&CadEntity::Vertex(*tag))? {
+            CadEntity::Vertex(new) => Some(*new),
+            _ => None,
+        };
+        let mut topology = CadTopology::default();
+        for (face, edges) in &self.topology.face_edges {
+            if let Some(face) = face_tag(face) {
+                let edges = edges.iter().map(edge_tag).collect::<Option<_>>()?;
+                topology.face_edges.insert(face, edges);
+            }
+        }
+        for (edge, vertices) in &self.topology.edge_vertices {
+            if let Some(edge) = edge_tag(edge) {
+                let vertices = vertices.iter().map(vertex_tag).collect::<Option<_>>()?;
+                topology.edge_vertices.insert(edge, vertices);
+            }
+        }
+        // Every face and edge of the smaller geometry is drawn as before.
+        let (mut faces, mut edges) = (0, 0);
+        for signature in &smaller.signatures {
+            match signature.entity {
+                CadEntity::Face(tag) if topology.face_edges.contains_key(&tag) => faces += 1,
+                CadEntity::Edge(tag) if topology.edge_vertices.contains_key(&tag) => edges += 1,
+                CadEntity::Face(_) | CadEntity::Edge(_) => return None,
+                CadEntity::Vertex(_) => {}
+            }
+        }
+        if faces != topology.face_edges.len() || edges != topology.edge_vertices.len() {
+            return None;
+        }
+        let part_dimensions: Vec<u8> = (self.part_dimensions.iter().zip(&kept))
+            .filter(|(_, kept)| **kept)
+            .map(|(dimension, _)| *dimension)
+            .collect();
+        let solids_gone = (self.part_dimensions.iter().zip(&kept))
+            .filter(|(dimension, kept)| **dimension == 3 && !**kept)
+            .count();
+        Some(GeometryDisplay {
+            mesh: self.mesh,
+            entities,
+            part_dimensions,
+            solids: self.solids.checked_sub(solids_gone)?,
+            faces,
+            edges,
+            topology,
+        })
+    }
 }
 
 /// An imported CAD file: the geometry for the project and its display.
@@ -788,13 +865,28 @@ pub fn delete_parts_renumbered(
         if let Some(part) = (deleted.iter()).find(|d| !parts.iter().any(|(_, n)| n == *d)) {
             return Err(GmshError::Other(format!("The geometry has no part {part}")));
         }
-        let old_signatures = signatures(gmsh)?;
+        // Kept with the geometry as Gmsh reads its BREP; made anew for one without them.
+        let old_signatures = if geometry.signatures.is_empty() {
+            signatures(gmsh)?
+        } else {
+            geometry.signatures.clone()
+        };
         let (gone, kept): (Vec<_>, Vec<_>) =
             (parts.into_iter()).partition(|(_, n)| deleted.contains(n));
         let entities: Vec<Entity> = (gone.iter())
             .flat_map(|(shape, _)| shape.entities())
             .collect();
         gmsh.remove(&entities)?;
+        // Only what stays is found again: a face or edge of a deleted part may lie exactly
+        // on one that stays, where parts touch, and must not take its place.
+        let mut remaining = BTreeSet::new();
+        for dim in [0, 1, 2] {
+            remaining
+                .extend((gmsh.entities(dim)?.into_iter()).filter_map(|t| CadEntity::of(dim, t)));
+        }
+        let old_signatures: Vec<EntitySignature> = (old_signatures.into_iter())
+            .filter(|s| remaining.contains(&s.entity))
+            .collect();
         gmsh.write(&smaller.0)?;
         Ok((
             kept.into_iter().map(|(_, n)| n).collect::<Vec<_>>(),
@@ -1395,13 +1487,14 @@ pub fn merge_part(mesh: &FeMesh, part_mesh: FeMesh) -> FeMesh {
 /// Delete of a mesh part. Sets and surfaces lose them too; the other parts keep their
 /// numbers.
 pub fn delete_mesh_part(mesh: &FeMesh, part: &str) -> FeMesh {
-    let mut empty = FeMesh::default();
-    empty.parts.push(Part {
-        name: part.to_string(),
-        elements: Vec::new(),
-    });
-    let mut smaller = merge_part(mesh, empty);
-    smaller.parts.retain(|p| !p.name.eq_ignore_ascii_case(part));
+    delete_mesh_parts(mesh, &[part.to_owned()])
+}
+
+/// [`delete_mesh_part`] for several parts at once, as selected together: the mesh is built
+/// anew once rather than once per part.
+pub fn delete_mesh_parts(mesh: &FeMesh, parts: &[String]) -> FeMesh {
+    let mut smaller = mesh.clone();
+    smaller.remove_parts(parts);
     smaller
 }
 
