@@ -1,5 +1,6 @@
-//! The meshing worker: the program started with `--mesh-worker <folder>` meshes the geometry
-//! in `request.ron` there into `result.ron`, and ends when its input is closed.
+//! The meshing worker: the program started with `--mesh-worker <folder> <program id>` meshes
+//! the geometry in `request.ron` there into `result.ron`, and ends when the program does: on
+//! Unix when its input is closed.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -53,6 +54,7 @@ fn worker(dir: &Path) -> Command {
     command
         .arg("--mesh-worker")
         .arg(dir)
+        .arg(std::process::id().to_string())
         .stdin(Stdio::piped())
         .stdout(Stdio::null());
     command
@@ -70,6 +72,8 @@ fn the_worker_meshes_the_geometry() {
     let _input = child.stdin.take();
     let status = child.wait().unwrap();
     assert!(status.success(), "{status}");
+    // The result was renamed into place whole.
+    assert!(!dir.join("result.tmp").exists());
     let text = std::fs::read_to_string(dir.join("result.ron")).unwrap();
     let result: WorkerResult = ron::from_str(&text).unwrap();
     let meshes = result.unwrap();
