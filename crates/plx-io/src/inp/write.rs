@@ -2452,7 +2452,7 @@ fn traction_forces(
     force: [f64; 3],
     axisymmetric: bool,
 ) -> BTreeMap<NodeId, [f64; 3]> {
-    let (weights, total_area) = constraints::node_areas(mesh, faces, axisymmetric);
+    let (weights, total_area) = constraints::node_areas(mesh, faces, axisymmetric, false);
     if total_area <= 0.0 {
         return BTreeMap::new();
     }
