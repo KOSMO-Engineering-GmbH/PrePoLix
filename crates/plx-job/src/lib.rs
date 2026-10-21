@@ -10,6 +10,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+pub mod live;
 pub mod process;
 pub mod restart;
 
@@ -68,6 +69,8 @@ pub struct Job {
     /// Lines of output not yet handed out by [`Job::new_output`].
     output: Arc<Mutex<Vec<String>>>,
     readers: Vec<JoinHandle<()>>,
+    /// Read from the lines handed out by [`Job::new_output`].
+    live: live::LiveProgress,
     status: JobStatus,
 }
 
@@ -91,6 +94,9 @@ impl Job {
             .arg(name)
             .current_dir(work_dir)
             .env("OMP_NUM_THREADS", solver.threads.max(1).to_string())
+            // CalculiX's Fortran part writes the STEP headers; unbuffered they cannot fall
+            // behind the increments in the pipe, which the live progress reads in order.
+            .env("GFORTRAN_UNBUFFERED_PRECONNECTED", "y")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -109,6 +115,7 @@ impl Job {
             child,
             output,
             readers,
+            live: live::LiveProgress::default(),
             status: JobStatus::Running,
         })
     }
@@ -153,7 +160,14 @@ impl Job {
     /// Output lines written since the last call.
     pub fn new_output(&mut self) -> Vec<String> {
         let mut output = self.output.lock().unwrap_or_else(|e| e.into_inner());
-        std::mem::take(&mut *output)
+        let lines = std::mem::take(&mut *output);
+        lines.iter().for_each(|line| self.live.read(line));
+        lines
+    }
+
+    /// Where the run is by its output so far, see [`live::LiveProgress`].
+    pub fn live_progress(&self) -> &live::LiveProgress {
+        &self.live
     }
 
     /// The last increment CalculiX reported in the `.sta` file.
@@ -236,9 +250,10 @@ pub fn parse_sta(text: &str) -> Option<Progress> {
         };
         Some(Progress {
             step: step.parse().ok()?,
-            // CalculiX marks increments of linear perturbation steps with a "U".
+            // CalculiX marks increments of linear perturbation steps with a "U", and attempts
+            // that did not converge too.
             increment: increment.trim_end_matches('U').parse().ok()?,
-            attempt: attempt.parse().ok()?,
+            attempt: attempt.trim_end_matches('U').parse().ok()?,
             iterations: iterations.parse().ok()?,
             total_time: total.parse().ok()?,
             step_time: step_time.parse().ok()?,

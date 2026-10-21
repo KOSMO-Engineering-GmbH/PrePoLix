@@ -16,6 +16,11 @@ fn reads_the_last_increment_of_the_status_file() {
     );
     assert_eq!(progress.step_time, 0.625);
     assert_eq!(parse_sta("SUMMARY OF JOB INFORMATION\n"), None);
+    // An attempt that did not converge is marked with a "U".
+    let failed = parse_sta(&format!(
+        "{STA}     1  3   2U    4  0.6E+00  0.6E+00  0.1E+00\n"
+    ));
+    assert_eq!(failed.map(|p| (p.increment, p.attempt)), Some((3, 2)));
 }
 
 fn work_dir(name: &str) -> PathBuf {
@@ -93,4 +98,75 @@ fn a_solver_that_crashes_after_writing_results_fails() {
     let mut job = Job::start(&solver, &dir, "job", "*HEADING\n").unwrap();
     assert_eq!(job.wait(), JobStatus::FailedWithResults);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// The live progress follows the output of a real run: two nonlinear steps, and the second
+/// step's header comes before its increments, not buffered to the end of the run.
+#[test]
+fn live_progress_follows_a_nonlinear_run() {
+    if !ccx_installed() {
+        return;
+    }
+    let input = "\
+*NODE
+1,0,0,0
+2,1,0,0
+3,1,1,0
+4,0,1,0
+5,0,0,1
+6,1,0,1
+7,1,1,1
+8,0,1,1
+*ELEMENT,TYPE=C3D8,ELSET=E
+1,1,2,3,4,5,6,7,8
+*NSET,NSET=BOT
+1,2,3,4
+*NSET,NSET=TOP
+5,6,7,8
+*MATERIAL,NAME=M
+*ELASTIC
+210000,0.3
+*PLASTIC
+200,0
+400,0.1
+*SOLID SECTION,ELSET=E,MATERIAL=M
+*STEP,NLGEOM,INC=100
+*STATIC
+0.5,1
+*BOUNDARY
+BOT,1,3
+TOP,3,3,0.3
+*END STEP
+*STEP,NLGEOM
+*STATIC
+0.25,1
+*BOUNDARY
+BOT,1,3
+*CLOAD
+TOP,1,10
+*END STEP
+";
+    let dir = work_dir("live");
+    let mut job = Job::start(&Solver::default(), &dir, "Analysis-1", input).unwrap();
+    assert_eq!(job.wait(), JobStatus::Completed);
+    let (mut steps, mut replay) = (Vec::new(), live::LiveProgress::default());
+    for line in job.new_output() {
+        replay.read(&line);
+        if replay.increment.is_some() {
+            steps.push(replay.step);
+        }
+    }
+    steps.dedup();
+    assert_eq!(
+        steps,
+        [Some(1), Some(2)],
+        "increments of both steps under their header"
+    );
+    let live = job.live_progress();
+    assert_eq!(live, &replay);
+    assert!(
+        live.iteration.is_some() && live.step_time.is_some(),
+        "{live:?}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
 }
