@@ -486,13 +486,32 @@ impl FeMesh {
             }
         }
         self.parts.retain(|p| !gone(p));
+        self.remove_flagged(&removed, true);
+    }
+
+    /// Removes the elements `ids` from the mesh, its parts, sets, surfaces and CAD map but
+    /// keeps every node, so that results of the nodes keep their order; parts left empty go.
+    pub fn remove_elements(&mut self, ids: &BTreeSet<ElementId>) {
+        let removed: Vec<bool> = self.elements.iter().map(|e| ids.contains(&e.id)).collect();
+        if !removed.contains(&true) {
+            return;
+        }
+        for part in &mut self.parts {
+            part.elements.retain(|id| !ids.contains(id));
+        }
+        self.parts.retain(|p| !p.elements.is_empty());
+        self.remove_flagged(&removed, false);
+    }
+
+    /// Removes the elements flagged by index and, with `nodes`, the nodes only they use.
+    fn remove_flagged(&mut self, removed: &[bool], nodes: bool) {
         if !removed.contains(&true) {
             return;
         }
         // The nodes of the removed elements that no kept element uses go.
         let mut used = vec![false; self.node_ids.len()];
         let mut touched = vec![false; self.node_ids.len()];
-        for (element, &removed) in self.elements.iter().zip(&removed) {
+        for (element, &removed) in self.elements.iter().zip(removed) {
             let flags = if removed { &mut touched } else { &mut used };
             for node in &element.nodes {
                 if let Some(&index) = self.node_lookup.get(node) {
@@ -501,7 +520,7 @@ impl FeMesh {
             }
         }
         let node_gone: Vec<bool> = (touched.iter().zip(&used))
-            .map(|(&touched, &used)| touched && !used)
+            .map(|(&touched, &used)| nodes && touched && !used)
             .collect();
         // Only sets, surfaces and the CAD map need the ids.
         if !(self.node_sets.is_empty()
@@ -509,7 +528,7 @@ impl FeMesh {
             && self.surfaces.is_empty()
             && self.cad.is_empty())
         {
-            let elements: BTreeSet<ElementId> = (self.elements.iter().zip(&removed))
+            let elements: BTreeSet<ElementId> = (self.elements.iter().zip(removed))
                 .filter(|(_, removed)| **removed)
                 .map(|(e, _)| e.id)
                 .collect();
@@ -766,6 +785,40 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn removed_elements_leave_their_nodes_and_empty_parts_go() {
+        let mut mesh = FeMesh::default();
+        for id in 1..=3 {
+            mesh.set_node(id, [id as f64, 0.0, 0.0]);
+        }
+        for id in 1..=3 {
+            mesh.add_element(Element {
+                id,
+                type_name: "T3D2".into(),
+                shape: ElementShape::Line2,
+                nodes: vec![id, id % 3 + 1],
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "A".into(),
+            elements: vec![1, 2],
+        });
+        mesh.parts.push(Part {
+            name: "GAP".into(),
+            elements: vec![3],
+        });
+        mesh.element_sets.insert("ALL".into(), vec![1, 2, 3]);
+        mesh.remove_elements(&BTreeSet::from([2, 3]));
+        assert_eq!(mesh.element_count(), 1);
+        assert_eq!(mesh.element(1).map(|e| e.id), Some(1));
+        assert_eq!(mesh.element(3), None);
+        assert_eq!(mesh.node_ids(), [1, 2, 3]);
+        assert_eq!(mesh.parts.len(), 1);
+        assert_eq!(mesh.parts[0].elements, [1]);
+        assert_eq!(mesh.element_sets["ALL"], [1]);
+    }
 
     #[test]
     fn adopted_parts_regroup_the_elements() {

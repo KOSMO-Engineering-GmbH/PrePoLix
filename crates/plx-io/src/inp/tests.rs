@@ -153,3 +153,20 @@ fn finds_contact_pairs_but_not_ties() {
     assert!(defines_contact(&general).unwrap());
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn elements_of_unsupported_types_are_skipped_by_number() {
+    let import = read_inp(&testdata("gap_stuetzen.inp")).unwrap();
+    assert_eq!(import.mesh.element_count(), 1);
+    assert_eq!(
+        import.skipped_elements.into_iter().collect::<Vec<_>>(),
+        [101, 102, 103, 104]
+    );
+    // Continuation lines hold nodes, not element numbers.
+    let text = "*Element, Type=C3D9\n7, 1, 2, 3, 4, 5, 6, 7, 8,\n9\n8, 1, 2, 3, 4, 5, 6, 7, 8, 9\n";
+    let import = read_inp_str(text, None).unwrap();
+    assert_eq!(
+        import.skipped_elements.into_iter().collect::<Vec<_>>(),
+        [7, 8]
+    );
+}

@@ -26,9 +26,15 @@ When results are opened, PrePoLix shows the #ui("Results") tab with the last inc
 Results list the parts of the model they were computed from, as in the #ui("FE Model") tab, also
 when several parts share a section. A `.frd` file itself only groups the elements by material;
 PrePoLix reads the parts from the input file CalculiX ran, the `.inp` file of the same name next
-to the results. Results of an analysis run from PrePoLix always have it.
+to the results. Results of an analysis run from PrePoLix always have it. The spring and gap
+elements that constraints become in the input file, such as the gaps of a compression only
+support (@compression-only), are left out of the results: CalculiX would list each gap as a
+material of its own, and they carry no results of their own.
 
 #screenshot("results-parts.png", [Three parts sharing one section keep their names in the results])
+
+#screenshot("results-without-gaps.png", [A plate on compression only supports: its results show
+  the plate as the only part])
 
 == Results toolbar <results-toolbar>
 

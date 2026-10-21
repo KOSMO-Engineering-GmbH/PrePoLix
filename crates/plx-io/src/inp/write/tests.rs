@@ -3224,13 +3224,17 @@ fn calculix_compression_only_support_takes_only_pressure() {
     let frd = run_ccx("druck-nur-verteilt", &text).unwrap();
     let sink = mean_top(&blocks, &frd, "U3");
     assert!((sink + 0.05).abs() < 0.001, "{sink}");
-    // Applied to the 9 nodes individually, each gap has the whole stiffness.
+    // Applied to the 9 nodes individually, each gap has the whole stiffness. The gaps of
+    // the flat face then share one section, as CalculiX makes a material of each.
     let each = |c: &mut CompressionOnly| {
         c.spring_stiffness = Some(1000.0);
         c.each_node = true;
     };
     let text = support(down, &each);
-    assert_eq!(text.matches(", , 1000, ").count(), 9, "{text}");
+    assert_eq!(text.matches(", , 1000, ").count(), 1, "{text}");
+    assert_eq!(text.matches("*Gap, Elset=").count(), 1, "{text}");
+    let gaps = text.split("*Element, Type=GAPUNI\n").nth(1).unwrap();
+    assert_eq!(gaps.lines().take_while(|l| !l.starts_with('*')).count(), 9);
     let frd = run_ccx("druck-nur-einzeln", &text).unwrap();
     let sink = mean_top(&blocks, &frd, "U3");
     assert!((sink + 0.01).abs() < 0.001, "{sink}");

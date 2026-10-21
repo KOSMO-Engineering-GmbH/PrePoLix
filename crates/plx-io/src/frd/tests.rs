@@ -200,3 +200,14 @@ fn cyclic_symmetric_modes_carry_their_nodal_diameter() {
         ["DISP", "DISPI", "STRESS", "STRESSI", "ERROR", "ERRORI"]
     );
 }
+
+#[test]
+fn gap_sections_of_the_same_name_make_one_part() {
+    // CalculiX writes a material "GAP" for each of the four `*Gap` sections.
+    let import = read_frd(&testdata("gap_stuetzen.frd")).unwrap();
+    assert_eq!(import.materials.values().filter(|m| *m == "GAP").count(), 4);
+    let parts: Vec<(&str, usize)> = (import.mesh.parts.iter())
+        .map(|p| (p.name.as_str(), p.elements.len()))
+        .collect();
+    assert_eq!(parts, [("STEEL", 1), ("GAP", 4)]);
+}
