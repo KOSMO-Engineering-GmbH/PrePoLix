@@ -165,7 +165,7 @@ impl FeModel {
             for bc in &mut step.boundary_conditions {
                 match &mut bc.kind {
                     BoundaryKind::Submodel { .. } | BoundaryKind::Symmetry { .. } => {}
-                    BoundaryKind::RemoteDisplacement(remote) => {
+                    BoundaryKind::Displacement(remote) => {
                         convert_displacements(&mut remote.values, &c);
                         c.option(&mut remote.pinball, Quantity::Length);
                         if let Some(location) = &mut remote.location {
@@ -178,7 +178,6 @@ impl FeModel {
                             }
                         }
                     }
-                    BoundaryKind::Displacement(values) => convert_displacements(values, &c),
                     BoundaryKind::Temperature(t) => c.value(t, Quantity::Temperature),
                 }
             }

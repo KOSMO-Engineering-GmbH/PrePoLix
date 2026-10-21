@@ -576,7 +576,7 @@ impl FeModel {
             .iter_mut()
             .flat_map(|s| &mut s.boundary_conditions)
         {
-            if let crate::BoundaryKind::RemoteDisplacement(remote) = &mut bc.kind
+            if let crate::BoundaryKind::Displacement(remote) = &mut bc.kind
                 && remote.system == old
             {
                 remote.system = new.to_string();

@@ -488,7 +488,7 @@ mod tests {
             active: true,
             visible: true,
             region: fixed.clone(),
-            kind: BoundaryKind::Displacement([Some(0.0); 6]),
+            kind: BoundaryKind::displacement([Some(0.0); 6]),
             amplitude: None,
         });
         step.loads.push(Load {
@@ -668,7 +668,7 @@ mod tests {
             active: true,
             visible: true,
             region: fixed.clone(),
-            kind: BoundaryKind::Displacement([Some(0.0); 6]),
+            kind: BoundaryKind::displacement([Some(0.0); 6]),
             amplitude: None,
         });
         step.loads.push(Load {

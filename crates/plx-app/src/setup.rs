@@ -10,16 +10,16 @@ use std::collections::{BTreeSet, HashSet};
 use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
-    AXIS_LABELS, Amplitude, BeamOrientation, BeamProfile, BeamSection, BoundaryCondition,
+    AXIS_LABELS, Amplitude, BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition,
     BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CyclicSymmetry,
-    DefinedField, DefinedFieldKind, DynamicProcedure, DynamicStep, Elastic, EquationSolver,
-    FeModel, Field, FieldOutput, FrequencyStep, GLOBAL, Hardening, HeatTransferStep, HistoryKind,
-    HistoryOutput, Incrementation, InitialCondition, InitialConditionKind, ItemRef, Load, LoadKind,
-    Material, MeshSet, ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad,
-    NodeTie, OutputDimension, OutputKind, PlasticPoint, Quantity, Region, RemoteBehavior,
-    RemoteDisplacement, Section, SectionKind, SensitivityStep, SetKind, StaticStep,
-    SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction, SymmetryError, Tie, UnitSystem,
-    ViscoStep, Wheel, next_name, symmetry_plane,
+    DefinedField, DefinedFieldKind, Displacement, DynamicProcedure, DynamicStep, Elastic,
+    EquationSolver, FeModel, Field, FieldOutput, Formulation, FrequencyStep, GLOBAL, Hardening,
+    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
+    InitialConditionKind, ItemRef, Load, LoadKind, Material, MeshSet, ModalDamping,
+    ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie, OutputDimension, OutputKind,
+    PlasticPoint, Quantity, Region, RemoteBehavior, Section, SectionKind, SensitivityStep, SetKind,
+    StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction, SymmetryError, Tie,
+    UnitSystem, ViscoStep, Wheel, next_name, symmetry_plane,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
@@ -576,18 +576,21 @@ impl RegionDraft {
             .collect();
         let mut remotes: Vec<&str> = Vec::new();
         if self.sources.contains(&Source::RemotePoint) {
-            let conditions = model.fe.steps.iter().flat_map(|s| &s.boundary_conditions);
-            for bc in conditions {
-                if matches!(bc.kind, BoundaryKind::RemoteDisplacement(_))
-                    && !remotes.contains(&bc.name.as_str())
-                {
-                    remotes.push(&bc.name);
+            for (s, step) in model.fe.steps.iter().enumerate() {
+                for (i, bc) in step.boundary_conditions.iter().enumerate() {
+                    if matches!(
+                        model.fe.formulation(&model.mesh, s, i),
+                        Some(Formulation::Point(_))
+                    ) && !remotes.contains(&bc.name.as_str())
+                    {
+                        remotes.push(&bc.name);
+                    }
                 }
             }
         }
         if points.is_empty() && remotes.is_empty() {
             ui.weak(if self.sources.contains(&Source::RemotePoint) {
-                "The model has no reference points (Features) and no remote displacements."
+                "The model has no reference points (Features) and no displacements on a point."
             } else {
                 "The model has no reference points (Features)."
             });
@@ -607,7 +610,7 @@ impl RegionDraft {
                     if !points.is_empty() {
                         ui.separator();
                     }
-                    ui.weak("Remote Displacements");
+                    ui.weak("Displacements on a point");
                 }
                 for name in remotes {
                     let chosen = source == Source::RemotePoint && set == name;
@@ -982,7 +985,7 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
         Region::ReferencePoint(_) => {}
         // The point of a remote displacement exists only in the input file; its region shows.
         Region::RemotePoint(name) => {
-            if let Some((_, bc, _)) = model.fe.remote_displacement(name) {
+            if let Some((_, bc, _)) = model.fe.remote_displacement(&model.mesh, name) {
                 return region_highlight(model, &bc.region);
             }
         }
@@ -1094,7 +1097,6 @@ fn names<'a, T: 'a>(items: &'a [T], name: impl Fn(&T) -> &str + 'a) -> Vec<&'a s
 }
 
 const DISPLACEMENT: &str = "Displacement_Rotation";
-const REMOTE_DISPLACEMENT: &str = "Remote_Displacement";
 const TEMPERATURE: &str = "Temperature";
 const DEFINED_TEMPERATURE: &str = "Defined_Temperature";
 const INITIAL_VELOCITY: &str = "Initial_Velocity";
@@ -1125,18 +1127,13 @@ fn previews_motion(bc: &BoundaryCondition, fe: &FeModel) -> bool {
 }
 
 /// The boundary condition kinds of the dialog: label, default name and the kind.
-fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 5] {
+fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 4] {
     [
         // All degrees of freedom held, the most common support.
         (
             "Displacement/Rotation",
             DISPLACEMENT,
-            BoundaryKind::Displacement([Some(0.0); 6]),
-        ),
-        (
-            "Remote Displacement",
-            REMOTE_DISPLACEMENT,
-            BoundaryKind::RemoteDisplacement(RemoteDisplacement::new([Some(0.0); 6])),
+            BoundaryKind::displacement([Some(0.0); 6]),
         ),
         ("Temperature", TEMPERATURE, BoundaryKind::Temperature(0.0)),
         (
@@ -1158,40 +1155,44 @@ fn boundary_kinds() -> [(&'static str, &'static str, BoundaryKind); 5] {
 fn boundary_kind_name(kind: &BoundaryKind) -> &'static str {
     match kind {
         BoundaryKind::Displacement(_) => DISPLACEMENT,
-        BoundaryKind::RemoteDisplacement(_) => REMOTE_DISPLACEMENT,
         BoundaryKind::Temperature(_) => TEMPERATURE,
         BoundaryKind::Submodel { .. } => SUBMODEL,
         BoundaryKind::Symmetry { .. } => SYMMETRY,
     }
 }
 
-/// Rows of a remote displacement, Ansys' fields: how the selection follows the point, the
-/// coordinate system of the point and its directions, where the point is and the pinball
-/// region.
-fn remote_rows(
+/// Rows of a displacement below its values: how the selection follows them (Ansys'
+/// behavior) with what the input file gets, the coordinate system of the directions and,
+/// for a point, where it is and the pinball region. `names` are the step's and the boundary
+/// condition's, for exposed rotations.
+fn displacement_rows(
     ui: &mut Ui,
-    remote: &mut RemoteDisplacement,
+    remote: &mut Displacement,
     region: &Region,
+    names: (&str, &str),
     model: &Model,
     units: UnitSystem,
 ) {
     let fe = &model.fe;
     ui.label("Behavior");
-    egui::ComboBox::from_id_salt("remote behavior")
+    egui::ComboBox::from_id_salt("displacement behavior")
         .selected_text(remote.behavior.label())
         .width(200.0)
         .show_ui(ui, |ui| {
-            for behavior in RemoteBehavior::ALL {
+            for behavior in Behavior::ALL {
                 ui.selectable_value(&mut remote.behavior, behavior, behavior.label());
             }
         });
     ui.end_row();
+    let formulation = remote.formulation(fe, &model.mesh, region, names.0, names.1);
+    let point = matches!(formulation, Formulation::Point(_));
     ui.label("");
-    ui.weak(match remote.behavior {
-        RemoteBehavior::Rigid => "The selection keeps its shape.",
-        RemoteBehavior::Deformable => "Mean motion; the selection deforms.",
-        RemoteBehavior::Coupled => "Nodes shift with the point; no rotations.",
-    });
+    ui.add(
+        egui::Label::new(
+            egui::RichText::new(formulation_hint(remote, formulation, region, model)).weak(),
+        )
+        .wrap(),
+    );
     ui.end_row();
     ui.label("Coordinate system");
     egui::ComboBox::from_id_salt("remote system")
@@ -1205,6 +1206,10 @@ fn remote_rows(
             }
         });
     ui.end_row();
+    // Location and pinball region belong to a point.
+    if !point {
+        return;
+    }
     let system = fe.coordinate_system_or_global(&remote.system);
     let cylindrical = system
         .as_ref()
@@ -1250,7 +1255,7 @@ fn remote_rows(
         }
     }
     ui.label("Point");
-    match remote.resolve(fe, &model.mesh, region) {
+    match remote.resolve(fe, &model.mesh, region, &Default::default()) {
         Ok(point) => {
             let [x, y, z] = point
                 .position
@@ -1282,19 +1287,22 @@ fn remote_rows(
             .changed();
         if switched && limited {
             // Starts from the farthest node of the selection, which still takes them all.
-            let all = RemoteDisplacement {
+            let all = Displacement {
                 pinball: None,
                 ..remote.clone()
             };
-            let farthest = all.resolve(fe, &model.mesh, region).ok().map(|point| {
-                (point.nodes.iter())
-                    .filter_map(|&n| model.mesh.node(n))
-                    .map(|x| {
-                        let d: [f64; 3] = std::array::from_fn(|i| x[i] - point.position[i]);
-                        (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
-                    })
-                    .fold(0.0, f64::max)
-            });
+            let farthest = all
+                .resolve(fe, &model.mesh, region, &Default::default())
+                .ok()
+                .map(|point| {
+                    (point.nodes.iter())
+                        .filter_map(|&n| model.mesh.node(n))
+                        .map(|x| {
+                            let d: [f64; 3] = std::array::from_fn(|i| x[i] - point.position[i]);
+                            (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+                        })
+                        .fold(0.0, f64::max)
+                });
             // Rounded up to three digits, so the farthest node stays inside.
             let rounded = farthest.filter(|&r| r > 0.0).map(|r| {
                 let scale = 10f64.powi(2 - r.log10().floor() as i32);
@@ -1312,6 +1320,51 @@ fn remote_rows(
         remote.pinball = limited.then_some(radius.max(0.0));
     });
     ui.end_row();
+}
+
+/// What the input file gets for a displacement, as the line below its behavior says it.
+fn formulation_hint(
+    displacement: &Displacement,
+    formulation: Formulation,
+    region: &Region,
+    model: &Model,
+) -> String {
+    let automatic = if displacement.behavior == Behavior::Automatic {
+        "Automatic: "
+    } else {
+        ""
+    };
+    let text = match formulation {
+        _ if region.reference_point().is_some() => {
+            "The point and the rigid body it drives are held.".to_string()
+        }
+        Formulation::Point(RemoteBehavior::Rigid) => "Rigid point at the centre of the \
+            selection: the selection keeps its shape and turns about the point where its \
+            rotations are free."
+            .to_string(),
+        Formulation::Point(RemoteBehavior::Deformable) => "Point at the centre of the \
+            selection that moves with the mean of its nodes: the selection deforms."
+            .to_string(),
+        Formulation::Nodes => {
+            let nodes = region.nodes(&model.mesh);
+            let expanded = plx_model::expanded_nodes(&model.mesh);
+            let solid = nodes.iter().any(|n| !expanded.contains(n));
+            let turned = displacement.values[3..]
+                .iter()
+                .any(|v| v.is_some_and(|v| v != 0.0));
+            let mut text = format!("Each of the {} nodes held directly.", nodes.len());
+            if solid && displacement.values[3..].iter().any(Option::is_some) {
+                text.push_str(if turned {
+                    " Nodes of solids have no rotations: UR has no effect."
+                } else {
+                    " Held rotations keep the selection from turning; leave them free \
+                     for a hinge."
+                });
+            }
+            text
+        }
+    };
+    format!("{automatic}{text}")
 }
 
 /// Rows of a symmetry boundary condition: where the normal of the plane comes from, the
@@ -1967,7 +2020,7 @@ impl Editor {
             return None;
         };
         let preview = self.motion.as_mut()?;
-        let BoundaryKind::Displacement(values) = bc.kind else {
+        let BoundaryKind::Displacement(Displacement { values, .. }) = bc.kind else {
             return None;
         };
         let amplitude = model.fe.amplitude(bc.amplitude.as_deref()?)?;
@@ -2357,27 +2410,17 @@ impl Editor {
                     });
                     ui.end_row();
                 }
-                if let BoundaryKind::RemoteDisplacement(remote) = &mut bc.kind {
-                    remote_rows(ui, remote, &region.region(), model, units);
-                }
-                // Nodes of 2D models only move in the x-y plane; the point of a remote
-                // displacement in a plane model also turns about z.
+                // Nodes of 2D models only move in the x-y plane; a point, of a rigid body or
+                // of a displacement, also turns about z in a plane model.
                 let dofs: Vec<usize> = match &bc.kind {
-                    BoundaryKind::RemoteDisplacement(remote) => {
-                        remote.dofs(model.fe.properties.space)
-                    }
-                    // The reference point of a rigid body in a plane model also turns about z.
-                    BoundaryKind::Displacement(_)
-                        if two_d && region.region().reference_point().is_some() =>
-                    {
+                    BoundaryKind::Displacement(_) => {
                         model.fe.properties.space.remote_dofs().to_vec()
                     }
                     _ if two_d => vec![0, 1],
                     _ => (0..6).collect(),
                 };
                 let values = match &mut bc.kind {
-                    BoundaryKind::Displacement(values) => Some(values),
-                    BoundaryKind::RemoteDisplacement(remote) => Some(&mut remote.values),
+                    BoundaryKind::Displacement(displacement) => Some(&mut displacement.values),
                     _ => None,
                 };
                 if let Some(values) = values {
@@ -2402,6 +2445,11 @@ impl Editor {
                         *value = set.then_some(number);
                         ui.end_row();
                     }
+                }
+                if let BoundaryKind::Displacement(displacement) = &mut bc.kind {
+                    let step = model.fe.steps.get(*step).map_or("", |s| s.name.as_str());
+                    let names = (step, bc.name.as_str());
+                    displacement_rows(ui, displacement, &region.region(), names, model, units);
                 }
                 if let BoundaryKind::Submodel { step, dofs } = &mut bc.kind {
                     submodel_rows(ui, *step, dofs, two_d, &model.fe);
@@ -2449,8 +2497,8 @@ impl Editor {
                             crate::results::format_value(frame.scale as f32),
                         ));
                         ui.end_row();
-                        if let BoundaryKind::Displacement(values) = &bc.kind
-                            && values[3..].iter().any(Option::is_some)
+                        if let BoundaryKind::Displacement(displacement) = &bc.kind
+                            && displacement.values[3..].iter().any(Option::is_some)
                         {
                             ui.label("");
                             ui.weak("Rotations are not shown in the preview.");
@@ -3249,7 +3297,7 @@ impl Editor {
                     bc.active = existing.active;
                     renamed = Some(existing.name.clone()).filter(|old| *old != bc.name);
                 }
-                let remote = matches!(bc.kind, BoundaryKind::RemoteDisplacement(_));
+                let remote = matches!(bc.kind, BoundaryKind::Displacement(_));
                 let new = bc.name.clone();
                 put(list, index, bc);
                 // History outputs of a remote displacement's point follow a renamed one.
@@ -3721,7 +3769,7 @@ fn history_output_form(
         }
         _ => {
             region.ui(ui, model);
-            if let Some(hint) = point_hint(&region.region(), &model.fe) {
+            if let Some(hint) = point_hint(&region.region(), &model.fe, &model.mesh) {
                 ui.label("");
                 ui.weak(hint);
                 ui.end_row();
@@ -3731,11 +3779,18 @@ fn history_output_form(
 }
 
 /// What a nodal history output of a point prints besides forces and displacements.
-fn point_hint(region: &Region, fe: &FeModel) -> Option<&'static str> {
+fn point_hint(region: &Region, fe: &FeModel, mesh: &FeMesh) -> Option<&'static str> {
     let behavior = match region {
         Region::ReferencePoint(_) => RemoteBehavior::Rigid,
-        Region::RemotePoint(name) => match fe.remote_displacement(name) {
-            Some((_, _, remote)) => remote.behavior,
+        Region::RemotePoint(name) => match fe.remote_displacement(mesh, name) {
+            Some((s, bc, _)) => {
+                let i =
+                    (fe.steps[s].boundary_conditions.iter()).position(|b| std::ptr::eq(b, bc))?;
+                match fe.formulation(mesh, s, i)? {
+                    Formulation::Point(behavior) => behavior,
+                    Formulation::Nodes => return None,
+                }
+            }
             None => return None,
         },
         _ => return None,
@@ -3747,11 +3802,7 @@ fn point_hint(region: &Region, fe: &FeModel) -> Option<&'static str> {
         }
         RemoteBehavior::Deformable => {
             "U includes the rotations (UR) of the point. CalculiX has no reaction forces or \
-             moments at a deformable remote point; use the Rigid behavior for them."
-        }
-        RemoteBehavior::Coupled => {
-            "CalculiX has no reaction forces at a coupled remote point, which does not turn: \
-             only its displacements are printed."
+             moments at a deformable point; use the Rigid behavior for them."
         }
     })
 }
@@ -5049,12 +5100,12 @@ mod tests {
         rename_default(
             &mut name,
             DISPLACEMENT,
-            REMOTE_DISPLACEMENT,
+            SYMMETRY,
             &["Displacement_Rotation-1"],
         );
-        assert_eq!(name, "Remote_Displacement-1");
+        assert_eq!(name, "Symmetry-1");
         let mut name = "Clamp".to_string();
-        rename_default(&mut name, DISPLACEMENT, REMOTE_DISPLACEMENT, &[]);
+        rename_default(&mut name, DISPLACEMENT, SYMMETRY, &[]);
         assert_eq!(name, "Clamp");
     }
 
@@ -5067,7 +5118,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(Vec::new()),
-            kind: BoundaryKind::Displacement([Some(0.0), None, None, None, None, None]),
+            kind: BoundaryKind::displacement([Some(0.0), None, None, None, None, None]),
             amplitude: None,
         });
         fe.steps.push(step);
@@ -5077,8 +5128,8 @@ mod tests {
             unreachable!()
         };
         assert_eq!(bc.name, "Displacement_Rotation-2");
-        rename_default(&mut bc.name, DISPLACEMENT, REMOTE_DISPLACEMENT, &taken);
-        assert_eq!(bc.name, "Remote_Displacement-1");
+        rename_default(&mut bc.name, DISPLACEMENT, SYMMETRY, &taken);
+        assert_eq!(bc.name, "Symmetry-1");
         // An edited item does not block its own name.
         let mut editor = Editor::create(NewItem::BoundaryCondition(0), &fe).unwrap();
         editor.index = Some(0);
@@ -5172,7 +5223,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::NodeSet("FIX".into()),
-            kind: BoundaryKind::Displacement([Some(0.0); 6]),
+            kind: BoundaryKind::displacement([Some(0.0); 6]),
             amplitude: None,
         });
         fe.steps[0].loads.push(Load {
@@ -5250,7 +5301,7 @@ mod tests {
                 active: true,
                 visible: true,
                 region: Region::NodeSet("FIX".into()),
-                kind: BoundaryKind::Displacement([Some(0.0); 6]),
+                kind: BoundaryKind::displacement([Some(0.0); 6]),
                 amplitude: None,
             },
             BoundaryCondition {
@@ -5374,7 +5425,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::NodeSet("FIX".into()),
-            kind: BoundaryKind::Displacement([Some(0.0); 6]),
+            kind: BoundaryKind::displacement([Some(0.0); 6]),
             amplitude: None,
         });
         let bc = TreeItem::BoundaryCondition(0, 0);

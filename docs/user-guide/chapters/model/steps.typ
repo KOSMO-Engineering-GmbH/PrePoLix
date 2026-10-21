@@ -172,18 +172,17 @@ When results are opened, the `.dat` file is read too, and the history outputs ap
 
 ==== Forces and moments of a point <history-point>
 
-For the forces, moments and rotations of a rigid body or a remote displacement, choose
+For the forces, moments and rotations of a rigid body or of a displacement on a point, choose
 #ui("Reference Point") as the region of a node output. The list offers the reference points
 under #ui("Features") (@features), which a rigid body constraint drives (@rigid-body), and the
-remote displacements of all steps (@remote-displacement), whose point exists only in the input
-file. The point's values appear under the name of the history output: `RF` gives the forces
+displacements of all steps that are written with a point (@displacement-behavior), whose point
+exists only in the input file. The point's values appear under the name of the history output: `RF` gives the forces
 (`FORCES`) and the moments (`MOMENTS`, `RM1` to `RM3`), `U` the displacements and the rotations
 (`ROTATIONS`, `UR1` to `UR3`, in radians), `V` the velocities and the angular velocities.
 
-#screenshot("history-output-point.png", [Node history output of the point of a remote
+#screenshot("history-output-point.png", [Node history output of the point of a
   displacement])
 
 CalculiX computes reaction forces and moments only at the point of a rigid body: a rigid body
-constraint or a remote displacement with the #ui("Rigid") behavior. At a #ui("Deformable")
-remote displacement only the displacements and rotations are printed, at a #ui("Coupled") one,
-which does not turn, only the displacements.
+constraint or a displacement on a #ui("Rigid") point. At a #ui("Deformable") point only the
+displacements and rotations are printed.

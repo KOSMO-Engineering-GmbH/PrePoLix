@@ -1,7 +1,8 @@
-//! Remote displacements: prescribed displacements and rotations of a point, by default at
-//! the centre of the selection, that the selection follows as a rigid body, on average
-//! (deformable) or with its nodes coupled to the point, as Ansys' remote displacement does.
-//! The point exists only in the input file.
+//! Prescribed displacements and rotations of a selection. CalculiX holds the nodes of the
+//! selection directly, or, where the selection should turn although its nodes have no
+//! rotations (faces and edges of solids), a point, by default at the centre of the selection,
+//! that the selection follows as a rigid body or on average (deformable), as Ansys' remote
+//! displacement does. The point exists only in the input file.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -9,46 +10,71 @@ use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 use serde::{Deserialize, Serialize};
 
 use crate::features::GLOBAL;
-use crate::{FeModel, ModelSpace, Region};
+use crate::{BoundaryKind, FeModel, ModelSpace, Region};
 
-/// How the selection follows the remote point, Ansys' "Behavior".
+/// How the selection follows its prescribed displacements, Ansys' "Behavior".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RemoteBehavior {
-    /// The selection keeps its shape (`*RIGID BODY`).
+pub enum Behavior {
+    /// Chosen from the selection, see [`Displacement::formulation`].
     #[default]
+    Automatic,
+    /// Every node is held directly.
+    EachNode,
+    /// The selection keeps its shape and follows a point (`*RIGID BODY`).
     Rigid,
-    /// The point moves with the weighted mean of the selection, which may deform: Nastran's
+    /// A point moves with the weighted mean of the selection, which may deform: Nastran's
     /// RBE3, written as `*EQUATION`s.
     Deformable,
-    /// Every node of the selection moves like the point in the prescribed directions, and
-    /// freely in the others; rotations are not coupled.
-    Coupled,
 }
 
-impl RemoteBehavior {
-    pub const ALL: [RemoteBehavior; 3] = [Self::Rigid, Self::Deformable, Self::Coupled];
+impl Behavior {
+    pub const ALL: [Behavior; 4] = [
+        Self::Automatic,
+        Self::EachNode,
+        Self::Rigid,
+        Self::Deformable,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::Automatic => "Automatic",
+            Self::EachNode => "Each node",
             Self::Rigid => "Rigid",
             Self::Deformable => "Deformable",
-            Self::Coupled => "Coupled",
         }
     }
 }
 
-/// A remote displacement, Ansys' remote displacement as far as CalculiX can do it.
+/// How the selection follows a point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoteBehavior {
+    Rigid,
+    Deformable,
+}
+
+/// How a displacement is written for CalculiX, see [`Displacement::formulation`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Formulation {
+    /// `*BOUNDARY` on every node of the selection (a reference point: on its nodes).
+    Nodes,
+    /// `*BOUNDARY` on a point the selection follows.
+    Point(RemoteBehavior),
+}
+
+/// Prescribed displacements and rotations of a selection.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RemoteDisplacement {
-    /// Displacements (U1..U3) and rotations (UR1..UR3) of the point in the directions of
-    /// `system`; `None` leaves one free.
+pub struct Displacement {
+    /// Displacements (U1..U3) and rotations (UR1..UR3) in the directions of `system`;
+    /// `None` leaves one free.
     pub values: [Option<f64>; 6],
-    pub behavior: RemoteBehavior,
+    pub behavior: Behavior,
     /// Coordinate system of the location and of the directions, by name ([`GLOBAL`]).
     pub system: String,
-    /// Coordinates of the point in `system`; `None` is the centre of the selection.
+    /// Coordinates of the point in `system`; `None` is the centre of the selection. Setting
+    /// it asks for a point.
     pub location: Option<[f64; 3]>,
     /// Only the nodes within this distance of the point take part, Ansys' pinball region.
+    /// Setting it asks for a point.
     pub pinball: Option<f64>,
 }
 
@@ -74,26 +100,102 @@ pub enum RemoteDof {
 }
 
 impl FeModel {
-    /// The first remote displacement boundary condition of the name, of any step, with
-    /// the index of its step.
-    pub fn remote_displacement(
-        &self,
-        name: &str,
-    ) -> Option<(usize, &crate::BoundaryCondition, &RemoteDisplacement)> {
-        self.steps.iter().enumerate().find_map(|(s, step)| {
-            step.boundary_conditions
-                .iter()
-                .find_map(|bc| match &bc.kind {
-                    crate::BoundaryKind::RemoteDisplacement(remote) if bc.name == name => {
-                        Some((s, bc, remote))
-                    }
-                    _ => None,
-                })
+    /// The displacement boundary condition `i` of step `s`.
+    pub fn displacement(&self, s: usize, i: usize) -> Option<&Displacement> {
+        match &self.steps.get(s)?.boundary_conditions.get(i)?.kind {
+            BoundaryKind::Displacement(displacement) => Some(displacement),
+            _ => None,
+        }
+    }
+
+    /// How the displacement boundary condition `i` of step `s` is written. The point of a
+    /// displacement exists in all steps of the input file, so one that needs a point in some
+    /// active step gets it in all of them: the boundary conditions of the same name and
+    /// region in the other steps decide too.
+    pub fn formulation(&self, mesh: &FeMesh, s: usize, i: usize) -> Option<Formulation> {
+        let step = self.steps.get(s)?;
+        let bc = step.boundary_conditions.get(i)?;
+        let BoundaryKind::Displacement(displacement) = &bc.kind else {
+            return None;
+        };
+        if displacement.behavior != Behavior::Automatic {
+            return Some(displacement.formulation(self, mesh, &bc.region, &step.name, &bc.name));
+        }
+        let point = (self.steps.iter().filter(|other| other.active))
+            .flat_map(|other| other.boundary_conditions.iter().map(move |b| (other, b)))
+            .filter(|(other, b)| {
+                b.active
+                    && b.name == bc.name
+                    && b.region == bc.region
+                    && other.kind.supports_boundary(&b.kind)
+            })
+            .chain(std::iter::once((step, bc)))
+            .any(|(other, b)| match &b.kind {
+                BoundaryKind::Displacement(d) if d.behavior == Behavior::Automatic => matches!(
+                    d.formulation(self, mesh, &b.region, &other.name, &b.name),
+                    Formulation::Point(_)
+                ),
+                _ => false,
+            });
+        Some(if point {
+            Formulation::Point(RemoteBehavior::Rigid)
+        } else {
+            Formulation::Nodes
         })
     }
 
-    /// Follows a renamed remote displacement: history outputs of its point keep referring
-    /// to it.
+    /// The first displacement boundary condition of the name that is written with a point,
+    /// of any step, with the index of its step.
+    pub fn remote_displacement(
+        &self,
+        mesh: &FeMesh,
+        name: &str,
+    ) -> Option<(usize, &crate::BoundaryCondition, &Displacement)> {
+        self.steps.iter().enumerate().find_map(|(s, step)| {
+            let (i, bc) =
+                (step.boundary_conditions.iter().enumerate()).find(|(_, bc)| bc.name == name)?;
+            let BoundaryKind::Displacement(displacement) = &bc.kind else {
+                return None;
+            };
+            matches!(self.formulation(mesh, s, i), Some(Formulation::Point(_))).then_some((
+                s,
+                bc,
+                displacement,
+            ))
+        })
+    }
+
+    /// The nodes that boundary conditions hold directly in a step, mechanical degrees of
+    /// freedom only. A point leaves them out of its coupling: CalculiX refuses a degree of
+    /// freedom that an equation depends on and a boundary condition holds.
+    pub fn directly_held_nodes(&self, mesh: &FeMesh) -> BTreeSet<NodeId> {
+        let mut held = BTreeSet::new();
+        for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
+            for (i, bc) in step.boundary_conditions.iter().enumerate() {
+                if !bc.active
+                    || !step.kind.supports_boundary(&bc.kind)
+                    || bc.region.reference_point().is_some()
+                {
+                    continue;
+                }
+                let direct = match &bc.kind {
+                    BoundaryKind::Displacement(d) => {
+                        self.formulation(mesh, s, i) == Some(Formulation::Nodes)
+                            && d.values[..3].iter().any(Option::is_some)
+                    }
+                    BoundaryKind::Submodel { dofs, .. } => dofs[..3].iter().any(|&d| d),
+                    BoundaryKind::Symmetry { .. } => true,
+                    BoundaryKind::Temperature(_) => false,
+                };
+                if direct {
+                    held.extend(bc.region.nodes(mesh));
+                }
+            }
+        }
+        held
+    }
+
+    /// Follows a renamed displacement: history outputs of its point keep referring to it.
     pub fn rename_remote_point(&mut self, old: &str, new: &str) {
         for output in self.steps.iter_mut().flat_map(|s| &mut s.history_outputs) {
             if let Some(Region::RemotePoint(name)) = output.kind.region_mut()
@@ -105,40 +207,96 @@ impl FeModel {
     }
 }
 
-impl RemoteDisplacement {
+impl Displacement {
     pub fn new(values: [Option<f64>; 6]) -> Self {
         Self {
             values,
-            behavior: RemoteBehavior::default(),
+            behavior: Behavior::default(),
             system: GLOBAL.into(),
             location: None,
             pinball: None,
         }
     }
 
-    /// The same point and coupling, whatever the values: remote displacements of several
-    /// steps share it. A coupling depends on which directions are held.
+    /// A displacement whose selection follows a rigid point.
+    pub fn rigid(values: [Option<f64>; 6]) -> Self {
+        Self {
+            behavior: Behavior::Rigid,
+            ..Self::new(values)
+        }
+    }
+
+    /// How this displacement alone is written; [`FeModel::formulation`] looks at the other
+    /// steps as well. `step` and `name` find exposed rotations, which count as turning:
+    /// the formulation does not change with a parameter.
+    ///
+    /// Automatically, the nodes are held directly when they have rotations of their own
+    /// (beam and shell nodes), when the selection is a single node or a reference point,
+    /// in axisymmetric models, and when all rotations of the model space are held at zero.
+    /// A point at the centre is needed for a face or edge of solids that may turn or is
+    /// turned, and for a location or pinball region; it is rigid then.
+    pub fn formulation(
+        &self,
+        model: &FeModel,
+        mesh: &FeMesh,
+        region: &Region,
+        step: &str,
+        name: &str,
+    ) -> Formulation {
+        let point = match self.behavior {
+            Behavior::EachNode => return Formulation::Nodes,
+            Behavior::Rigid => RemoteBehavior::Rigid,
+            Behavior::Deformable => RemoteBehavior::Deformable,
+            Behavior::Automatic => RemoteBehavior::Rigid,
+        };
+        if region.reference_point().is_some() {
+            return Formulation::Nodes;
+        }
+        if self.behavior != Behavior::Automatic || self.location.is_some() || self.pinball.is_some()
+        {
+            return Formulation::Point(point);
+        }
+        let space = model.properties.space;
+        let rotations: Vec<usize> = (space.remote_dofs().iter().copied())
+            .filter(|&d| d >= 3)
+            .collect();
+        if rotations.is_empty() {
+            return Formulation::Nodes;
+        }
+        let exposed = (model.exposed.iter()).any(|e| {
+            matches!(&e.path.item, crate::ItemRef::BoundaryCondition { step: s, name: n }
+                if s == step && n == name)
+                && crate::Field::ROTATION.contains(&e.path.field)
+        });
+        let still = rotations.iter().all(|&d| self.values[d] == Some(0.0));
+        if still && !exposed {
+            return Formulation::Nodes;
+        }
+        let nodes = region.nodes(mesh);
+        if nodes.len() < 2 {
+            return Formulation::Nodes;
+        }
+        let expanded = expanded_nodes(mesh);
+        if nodes.iter().all(|n| expanded.contains(n)) {
+            return Formulation::Nodes;
+        }
+        Formulation::Point(point)
+    }
+
+    /// The same point and coupling, whatever the values: displacements of several steps
+    /// share it.
     pub fn same_point(&self, other: &Self) -> bool {
-        let held = |r: &Self| r.values.map(|v| v.is_some());
         self.behavior == other.behavior
             && self.system == other.system
             && self.location == other.location
             && self.pinball == other.pinball
-            && (self.behavior != RemoteBehavior::Coupled || held(self) == held(other))
     }
 
-    /// The degrees of freedom (0..6) of the point the model space and the behavior allow.
-    pub fn dofs(&self, space: ModelSpace) -> Vec<usize> {
-        let coupled = self.behavior == RemoteBehavior::Coupled;
-        (space.remote_dofs().iter().copied())
-            .filter(|&d| !coupled || d < 3)
-            .collect()
-    }
-
-    /// The values of the degrees of freedom [`Self::dofs`] allows, the others free.
+    /// The values of the degrees of freedom of a point the model space allows, the others
+    /// free.
     pub fn held(&self, space: ModelSpace) -> [Option<f64>; 6] {
         let mut held = [None; 6];
-        for d in self.dofs(space) {
+        for &d in space.remote_dofs() {
             held[d] = self.values[d];
         }
         held
@@ -150,6 +308,7 @@ impl RemoteDisplacement {
         model: &FeModel,
         mesh: &FeMesh,
         region: &Region,
+        excluded: &BTreeSet<NodeId>,
     ) -> Result<RemotePoint, String> {
         let system = (model.coordinate_system_or_global(&self.system))
             .ok_or_else(|| format!("Coordinate System {} does not exist", self.system))?;
@@ -176,6 +335,13 @@ impl RemoteDisplacement {
                 None => "The selection contains no nodes.".into(),
             });
         }
+        // Nodes another boundary condition holds directly stay out of the coupling.
+        let nodes: Vec<NodeId> = (nodes.iter().copied())
+            .filter(|n| !excluded.contains(n))
+            .collect();
+        if nodes.is_empty() {
+            return Err("Other boundary conditions hold all nodes of the selection.".into());
+        }
         let areas = face_areas(mesh, &region.faces(mesh));
         let weights = (nodes.iter())
             .map(|n| areas.get(n).copied().unwrap_or(0.0))
@@ -196,23 +362,11 @@ impl RemoteDisplacement {
 }
 
 impl RemotePoint {
-    /// The `*EQUATION`s of a deformable or coupled behavior, each as its terms with the
-    /// dependent node first: a node degree of freedom that no other equation has, so
-    /// CalculiX needs no cascading. `held` are the point's prescribed degrees of freedom
-    /// (of a coupling, in the point's directions).
-    pub fn equations(
-        &self,
-        mesh: &FeMesh,
-        behavior: RemoteBehavior,
-        held: &[Option<f64>; 6],
-        space: ModelSpace,
-    ) -> Vec<Vec<(RemoteDof, f64)>> {
-        let rows = match behavior {
-            RemoteBehavior::Rigid => return Vec::new(),
-            RemoteBehavior::Deformable => self.averaging_rows(mesh, space),
-            RemoteBehavior::Coupled => self.coupling_rows(held, space),
-        };
-        reduce(rows)
+    /// The `*EQUATION`s of a deformable behavior, each as its terms with the dependent node
+    /// first: a node degree of freedom that no other equation has, so CalculiX needs no
+    /// cascading.
+    pub fn equations(&self, mesh: &FeMesh, space: ModelSpace) -> Vec<Vec<(RemoteDof, f64)>> {
+        reduce(self.averaging_rows(mesh, space))
     }
 
     /// Nastran's RBE3: the point moves with the weighted mean translation of the nodes and
@@ -278,32 +432,6 @@ impl RemotePoint {
                 }
             }
             rows.push(row);
-        }
-        rows
-    }
-
-    /// Each node moves like the point in each held direction e: e . u_node = e . u_point.
-    fn coupling_rows(
-        &self,
-        held: &[Option<f64>; 6],
-        space: ModelSpace,
-    ) -> Vec<Vec<(RemoteDof, f64)>> {
-        let translations = if space.is_2d() { 2 } else { 3 };
-        let axes = self
-            .axes
-            .unwrap_or([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]);
-        let mut rows = Vec::new();
-        for &node in &self.nodes {
-            for (k, e) in axes.iter().enumerate().take(translations) {
-                if held[k].is_none() {
-                    continue;
-                }
-                let mut row: Vec<(RemoteDof, f64)> = (0..translations)
-                    .map(|g| (RemoteDof::Node(node, g), e[g]))
-                    .collect();
-                row.extend((0..translations).map(|g| (RemoteDof::Translation(g), -e[g])));
-                rows.push(row);
-            }
         }
         rows
     }

@@ -356,10 +356,16 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
                     }
                 }
             }
-            // The supports at the remote point with lines to it from nodes spread over the
-            // region, like a rigid body's.
-            Kind::Boundary(BoundaryKind::RemoteDisplacement(ref remote)) => {
-                let Ok(point) = remote.resolve(&model.fe, &model.mesh, &item.region) else {
+            // A displacement on a point: the supports at the point with lines to it from
+            // nodes spread over the region, like a rigid body's.
+            Kind::Boundary(BoundaryKind::Displacement(ref remote))
+                if matches!(
+                    remote.formulation(&model.fe, &model.mesh, &item.region, "", ""),
+                    plx_model::Formulation::Point(_)
+                ) =>
+            {
+                let none = Default::default();
+                let Ok(point) = remote.resolve(&model.fe, &model.mesh, &item.region, &none) else {
                     continue;
                 };
                 let centre = DVec3::from(point.position);
@@ -388,12 +394,12 @@ pub fn build(model: &Model, items: &[Item]) -> Vec<Symbol> {
             }
             Kind::Boundary(ref kind) => {
                 let held: [bool; 6] = match *kind {
-                    BoundaryKind::Displacement(values) => values.map(|v| v.is_some()),
+                    BoundaryKind::Displacement(ref displacement) => {
+                        displacement.values.map(|v| v.is_some())
+                    }
                     BoundaryKind::Temperature(_) => [false; 6],
                     BoundaryKind::Submodel { dofs, .. } => dofs,
-                    BoundaryKind::Symmetry { .. } | BoundaryKind::RemoteDisplacement(_) => {
-                        unreachable!("drawn above")
-                    }
+                    BoundaryKind::Symmetry { .. } => unreachable!("drawn above"),
                 };
                 if let Some(center) = region_center(model, &item.region, &visible) {
                     for (axis, &held) in held.iter().enumerate() {

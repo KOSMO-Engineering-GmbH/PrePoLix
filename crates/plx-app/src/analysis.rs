@@ -798,14 +798,20 @@ mod tests {
             kind,
             amplitude: None,
         };
-        let pull = |u: f64| BoundaryKind::Displacement([Some(u), None, None, None, None, None]);
+        // Each node pulled: the end face contracts freely.
+        let pull = |u: f64| {
+            BoundaryKind::Displacement(plx_model::Displacement {
+                behavior: plx_model::Behavior::EachNode,
+                ..plx_model::Displacement::new([Some(u), None, None, None, None, None])
+            })
+        };
         let steps = [0.01, 0.02, last].into_iter().enumerate().map(|(i, u)| {
             let mut step = plx_model::Step::new_static(format!("Step-{}", i + 1));
             step.boundary_conditions = vec![
                 bc(
                     "Fix",
                     vec![1, 2, 3, 4],
-                    BoundaryKind::Displacement([Some(0.0); 6]),
+                    BoundaryKind::displacement([Some(0.0); 6]),
                 ),
                 bc("Pull", vec![13, 14, 15, 16], pull(u)),
             ];
@@ -1005,7 +1011,7 @@ mod tests {
         frequency.boundary_conditions = vec![bc(
             "Fix",
             vec![1, 2, 3, 4],
-            BoundaryKind::Displacement([Some(0.0); 6]),
+            BoundaryKind::displacement([Some(0.0); 6]),
         )];
         let mut modal = Step::new_modal_dynamics("Shake");
         modal.boundary_conditions = frequency.boundary_conditions.clone();

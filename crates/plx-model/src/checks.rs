@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId};
 
-use crate::{Region, SymmetryPlane, symmetry_dofs, symmetry_plane};
+use crate::{Formulation, GLOBAL, Region, SymmetryPlane, symmetry_dofs, symmetry_plane};
 
 use crate::{
     BoundaryKind, Constraint, ContactMethod, DefinedFieldKind, FeModel, LoadKind, Material,
@@ -41,10 +41,10 @@ pub enum Problem {
     /// A boundary condition, load or history output on a reference point that no active
     /// rigid body is driven by: the point has no node in the input file.
     NoRigidBody,
-    /// Nodes in two rigid bodies, of rigid body constraints or remote displacements:
+    /// Nodes in two rigid bodies, of rigid body constraints or displacements on a point:
     /// CalculiX keeps them in the first and only warns.
     SharedRigidBody,
-    /// Beam, truss, shell or membrane nodes in a rigid body or rigid remote displacement:
+    /// Beam, truss, shell or membrane nodes in a rigid body or rigid displacement point:
     /// CalculiX 2.23 refuses them in a `*RIGID BODY`, so they are coupled by linear
     /// equations, which hold for small rotations only. Warned of in steps with large
     /// deformations, and found in the output of a CalculiX run of another input file.
@@ -243,7 +243,7 @@ impl Problem {
                 "CalculiX refuses nodes of beams, trusses, shells and membranes in a rigid \
                  body (\"nodes belonging to beam elements must not be subject to a RIGID \
                  MPC\"), because it expands these elements into solids. PrePoLix therefore \
-                 couples such nodes of a Rigid Body constraint or a rigid Remote Displacement \
+                 couples such nodes of a Rigid Body constraint or a rigid displacement point \
                  with linear equations to the point. They are exact for small rotations, as \
                  in a linear analysis; with large deformations (NLGEOM) and large rotations \
                  of the point these nodes lag behind the rigid motion. As with a rigid body, \
@@ -251,7 +251,7 @@ impl Problem {
             }
             Problem::SharedRigidBody => {
                 "A node can follow one rigid body or remote point only. Rigid body constraints \
-                 and remote displacements each tie their selection to a point; where two share \
+                 and displacements on a point each tie their selection to it; where two share \
                  nodes, CalculiX leaves these nodes in the first rigid body and the second \
                  moves without them, or it stops on equations that depend on each other."
             }
@@ -544,8 +544,8 @@ impl Problem {
                  PrePoLix: run the analysis again."
             }
             Problem::SharedRigidBody => {
-                "Make the selections of the rigid bodies and remote displacements separate, or \
-                 use one remote displacement or rigid body for the joint selection."
+                "Make the selections of the rigid bodies and displacements on a point separate, \
+                 or use one displacement or rigid body for the joint selection."
             }
             Problem::NoRigidBody => {
                 "Create a Rigid Body constraint on the surface or nodes the reference point \
@@ -1038,20 +1038,23 @@ impl FeModel {
                 bodies.push((ModelItem::Constraint(i), &body.name, nodes));
             }
         }
-        let mut points: Vec<(&Region, &crate::RemoteDisplacement)> = Vec::new();
+        let mut points: Vec<(&Region, &crate::Displacement)> = Vec::new();
+        let mut excluded = None;
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             for (i, bc) in step.boundary_conditions.iter().enumerate() {
-                let BoundaryKind::RemoteDisplacement(remote) = &bc.kind else {
+                let BoundaryKind::Displacement(remote) = &bc.kind else {
                     continue;
                 };
                 if !bc.active
                     || !step.kind.supports_boundary(&bc.kind)
+                    || !matches!(self.formulation(mesh, s, i), Some(Formulation::Point(_)))
                     || (points.iter()).any(|(r, p)| **r == bc.region && p.same_point(remote))
                 {
                     continue;
                 }
                 points.push((&bc.region, remote));
-                if let Ok(point) = remote.resolve(self, mesh, &bc.region) {
+                let excluded = excluded.get_or_insert_with(|| self.directly_held_nodes(mesh));
+                if let Ok(point) = remote.resolve(self, mesh, &bc.region, excluded) {
                     let nodes = point.nodes.into_iter().collect();
                     bodies.push((ModelItem::BoundaryCondition(s, i), &bc.name, nodes));
                 }
@@ -1356,6 +1359,8 @@ impl FeModel {
         // Whether a boundary condition moves something: remote displacements and those of
         // reference points hold no nodes of the mesh, so `fixed` does not see them.
         let mut moved = false;
+        // Supports of displacements in a coordinate system of their own.
+        let mut local_supports: Vec<(NodeId, [f64; 3], bool)> = Vec::new();
         for (i, bc) in step.boundary_conditions.iter().enumerate() {
             // A step leaves out what it cannot take, as the input file does.
             if !bc.active
@@ -1364,27 +1369,45 @@ impl FeModel {
             {
                 continue;
             }
-            if let BoundaryKind::Displacement(values)
-            | BoundaryKind::RemoteDisplacement(crate::RemoteDisplacement { values, .. }) =
-                &bc.kind
-            {
-                moved |= values.iter().any(|v| v.is_some_and(|v| v != 0.0));
+            let formulation = self.formulation(mesh, s, i);
+            if let BoundaryKind::Displacement(displacement) = &bc.kind {
+                moved |= (displacement.values.iter()).any(|v| v.is_some_and(|v| v != 0.0));
             }
-            let values: Vec<(usize, f64)> = match bc.kind {
-                BoundaryKind::Displacement(values) => (values.iter().enumerate())
+            let values: Vec<(usize, f64)> = match &bc.kind {
+                // The nodes follow the rigid body of a point, see `check_rigid_body`.
+                BoundaryKind::Displacement(_) if formulation != Some(Formulation::Nodes) => {
+                    Vec::new()
+                }
+                // Directions of a coordinate system of its own hold each node along them.
+                BoundaryKind::Displacement(displacement) if displacement.system != GLOBAL => {
+                    if let Some(system) = self.coordinate_system_or_global(&displacement.system) {
+                        for node in bc.region.nodes(mesh) {
+                            let Some(x) = mesh.node(node) else {
+                                continue;
+                            };
+                            let Ok(axes) = system.directions_at(x) else {
+                                continue;
+                            };
+                            for d in (0..dofs).filter(|&d| displacement.values[d].is_some()) {
+                                local_supports.push((node, axes[d % 3], d >= 3));
+                            }
+                        }
+                    }
+                    Vec::new()
+                }
+                BoundaryKind::Displacement(displacement) => (displacement.values.iter())
+                    .enumerate()
                     .filter_map(|(d, v)| v.map(|v| (d, v)))
                     .collect(),
-                // The nodes follow the rigid body of the point, see `check_rigid_body`.
-                BoundaryKind::RemoteDisplacement(_) => Vec::new(),
                 // Degree of freedom 11.
-                BoundaryKind::Temperature(t) => vec![(10, t)],
+                BoundaryKind::Temperature(t) => vec![(10, *t)],
                 // The values come from the global model; NaN stands for them.
                 BoundaryKind::Submodel { dofs: held, .. } => (0..dofs.min(3))
                     .filter(|&d| held[d])
                     .map(|d| (d, f64::NAN))
                     .collect(),
                 BoundaryKind::Symmetry { normal } => {
-                    match symmetry_plane(mesh, &bc.region, space, normal) {
+                    match symmetry_plane(mesh, &bc.region, space, *normal) {
                         Err(error) => {
                             findings.push(Finding::new(
                                 ModelItem::BoundaryCondition(s, i),
@@ -1435,8 +1458,11 @@ impl FeModel {
             }
             // The rotations of a reference point turn its rigid body.
             // Rotations held at zero do no harm; nothing turns solid nodes anyway.
-            if let BoundaryKind::Displacement(values) = bc.kind
-                && values[3..].iter().any(|v| v.is_some_and(|v| v != 0.0))
+            if let BoundaryKind::Displacement(displacement) = &bc.kind
+                && formulation == Some(Formulation::Nodes)
+                && displacement.values[3..]
+                    .iter()
+                    .any(|v| v.is_some_and(|v| v != 0.0))
                 && bc.region.reference_point().is_none()
                 && (space.is_2d() || !trusses.rotational.iter().any(|&r| r))
             {
@@ -1499,7 +1525,7 @@ impl FeModel {
         }
         // Supports of the skewed symmetry planes: the normal displacement and the rotations
         // about the in-plane axes.
-        let mut skewed_supports: Vec<(NodeId, [f64; 3], bool)> = Vec::new();
+        let mut skewed_supports = local_supports;
         for (index, &(i, plane)) in skewed.iter().enumerate() {
             let nodes = step.boundary_conditions[i].region.nodes(mesh);
             let (t1, t2) = plane.in_plane_axes();
@@ -1717,16 +1743,14 @@ impl FeModel {
                 continue;
             }
             match bc.kind {
-                BoundaryKind::Displacement(values) => {
-                    out.extend((0..dofs).filter(|&d| values[d].is_some()));
+                BoundaryKind::Displacement(ref displacement) => {
+                    out.extend((0..dofs).filter(|&d| displacement.values[d].is_some()));
                 }
                 BoundaryKind::Submodel { dofs: driven, .. } => {
                     out.extend((0..dofs.min(3)).filter(|&d| driven[d]));
                 }
-                // A reference point fixes no plane; a remote displacement brings its own.
-                BoundaryKind::Temperature(_)
-                | BoundaryKind::Symmetry { .. }
-                | BoundaryKind::RemoteDisplacement(_) => {}
+                // A reference point fixes no plane.
+                BoundaryKind::Temperature(_) | BoundaryKind::Symmetry { .. } => {}
             }
         }
         out.sort_unstable();
@@ -1869,30 +1893,26 @@ impl FeModel {
                 }
             }
         }
-        // A rigid or deformable remote displacement holds its region like a rigid body
-        // with a boundary condition on its point; a coupled one each node in the held
-        // directions.
+        // A displacement on a point holds its region like a rigid body with a boundary
+        // condition on its point.
         let step = &self.steps[s];
-        for bc in &step.boundary_conditions {
-            let BoundaryKind::RemoteDisplacement(remote) = &bc.kind else {
+        let mut excluded = None;
+        for (i, bc) in step.boundary_conditions.iter().enumerate() {
+            let BoundaryKind::Displacement(remote) = &bc.kind else {
                 continue;
             };
-            if !bc.active || !step.kind.supports_boundary(&bc.kind) {
+            if !bc.active
+                || !step.kind.supports_boundary(&bc.kind)
+                || !matches!(self.formulation(mesh, s, i), Some(Formulation::Point(_)))
+            {
                 continue;
             }
-            let Ok(point) = remote.resolve(self, mesh, &bc.region) else {
+            let excluded = excluded.get_or_insert_with(|| self.directly_held_nodes(mesh));
+            let Ok(point) = remote.resolve(self, mesh, &bc.region, excluded) else {
                 continue;
             };
             let axes = (point.axes).unwrap_or([axis(0), axis(1), axis(2)]);
             let held = remote.held(space);
-            if remote.behavior == crate::RemoteBehavior::Coupled {
-                for &node in &point.nodes {
-                    for d in (0..3).filter(|&d| held[d].is_some()) {
-                        support(node, axes[d], false);
-                    }
-                }
-                continue;
-            }
             let region = Region::Nodes(point.nodes.clone());
             let tied = pieces(&region);
             join(&mut ties, &tied, &[]);
@@ -2082,10 +2102,11 @@ impl FeModel {
             mark(&tie.slave, &mut held_otherwise);
         }
         let step = &self.steps[s];
-        for bc in &step.boundary_conditions {
-            if let BoundaryKind::RemoteDisplacement(remote) = &bc.kind
+        for (i, bc) in step.boundary_conditions.iter().enumerate() {
+            if let BoundaryKind::Displacement(remote) = &bc.kind
                 && bc.active
                 && step.kind.supports_boundary(&bc.kind)
+                && matches!(self.formulation(mesh, s, i), Some(Formulation::Point(_)))
                 && remote.values.iter().any(Option::is_some)
             {
                 mark(&bc.region, &mut held_otherwise);
@@ -2697,7 +2718,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(vec![1, 4, 5, 8]),
-            kind: BoundaryKind::Displacement([Some(0.0); 6]),
+            kind: BoundaryKind::displacement([Some(0.0); 6]),
             amplitude: None,
         });
         step.loads.push(Load {
@@ -2978,7 +2999,7 @@ mod tests {
         assert_eq!(check(&model, &mesh), []);
         // Only U1 fixed at node 1 means something else in the turned system.
         model.steps[0].boundary_conditions[0].kind =
-            BoundaryKind::Displacement([Some(0.0), None, None, None, None, None]);
+            each_node([Some(0.0), None, None, None, None, None]);
         assert!(problems(&check(&model, &mesh)).contains(&(item, Problem::SkewedSymmetryShared)));
     }
 
@@ -3012,7 +3033,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(vec![1, 2]),
-            kind: BoundaryKind::Displacement([Some(0.0); 6]),
+            kind: BoundaryKind::displacement([Some(0.0); 6]),
             amplitude: None,
         });
         let detail = &check(&model, &mesh)[0].detail;
@@ -3277,14 +3298,14 @@ mod tests {
         *model.constraints[0].active_mut() = true;
         // Only the translations held: the cube can still turn about the point.
         model.steps[0].boundary_conditions[0].kind =
-            BoundaryKind::Displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
+            BoundaryKind::displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
         let found = problems(&check(&model, &mesh));
         assert!(
             found.contains(&(ModelItem::Part(0), Problem::RigidBodyMotion)),
             "{found:?}"
         );
         // A moment on the point without the body is flagged too.
-        model.steps[0].boundary_conditions[0].kind = BoundaryKind::Displacement([Some(0.0); 6]);
+        model.steps[0].boundary_conditions[0].kind = BoundaryKind::displacement([Some(0.0); 6]);
         model.steps[0].loads[0].region = Region::ReferencePoint("RP-1".into());
         model.steps[0].loads[0].kind = LoadKind::Moment([1.0, 0.0, 0.0]);
         assert_eq!(problems(&check(&model, &mesh)), []);
@@ -3302,7 +3323,7 @@ mod tests {
         let mut model = model(&mesh);
         let bc = &mut model.steps[0].boundary_conditions[0];
         bc.region = Region::Nodes(vec![1, 4, 5, 8]);
-        bc.kind = BoundaryKind::RemoteDisplacement(crate::RemoteDisplacement::new([Some(0.0); 6]));
+        bc.kind = BoundaryKind::Displacement(crate::Displacement::rigid([Some(0.0); 6]));
         assert_eq!(problems(&check(&model, &mesh)), []);
         // A rigid body constraint on some of the same nodes takes them away.
         model
@@ -3320,7 +3341,7 @@ mod tests {
         model.constraints.clear();
         // Translations alone let the cube turn about the point.
         model.steps[0].boundary_conditions[0].kind =
-            BoundaryKind::RemoteDisplacement(crate::RemoteDisplacement::new([
+            BoundaryKind::Displacement(crate::Displacement::rigid([
                 Some(0.0),
                 Some(0.0),
                 Some(0.0),
@@ -3351,13 +3372,13 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(vec![2, 3, 6, 7]),
-            kind: BoundaryKind::RemoteDisplacement(crate::RemoteDisplacement::new(values)),
+            kind: BoundaryKind::Displacement(crate::Displacement::rigid(values)),
             amplitude: None,
         });
         assert!(no_load(&model));
         values[1] = Some(-0.001);
         model.steps[0].boundary_conditions[1].kind =
-            BoundaryKind::RemoteDisplacement(crate::RemoteDisplacement::new(values));
+            BoundaryKind::Displacement(crate::Displacement::rigid(values));
         assert!(!no_load(&model));
         // Neither does a displacement of a reference point.
         model
@@ -3368,10 +3389,10 @@ mod tests {
         model.constraints.push(Constraint::RigidBody(body));
         let bc = &mut model.steps[0].boundary_conditions[1];
         bc.region = Region::ReferencePoint("RP-1".into());
-        bc.kind = BoundaryKind::Displacement([None, None, None, None, None, Some(0.0)]);
+        bc.kind = BoundaryKind::displacement([None, None, None, None, None, Some(0.0)]);
         assert!(no_load(&model));
         model.steps[0].boundary_conditions[1].kind =
-            BoundaryKind::Displacement([None, None, None, None, None, Some(0.01)]);
+            BoundaryKind::displacement([None, None, None, None, None, Some(0.01)]);
         assert!(!no_load(&model));
     }
 
@@ -3436,7 +3457,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(vec![1, 2]),
-            kind: BoundaryKind::Displacement([Some(0.1), None, None, None, None, None]),
+            kind: each_node([Some(0.1), None, None, None, None, None]),
             amplitude: None,
         });
         step.loads[0].region = Region::Nodes(vec![4]);
@@ -3458,7 +3479,7 @@ mod tests {
         );
         // The same value is no conflict.
         model.steps[0].boundary_conditions[1].kind =
-            BoundaryKind::Displacement([Some(0.0), None, None, None, None, None]);
+            BoundaryKind::displacement([Some(0.0), None, None, None, None, None]);
         model.steps[0].loads.clear();
         assert_eq!(
             problems(&check(&model, &mesh)),
@@ -3513,12 +3534,80 @@ mod tests {
         );
     }
 
+    /// A displacement that holds every node.
+    fn each_node(values: [Option<f64>; 6]) -> BoundaryKind {
+        BoundaryKind::Displacement(crate::Displacement {
+            behavior: crate::Behavior::EachNode,
+            ..crate::Displacement::new(values)
+        })
+    }
+
+    #[test]
+    fn a_face_of_solids_with_free_rotations_turns_about_a_point() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        // A clamp holds each node.
+        assert_eq!(model.formulation(&mesh, 0, 0), Some(Formulation::Nodes));
+        // Free rotations need a point: the face turns about its centre.
+        let bc = &mut model.steps[0].boundary_conditions[0];
+        bc.kind = BoundaryKind::displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
+        let rigid = Some(Formulation::Point(crate::RemoteBehavior::Rigid));
+        assert_eq!(model.formulation(&mesh, 0, 0), rigid);
+        // So the cubes turn about the line through the point: a mechanism, no ignored
+        // rotations.
+        assert!(
+            problems(&check(&model, &mesh))
+                .iter()
+                .all(|(_, p)| *p != Problem::RotationsIgnored)
+        );
+        // A turned face as well, but not a single node, nor one held directly.
+        let bc = &mut model.steps[0].boundary_conditions[0];
+        bc.kind = BoundaryKind::displacement([
+            Some(0.0),
+            Some(0.0),
+            Some(0.0),
+            Some(0.1),
+            Some(0.0),
+            Some(0.0),
+        ]);
+        assert_eq!(model.formulation(&mesh, 0, 0), rigid);
+        let bc = &mut model.steps[0].boundary_conditions[0];
+        bc.region = Region::Nodes(vec![1]);
+        assert_eq!(model.formulation(&mesh, 0, 0), Some(Formulation::Nodes));
+        let bc = &mut model.steps[0].boundary_conditions[0];
+        bc.region = Region::Nodes(vec![1, 4, 5, 8]);
+        bc.kind = each_node([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
+        assert_eq!(model.formulation(&mesh, 0, 0), Some(Formulation::Nodes));
+        // An exposed rotation counts as turning, whatever its value.
+        model.steps[0].boundary_conditions[0].kind = BoundaryKind::displacement([Some(0.0); 6]);
+        model.exposed.push(crate::Exposed {
+            key: 1,
+            name: "Twist".into(),
+            path: crate::ValuePath::new(
+                crate::ItemRef::BoundaryCondition {
+                    step: "Step-1".into(),
+                    name: "Fixed-1".into(),
+                },
+                crate::Field::RotationX,
+            ),
+        });
+        assert_eq!(model.formulation(&mesh, 0, 0), rigid);
+        // A point in one step is the point of the boundary condition in all of them.
+        model.exposed.clear();
+        let mut second = model.steps[0].clone();
+        second.name = "Step-2".into();
+        second.boundary_conditions[0].kind =
+            BoundaryKind::displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
+        model.steps.push(second);
+        assert_eq!(model.formulation(&mesh, 0, 0), rigid);
+    }
+
     #[test]
     fn rotations_on_solids_are_ignored() {
         let mesh = cubes(1, false);
         let mut model = model(&mesh);
         model.steps[0].boundary_conditions[0].kind =
-            BoundaryKind::Displacement([Some(0.0), Some(0.0), Some(0.0), Some(0.01), None, None]);
+            each_node([Some(0.0), Some(0.0), Some(0.0), Some(0.01), None, None]);
         assert_eq!(
             problems(&check(&model, &mesh)),
             [(
@@ -3527,7 +3616,7 @@ mod tests {
             )]
         );
         // Rotations held at zero, a clamp, change nothing.
-        model.steps[0].boundary_conditions[0].kind = BoundaryKind::Displacement([Some(0.0); 6]);
+        model.steps[0].boundary_conditions[0].kind = BoundaryKind::displacement([Some(0.0); 6]);
         assert_eq!(problems(&check(&model, &mesh)), []);
     }
 
@@ -3582,7 +3671,7 @@ mod tests {
         // Axisymmetric: only the axial motion is a rigid body motion.
         model.properties.space = ModelSpace::Axisymmetric;
         model.steps[0].boundary_conditions[0].kind =
-            BoundaryKind::Displacement([None, Some(0.0), None, None, None, None]);
+            BoundaryKind::displacement([None, Some(0.0), None, None, None, None]);
         assert_eq!(check(&model, &mesh), []);
     }
 
@@ -3646,7 +3735,7 @@ mod tests {
         model.sections[0].kind = crate::SectionKind::Beam(crate::BeamSection::DEFAULT);
         let bc = &mut model.steps[0].boundary_conditions[0];
         bc.region = Region::Nodes(vec![1]);
-        bc.kind = BoundaryKind::RemoteDisplacement(crate::RemoteDisplacement::new([Some(0.0); 6]));
+        bc.kind = BoundaryKind::Displacement(crate::Displacement::rigid([Some(0.0); 6]));
         model.steps[0].loads[0].region = Region::Nodes(vec![3]);
         // Linear: the equations replacing the rigid body are exact.
         let rigid = |found: &[Finding]| {
@@ -3702,14 +3791,14 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(vec![3]),
-            kind: BoundaryKind::Displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]),
+            kind: BoundaryKind::displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]),
             amplitude: None,
         });
         // A clamp and a pin.
         assert_eq!(check(&model, &mesh), []);
         // The pin also stops the twist: CalculiX makes a clamp of it.
         model.steps[0].boundary_conditions[1].kind =
-            BoundaryKind::Displacement([Some(0.0), Some(0.0), Some(0.0), Some(0.0), None, None]);
+            BoundaryKind::displacement([Some(0.0), Some(0.0), Some(0.0), Some(0.0), None, None]);
         assert_eq!(
             problems(&check(&model, &mesh)),
             [(
@@ -3723,7 +3812,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(vec![3]),
-            kind: BoundaryKind::Displacement([None, None, None, None, Some(0.0), Some(0.0)]),
+            kind: BoundaryKind::displacement([None, None, None, None, Some(0.0), Some(0.0)]),
             amplitude: None,
         });
         assert_eq!(check(&model, &mesh), []);
@@ -3731,9 +3820,9 @@ mod tests {
         // copes with.
         model.steps[0].boundary_conditions.truncate(2);
         model.steps[0].boundary_conditions[0].kind =
-            BoundaryKind::Displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
+            BoundaryKind::displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
         model.steps[0].boundary_conditions[1].kind =
-            BoundaryKind::Displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
+            BoundaryKind::displacement([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
         let findings = check(&model, &mesh);
         assert_eq!(
             problems(&findings),
@@ -3794,13 +3883,13 @@ mod tests {
         model.sections[0].kind = crate::SectionKind::Truss { area: 1.0 };
         let bcs = &mut model.steps[0].boundary_conditions;
         bcs[0].region = Region::Nodes(vec![1]);
-        bcs[0].kind = BoundaryKind::Displacement([Some(0.0), None, Some(0.0), None, None, None]);
+        bcs[0].kind = BoundaryKind::displacement([Some(0.0), None, Some(0.0), None, None, None]);
         bcs.push(BoundaryCondition {
             name: "Roller".into(),
             active: true,
             visible: true,
             region: Region::Nodes(vec![2]),
-            kind: BoundaryKind::Displacement([None, None, Some(0.0), None, None, None]),
+            kind: BoundaryKind::displacement([None, None, Some(0.0), None, None, None]),
             amplitude: None,
         });
         bcs.push(BoundaryCondition {
@@ -3808,7 +3897,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(mesh.node_ids().to_vec()),
-            kind: BoundaryKind::Displacement([None, Some(0.0), None, None, None, None]),
+            kind: BoundaryKind::displacement([None, Some(0.0), None, None, None, None]),
             amplitude: None,
         });
         model.steps[0].loads[0].region = Region::Nodes(vec![3]);

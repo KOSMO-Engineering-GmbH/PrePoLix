@@ -3,9 +3,9 @@ use std::process::Command;
 
 use plx_mesh::CadEntity;
 use plx_model::{
-    BeamOrientation, BeamProfile, BeamSection, BoundaryCondition, DefinedField, DefinedFieldKind,
-    DynamicStep, Elastic, EquationSolver, Hardening, Load, Material, ModalDamping,
-    ModalDynamicsStep, NodeTie, Plastic, PlasticPoint, ReferencePoint, RemoteDisplacement,
+    BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, DefinedField,
+    DefinedFieldKind, Displacement, DynamicStep, Elastic, EquationSolver, Hardening, Load,
+    Material, ModalDamping, ModalDynamicsStep, NodeTie, Plastic, PlasticPoint, ReferencePoint,
     RigidBody, Section, SectionKind, SteadyStateDynamicsStep,
 };
 
@@ -33,7 +33,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
         active: true,
         visible: true,
         region: Region::NodeSet("FIX".into()),
-        kind: BoundaryKind::Displacement([Some(0.0); 6]),
+        kind: BoundaryKind::displacement([Some(0.0); 6]),
         amplitude: None,
     });
     step.loads.push(load);
@@ -422,7 +422,7 @@ fn a_rigid_body_and_its_reference_point_are_written_like_prepomax_does() {
         active: true,
         visible: true,
         region: Region::ReferencePoint("RP-1".into()),
-        kind: BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, Some(0.01)]),
+        kind: BoundaryKind::displacement([Some(0.0), Some(0.0), None, None, None, Some(0.01)]),
         amplitude: None,
     };
     let (mesh, model) = rigid_tip(Some(moment([0.0, 0.0, 1000.0])), Some(bc));
@@ -530,7 +530,7 @@ fn calculix_turns_the_rigid_tip_by_the_rotation_of_its_reference_point() {
         active: true,
         visible: true,
         region: Region::ReferencePoint("RP-1".into()),
-        kind: BoundaryKind::Displacement([None, None, None, None, None, Some(angle)]),
+        kind: BoundaryKind::displacement([None, None, None, None, None, Some(angle)]),
         amplitude: None,
     };
     let (mesh, model) = rigid_tip(None, Some(bc));
@@ -545,13 +545,21 @@ fn calculix_turns_the_rigid_tip_by_the_rotation_of_its_reference_point() {
     }
 }
 
+/// A displacement held at every node.
+fn each_node(values: [Option<f64>; 6]) -> BoundaryKind {
+    BoundaryKind::Displacement(Displacement {
+        behavior: Behavior::EachNode,
+        ..Displacement::new(values)
+    })
+}
+
 fn remote(name: &str, values: [Option<f64>; 6]) -> BoundaryCondition {
     BoundaryCondition {
         name: name.into(),
         active: true,
         visible: true,
         region: Region::Surface("TIP".into()),
-        kind: BoundaryKind::RemoteDisplacement(RemoteDisplacement::new(values)),
+        kind: BoundaryKind::Displacement(Displacement::rigid(values)),
         amplitude: None,
     }
 }
@@ -559,10 +567,10 @@ fn remote(name: &str, values: [Option<f64>; 6]) -> BoundaryCondition {
 /// A remote displacement on the tip face, changed by `edit`.
 fn remote_with(
     values: [Option<f64>; 6],
-    edit: impl FnOnce(&mut RemoteDisplacement),
+    edit: impl FnOnce(&mut Displacement),
 ) -> BoundaryCondition {
     let mut bc = remote("Remote-1", values);
-    if let BoundaryKind::RemoteDisplacement(r) = &mut bc.kind {
+    if let BoundaryKind::Displacement(r) = &mut bc.kind {
         edit(r);
     }
     bc
@@ -588,10 +596,12 @@ fn turned_system(model: &mut FeModel) {
 /// J^-1 sum w r x u restricted to axis k when J is diagonal, as the equations define it.
 fn mean_rotation(mesh: &FeMesh, model: &FeModel, frd: &FrdImport, k: usize) -> f64 {
     let bc = &model.steps[0].boundary_conditions[1];
-    let BoundaryKind::RemoteDisplacement(remote) = &bc.kind else {
+    let BoundaryKind::Displacement(remote) = &bc.kind else {
         unreachable!()
     };
-    let point = remote.resolve(model, mesh, &bc.region).unwrap();
+    let point = remote
+        .resolve(model, mesh, &bc.region, &Default::default())
+        .unwrap();
     let total: f64 = point.weights.iter().sum();
     let x: Vec<[f64; 3]> = point.nodes.iter().map(|&n| mesh.node(n).unwrap()).collect();
     let c: [f64; 3] = std::array::from_fn(|i| {
@@ -616,7 +626,7 @@ fn calculix_turns_a_deformable_remote_point_with_the_mean_of_its_face() {
     let angle = 0.01;
     let values = [Some(0.0), Some(0.0), Some(0.0), None, None, Some(angle)];
     let (mesh, model) = remote_cantilever(remote_with(values, |r| {
-        r.behavior = RemoteBehavior::Deformable;
+        r.behavior = Behavior::Deformable;
     }));
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(!text.contains("*Rigid body"), "{text}");
@@ -628,27 +638,78 @@ fn calculix_turns_a_deformable_remote_point_with_the_mean_of_its_face() {
     assert!((turned - angle).abs() < 1e-6 * angle, "{turned} != {angle}");
 }
 
+/// Each node held in a coordinate system of its own: a `*Transform` of the nodes.
 #[test]
-fn calculix_couples_the_nodes_of_a_coupled_remote_point() {
+fn calculix_holds_each_node_in_its_coordinate_system() {
     let shift = 0.1;
-    let values = [None, Some(shift), None, None, None, Some(0.5)];
-    let (mesh, model) = remote_cantilever(remote_with(values, |r| {
-        r.behavior = RemoteBehavior::Coupled;
+    let values = [Some(shift), Some(0.0), Some(0.0), None, None, None];
+    let (mesh, mut model) = remote_cantilever(remote_with(values, |r| {
+        r.behavior = Behavior::EachNode;
+        r.system = "Turned".into();
     }));
+    turned_system(&mut model);
     let text = write_inp(&mesh, &model, "").unwrap();
-    // One equation per node in the held direction; the rotation does not count.
-    assert_eq!(text.matches("*Equation").count(), 9, "{text}");
+    assert!(!text.contains("*Equation"), "{text}");
+    assert!(!text.contains("*Rigid body"), "{text}");
     assert!(
-        text.contains("** Name: Remote-1\n*Boundary\n100, 2, 2, 0.1\n**"),
+        text.contains("*Transform, Nset=Internal-1_TIP, Type=R\n0, 1, 0, -1, 0, 0\n"),
         "{text}"
     );
-    let Some(frd) = run_ccx("remote-coupled", &text) else {
+    let Some(frd) = run_ccx("each-node-system", &text) else {
         return;
     };
     for id in [11, 22, 33, 44, 55, 66, 77, 88, 99] {
-        let u2 = node_value(&frd, "DISP", "U2", id);
-        assert!((u2 - shift).abs() < 1e-6, "{id}: {u2}");
+        let u = ["U1", "U2", "U3"].map(|c| node_value(&frd, "DISP", c, id));
+        assert!(
+            u[0].abs() < 1e-6 && (u[1] - shift).abs() < 1e-6 && u[2].abs() < 1e-6,
+            "{id}: {u:?}"
+        );
     }
+}
+
+/// A face of solids held in its translations and free to turn becomes a hinge about its
+/// centre; held in all directions it is clamped node by node. Nodes that another boundary
+/// condition holds directly stay out of the point.
+#[test]
+fn a_face_free_to_turn_follows_a_rigid_point() {
+    let hinge = [Some(0.0), Some(0.0), Some(0.0), None, None, None];
+    let (mesh, mut model) = remote_cantilever(remote("Hinge-1", hinge));
+    if let BoundaryKind::Displacement(d) = &mut model.steps[0].boundary_conditions[1].kind {
+        d.behavior = Behavior::Automatic;
+    }
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Rigid body, Nset=Internal-1_TIP,"), "{text}");
+    assert!(
+        text.contains("** Name: Hinge-1\n*Boundary\n100, 1, 3, 0\n**"),
+        "{text}"
+    );
+    // Clamped: each node.
+    model.steps[0].boundary_conditions[1].kind = BoundaryKind::displacement([Some(0.0); 6]);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Rigid body"), "{text}");
+    assert!(
+        text.contains("** Name: Hinge-1\n*Boundary\nInternal-1_TIP, 1, 6, 0\n"),
+        "{text}"
+    );
+    // A node of the face held by another boundary condition leaves the point.
+    model.steps[0].boundary_conditions[1].kind = BoundaryKind::displacement(hinge);
+    let node = Region::Surface("TIP".into()).nodes(&mesh)[0];
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Pin-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(vec![node]),
+        kind: BoundaryKind::displacement([None, Some(0.0), None, None, None, None]),
+        amplitude: None,
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Rigid body, Nset=Internal_Selection"),
+        "{text}"
+    );
+    let Some(_) = run_ccx("hinge-and-pin", &text) else {
+        return;
+    };
 }
 
 /// In a coordinate system turned about z, U1 is the global y direction and UR1 a rotation
@@ -684,8 +745,8 @@ fn calculix_moves_a_remote_point_in_its_coordinate_system() {
     }
     let angle = 0.01;
     let bc = &mut model.steps[0].boundary_conditions[1];
-    if let BoundaryKind::RemoteDisplacement(r) = &mut bc.kind {
-        r.behavior = RemoteBehavior::Deformable;
+    if let BoundaryKind::Displacement(r) = &mut bc.kind {
+        r.behavior = Behavior::Deformable;
         r.values = [
             Some(0.0),
             Some(0.0),
@@ -863,7 +924,7 @@ fn calculix_yields_the_bar_pulled_beyond_its_yield_stress() {
             active: true,
             visible: true,
             region: Region::Nodes(nodes_at(axis, min[axis])),
-            kind: BoundaryKind::Displacement(dofs),
+            kind: each_node(dofs),
             amplitude: None,
         }
     };
@@ -926,7 +987,7 @@ fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
         active: true,
         visible: true,
         region: Region::Surface("TIP".into()),
-        kind: BoundaryKind::Displacement([Some(0.0); 6]),
+        kind: BoundaryKind::displacement([Some(0.0); 6]),
         amplitude: None,
     });
     (mesh, model)
@@ -2265,7 +2326,7 @@ fn plane_model(
             active: true,
             visible: true,
             region: Region::Nodes(nodes),
-            kind: BoundaryKind::Displacement(values),
+            kind: each_node(values),
             amplitude: None,
         });
     }
@@ -2318,7 +2379,7 @@ fn two_d_models_write_their_element_types_thickness_and_dofs() {
         LoadKind::force([1.0, 2.0, 3.0]),
         Region::Nodes(vec![5]),
     );
-    model.steps[0].boundary_conditions[0].kind = BoundaryKind::Displacement([Some(0.0); 6]);
+    model.steps[0].boundary_conditions[0].kind = BoundaryKind::displacement([Some(0.0); 6]);
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
         "*Element, Type=CPS8, Elset=PLATE\n",
@@ -2528,7 +2589,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         active: true,
         visible: true,
         region: Region::Nodes(bottom),
-        kind: BoundaryKind::Displacement([Some(0.0); 6]),
+        kind: BoundaryKind::displacement([Some(0.0); 6]),
         amplitude: None,
     });
     step.loads.push(Load {
@@ -2755,7 +2816,7 @@ fn calculix_carries_the_load_across_a_contact() {
             active: true,
             visible: true,
             region: Region::Nodes(top),
-            kind: BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, None]),
+            kind: each_node([Some(0.0), Some(0.0), None, None, None, None]),
             amplitude: None,
         });
         model.surface_interactions.push(SurfaceInteraction {
@@ -2790,7 +2851,7 @@ fn calculix_carries_shear_across_a_tied_contact_without_stick_slope() {
         active: true,
         visible: true,
         region: Region::Nodes(top.clone()),
-        kind: BoundaryKind::Displacement([Some(0.001), None, None, None, None, None]),
+        kind: BoundaryKind::displacement([Some(0.001), None, None, None, None, None]),
         amplitude: None,
     });
     model.surface_interactions.push(SurfaceInteraction {
@@ -2980,7 +3041,7 @@ fn blocks_model(
         active: true,
         visible: true,
         region: Region::Faces(blocks.a_bottom.clone()),
-        kind: BoundaryKind::Displacement([Some(0.0); 6]),
+        kind: BoundaryKind::displacement([Some(0.0); 6]),
         amplitude: None,
     });
     step.loads.push(Load {
@@ -3285,7 +3346,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
         active: true,
         visible: true,
         region: Region::Nodes(vec![1]),
-        kind: BoundaryKind::Displacement([Some(0.0); 6]),
+        kind: BoundaryKind::displacement([Some(0.0); 6]),
         amplitude: None,
     });
     step.loads.push(Load {
@@ -3544,7 +3605,7 @@ fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
         visible: true,
         amplitude: None,
         region: Region::Nodes(vec![101]),
-        kind: BoundaryKind::Displacement([None, None, Some(0.0), None, None, None]),
+        kind: BoundaryKind::displacement([None, None, Some(0.0), None, None, None]),
     });
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
@@ -3673,7 +3734,7 @@ fn calculix_stretches_two_trusses_tied_at_a_node_like_one() {
         visible: true,
         amplitude: None,
         region: Region::Nodes(nodes),
-        kind: BoundaryKind::Displacement([None, Some(0.0), Some(0.0), None, None, None]),
+        kind: BoundaryKind::displacement([None, Some(0.0), Some(0.0), None, None, None]),
     });
     let Some(frd) = run_ccx("stab_node_tie", &write_inp(&mesh, &model, "").unwrap()) else {
         return;
@@ -3865,7 +3926,7 @@ fn calculix_stretches_a_truss_by_f_l_over_e_a() {
         active: true,
         visible: true,
         region: Region::Nodes(nodes),
-        kind: BoundaryKind::Displacement([None, Some(0.0), Some(0.0), None, None, None]),
+        kind: BoundaryKind::displacement([None, Some(0.0), Some(0.0), None, None, None]),
         amplitude: None,
     });
     let Some(frd) = run_ccx("stab_t3d2", &write_inp(&mesh, &model, "").unwrap()) else {
@@ -3966,7 +4027,7 @@ fn writes_heat_transfer_keywords() {
                 active: true,
                 visible: true,
                 region: Region::NodeSet("FIX".into()),
-                kind: BoundaryKind::Displacement([Some(0.0); 6]),
+                kind: BoundaryKind::displacement([Some(0.0); 6]),
                 amplitude: None,
             },
         ],
@@ -4172,7 +4233,7 @@ fn calculix_strains_the_bar_by_the_temperatures_of_a_result_file() {
         active: true,
         visible: true,
         region: Region::Nodes(nodes),
-        kind: BoundaryKind::Displacement([
+        kind: BoundaryKind::displacement([
             held[0].then_some(0.0),
             held[1].then_some(0.0),
             held[2].then_some(0.0),
@@ -4441,7 +4502,7 @@ fn expand_bar(kind: StepKind, name: &str) -> String {
         active: true,
         visible: true,
         region: Region::Nodes(nodes),
-        kind: BoundaryKind::Displacement(values),
+        kind: each_node(values),
         amplitude: None,
     };
     let (origin, y, z) = (at([0.0; 3]), at([0.0, 5.0, 0.0]), at([0.0, 0.0, 5.0]));
@@ -4552,7 +4613,7 @@ fn writes_amplitudes_and_their_references() {
         active: true,
         visible: true,
         region: Region::Nodes(vec![99]),
-        kind: BoundaryKind::Displacement([None, Some(0.5), None, None, None, None]),
+        kind: BoundaryKind::displacement([None, Some(0.5), None, None, None, None]),
         amplitude: Some("Half".into()),
     });
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -4841,7 +4902,7 @@ fn calculix_prints_the_contact_force_of_a_pair() {
         active: true,
         visible: true,
         region: Region::Nodes(top),
-        kind: BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, None]),
+        kind: each_node([Some(0.0), Some(0.0), None, None, None, None]),
         amplitude: None,
     });
     model.surface_interactions.push(SurfaceInteraction {
@@ -5410,7 +5471,7 @@ fn calculix_bends_the_half_shell_plate_like_the_full_one() {
     let edge = model.steps[0].boundary_conditions[1].region.clone();
     model.steps[0].boundary_conditions[1] = BoundaryCondition {
         region: edge,
-        kind: BoundaryKind::Displacement([None, Some(0.0), None, None, None, None]),
+        kind: BoundaryKind::displacement([None, Some(0.0), None, None, None, None]),
         ..model.steps[0].boundary_conditions[1].clone()
     };
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -5893,7 +5954,7 @@ fn calculix_creeps_the_bar_by_nortons_law() {
             active: true,
             visible: true,
             region: Region::Nodes(nodes_at(axis, min[axis])),
-            kind: BoundaryKind::Displacement(dofs),
+            kind: each_node(dofs),
             amplitude: None,
         }
     };
@@ -6181,10 +6242,10 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
     step.boundary_conditions.push(bc(
         "Fixed-1",
         (101..=103).collect(),
-        BoundaryKind::Displacement([Some(0.0); 6]),
+        BoundaryKind::displacement([Some(0.0); 6]),
     ));
     // A membrane holds the block in its plane only.
-    let sideways = BoundaryKind::Displacement([Some(0.0), Some(0.0), None, None, None, None]);
+    let sideways = BoundaryKind::displacement([Some(0.0), Some(0.0), None, None, None, None]);
     step.boundary_conditions
         .push(bc("Guided-1", (10..=18).collect(), sideways));
     step.loads.push(Load {
@@ -6326,7 +6387,7 @@ fn calculix_bends_a_rectangle_of_a_mesh_block_held_and_loaded_on_its_edges() {
         active: true,
         visible: true,
         region: Region::NodeSet("X-".into()),
-        kind: BoundaryKind::Displacement([Some(0.0); 6]),
+        kind: BoundaryKind::displacement([Some(0.0); 6]),
         amplitude: None,
     });
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -6412,7 +6473,7 @@ fn calculix_turns_the_reference_point_of_a_plane_model() {
         visible: true,
         region: Region::ReferencePoint("RP-1".into()),
         // U3, UR1 and UR2 do not exist in a plane model and are left out.
-        kind: BoundaryKind::Displacement([
+        kind: BoundaryKind::displacement([
             Some(0.0),
             Some(0.0),
             Some(1.0),
@@ -6453,10 +6514,10 @@ fn calculix_turns_a_deformable_remote_point_of_a_plane_model() {
         Region::Nodes(vec![1]),
     );
     model.steps[0].loads.clear();
-    let mut remote = RemoteDisplacement::new([Some(0.0), Some(0.0), None, None, None, Some(angle)]);
-    remote.behavior = RemoteBehavior::Deformable;
+    let mut remote = Displacement::new([Some(0.0), Some(0.0), None, None, None, Some(angle)]);
+    remote.behavior = Behavior::Deformable;
     let mut bc = self::remote("Remote-1", [None; 6]);
-    bc.kind = BoundaryKind::RemoteDisplacement(remote);
+    bc.kind = BoundaryKind::Displacement(remote);
     bc.region = Region::Nodes(nodes_at(&mesh, 0, 10.0));
     model.steps[0].boundary_conditions.push(bc);
     let text = write_inp(&mesh, &model, "").unwrap();
@@ -6480,7 +6541,7 @@ fn calculix_turns_a_deformable_remote_point_of_a_plane_model() {
 #[test]
 fn calculix_drives_a_quadratic_end_face_with_every_behavior() {
     let angle = 0.01;
-    for behavior in RemoteBehavior::ALL {
+    for behavior in [Behavior::Rigid, Behavior::Deformable, Behavior::EachNode] {
         let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", tip_force());
         model.steps[0].loads.clear();
         let mut bc = remote_with(
@@ -6495,10 +6556,12 @@ fn calculix_drives_a_quadratic_end_face_with_every_behavior() {
         };
         // The shift along z: of every node, or of their weighted mean when deformable.
         let bc = &model.steps[0].boundary_conditions[1];
-        let BoundaryKind::RemoteDisplacement(remote) = &bc.kind else {
+        let BoundaryKind::Displacement(remote) = &bc.kind else {
             unreachable!()
         };
-        let point = remote.resolve(&model, &mesh, &bc.region).unwrap();
+        let point = remote
+            .resolve(&model, &mesh, &bc.region, &Default::default())
+            .unwrap();
         let u3: Vec<f64> = (point.nodes.iter())
             .map(|&n| node_value(&frd, "DISP", "U3", n))
             .collect();
@@ -6510,10 +6573,10 @@ fn calculix_drives_a_quadratic_end_face_with_every_behavior() {
             .sum::<f64>()
             / total;
         assert!((mean - 0.01).abs() < 1e-6, "{}: {mean}", behavior.label());
-        if behavior != RemoteBehavior::Deformable {
+        if behavior != Behavior::Deformable {
             assert!(u3.iter().all(|u| (u - 0.01).abs() < 1e-6), "{u3:?}");
         }
-        if behavior == RemoteBehavior::Deformable {
+        if behavior == Behavior::Deformable {
             let turned = mean_rotation(&mesh, &model, &frd, 2);
             assert!((turned - angle).abs() < 1e-5 * angle, "{turned} != {angle}");
         }
@@ -6558,19 +6621,35 @@ fn a_point_history_output_prints_its_reference_and_rotation_node() {
 fn a_remote_point_history_output_prints_the_nodes_of_the_point() {
     let values = [Some(0.0), None, None, None, None, None];
     let (mesh, mut model) = remote_cantilever(remote_with(values, |r| {
-        r.behavior = plx_model::RemoteBehavior::Coupled;
+        r.behavior = Behavior::Deformable;
     }));
     (model.steps[0].history_outputs).push(HistoryOutput::node(
         "NH_Output-1",
         Region::RemotePoint("Remote-1".into()),
     ));
     let text = write_inp(&mesh, &model, "").unwrap();
-    // A coupled point does not turn: only its reference node is printed.
     assert!(
         text.contains("*Nset, Nset=Internal_Selection-1_NH_Output-1\n100\n"),
         "{text}"
     );
-    assert!(!text.contains("Internal_Rotation"), "{text}");
+    assert!(
+        text.contains("*Nset, Nset=Internal_Rotation-1_NH_Output-1\n101\n"),
+        "{text}"
+    );
+    // A displacement held at each node has no point.
+    if let BoundaryKind::Displacement(d) = &mut model.steps[0].boundary_conditions[1].kind {
+        d.behavior = Behavior::EachNode;
+    }
+    assert_eq!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::UnknownRemotePoint {
+            item: "NH_Output-1".into(),
+            point: "Remote-1".into(),
+        })
+    );
+    if let BoundaryKind::Displacement(d) = &mut model.steps[0].boundary_conditions[1].kind {
+        d.behavior = Behavior::Deformable;
+    }
     // A deactivated remote displacement has no point.
     model.steps[0].boundary_conditions[1].active = false;
     assert_eq!(
@@ -6636,7 +6715,7 @@ fn calculix_prints_the_moment_and_rotation_of_a_reference_point() {
         active: true,
         visible: true,
         region: Region::ReferencePoint("RP-1".into()),
-        kind: BoundaryKind::Displacement([None, None, None, None, None, Some(0.01)]),
+        kind: BoundaryKind::displacement([None, None, None, None, None, Some(0.01)]),
         amplitude: None,
     };
     let (mesh, model) = rigid_tip(None, Some(bc));
@@ -6669,7 +6748,7 @@ fn calculix_prints_the_moment_and_rotation_of_a_remote_point() {
 fn calculix_prints_the_rotation_of_a_deformable_remote_point() {
     let values = [None, None, None, None, None, Some(0.01)];
     let (mesh, mut model) = remote_cantilever(remote_with(values, |r| {
-        r.behavior = plx_model::RemoteBehavior::Deformable;
+        r.behavior = Behavior::Deformable;
     }));
     (model.steps[0].history_outputs).push(HistoryOutput::node(
         "NH_Output-1",
