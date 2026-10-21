@@ -2621,7 +2621,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(fixed),
-            kind: BoundaryKind::Displacement([Some(0.0); 6]),
+            kind: BoundaryKind::displacement([Some(0.0); 6]),
             amplitude: None,
         });
         step.boundary_conditions.push(BoundaryCondition {
@@ -2629,7 +2629,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(pulled),
-            kind: BoundaryKind::Displacement([Some(0.1), None, None, None, None, None]),
+            kind: BoundaryKind::displacement([Some(0.1), None, None, None, None, None]),
             amplitude: None,
         });
         model.fe = FeModel {
@@ -2772,7 +2772,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::Nodes(rim),
-            kind: BoundaryKind::Displacement([Some(0.0); 6]),
+            kind: BoundaryKind::displacement([Some(0.0); 6]),
             amplitude: None,
         });
         step.loads.push(Load {
@@ -2881,12 +2881,12 @@ mod tests {
             (
                 "Fix",
                 vec![1, 2, 3, 4],
-                BoundaryKind::Displacement([Some(0.0); 6]),
+                BoundaryKind::displacement([Some(0.0); 6]),
             ),
             (
                 "Pull",
                 vec![13, 14, 15, 16],
-                BoundaryKind::Displacement([Some(0.01), None, None, None, None, None]),
+                BoundaryKind::displacement([Some(0.01), None, None, None, None, None]),
             ),
         ] {
             step.boundary_conditions.push(BoundaryCondition {

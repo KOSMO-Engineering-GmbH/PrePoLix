@@ -68,7 +68,8 @@ pub use primitive::{MAX_PRIMITIVE_ELEMENTS, MeshPrimitive, Param, ParamSlot, Par
 pub use properties::{ModelKind, ModelProperties, ModelSpace};
 pub use region::{Region, describe_entities};
 pub use remote::{
-    RemoteBehavior, RemoteDisplacement, RemoteDof, RemotePoint, expanded_nodes, rigid_rows,
+    Behavior, Displacement, Formulation, RemoteBehavior, RemoteDof, RemotePoint, expanded_nodes,
+    rigid_rows,
 };
 pub use section::{
     BeamOrientation, BeamProfile, BeamSection, Section, SectionKind, line_tangent, membrane_type,
@@ -100,8 +101,9 @@ use serde::{Deserialize, Serialize};
 /// Switch blocks; formats 10 and 11 read as they are. Format 13 records the signatures of
 /// the geometry's entities, to find them again in changed shapes; format 12 reads as it is,
 /// without them. Format 14 drops the user keywords of the keyword editor; older formats read
-/// without them.
-pub const PROJECT_FORMAT: u32 = 14;
+/// without them. Format 15 merges the remote displacement into the displacement, which
+/// chooses how it is written from its selection; older formats are refused.
+pub const PROJECT_FORMAT: u32 = 15;
 
 /// Everything besides the mesh that makes up an analysis.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -1473,13 +1475,10 @@ pub struct BoundaryCondition {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BoundaryKind {
-    /// Prescribed displacements (U1..U3) and rotations (UR1..UR3); `None` leaves one free.
-    Displacement([Option<f64>; 6]),
-    /// Prescribed displacements and rotations of a point at the centre of the region or
-    /// elsewhere, which the region follows rigidly, as a mean or node by node (Ansys' remote
-    /// displacement). The point and its coupling exist only in the input file (`*RIGID BODY`
-    /// or `*EQUATION`).
-    RemoteDisplacement(RemoteDisplacement),
+    /// Prescribed displacements (U1..U3) and rotations (UR1..UR3) of the region, held at
+    /// every node or, where the region should turn, at a point it follows (Ansys' remote
+    /// displacement); see [`Displacement::formulation`].
+    Displacement(Displacement),
     /// Prescribed temperature (degree of freedom 11), PrePoMax's `TemperatureBC`.
     Temperature(f64),
     /// Displacements (U1..U3) taken from the results of the global model of a submodel
@@ -1512,6 +1511,11 @@ impl BoundaryKind {
 
     pub fn is_thermal(&self) -> bool {
         matches!(self, BoundaryKind::Temperature(_))
+    }
+
+    /// A displacement with the values, written as the selection needs.
+    pub fn displacement(values: [Option<f64>; 6]) -> Self {
+        BoundaryKind::Displacement(Displacement::new(values))
     }
 }
 
@@ -1809,7 +1813,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::ElementSet("A".into()),
-            kind: BoundaryKind::Displacement([Some(0.0); 6]),
+            kind: BoundaryKind::displacement([Some(0.0); 6]),
             amplitude: None,
         });
         step.loads.push(Load {

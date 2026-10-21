@@ -11,8 +11,8 @@ use std::fmt::Write as _;
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
     Amplitude, AmplitudeTime, BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint,
-    ContactMethod, ContactPair, DefinedFieldKind, DynamicStep, FeModel, FieldOutput, FrequencyStep,
-    GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
+    ContactMethod, ContactPair, DefinedFieldKind, DynamicStep, FeModel, FieldOutput, Formulation,
+    FrequencyStep, GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
     InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
     ModelSpace, MovingFrame, NodeTie, OutputDimension, OutputKind, Region, RemoteBehavior,
     RemoteDof, Section, SectionKind, SensitivityStep, StaticStep, SteadyStateDynamicsStep, Step,
@@ -425,13 +425,27 @@ fn boundaries_before_stored_modes(model: &FeModel, steps: &mut Keyword) -> Optio
     Some(std::mem::take(&mut boundaries.children))
 }
 
-/// `*Transform` of each node set that a skewed symmetry plane holds.
-fn transforms(transforms: &[(String, [f64; 3], [f64; 3])]) -> Vec<Keyword> {
+/// A local coordinate system of a node set.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Transform {
+    /// Directions x and y.
+    Rectangular([f64; 3], [f64; 3]),
+    /// Two points on the axis, z from the first to the second: radial, tangential, axial.
+    Cylindrical([f64; 3], [f64; 3]),
+}
+
+/// `*Transform` of each node set that a skewed symmetry plane or a displacement in a
+/// coordinate system of its own holds.
+fn transforms(transforms: &[(String, Transform)]) -> Vec<Keyword> {
     (transforms.iter())
-        .map(|(set, a, b)| {
+        .map(|(set, transform)| {
+            let (kind, a, b) = match transform {
+                Transform::Rectangular(a, b) => ("R", a, b),
+                Transform::Cylindrical(a, b) => ("C", a, b),
+            };
             let values: Vec<String> = a.iter().chain(b).map(|&v| number(v)).collect();
             Keyword::generated(format!(
-                "*Transform, Nset={set}, Type=R\n{}\n",
+                "*Transform, Nset={set}, Type={kind}\n{}\n",
                 values.join(", ")
             ))
         })
@@ -632,15 +646,16 @@ struct Sets<'a> {
     /// Reference and rotation node of each reference point an active rigid body is driven
     /// by, and the node set holding the reference node once something refers to it.
     reference_nodes: BTreeMap<String, ReferenceNodes>,
-    /// Reference and rotation node of the point of each remote displacement, with its
-    /// region; boundary conditions with the same region and point share it.
-    remote_points: Vec<(Region, plx_model::RemoteDisplacement, [NodeId; 2])>,
-    /// Reference and rotation node of the point of each remote displacement by the boundary
-    /// condition's name, with its behavior.
+    /// Reference and rotation node of the point of each displacement written with a point,
+    /// with its region; boundary conditions with the same region and point share it.
+    remote_points: Vec<(Region, plx_model::Displacement, [NodeId; 2])>,
+    /// Reference and rotation node of the point of each displacement written with a point by
+    /// the boundary condition's name, with its behavior.
     remote_names: BTreeMap<String, ([NodeId; 2], RemoteBehavior)>,
-    /// Local coordinate systems (`*Transform`, type R) of node sets whose symmetry plane is
-    /// no coordinate plane: the set with the local x and y axes.
-    transforms: Vec<(String, [f64; 3], [f64; 3])>,
+    /// Local coordinate systems (`*Transform`) of node sets whose symmetry plane is no
+    /// coordinate plane or whose displacement is in a system of its own: the set with the
+    /// local x and y axes (type R), or with two points on the axis (type C).
+    transforms: Vec<(String, Transform)>,
     /// Nodes of line, shell and membrane elements, see [`rigid_body`].
     expanded: BTreeSet<NodeId>,
 }
@@ -1263,52 +1278,60 @@ fn constraints(
             Constraint::Tie(t) => keywords.push(tie(sets, t)?),
         }
     }
-    // A remote displacement drives its region from a point, by default at the centre of the
-    // region; the point exists only in the input file. Its reference node takes the
+    // A displacement that needs a point drives its region from it, by default at the centre
+    // of the region; the point exists only in the input file. Its reference node takes the
     // translations, its rotation node the rotations as displacements, both in the directions
-    // of the remote displacement's coordinate system.
-    for step in model.steps.iter().filter(|s| s.active) {
-        for bc in &step.boundary_conditions {
-            let BoundaryKind::RemoteDisplacement(remote) = &bc.kind else {
+    // of the displacement's coordinate system. Nodes that boundary conditions hold directly
+    // stay out of the coupling: CalculiX refuses them there.
+    let mut excluded = None;
+    for (s, step) in model.steps.iter().enumerate().filter(|(_, s)| s.active) {
+        for (i, bc) in step.boundary_conditions.iter().enumerate() {
+            let BoundaryKind::Displacement(remote) = &bc.kind else {
                 continue;
             };
             if !bc.active || !step.kind.supports_boundary(&bc.kind) {
                 continue;
             }
+            let Some(Formulation::Point(behavior)) = model.formulation(sets.mesh, s, i) else {
+                continue;
+            };
             if let Some(&(_, _, nodes)) = (sets.remote_points.iter())
                 .find(|(r, p, _)| *r == bc.region && p.same_point(remote))
             {
-                (sets.remote_names.entry(bc.name.clone())).or_insert((nodes, remote.behavior));
+                (sets.remote_names.entry(bc.name.clone())).or_insert((nodes, behavior));
                 continue;
             }
-            let point = (remote.resolve(model, sets.mesh, &bc.region)).map_err(|reason| {
-                WriteError::InvalidBoundary {
-                    item: bc.name.clone(),
-                    reason,
-                }
-            })?;
+            let excluded = excluded.get_or_insert_with(|| model.directly_held_nodes(sets.mesh));
+            let point =
+                (remote.resolve(model, sets.mesh, &bc.region, excluded)).map_err(|reason| {
+                    WriteError::InvalidBoundary {
+                        item: bc.name.clone(),
+                        reason,
+                    }
+                })?;
             let (reference, rotation) = (next_node, next_node + 1);
             next_node += 2;
             generated.nodes.push((reference, point.position));
             generated.nodes.push((rotation, point.position));
             sets.remote_points
                 .push((bc.region.clone(), remote.clone(), [reference, rotation]));
-            (sets.remote_names.entry(bc.name.clone()))
-                .or_insert(([reference, rotation], remote.behavior));
+            (sets.remote_names.entry(bc.name.clone())).or_insert(([reference, rotation], behavior));
             if let Some([x, y, _]) = point.axes {
                 let set =
                     sets.free_name("Internal_Selection", &format!("{}_Point", name(&bc.name)));
                 sets.node_sets
                     .push((set.clone(), vec![reference, rotation]));
-                sets.transforms.push((set, x, y));
+                sets.transforms.push((set, Transform::Rectangular(x, y)));
             }
             let mut text = format!("** Name: {}: Remote point\n", bc.name);
-            match remote.behavior {
+            match behavior {
                 RemoteBehavior::Rigid => {
-                    let region = if remote.pinball.is_some() {
-                        Region::Nodes(point.nodes.clone())
-                    } else {
+                    let whole = remote.pinball.is_none()
+                        && point.nodes.len() == bc.region.nodes(sets.mesh).len();
+                    let region = if whole {
                         bc.region.clone()
+                    } else {
+                        Region::Nodes(point.nodes.clone())
                     };
                     rigid_body(
                         &mut text,
@@ -1320,10 +1343,9 @@ fn constraints(
                         [reference, rotation],
                     )?;
                 }
-                RemoteBehavior::Deformable | RemoteBehavior::Coupled => {
+                RemoteBehavior::Deformable => {
                     let space = model.properties.space;
-                    let held = remote.held(space);
-                    for equation in point.equations(sets.mesh, remote.behavior, &held, space) {
+                    for equation in point.equations(sets.mesh, space) {
                         remote_equation(&mut text, &equation, point.axes, [reference, rotation]);
                     }
                 }
@@ -1828,6 +1850,13 @@ fn rigid_body(
     Ok(())
 }
 
+/// How the displacement boundary condition of the name in the step of the name is written.
+fn formulation(model: &FeModel, mesh: &FeMesh, step: &str, bc: &str) -> Option<Formulation> {
+    let s = model.steps.iter().position(|s| s.name == step)?;
+    let i = (model.steps[s].boundary_conditions.iter()).position(|b| b.name == bc)?;
+    model.formulation(mesh, s, i)
+}
+
 /// An `*Equation` of a remote point: its terms with the point's translations and rotations
 /// on the reference and rotation node, turned into the point's directions, which the
 /// `*Transform` of the two nodes makes theirs.
@@ -1958,6 +1987,7 @@ fn step_block<'f>(
         stored_perturbation,
         cyclic,
         cyclic_slaves,
+        model,
         ..
     } = context;
     // Nodes of 2D models move in the x-y plane only; CalculiX fails on rotations there.
@@ -2003,7 +2033,14 @@ fn step_block<'f>(
             boundaries.push(deactivated(&bc.name));
             continue;
         }
-        if let BoundaryKind::RemoteDisplacement(remote) = &bc.kind {
+        let on_point = sets.remote_names.contains_key(&bc.name)
+            && matches!(
+                formulation(model, sets.mesh, &step.name, &bc.name),
+                Some(Formulation::Point(_))
+            );
+        if let BoundaryKind::Displacement(remote) = &bc.kind
+            && on_point
+        {
             let Some(&(_, _, [reference, rotation])) = (sets.remote_points.iter())
                 .find(|(r, p, _)| *r == bc.region && p.same_point(remote))
             else {
@@ -2051,8 +2088,36 @@ fn step_block<'f>(
         };
         let mut out = format!("** Name: {}\n*Boundary{options}\n", bc.name);
         match bc.kind {
-            BoundaryKind::RemoteDisplacement(_) => unreachable!("written above"),
-            BoundaryKind::Displacement(values) => {
+            BoundaryKind::Displacement(ref displacement) => {
+                let values = displacement.values;
+                // A coordinate system of its own turns the directions of the nodes.
+                if displacement.system != plx_model::GLOBAL && rotation_node.is_none() {
+                    let system = (model.coordinate_system_or_global(&displacement.system))
+                        .ok_or_else(|| WriteError::InvalidBoundary {
+                            item: bc.name.clone(),
+                            reason: format!(
+                                "Coordinate System {} does not exist",
+                                displacement.system
+                            ),
+                        })?;
+                    let invalid = |reason: String| WriteError::InvalidBoundary {
+                        item: bc.name.clone(),
+                        reason,
+                    };
+                    let [x, y, z] = system.axes().map_err(invalid)?;
+                    let transform = match system.kind {
+                        plx_model::CoordinateSystemKind::Rectangular => {
+                            Transform::Rectangular(x, y)
+                        }
+                        plx_model::CoordinateSystemKind::Cylindrical => Transform::Cylindrical(
+                            system.origin,
+                            std::array::from_fn(|k| system.origin[k] + z[k]),
+                        ),
+                    };
+                    if !sets.transforms.iter().any(|(s, ..)| *s == set) {
+                        sets.transforms.push((set.clone(), transform));
+                    }
+                }
                 let rotation = rotation_node.map(|n| n.to_string());
                 // The point of a rigid body turns in a plane model too: about z, the
                 // rotation node's third degree of freedom. Its other directions do not exist.
@@ -2097,7 +2162,8 @@ fn step_block<'f>(
                 if transformed {
                     let (t1, _) = plane.in_plane_axes();
                     if !sets.transforms.iter().any(|(s, ..)| *s == set) {
-                        sets.transforms.push((set.clone(), plane.normal, t1));
+                        (sets.transforms)
+                            .push((set.clone(), Transform::Rectangular(plane.normal, t1)));
                     }
                 }
                 for dof in symmetry_dofs(axis, dofs) {
@@ -3038,7 +3104,7 @@ fn point_output(
     let turning: Vec<&str> = (printed.iter().copied())
         .filter(|v| ["RF", "U", "V"].contains(v))
         .collect();
-    if behavior != RemoteBehavior::Coupled && !turning.is_empty() {
+    if !turning.is_empty() {
         let set = sets.free_name("Internal_Rotation", &name(&output.name));
         sets.node_sets.push((set.clone(), vec![rotation]));
         let _ = write!(

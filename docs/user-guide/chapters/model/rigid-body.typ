@@ -5,8 +5,8 @@
 A #ui("Rigid Body") constraint makes the nodes of a region move as one rigid body, driven by a
 reference point: a bolt head, a bearing seat or a face a lever acts on. Create it with
 #menu("Interaction", "Create Constraint ...") and choose #ui("Rigid Body"). To only hold or move
-a face as a rigid body about its centre, a #ui("Remote Displacement") boundary condition
-(@remote-displacement) needs no reference point.
+a face as a rigid body about its centre, a #ui("Displacement/Rotation") boundary condition with
+free or turned rotations (@displacement-behavior) needs no reference point.
 
 #screenshot("rigid-body.png", [Rigid body constraint])
 

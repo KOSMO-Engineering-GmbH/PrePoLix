@@ -117,8 +117,24 @@ impl FeModel {
                     .or_else(|| self.missing_amplitude([&bc.amplitude]))
                     .or_else(|| match &bc.kind {
                         // An unknown coordinate system, or no node in the pinball region.
-                        crate::BoundaryKind::RemoteDisplacement(remote) => {
-                            remote.resolve(self, mesh, &bc.region).err()
+                        crate::BoundaryKind::Displacement(displacement) => {
+                            match self.formulation(mesh, s, i) {
+                                Some(crate::Formulation::Point(_)) => (displacement.resolve(
+                                    self,
+                                    mesh,
+                                    &bc.region,
+                                    &Default::default(),
+                                ))
+                                .err(),
+                                _ => (self.coordinate_system_or_global(&displacement.system))
+                                    .is_none()
+                                    .then(|| {
+                                        format!(
+                                            "Coordinate System {} does not exist",
+                                            displacement.system
+                                        )
+                                    }),
+                            }
                         }
                         _ => None,
                     });
@@ -168,7 +184,7 @@ impl FeModel {
                     kind => kind.region().and_then(|r| {
                         r.missing_reference(mesh)
                             .or_else(|| self.missing_region_point(r))
-                            .or_else(|| self.missing_remote_point(r))
+                            .or_else(|| self.missing_remote_point(mesh, r))
                     }),
                 };
                 if let Some(reason) = reason {
@@ -228,11 +244,12 @@ impl FeModel {
             .and_then(|name| self.missing_reference_point(name))
     }
 
-    /// The remote displacement of a region on its point, if the model has none of that name.
-    fn missing_remote_point(&self, region: &Region) -> Option<String> {
+    /// The displacement of a region on its point, if the model has none of that name written
+    /// with a point.
+    fn missing_remote_point(&self, mesh: &FeMesh, region: &Region) -> Option<String> {
         let name = region.remote_point()?;
-        (self.remote_displacement(name).is_none())
-            .then(|| format!("Remote Displacement {name} does not exist"))
+        (self.remote_displacement(mesh, name).is_none())
+            .then(|| format!("Displacement {name} does not exist or has no point"))
     }
 
     /// The first of the amplitude references that names no amplitude of the model.
@@ -409,7 +426,7 @@ mod tests {
             active: true,
             visible: true,
             region: Region::NodeSet("FIX".into()),
-            kind: BoundaryKind::Displacement([Some(0.0); 6]),
+            kind: BoundaryKind::displacement([Some(0.0); 6]),
             amplitude: None,
         });
         FeModel {

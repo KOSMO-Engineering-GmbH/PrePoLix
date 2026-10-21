@@ -273,8 +273,7 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 (step_named(fe, step)?.boundary_conditions.iter_mut()).find(|b| &b.name == name)?;
             match (&mut bc.kind, field) {
                 (BoundaryKind::Temperature(t), Field::Value) => real(t, Quantity::Temperature),
-                (BoundaryKind::Displacement(values), field) => dof_slot(values, field),
-                (BoundaryKind::RemoteDisplacement(remote), field) => match field {
+                (BoundaryKind::Displacement(remote), field) => match field {
                     Field::Pinball => real(remote.pinball.as_mut()?, Quantity::Length),
                     Field::LocationX | Field::LocationY | Field::LocationZ => {
                         let axis = Field::LOCATION.iter().position(|f| *f == field)?;
@@ -625,7 +624,7 @@ mod tests {
     fn remote_displacements_expose_their_numbers() {
         let mut fe = model();
         let mut remote =
-            crate::RemoteDisplacement::new([Some(0.5), None, Some(0.0), None, None, Some(0.1)]);
+            crate::Displacement::new([Some(0.5), None, Some(0.0), None, None, Some(0.1)]);
         remote.location = Some([1.0, 2.0, 3.0]);
         fe.steps[0]
             .boundary_conditions
@@ -634,7 +633,7 @@ mod tests {
                 active: true,
                 visible: true,
                 region: Region::Nodes(Vec::new()),
-                kind: BoundaryKind::RemoteDisplacement(remote),
+                kind: BoundaryKind::Displacement(remote),
                 amplitude: None,
             });
         let item = ItemRef::BoundaryCondition {
