@@ -640,6 +640,7 @@ pub fn window(
     let mut actions = WindowActions::default();
     let mut open = true;
     egui::Window::new("Sound of the Mode Shapes")
+        .id(crate::ids::window(ctx, "mode sound"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)

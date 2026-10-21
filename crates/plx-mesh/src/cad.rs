@@ -235,6 +235,30 @@ impl FeMesh {
         ids.into_iter().collect()
     }
 
+    /// Line elements (beams, trusses) along CAD edges, e.g. of a line part meshed from a free
+    /// edge, by their end nodes.
+    pub fn cad_line_elements(&self, entities: &[CadEntity]) -> Vec<ElementId> {
+        let segments: BTreeSet<[NodeId; 2]> = (entities.iter())
+            .filter_map(|e| match e {
+                CadEntity::Edge(tag) => self.cad.segments.get(tag),
+                _ => None,
+            })
+            .flatten()
+            .map(|&[a, b]| [a.min(b), a.max(b)])
+            .collect();
+        if segments.is_empty() {
+            return Vec::new();
+        }
+        (self.elements().iter())
+            .filter(|e| e.shape.family() == crate::ElementFamily::Line)
+            .filter(|e| match (e.nodes.first(), e.nodes.last()) {
+                (Some(&a), Some(&b)) => segments.contains(&[a.min(b), a.max(b)]),
+                _ => false,
+            })
+            .map(|e| e.id)
+            .collect()
+    }
+
     /// Element faces on CAD entities: the faces on CAD faces of solids and shells, and the
     /// edges of 2D elements and shells (faces too, see [`crate::Element::faces`]) along CAD
     /// edges.

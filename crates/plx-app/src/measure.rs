@@ -282,7 +282,7 @@ impl MeasureEditor {
         let mut result = MeasureEditorResult::Open;
         let mut open = true;
         egui::Window::new(format!("Measure - {}", self.name))
-            .id(egui::Id::new(("measure", self.id)))
+            .id(crate::ids::window(ctx, ("measure", self.id)))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

@@ -300,6 +300,19 @@ impl ViewportRenderer {
         self.drawn = None;
     }
 
+    /// Replaces the mesh of one part, e.g. when its highlight changed; it stays visible or
+    /// hidden as it was.
+    pub fn set_part(&mut self, device: &wgpu::Device, index: usize, mesh: &RenderMesh) {
+        let Some(part) = self.parts.get_mut(index) else {
+            return;
+        };
+        let visible = part.visible;
+        *part = upload(device, mesh);
+        part.visible = visible;
+        self.update_blank_directions(device);
+        self.drawn = None;
+    }
+
     /// Cuts the scene at a plane, or shows it whole again with `None`.
     pub fn set_clip_plane(&mut self, clip: Option<ClipPlane>) {
         if self.clip != clip {

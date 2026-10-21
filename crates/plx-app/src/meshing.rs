@@ -88,6 +88,7 @@ impl MeshSetupWindow {
         let mut open = true;
         let mut result = MeshSetupResult::Open;
         egui::Window::new("Default Meshing Parameters")
+            .id(crate::ids::window(ctx, "default meshing parameters"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -355,7 +356,7 @@ impl MeshItemEditor {
             self.update_face_parts(view);
         }
         let window = egui::Window::new(self.title())
-            .id(egui::Id::new("mesh item editor"))
+            .id(crate::ids::window(ctx, "mesh item editor"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -912,29 +913,12 @@ pub fn cad_pick(view: &Model, hit: &Hit, precision: f32) -> Option<CadEntity> {
 
 /// Element faces of the display that show a CAD face.
 fn face_items(view: &Model, tags: &BTreeSet<i32>) -> std::collections::HashSet<(u32, u8)> {
-    let mut faces = std::collections::HashSet::new();
-    for part in 0..view.parts.len() {
-        for face in &view.skin(part).faces {
-            let id = view.mesh.elements()[face.element].id;
-            if let Some(CadEntity::Face(tag)) = view.cad_entity(id)
-                && tags.contains(&tag)
-            {
-                faces.insert((id, face.face as u8 + 1));
-            }
-        }
-    }
-    faces
+    view.cad_face_items(tags)
 }
 
 /// Segments of the display that show a CAD edge, as node pairs.
 fn edge_segments(view: &Model, tags: &BTreeSet<i32>) -> Vec<[NodeId; 2]> {
-    (view.mesh.elements().iter())
-        .filter(|e| e.shape == ElementShape::Line2)
-        .filter(
-            |e| matches!(view.cad_entity(e.id), Some(CadEntity::Edge(tag)) if tags.contains(&tag)),
-        )
-        .map(|e| [e.nodes[0], e.nodes[1]])
-        .collect()
+    view.cad_edge_segments(tags)
 }
 
 /// The outlines of CAD faces and the lines of CAD edges, for the hover preview.

@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use glam::{DAffine3, DVec3, Vec3};
 use plx_io::frd::{FrdImport, read_frd};
 use plx_io::inp::{InpImport, read_inp};
-use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, PartSkin, extract_part_skin};
+use plx_mesh::{
+    ElementFamily, ElementId, ElementShape, FeMesh, NodeId, PartSkin, extract_part_skin,
+};
 use plx_mesher::{CadEntity, GeometryDisplay};
 #[cfg(test)]
 use plx_model::SectionKind;
@@ -122,6 +124,10 @@ pub struct Model {
     pub motion: Option<Vec<(usize, [f64; 3])>>,
     /// Node indices of each part and the part of each node, built when first needed.
     part_nodes: std::sync::OnceLock<PartNodes>,
+    /// Nodes and elements of each part's skin, built when first needed.
+    skin_lookup: std::sync::OnceLock<SkinLookup>,
+    /// What shows each CAD entity of a geometry display, built when first needed.
+    cad_display: std::sync::OnceLock<CadDisplay>,
     /// Lookups to the CAD entities of a mesh generated from geometry, built when first
     /// needed.
     cad_index: std::sync::OnceLock<crate::cad_selection::CadIndex>,
@@ -194,6 +200,54 @@ impl PartNodes {
             .collect();
         Self { nodes, part_of }
     }
+}
+
+/// What the skins of the parts are made of, for picking and redrawing single parts.
+struct SkinLookup {
+    /// The nodes of the faces and lines of each part's skin.
+    nodes: Vec<Vec<usize>>,
+    /// The part whose skin shows an element, by element index; `u32::MAX` for none.
+    element_part: Vec<u32>,
+}
+
+impl SkinLookup {
+    fn new(skins: &[PartSkin], elements: usize) -> Self {
+        let mut element_part = vec![u32::MAX; elements];
+        let nodes = (skins.iter().enumerate())
+            .map(|(index, skin)| {
+                let elements = (skin.faces.iter().map(|f| f.element))
+                    .chain(skin.line_elements.iter().copied());
+                for element in elements {
+                    element_part[element] = index as u32;
+                }
+                let corners = (skin.faces.iter()).flat_map(|f| &f.corners);
+                let nodes = corners.chain(skin.lines.iter().flatten()).copied();
+                // Marked in the range of the part's nodes, which is cheaper than sorting.
+                let (lo, hi) =
+                    (nodes.clone()).fold((usize::MAX, 0), |(lo, hi), n| (lo.min(n), hi.max(n + 1)));
+                let mut used = vec![false; hi.saturating_sub(lo)];
+                for node in nodes {
+                    used[node - lo] = true;
+                }
+                (used.iter().enumerate())
+                    .filter(|(_, used)| **used)
+                    .map(|(k, _)| lo + k)
+                    .collect()
+            })
+            .collect();
+        Self {
+            nodes,
+            element_part,
+        }
+    }
+}
+
+/// The skin faces and line segments that show each CAD face and edge of a geometry
+/// display, so that highlighting entities doesn't search the whole display every frame.
+#[derive(Default)]
+struct CadDisplay {
+    faces: HashMap<i32, Vec<(ElementId, u8)>>,
+    edges: HashMap<i32, Vec<[NodeId; 2]>>,
 }
 
 /// What is shown selected: whole parts, element faces and nodes.
@@ -595,6 +649,8 @@ impl Model {
             query_annotations: Vec::new(),
             motion: None,
             part_nodes: Default::default(),
+            skin_lookup: Default::default(),
+            cad_display: Default::default(),
             checks: Default::default(),
             cad_index: Default::default(),
             history: Default::default(),
@@ -643,6 +699,51 @@ impl Model {
         self.cad_entities.get(index).copied()
     }
 
+    /// The skin faces that show the CAD faces `tags` of a geometry display, as (element,
+    /// CalculiX face number), in every part that draws them.
+    pub fn cad_face_items(&self, tags: &BTreeSet<i32>) -> HashSet<(ElementId, u8)> {
+        let display = self.cad_display();
+        (tags.iter())
+            .filter_map(|tag| display.faces.get(tag))
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    /// The segments of a geometry display that show the CAD edges `tags`, as node pairs.
+    pub fn cad_edge_segments(&self, tags: &BTreeSet<i32>) -> Vec<[NodeId; 2]> {
+        let display = self.cad_display();
+        (tags.iter())
+            .filter_map(|tag| display.edges.get(tag))
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    fn cad_display(&self) -> &CadDisplay {
+        self.cad_display.get_or_init(|| {
+            let mut display = CadDisplay::default();
+            if self.cad_entities.is_empty() {
+                return display;
+            }
+            let elements = self.mesh.elements();
+            for face in self.skins.iter().flat_map(|skin| &skin.faces) {
+                let id = elements[face.element].id;
+                if let Some(CadEntity::Face(tag)) = self.cad_entity(id) {
+                    let items = display.faces.entry(tag).or_default();
+                    items.push((id, face.face as u8 + 1));
+                }
+            }
+            for element in elements.iter().filter(|e| e.shape == ElementShape::Line2) {
+                if let Some(CadEntity::Edge(tag)) = self.cad_entity(element.id) {
+                    let segment = [element.nodes[0], element.nodes[1]];
+                    display.edges.entry(tag).or_default().push(segment);
+                }
+            }
+            display
+        })
+    }
+
     /// Changes the mesh in place, e.g. by a mesh tool, and rebuilds what the GUI derives
     /// from it; the parts keep their colours and visibility.
     pub fn edit_mesh(&mut self, edit: impl FnOnce(&mut FeMesh, &mut FeModel)) {
@@ -677,6 +778,8 @@ impl Model {
         self.highlight = Highlight::default();
         self.section_cells = Default::default();
         self.part_nodes = Default::default();
+        self.skin_lookup = Default::default();
+        self.cad_display = Default::default();
         self.checks = Default::default();
         self.cad_index = Default::default();
         self.geometry_index = Default::default();
@@ -740,6 +843,10 @@ impl Model {
 
     fn part_nodes(&self) -> &PartNodes {
         self.part_nodes.get_or_init(|| PartNodes::new(&self.mesh))
+    }
+
+    fn skin_lookup(&self) -> &SkinLookup {
+        (self.skin_lookup).get_or_init(|| SkinLookup::new(&self.skins, self.mesh.elements().len()))
     }
 
     /// The offsets of all parts for an exploded view; the layout is kept until parameters
@@ -1051,43 +1158,98 @@ impl Model {
             std::borrow::Cow::Borrowed(&[][..])
         };
         let shells = self.thick_shell_elements();
-        self.mesh
-            .parts
-            .iter()
-            .zip(&self.parts)
-            .zip(&self.skins)
-            .enumerate()
-            .map(|(index, ((_, info), skin))| {
-                let mut mesh = part_render_mesh(
+        (0..self.parts.len().min(self.skins.len()))
+            .map(|index| {
+                self.part_mesh(
+                    index,
                     coords,
-                    skin,
-                    self.origin,
-                    info.color,
-                    self.face_highlight(index, skin),
-                    SMOOTH_ANGLE_DEG,
                     scalars,
-                );
-                self.highlight_outline(index, &mut mesh);
-                if let Some(thick) = shells.as_ref() {
-                    mesh.append(thick_shell_mesh(
-                        coords,
-                        skin,
-                        self.origin,
-                        info.color,
-                        self.face_highlight(index, skin),
-                        |face| thick.get(&skin.faces[face].element).copied(),
-                        SMOOTH_ANGLE_DEG,
-                    ));
-                }
-                if deformed {
-                    mesh.wireframe_edges = wireframe_edges(&undeformed, skin, self.origin);
-                }
-                if self.is_geometry {
-                    mesh.mesh_edges.clear();
-                }
-                mesh
+                    &undeformed,
+                    deformed,
+                    shells.as_ref(),
+                )
             })
             .collect()
+    }
+
+    /// The mesh of one part as [`Model::part_meshes`] builds it.
+    fn part_mesh(
+        &self,
+        index: usize,
+        coords: &[[f64; 3]],
+        scalars: Option<&[f32]>,
+        undeformed: &[[f64; 3]],
+        deformed: bool,
+        shells: Option<&HashMap<usize, ShellThickness>>,
+    ) -> RenderMesh {
+        let (info, skin) = (&self.parts[index], &self.skins[index]);
+        let mut mesh = part_render_mesh(
+            coords,
+            skin,
+            self.origin,
+            info.color,
+            self.face_highlight(index, skin),
+            SMOOTH_ANGLE_DEG,
+            scalars,
+        );
+        self.highlight_outline(index, skin, &mut mesh);
+        if let Some(thick) = shells {
+            mesh.append(thick_shell_mesh(
+                coords,
+                skin,
+                self.origin,
+                info.color,
+                self.face_highlight(index, skin),
+                |face| thick.get(&skin.faces[face].element).copied(),
+                SMOOTH_ANGLE_DEG,
+            ));
+        }
+        if deformed {
+            mesh.wireframe_edges = wireframe_edges(undeformed, skin, self.origin);
+        }
+        if self.is_geometry {
+            mesh.mesh_edges.clear();
+        }
+        mesh
+    }
+
+    /// The mesh of one part as [`Model::scene_meshes`] draws it, so that a change of the
+    /// highlight redraws only the parts it concerns. `None` for results, whose parts are
+    /// drawn with contours, copies and arrows: they are built all at once.
+    pub fn part_scene_mesh(&self, index: usize) -> Option<RenderMesh> {
+        if self.results.is_some() || index >= self.parts.len().min(self.skins.len()) {
+            return None;
+        }
+        let coords = self.shown_coords();
+        let shells = self.thick_shell_elements();
+        Some(self.part_mesh(index, &coords, None, &[], false, shells.as_ref()))
+    }
+
+    /// The parts drawn differently with the highlight `new` than with `old`; `None` when
+    /// the scene has to be built anew as a whole, see [`Model::part_scene_mesh`].
+    pub fn highlight_changed_parts(
+        &self,
+        old: &Highlight,
+        new: &Highlight,
+    ) -> Option<BTreeSet<usize>> {
+        if self.results.is_some() {
+            return None;
+        }
+        let mut parts: BTreeSet<usize> = (old.parts.symmetric_difference(&new.parts))
+            .chain(old.outlines.symmetric_difference(&new.outlines))
+            .copied()
+            .collect();
+        let part_of = &self.skin_lookup().element_part;
+        let faces = (old.faces.symmetric_difference(&new.faces)).chain(
+            old.secondary_faces
+                .symmetric_difference(&new.secondary_faces),
+        );
+        // A face of an element on no skin isn't drawn.
+        let changed = (faces.filter_map(|&(element, _)| self.mesh.element_index(element)))
+            .filter_map(|index| part_of.get(index).copied())
+            .filter(|&part| part != u32::MAX);
+        parts.extend(changed.map(|part| part as usize));
+        Some(parts)
     }
 
     /// The shell and membrane sections of a 3D FE model, whose elements can be drawn as the
@@ -1232,15 +1394,19 @@ impl Model {
         self.origin
     }
 
-    /// Recolours the vertices of highlighted faces; vertices are laid out face by face.
-    fn highlight_outline(&self, part: usize, mesh: &mut RenderMesh) {
+    /// Draws the outline of an outlined part red and wide; a highlighted part whose faces turn
+    /// red gets its line elements red and wide, as they have no faces to colour.
+    fn highlight_outline(&self, part: usize, skin: &PartSkin, mesh: &mut RenderMesh) {
+        let red = |vertex: &Vertex| Vertex {
+            color: HIGHLIGHT_COLOR,
+            ..*vertex
+        };
         if self.highlight.outlines.contains(&part) {
-            mesh.wide_edges = (mesh.feature_edges.iter())
-                .map(|&vertex| Vertex {
-                    color: HIGHLIGHT_COLOR,
-                    ..vertex
-                })
-                .collect();
+            mesh.wide_edges = mesh.feature_edges.iter().map(red).collect();
+        } else if self.highlight.parts.contains(&part) {
+            // The segments of line elements come last in the feature edges.
+            let lines = mesh.feature_edges.len() - 2 * skin.lines.len();
+            mesh.wide_edges = mesh.feature_edges[lines..].iter().map(red).collect();
         }
     }
 
@@ -1273,6 +1439,14 @@ impl Model {
             .iter()
             .flat_map(|skin| &skin.faces)
             .map(|f| (elements[f.element].id, f.face as u8 + 1))
+    }
+
+    /// The segments of all line elements (beams, trusses, CAD edges) with their element.
+    pub fn line_segments(&self) -> impl Iterator<Item = (ElementId, [NodeId; 2])> + '_ {
+        let (elements, ids) = (self.mesh.elements(), self.mesh.node_ids());
+        (self.skins.iter())
+            .flat_map(|skin| skin.lines.iter().zip(&skin.line_elements))
+            .map(move |(&[a, b], &element)| (elements[element].id, [ids[a], ids[b]]))
     }
 
     /// All element faces on the surface with the ids of their corner nodes.
@@ -1410,10 +1584,13 @@ impl Model {
         let coords = self.shown_coords();
         let position = |node: usize| (DVec3::from(coords[node]) - self.origin).as_vec3();
         let mut best: Option<(f32, Hit)> = None;
-        for (part, skin) in self.skins.iter().enumerate() {
-            if !self.parts[part].visible {
-                continue;
+        // Only the parts whose box the ray passes, nearest first, until a hit lies in front
+        // of the next box: a click in a large assembly tests the faces of a few parts.
+        for (entry, part) in self.parts_along_ray(&coords, origin, direction, |_| 0.0) {
+            if best.is_some_and(|(nearest, _)| nearest < entry) {
+                break;
             }
+            let skin = &self.skins[part];
             for (index, face) in skin.faces.iter().enumerate() {
                 let a = position(face.corners[0]);
                 for pair in face.corners[1..].windows(2) {
@@ -1454,10 +1631,11 @@ impl Model {
         let position = |node: usize| (DVec3::from(coords[node]) - self.origin).as_vec3();
         let u = direction.normalize_or_zero();
         let mut best: Option<(f32, Hit)> = None;
-        for (part, skin) in self.skins.iter().enumerate() {
-            if !self.parts[part].visible {
-                continue;
+        for (entry, part) in self.parts_along_ray(&coords, origin, u, &tolerance) {
+            if best.is_some_and(|(nearest, _)| nearest < entry) {
+                break;
             }
+            let skin = &self.skins[part];
             for (index, &[a, b]) in skin.lines.iter().enumerate() {
                 let (a, b) = (position(a), position(b));
                 let Some((t, s)) = ray_segment(origin, u, a, b) else {
@@ -1484,6 +1662,51 @@ impl Model {
             }
         }
         best
+    }
+
+    /// The visible parts whose bounding box a ray passes, with the distance along the ray
+    /// (in units of `direction`) at which it enters the box, nearest first. Boxes are
+    /// widened by `tolerance`, the pick tolerance at a point of the ray.
+    fn parts_along_ray(
+        &self,
+        coords: &[[f64; 3]],
+        origin: Vec3,
+        direction: Vec3,
+        tolerance: impl Fn(Vec3) -> f32,
+    ) -> Vec<(f32, usize)> {
+        let skin_nodes = &self.skin_lookup().nodes;
+        let unit = direction.normalize_or_zero();
+        let mut parts: Vec<(f32, usize)> = (self.parts.iter().enumerate())
+            .filter(|(index, info)| info.visible && *index < self.skins.len())
+            .filter_map(|(index, _)| {
+                let nodes = skin_nodes.get(index)?;
+                let (min, max) = (nodes.iter())
+                    .map(|&n| (DVec3::from(coords[n]) - self.origin).as_vec3())
+                    .fold(None, |bounds: Option<(Vec3, Vec3)>, p| {
+                        Some(bounds.map_or((p, p), |(lo, hi)| (lo.min(p), hi.max(p))))
+                    })?;
+                // The tolerance grows at most linearly along the ray, so its larger value
+                // at the ends of the stretch through the box bounds it; doubled, it also
+                // covers points of the ray a tolerance beyond the box.
+                let far = (0..8)
+                    .map(|k| {
+                        let corner = Vec3::select(
+                            glam::BVec3::new(k & 1 != 0, k & 2 != 0, k & 4 != 0),
+                            max,
+                            min,
+                        );
+                        (corner - origin).dot(unit)
+                    })
+                    .fold(0.0f32, f32::max);
+                let margin = 2.0 * tolerance(origin).max(tolerance(origin + unit * far))
+                    // Rounding of the positions, also for flat boxes.
+                    + 1e-5 * (max - min).length();
+                let entry = ray_box(origin, direction, min - margin, max + margin)?;
+                Some((entry, index))
+            })
+            .collect();
+        parts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        parts
     }
 
     /// What a click hits: the nearest face, or a line in front of it or where no face is.
@@ -1690,6 +1913,27 @@ fn ray_segment(origin: Vec3, u: Vec3, a: Vec3, b: Vec3) -> Option<(f32, f32)> {
     (t >= 0.0).then_some((t, s))
 }
 
+/// Distance along the ray (`t >= 0`) at which it enters a box, 0 when it starts inside.
+fn ray_box(origin: Vec3, direction: Vec3, min: Vec3, max: Vec3) -> Option<f32> {
+    let (mut near, mut far) = (0.0f32, f32::INFINITY);
+    for axis in 0..3 {
+        let (o, d) = (origin[axis], direction[axis]);
+        if d == 0.0 {
+            if o < min[axis] || o > max[axis] {
+                return None;
+            }
+            continue;
+        }
+        let (a, b) = ((min[axis] - o) / d, (max[axis] - o) / d);
+        near = near.max(a.min(b));
+        far = far.min(a.max(b));
+        if near > far {
+            return None;
+        }
+    }
+    Some(near)
+}
+
 /// Distance along the ray to a triangle (Möller-Trumbore), seen from either side.
 fn ray_triangle(origin: Vec3, direction: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
     let (ab, ac) = (b - a, c - a);
@@ -1728,6 +1972,32 @@ mod tests {
         assert_eq!(loaded.render_meshes.len(), 2);
         let (min, max) = model.visible_bounds().unwrap();
         assert_eq!(max - min, Vec3::new(20.0, 20.0, 15.0));
+    }
+
+    #[test]
+    fn highlighted_line_parts_are_drawn_red_and_wide() {
+        let mut model = load(&testdata("rahmen_b32.inp"), UnitSystem::Unitless)
+            .unwrap()
+            .model;
+        assert!(model.render_meshes()[0].wide_edges.is_empty());
+        // A section region of parts colours the faces, of which line parts have none.
+        model.highlight.parts.insert(0);
+        let meshes = model.render_meshes();
+        let segments = model.skin(0).lines.len();
+        assert!(segments > 0);
+        assert_eq!(meshes[0].wide_edges.len(), 2 * segments);
+        assert!(
+            meshes[0]
+                .wide_edges
+                .iter()
+                .all(|v| v.color == HIGHLIGHT_COLOR)
+        );
+        assert!(meshes[1].wide_edges.is_empty());
+        // Nodes and element sets on lines show their segments.
+        let nodes = model.mesh.node_ids()[..3].to_vec();
+        let region = plx_model::Region::Nodes(nodes);
+        let highlight = crate::setup::region_highlight(&model, &region);
+        assert!(!highlight.lines.is_empty());
     }
 
     #[test]
@@ -1903,6 +2173,155 @@ mod tests {
         );
         let global_z = |p: Vec3| p.z as f64 + model.origin().z;
         assert!((global_z(a) + global_z(b)).abs() < 1e-3, "{a} {b}");
+    }
+
+    #[test]
+    fn a_new_highlight_redraws_only_the_parts_it_concerns() {
+        let mut model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::Unitless)
+            .unwrap()
+            .model;
+        assert_eq!(model.parts.len(), 2);
+        let selected = Highlight::parts([1]);
+        let changed = model.highlight_changed_parts(&model.highlight, &selected);
+        assert_eq!(changed, Some(BTreeSet::from([1])));
+        model.highlight = selected.clone();
+        // The part drawn on its own is the part of the whole scene.
+        let scene = model.scene_meshes();
+        for (part, whole) in scene.iter().enumerate() {
+            let single = model.part_scene_mesh(part).unwrap();
+            assert_eq!(single.vertices, whole.vertices);
+            assert_eq!(single.wide_edges, whole.wide_edges);
+        }
+        // A face of the plate concerns the plate; the beams lose their outline.
+        let face = model.skin_faces().next().unwrap();
+        let faces = Highlight {
+            faces: HashSet::from([face]),
+            ..Highlight::default()
+        };
+        let changed = model.highlight_changed_parts(&selected, &faces);
+        assert_eq!(changed, Some(BTreeSet::from([0, 1])));
+        assert_eq!(
+            model.highlight_changed_parts(&faces, &faces),
+            Some(BTreeSet::new())
+        );
+    }
+
+    #[test]
+    fn picking_skips_parts_off_the_ray_but_finds_the_nearest_face() {
+        let model = load(&testdata("platte_mit_stuetzen.inp"), UnitSystem::Unitless)
+            .unwrap()
+            .model;
+        let coords = model.shown_coords();
+        let position = |node: usize| (DVec3::from(coords[node]) - model.origin).as_vec3();
+        // The nearest face of all parts, without boxes.
+        let nearest = |origin: Vec3, direction: Vec3| {
+            (model.skins.iter().flat_map(|skin| &skin.faces))
+                .flat_map(|face| {
+                    let a = position(face.corners[0]);
+                    (face.corners[1..].windows(2)).filter_map(move |pair| {
+                        ray_triangle(origin, direction, a, position(pair[0]), position(pair[1]))
+                    })
+                })
+                .min_by(f32::total_cmp)
+        };
+        let (min, max) = ((0..coords.len()).map(position))
+            .fold((Vec3::MAX, Vec3::MIN), |(lo, hi), p| (lo.min(p), hi.max(p)));
+        let size = (max - min).length();
+        let mut hits = 0;
+        for direction in [
+            Vec3::NEG_Z,
+            Vec3::Z,
+            Vec3::NEG_X,
+            Vec3::new(-1.0, -0.5, -2.0),
+        ] {
+            for i in 0..=10 {
+                for j in 0..=10 {
+                    let (u, v) = (i as f32 / 10.0, j as f32 / 10.0);
+                    let target = min + (max - min) * Vec3::new(u, v, 0.5);
+                    let origin = target - direction.normalize() * size;
+                    let expected = nearest(origin, direction);
+                    let hit = model.pick(origin, direction);
+                    assert_eq!(hit.is_some(), expected.is_some(), "{origin} {direction}");
+                    if let (Some(hit), Some(t)) = (hit, expected) {
+                        hits += 1;
+                        let found = (hit.point - origin).length() / direction.length();
+                        assert!((found - t).abs() <= 1e-4 * size, "{found} {t}");
+                    }
+                }
+            }
+        }
+        assert!(hits > 50, "{hits}");
+    }
+
+    /// Times a click on a part of a large assembly and the redrawn scene with it
+    /// highlighted: `PREPOLIX_PICK_BENCH=file.step cargo test --release -p plx-app
+    /// pick_bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn pick_bench() {
+        use std::time::Instant;
+        let Some(path) = std::env::var_os("PREPOLIX_PICK_BENCH") else {
+            return;
+        };
+        let start = Instant::now();
+        let mut view = load(std::path::Path::new(&path), UnitSystem::Unitless)
+            .unwrap()
+            .geometry_view
+            .unwrap();
+        let skin_faces: usize = view.skins.iter().map(|s| s.faces.len()).sum();
+        eprintln!(
+            "loaded in {:?}: {} parts, {} nodes, {} skin faces",
+            start.elapsed(),
+            view.parts.len(),
+            view.mesh.coords().len(),
+            skin_faces
+        );
+        let start = Instant::now();
+        let meshes = view.scene_meshes();
+        eprintln!("first scene: {:?}", start.elapsed());
+        let (min, max) = view.visible_bounds().unwrap();
+        // A click straight down onto the middle of each of a few parts, so that the
+        // highlight moves from part to part.
+        for (round, part) in (0..meshes.len())
+            .step_by(meshes.len().div_ceil(6))
+            .enumerate()
+        {
+            let Some((lo, hi)) = meshes[part].bounds() else {
+                continue;
+            };
+            let middle = (lo + hi) * 0.5;
+            let origin = Vec3::new(middle.x, middle.y, max.z + (max - min).length());
+            let click = crate::viewport::Click {
+                origin,
+                direction: Vec3::NEG_Z,
+                side_origin: origin + Vec3::X * (max - min).length() * 1e-3,
+                side_direction: Vec3::NEG_Z,
+                shift: false,
+                ctrl: false,
+            };
+            let start = Instant::now();
+            let hit = view.pick_click(&click);
+            let picked = start.elapsed();
+            let start = Instant::now();
+            let highlight = Highlight::parts(hit.map(|h| h.part));
+            let changed = view
+                .highlight_changed_parts(&view.highlight, &highlight)
+                .unwrap();
+            view.highlight = highlight;
+            for &part in &changed {
+                view.part_scene_mesh(part).unwrap();
+            }
+            let partial = start.elapsed();
+            let start = Instant::now();
+            let all = view.scene_meshes();
+            eprintln!(
+                "click {round}: pick {picked:?}, parts {changed:?} rebuilt in {partial:?}, \
+                 whole scene {:?} ({} meshes)",
+                start.elapsed(),
+                all.len()
+            );
+        }
+        drop(meshes);
     }
 
     #[test]

@@ -516,6 +516,7 @@ impl SettingsWindow {
         let mut open = true;
         let mut result = WindowResult::Open;
         egui::Window::new("Settings")
+            .id(crate::ids::window(ctx, "settings"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -861,7 +862,7 @@ impl SettingsWindow {
 /// Modal window over the application while the CalculiX self test runs, which takes a while
 /// on some systems.
 fn running_modal(ctx: &egui::Context, progress: &crate::solver_check::Progress) {
-    egui::Modal::new(egui::Id::new("solver check running")).show(ctx, |ui| {
+    egui::Modal::new(crate::ids::window(ctx, "solver check running")).show(ctx, |ui| {
         ui.set_width(300.0);
         ui.heading("Testing CalculiX");
         ui.add_space(6.0);

@@ -372,7 +372,7 @@ impl Picker {
         // egui's own constraint uses a default size before the first layout and pins the
         // window there; keep it on screen with its real size instead. It follows the dialog,
         // so it is not movable: egui keeps a movable window where it first was.
-        let id = egui::Id::new("selection window");
+        let id = crate::ids::window(ctx, "selection window");
         let width = egui::AreaState::load(ctx, id)
             .and_then(|s| s.size)
             .map_or(350.0, |s| s.x);
@@ -913,7 +913,12 @@ impl PartPicks {
             select_by: SelectBy::Part,
             ..Picker::default()
         };
-        preview(model, &picker.pick(model, hit, target, 0.0))
+        let mut preview = preview(model, &picker.pick(model, hit, target, 0.0));
+        if hit.line {
+            // A line part shows as its lines; points on every node would hide them.
+            preview.points.clear();
+        }
+        preview
     }
 
     /// The row of the dialog: the "..." button, the picked parts and a button to clear
@@ -980,6 +985,14 @@ pub fn preview(model: &Model, items: &Items) -> Preview {
                 .iter()
                 .filter_map(|&id| model.mesh.node_index(id))
                 .map(|n| model.render_position(n))
+                .collect();
+            // Segments of line elements between two of the nodes, so a picked line shows.
+            preview.lines = (model.line_segments())
+                .filter(|(_, line)| line.iter().all(|n| nodes.contains(n)))
+                .filter_map(|(_, [a, b])| {
+                    let position = |id| Some(model.render_position(model.mesh.node_index(id)?));
+                    Some([position(a)?, position(b)?])
+                })
                 .collect();
         }
         Items::Edges(edges) => {

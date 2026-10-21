@@ -71,3 +71,9 @@ again.
 - Dragging with the left button draws a box. Dragged from left to right (blue) it takes what lies
   completely inside; dragged from right to left (green) it also takes what crosses the box.
 - When the mouse rests for a moment, what a click would select is previewed in orange.
+
+Selected regions are drawn red. Line parts such as beams, trusses and CAD edges have no faces
+to colour: once picked they are drawn as wide red lines, and the preview shows their lines in
+orange.
+
+#screenshot("selection-lines.png", [The beam RIEGEL picked as the region of a section])

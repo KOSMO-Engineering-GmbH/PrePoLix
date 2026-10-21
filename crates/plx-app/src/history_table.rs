@@ -297,7 +297,7 @@ impl HistoryTable {
             table.set.name, table.field, table.component.name
         );
         let window = egui::Window::new(title)
-            .id(egui::Id::new("history table"))
+            .id(crate::ids::window(ctx, "history table"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)

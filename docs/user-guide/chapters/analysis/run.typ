@@ -55,6 +55,12 @@ every increment one below the other. The filter applies while CalculiX is still 
 
 #screenshot("monitor-filter.png", [The Analysis tab showing only the lines with "cpu"])
 
+The monitor keeps the last 20000 lines of a run, so a long run with many increments stays fast.
+Once there are more, the oldest lines go and the top row tells how many, for example
+#ui("10085 earlier lines not kept"); the new lines keep coming in at the bottom.
+
+#screenshot("monitor-long-output.png", [The end of a long run, its first lines dropped])
+
 The status at the end is #ui("completed"), #ui("finished with errors, results available"),
 #ui("failed") or #ui("killed"). If CalculiX failed, PrePoLix looks for known error messages
 in the output and adds a line "Possible cause: ..." with a remedy, for example for distorted
@@ -149,8 +155,13 @@ density, conductivity, specific heat), invalid material constants, distorted ele
 initial temperature in a transient heat transfer step, an increment larger than the step, rigid
 body motion of a part in a static step, truss structures that are mechanisms, radiation without
 the physical constants (@model-properties) and missing references (a deleted material, part or set that an item still uses). Warnings include parts held
-only by contact, conflicting boundary conditions, loads on fixed nodes, rotations without effect,
-steps without load and amplitudes that nothing uses.
+only by contact (contact pairs without tied surface behavior; tied contact holds like a tie), conflicting boundary conditions, loads on fixed nodes, rotations without effect,
+beam nodes with only some of their rotations given (CalculiX holds them all, and nonlinear steps
+mostly fail to converge), beams held by pins only, which are free to turn about the line
+through the pins (CalculiX solves them all the same), steps without load and amplitudes that
+nothing uses.
+
+#screenshot("beam-rotations-partly-held.png", [A beam end that holds only the rotation about Z])
 
 When a run starts, PrePoLix also checks that the configured CalculiX knows every keyword of the
 input file (see #ui("Test CalculiX") in @settings). An unknown keyword, for example of a step

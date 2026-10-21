@@ -4711,12 +4711,9 @@ impl ProjectApp {
         let mut filter = self.monitor.filter.clone();
         let (mut pick, mut stop, mut stop_all, mut open_analysis, mut clear) =
             (None, None, false, None, false);
-        let output: Vec<String> = match selected {
-            Some(id) => (self.solves.iter().find(|s| s.id == id))
-                .map(|solve| solve.output().into_iter().map(str::to_owned).collect())
-                .unwrap_or_default(),
-            None => Vec::new(),
-        };
+        let solve = selected.and_then(|id| self.solves.iter().find(|s| s.id == id));
+        let output: Vec<&str> = solve.map(|s| s.output()).unwrap_or_default();
+        let dropped = solve.map_or(0, |s| s.dropped());
         ui.horizontal(|ui| {
             let row = rows.iter().find(|r| Some(r.id) == selected);
             let active = row.is_some_and(|r| r.active);
@@ -4763,6 +4760,7 @@ impl ProjectApp {
             {
                 filter.clear();
             }
+            crate::analysis::dropped_note(ui, dropped);
         });
         ui.horizontal_top(|ui| {
             let height = ui.available_height();
@@ -4827,7 +4825,7 @@ impl ProjectApp {
                     crate::virtual_table::lines(ui, area, &output);
                 } else {
                     let needle = filter.to_lowercase();
-                    let shown: Vec<&String> = (output.iter())
+                    let shown: Vec<&str> = (output.iter().copied())
                         .filter(|line| line.to_lowercase().contains(&needle))
                         .collect();
                     crate::virtual_table::lines(ui, area, &shown);
@@ -6854,6 +6852,7 @@ impl ProjectApp {
         let valid = !name.trim().is_empty() && !taken;
         let noun = (self.nodes.iter().find(|n| n.id == id)).map_or("analysis", |n| n.kind().noun());
         egui::Window::new(format!("Rename {}", title_case(noun)))
+            .id(crate::ids::window(ctx, "rename"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -6863,9 +6862,17 @@ impl ProjectApp {
                 ui.horizontal(|ui| {
                     ui.label("Name:");
                     let edit = ui.text_edit_singleline(&mut name);
-                    edit.request_focus();
-                    if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) && valid {
-                        done = true;
+                    // Asking for the focus on the frame it is lost would keep Enter from
+                    // being seen.
+                    if !edit.has_focus() && !edit.lost_focus() {
+                        edit.request_focus();
+                    }
+                    if edit.lost_focus() {
+                        if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            done = valid;
+                        } else if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            cancelled = true;
+                        }
                     }
                 });
                 if taken {
@@ -6954,6 +6961,7 @@ impl ProjectApp {
         };
         let mut answer = None;
         egui::Window::new(title)
+            .id(crate::ids::window(ctx, "confirm block delete"))
             .collapsible(false)
             .resizable(false)
             .pivot(egui::Align2::CENTER_CENTER)

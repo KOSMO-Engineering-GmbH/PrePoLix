@@ -7,8 +7,8 @@ use std::collections::{BTreeSet, HashSet};
 
 use egui::Ui;
 use plx_mesh::{
-    CadEntity, ElementId, GeometryFilter, GroupBy, LineJoint, MasterSlaveItem, SearchParameters,
-    find_contact_pairs, find_line_joints, surface_faces,
+    CadEntity, ElementId, GeometryFilter, GroupBy, LineJoint, MasterSlaveItem, NodeId,
+    SearchParameters, SurfaceId, find_contact_pairs, find_line_joints, surface_faces,
 };
 use plx_model::{
     ContactMethod, ContactPair, FeModel, NodeTie, Quantity, Region, Tie, UnitSystem, next_name,
@@ -116,7 +116,13 @@ pub struct ContactSearchDialog {
     /// A 2D model, whose surfaces are the edges of its elements.
     plane: bool,
     error: Option<String>,
+    /// What the 3D view last showed, keyed by the selected rows: finding the faces of the
+    /// surfaces walks the skins of all parts, too slow for every frame of a large model.
+    shown: Option<Vec<ShownPair>>,
 }
+
+/// Master and slave surfaces of a selected pair, or the nodes of a line joint.
+type ShownPair = (BTreeSet<SurfaceId>, BTreeSet<SurfaceId>, Vec<NodeId>);
 
 pub enum SearchResult {
     Open,
@@ -146,11 +152,36 @@ impl ContactSearchDialog {
             searched: false,
             plane: fe.properties.space.is_2d(),
             error: None,
+            shown: None,
         }
     }
 
+    /// The pairs selected in the table for the 3D view, when they changed since the last call.
+    pub fn changed_highlight(&mut self, model: &Model) -> Option<Highlight> {
+        let shown = (self.rows.iter().filter(|r| r.selected))
+            .map(|r| {
+                let nodes = r
+                    .joint
+                    .as_ref()
+                    .map(|j| j.nodes.clone())
+                    .unwrap_or_default();
+                (r.item.master.clone(), r.item.slave.clone(), nodes)
+            })
+            .collect();
+        if self.shown.as_ref() == Some(&shown) {
+            return None;
+        }
+        self.shown = Some(shown);
+        Some(self.highlight(model))
+    }
+
+    /// The next call of `changed_highlight` builds the highlight anew.
+    pub fn forget_highlight(&mut self) {
+        self.shown = None;
+    }
+
     /// The pairs selected in the table, for the 3D view.
-    pub fn highlight(&self, model: &Model) -> Highlight {
+    fn highlight(&self, model: &Model) -> Highlight {
         let mut master = BTreeSet::new();
         let mut slave = BTreeSet::new();
         let mut nodes = Vec::new();
@@ -257,7 +288,7 @@ impl ContactSearchDialog {
         let mut result = SearchResult::Open;
         let mut open = true;
         egui::Window::new("Search Contact Pairs")
-            .id(egui::Id::new("contact search"))
+            .id(crate::ids::window(ctx, "contact search"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -924,4 +955,58 @@ fn part_stiffness(model: &Model) -> Vec<Option<f64>> {
                 .reduce(f64::max)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use plx_mesh::{Element, ElementShape, FeMesh, Part};
+
+    use super::*;
+
+    /// Two unit cubes of one hexahedron each, one on top of the other, as separate parts
+    /// with their own nodes.
+    fn stacked_cubes() -> Model {
+        let mut mesh = FeMesh::default();
+        let square = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        for part in 0..2u32 {
+            let base = part * 8;
+            for (i, z) in [part, part + 1].into_iter().enumerate() {
+                for (j, (x, y)) in square.into_iter().enumerate() {
+                    mesh.set_node(base + (i * 4 + j) as u32 + 1, [x, y, z as f64]);
+                }
+            }
+            mesh.add_element(Element {
+                id: part + 1,
+                type_name: "C3D8".into(),
+                shape: ElementShape::Hex8,
+                nodes: (1..=8).map(|n| base + n).collect(),
+            })
+            .unwrap();
+            mesh.parts.push(Part {
+                name: format!("PART-{}", part + 1),
+                elements: vec![part + 1],
+            });
+        }
+        Model::new(std::path::Path::new("cubes.inp"), mesh)
+    }
+
+    #[test]
+    fn highlight_is_built_only_when_the_selected_pairs_change() {
+        let model = stacked_cubes();
+        let mut dialog = ContactSearchDialog::new(&model.fe);
+        assert_eq!(dialog.changed_highlight(&model), Some(Highlight::default()));
+        assert_eq!(dialog.changed_highlight(&model), None);
+        dialog.search(&model);
+        assert_eq!(dialog.rows.len(), 1);
+        // Found pairs are not selected, so the view stays as it is.
+        assert_eq!(dialog.changed_highlight(&model), None);
+        dialog.select(0, false, false);
+        let shown = dialog.changed_highlight(&model).unwrap();
+        assert_eq!((shown.faces.len(), shown.secondary_faces.len()), (1, 1));
+        assert_eq!(dialog.changed_highlight(&model), None);
+        dialog.swap();
+        assert!(dialog.changed_highlight(&model).is_some());
+        dialog.forget_highlight();
+        assert!(dialog.changed_highlight(&model).is_some());
+    }
 }

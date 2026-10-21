@@ -971,6 +971,11 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
                 .skin_faces()
                 .filter(|(element, _)| elements.contains(element))
                 .collect();
+            // Line elements have no faces: they show as lines.
+            highlight.lines = (model.line_segments())
+                .filter(|(element, _)| elements.contains(element))
+                .map(|(_, line)| line)
+                .collect();
         }
         Region::Geometry(entities) => return crate::cad_selection::highlight(model, entities),
         // The point is drawn as a feature; the body it drives is the constraint's region.
@@ -991,6 +996,11 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
                 .skin_faces_with_corners()
                 .filter(|(_, corners)| corners.iter().all(|n| selected.contains(n)))
                 .map(|(face, _)| face)
+                .collect();
+            // Likewise segments of line elements between two selected nodes.
+            highlight.lines = (model.line_segments())
+                .map(|(_, line)| line)
+                .filter(|line| line.iter().all(|n| selected.contains(n)))
                 .collect();
         }
     }
@@ -2135,7 +2145,7 @@ impl Editor {
         let mut result = EditorResult::Open;
         let mut open = true;
         let mut window = egui::Window::new(self.title())
-            .id(egui::Id::new("item editor"))
+            .id(crate::ids::window(ctx, "item editor"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false);
@@ -2522,7 +2532,7 @@ impl Editor {
                     LoadKind::Force { value, each_node } => {
                         force_rows(ui, value, two_d, units);
                         ui.label("");
-                        ui.checkbox(each_node, "Apply to all nodes");
+                        ui.checkbox(each_node, "Apply to all nodes individually");
                         ui.end_row();
                         ui.label("");
                         ui.weak(if *each_node {

@@ -1038,6 +1038,87 @@ fn split_faces_keep_their_outline_on_the_mesh() {
     }
 }
 
+/// testdata/platte_geteilt.brep: a plate 40 x 20 with two discs of radius 4 split out of it,
+/// as the Split of a CAD program leaves them, and beside it a plain plate 20 x 20. Made with
+/// Gmsh's Python API: `addRectangle`, two `addDisk`, `fragment` of the plate with the discs,
+/// one more `addRectangle` at x = 50, written as BREP, which keeps the shared edges.
+#[test]
+fn faces_sharing_edges_are_one_shell_part() {
+    if !gmsh_available() {
+        return;
+    }
+    let mut geometry = import_cad(&testdata("platte_geteilt.brep"), UnitSystem::Unitless)
+        .unwrap()
+        .geometry;
+    // The split plate and its discs are one part, the plate beside it another.
+    assert_eq!(part_names(&geometry).unwrap(), ["SHELL-1", "SHELL-2"]);
+    let display = tessellate(&geometry).unwrap();
+    assert_eq!(display.part_dimensions, [2, 2]);
+    let faces_of = |part: &Part| -> BTreeSet<i32> {
+        (part.elements.iter())
+            .filter_map(|&e| match display.entity(e) {
+                Some(CadEntity::Face(face)) => Some(face),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(faces_of(&display.mesh.parts[0]).len(), 3);
+    assert_eq!(faces_of(&display.mesh.parts[1]).len(), 1);
+
+    geometry.meshing.max_size = 2.0;
+    geometry.meshing.second_order = false;
+    let mesh = generate_mesh(&geometry).unwrap().mesh;
+    let names: Vec<&str> = mesh.parts.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(names, ["SHELL-1", "SHELL-2"]);
+    // Every face keeps its own elements to pick for loads and supports.
+    assert_eq!(mesh.cad.faces.len(), 4);
+    let split: Vec<i32> = faces_of(&display.mesh.parts[0]).into_iter().collect();
+    let area = |face: i32| -> f64 {
+        (mesh.cad.faces[&face].iter())
+            .map(|&(e, _)| signed_area(&mesh, mesh.element(e).unwrap()).abs())
+            .sum()
+    };
+    let disc = std::f64::consts::PI * 16.0;
+    let mut areas: Vec<f64> = split.iter().map(|&f| area(f)).collect();
+    areas.sort_by(f64::total_cmp);
+    // Straight element sides cut the circles a little short.
+    for (got, exact) in areas.iter().zip([disc, disc, 800.0 - 2.0 * disc]) {
+        assert!(
+            (got - exact).abs() / exact < 0.05,
+            "Area {got}, not {exact}"
+        );
+    }
+    // The mesh is conformal: the plate and each disc share the nodes on the circle between
+    // them, and no other node lies there twice.
+    let nodes = |face: i32| -> BTreeSet<NodeId> {
+        mesh.cad_nodes(&[CadEntity::Face(face)])
+            .into_iter()
+            .collect()
+    };
+    let plate = *split
+        .iter()
+        .max_by(|&&a, &&b| area(a).total_cmp(&area(b)))
+        .unwrap();
+    for &face in split.iter().filter(|&&f| f != plate) {
+        let shared = nodes(plate).intersection(&nodes(face)).count();
+        assert!(
+            shared >= 12,
+            "Disc {face} shares {shared} nodes with the plate"
+        );
+    }
+    let coords = mesh.coords();
+    let mut places: Vec<[i64; 2]> = (coords.iter())
+        .map(|c| [(c[0] * 1e6).round() as i64, (c[1] * 1e6).round() as i64])
+        .collect();
+    let count = places.len();
+    places.sort_unstable();
+    places.dedup();
+    assert_eq!(places.len(), count, "nodes lie twice");
+
+    let smaller = delete_part(&geometry, "SHELL-1").unwrap().unwrap();
+    assert_eq!(part_names(&smaller).unwrap(), ["SHELL-2"]);
+}
+
 /// testdata/benannte_teile.step: a STEP file as CAD programs such as Onshape write it, an
 /// assembly "Part Studio 1" with the solids "oben" and "Stütze" (written `\X2\00FC\X0\`) and
 /// the surface part "Membran". Written by Gmsh, the names set in the text afterwards.

@@ -142,6 +142,10 @@ struct Workbench {
     view_command: Option<ViewCommand>,
     /// The result selection or deformation changed; the scene must be rebuilt.
     results_changed: bool,
+    /// The highlight of the shown scene changed, drawn differently on these parts: only
+    /// their meshes are rebuilt, so that a click in a large assembly doesn't build all parts
+    /// anew. Without any, only the highlighted nodes and lines over the scene changed.
+    highlight_changed: Option<BTreeSet<usize>>,
     /// Only the animation frame changed; frames already built are reused.
     frame_changed: bool,
     /// Scene of each animation frame shown so far, cleared when anything else changes.
@@ -289,6 +293,7 @@ impl AnalysisWindow {
                 analysis_tab: false,
                 view_command: None,
                 results_changed: false,
+                highlight_changed: None,
                 frame_changed: false,
                 frame_cache: Default::default(),
                 editor: None,
@@ -520,13 +525,7 @@ impl AnalysisWindow {
         run.state = solve.state_text();
         run.seconds = solve.seconds();
         run.progress = solve.progress();
-        let output = solve.output();
-        if output.len() < run.lines.len() {
-            run.lines.clear();
-        }
-        let from = run.lines.len();
-        run.lines
-            .extend(output[from..].iter().map(|l| (*l).to_owned()));
+        run.copy(&solve.output(), solve.output_total());
     }
 
     /// The project's solve is done: the analysis takes the mesh it made and the results it
@@ -2244,6 +2243,7 @@ impl Workbench {
         let mut close = false;
         let mut open = true;
         egui::Window::new("Linked Item")
+            .id(crate::ids::window(ctx, "linked item"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -2434,6 +2434,7 @@ impl Workbench {
         let mut open = true;
         let mut close = false;
         egui::Window::new("Model Check")
+            .id(crate::ids::window(ctx, "model check"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
@@ -4631,7 +4632,7 @@ impl Workbench {
             [name] => format!("Delete the selected part?\n{name}"),
             names => format!("Delete the selected parts?\n{}", names.join(", ")),
         };
-        egui::Modal::new(egui::Id::new("confirm delete")).show(ctx, |ui| {
+        egui::Modal::new(crate::ids::window(ctx, "confirm delete")).show(ctx, |ui| {
             ui.label(question);
             ui.add_space(6.0);
             ui.horizontal(|ui| {
@@ -5175,15 +5176,25 @@ impl Workbench {
             return;
         };
         let feature = self.feature_dialog.as_ref().filter(|d| d.results.is_none());
+        if (self.section_dialog.is_some() || feature.is_some())
+            && let Some(dialog) = &mut self.contact_search
+        {
+            // Shows its pairs again once the other dialog has closed.
+            dialog.forget_highlight();
+        }
         let highlight = if let Some(dialog) = &self.section_dialog {
             self.highlighted = None;
             dialog.highlight()
         } else if let Some(dialog) = feature {
             self.highlighted = None;
             dialog.highlight(model)
-        } else if let Some(dialog) = &self.contact_search {
+        } else if let Some(dialog) = &mut self.contact_search {
             self.highlighted = None;
-            dialog.highlight(model)
+            // Built anew only when the selected pairs change, as for the tree selection.
+            match dialog.changed_highlight(model) {
+                Some(highlight) => highlight,
+                None => return,
+            }
         } else if let Some(editor) = &self.editor {
             self.highlighted = None;
             editor.highlight(model)
@@ -5201,8 +5212,15 @@ impl Workbench {
             }
         };
         if highlight != model.highlight {
+            if self.tree_view == TreeView::FeModel {
+                match model.highlight_changed_parts(&model.highlight, &highlight) {
+                    Some(parts) => self.highlight_changed.get_or_insert_default().extend(parts),
+                    None => self.results_changed = true,
+                }
+            } else {
+                self.results_changed |= !on_results;
+            }
             model.highlight = highlight;
-            self.results_changed |= !on_results;
         }
     }
 
@@ -5228,8 +5246,13 @@ impl Workbench {
             _ => crate::meshing::entities_highlight(view, &self.mesh_failure),
         };
         if highlight != view.highlight {
+            if self.tree_view == TreeView::Geometry {
+                match view.highlight_changed_parts(&view.highlight, &highlight) {
+                    Some(parts) => self.highlight_changed.get_or_insert_default().extend(parts),
+                    None => self.results_changed = true,
+                }
+            }
             view.highlight = highlight;
-            self.results_changed |= self.tree_view == TreeView::Geometry;
         }
     }
 
@@ -5977,7 +6000,7 @@ impl Workbench {
             TreeView::FeModel => self.model.as_ref(),
         };
         egui::Window::new(properties::title(shown, &item))
-            .id(egui::Id::new("properties window"))
+            .id(crate::ids::window(ctx, "properties window"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -6335,6 +6358,13 @@ impl Workbench {
 
     /// Rebuilds the scene after the result selection or deformation changed.
     fn rebuild_if_results_changed(&mut self) {
+        let highlighted = self.highlight_changed.take();
+        if !(self.results_changed || self.frame_changed)
+            && let Some(parts) = highlighted
+        {
+            self.rebuild_highlighted_parts(parts);
+            return;
+        }
         let frame_only = !self.results_changed && self.frame_changed;
         if !(std::mem::take(&mut self.results_changed) | std::mem::take(&mut self.frame_changed)) {
             return;
@@ -6378,6 +6408,31 @@ impl Workbench {
             && let Some(bounds) = model.visible_bounds()
         {
             self.viewport.cover(bounds);
+        }
+        self.update_contour();
+    }
+
+    /// Rebuilds only the meshes of the parts whose highlight changed, or the whole scene
+    /// where the shown model can't draw a single part.
+    fn rebuild_highlighted_parts(&mut self, parts: BTreeSet<usize>) {
+        let model = match self.tree_view {
+            TreeView::Results => self.results.get(self.current_result),
+            TreeView::Geometry => self.geometry.as_ref(),
+            TreeView::FeModel => self.model.as_ref(),
+        };
+        let Some(model) = model else {
+            return;
+        };
+        let meshes: Option<Vec<(usize, RenderMesh)>> = (parts.into_iter())
+            .map(|index| Some((index, model.part_scene_mesh(index)?)))
+            .collect();
+        let Some(meshes) = meshes else {
+            self.results_changed = true;
+            self.rebuild_if_results_changed();
+            return;
+        };
+        for (index, mesh) in &meshes {
+            self.viewport.set_part(*index, mesh);
         }
         self.update_contour();
     }
@@ -6852,6 +6907,7 @@ fn animation_window(ctx: &egui::Context, view: &mut ResultsView, exporting: bool
     let mut open = true;
     let mut restart = None;
     egui::Window::new("Animation")
+        .id(crate::ids::window(ctx, "animation"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)

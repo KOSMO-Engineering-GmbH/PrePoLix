@@ -55,7 +55,7 @@ impl ParameterSetEditor {
         let mut result = ParameterSetResult::Open;
         let mut open = true;
         egui::Window::new(format!("Parameters - {}", self.name))
-            .id(egui::Id::new(("parameter set", self.id)))
+            .id(crate::ids::window(ctx, ("parameter set", self.id)))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

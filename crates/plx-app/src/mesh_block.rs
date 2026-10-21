@@ -53,7 +53,7 @@ impl MeshBlockEditor {
         let mut result = MeshBlockResult::Open;
         let mut open = true;
         egui::Window::new(format!("{} - {}", self.primitive.label(), self.name))
-            .id(egui::Id::new(("mesh block", self.id)))
+            .id(crate::ids::window(ctx, ("mesh block", self.id)))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
