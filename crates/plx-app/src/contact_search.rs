@@ -288,7 +288,7 @@ impl ContactSearchDialog {
         let mut result = SearchResult::Open;
         let mut open = true;
         egui::Window::new("Search Contact Pairs")
-            .id(egui::Id::new("contact search"))
+            .id(crate::ids::window(ctx, "contact search"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

@@ -67,7 +67,7 @@ impl ExplodedDialog {
         let mut change = None;
         let mut open = true;
         egui::Window::new("Exploded View")
-            .id(egui::Id::new("exploded view"))
+            .id(crate::ids::window(ctx, "exploded view"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

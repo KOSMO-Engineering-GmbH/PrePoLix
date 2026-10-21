@@ -738,7 +738,7 @@ impl EditDialog {
         let draft = &mut self.draft;
         let table = self.table;
         egui::Window::new("Edit Annotation")
-            .id(egui::Id::new("path plot edit"))
+            .id(crate::ids::window(ctx, "path plot edit"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

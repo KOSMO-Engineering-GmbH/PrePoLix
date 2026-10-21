@@ -485,7 +485,7 @@ impl Updater {
             "Update Available"
         };
         egui::Window::new(title)
-            .id(egui::Id::new("update window"))
+            .id(crate::ids::window(ctx, "update window"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

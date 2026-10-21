@@ -1049,7 +1049,7 @@ impl CampbellWindow {
         let mut open = true;
         let running = self.is_running();
         egui::Window::new(format!("Campbell diagram: {title}"))
-            .id(egui::Id::new(("campbell", id)))
+            .id(crate::ids::window(ctx, ("campbell", id)))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)

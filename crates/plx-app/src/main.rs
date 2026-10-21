@@ -25,6 +25,7 @@ mod history_table;
 mod hot_spot_dialog;
 mod hot_spots;
 mod icons;
+mod ids;
 mod lic;
 mod links;
 mod material_library;

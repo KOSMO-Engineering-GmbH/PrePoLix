@@ -81,7 +81,7 @@ impl ProjectApp {
             return;
         }
         let mut look_at = None;
-        egui::Area::new(egui::Id::new("project minimap"))
+        egui::Area::new(crate::ids::window(ctx, "project minimap"))
             .order(egui::Order::Foreground)
             .fixed_pos(rect.min)
             .show(ctx, |ui| {

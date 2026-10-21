@@ -430,7 +430,7 @@ impl FeatureDialog {
         let is_path = matches!(self.draft, Draft::Path(_));
         let is_plane_result = matches!(self.draft, Draft::ResultPlane(_));
         let window = egui::Window::new(self.title())
-            .id(egui::Id::new("feature dialog"))
+            .id(crate::ids::window(ctx, "feature dialog"))
             .open(&mut open)
             .collapsible(false)
             .resizable(is_path)

@@ -284,6 +284,7 @@ impl MaterialLibraryEditor {
         let mut result = LibraryResult::Open;
         let size = vec2(600.0, 560.0);
         let window = egui::Window::new("Material Library")
+            .id(crate::ids::window(ctx, "material library"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -333,7 +334,7 @@ impl MaterialLibraryEditor {
             self.preview_window(ctx, at);
         }
         if let Some(error) = self.error.clone() {
-            egui::Modal::new(egui::Id::new("material library error")).show(ctx, |ui| {
+            egui::Modal::new(crate::ids::window(ctx, "material library error")).show(ctx, |ui| {
                 ui.set_max_width(360.0);
                 ui.label(error);
                 ui.add_space(6.0);
@@ -343,7 +344,7 @@ impl MaterialLibraryEditor {
             });
         }
         if self.confirm_close {
-            egui::Modal::new(egui::Id::new("material library close")).show(ctx, |ui| {
+            egui::Modal::new(crate::ids::window(ctx, "material library close")).show(ctx, |ui| {
                 ui.label("Save changes to the material library before closing?");
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
@@ -558,6 +559,7 @@ impl MaterialLibraryEditor {
         let mut open = true;
         let material = self.previewed();
         egui::Window::new("Material Properties")
+            .id(crate::ids::window(ctx, "material properties"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

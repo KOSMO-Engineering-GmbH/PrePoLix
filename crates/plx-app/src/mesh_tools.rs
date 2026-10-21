@@ -122,7 +122,7 @@ impl MeshToolDialog {
         let mut result = MeshToolResult::Open;
         let mut open = true;
         egui::Window::new(self.title())
-            .id(egui::Id::new("mesh tool"))
+            .id(crate::ids::window(ctx, "mesh tool"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

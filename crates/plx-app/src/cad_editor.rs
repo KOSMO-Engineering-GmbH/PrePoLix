@@ -190,7 +190,7 @@ impl CadOperationEditor {
         let mut result = CadEditorResult::Open;
         let mut open = true;
         egui::Window::new(format!("CAD Operation - {}", self.name))
-            .id(egui::Id::new(("cad operation", self.id)))
+            .id(crate::ids::window(ctx, ("cad operation", self.id)))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)

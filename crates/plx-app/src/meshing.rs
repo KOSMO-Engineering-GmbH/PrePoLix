@@ -88,6 +88,7 @@ impl MeshSetupWindow {
         let mut open = true;
         let mut result = MeshSetupResult::Open;
         egui::Window::new("Default Meshing Parameters")
+            .id(crate::ids::window(ctx, "default meshing parameters"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -355,7 +356,7 @@ impl MeshItemEditor {
             self.update_face_parts(view);
         }
         let window = egui::Window::new(self.title())
-            .id(egui::Id::new("mesh item editor"))
+            .id(crate::ids::window(ctx, "mesh item editor"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

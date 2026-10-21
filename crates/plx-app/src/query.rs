@@ -177,7 +177,7 @@ impl QueryWindow {
         let mut action = QueryAction::Open;
         let mut open = true;
         egui::Window::new("Query")
-            .id(egui::Id::new("query"))
+            .id(crate::ids::window(ctx, "query"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

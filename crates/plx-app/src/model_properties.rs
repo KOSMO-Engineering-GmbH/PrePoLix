@@ -55,7 +55,7 @@ impl ModelPropertiesDialog {
         let error = (mesh.and_then(|mesh| space_error(self.draft.space, mesh)))
             .or_else(|| geometry.and_then(|g| geometry_check(self.draft.space, g).err()));
         egui::Window::new("Model Properties")
-            .id(egui::Id::new("model properties"))
+            .id(crate::ids::window(ctx, "model properties"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)

@@ -188,7 +188,7 @@ impl HotSpotDialog {
         let mut action = DialogAction::Open;
         let mut open = true;
         let window = egui::Window::new(self.title())
-            .id(egui::Id::new("hot spot dialog"))
+            .id(crate::ids::window(ctx, "hot spot dialog"))
             .open(&mut open)
             .collapsible(false)
             .resizable(true)
