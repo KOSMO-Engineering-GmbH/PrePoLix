@@ -1338,13 +1338,14 @@ fn formulation_hint(
         _ if region.reference_point().is_some() => {
             "The point and the rigid body it drives are held.".to_string()
         }
-        Formulation::Point(RemoteBehavior::Rigid) => "Rigid point at the centre of the \
-            selection: the selection keeps its shape and turns about the point where its \
-            rotations are free."
-            .to_string(),
-        Formulation::Point(RemoteBehavior::Deformable) => "Point at the centre of the \
-            selection that moves with the mean of its nodes: the selection deforms."
-            .to_string(),
+        Formulation::Point(RemoteBehavior::Rigid) => {
+            "Rigid point at the centre: the selection keeps its shape and turns about it."
+                .to_string()
+        }
+        Formulation::Point(RemoteBehavior::Deformable) => {
+            "Point at the centre that moves with the mean of the selection, which deforms."
+                .to_string()
+        }
         Formulation::Nodes => {
             let nodes = region.nodes(&model.mesh);
             let expanded = plx_model::expanded_nodes(&model.mesh);
@@ -1355,10 +1356,9 @@ fn formulation_hint(
             let mut text = format!("Each of the {} nodes held directly.", nodes.len());
             if solid && displacement.values[3..].iter().any(Option::is_some) {
                 text.push_str(if turned {
-                    " Nodes of solids have no rotations: UR has no effect."
+                    " Solid nodes have no rotations: UR has no effect."
                 } else {
-                    " Held rotations keep the selection from turning; leave them free \
-                     for a hinge."
+                    " Held rotations keep it from turning; free them for a hinge."
                 });
             }
             text

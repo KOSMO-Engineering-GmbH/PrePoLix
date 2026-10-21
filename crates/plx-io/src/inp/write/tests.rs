@@ -638,6 +638,54 @@ fn calculix_turns_a_deformable_remote_point_with_the_mean_of_its_face() {
     assert!((turned - angle).abs() < 1e-6 * angle, "{turned} != {angle}");
 }
 
+/// A solid beam on two end faces held in their translations with free rotations is simply
+/// supported: the faces turn about their centres. Held at each node, the same supports clamp
+/// the ends nearly.
+#[test]
+fn calculix_supports_a_solid_beam_on_two_hinged_faces() {
+    // 100 x 10 x 10, 1000 N at midspan: F L^3 / (48 E I) plus shear F L / (4 k G A).
+    let force = Load {
+        region: Region::Nodes(vec![477, 508, 539, 570, 601]),
+        kind: LoadKind::force([0.0, 0.0, -1000.0]),
+        ..tip_force()
+    };
+    let (mesh, mut model) = analysis("kragbalken_c3d20r.inp", force);
+    let bending = 1000.0 * 100f64.powi(3) / (48.0 * 210_000.0 * 1e4 / 12.0);
+    let shear = 1000.0 * 100.0 / (4.0 * 5.0 / 6.0 * 210_000.0 / 2.6 * 100.0);
+    let expected = bending + shear;
+    let step = &mut model.steps[0];
+    // The left face also stops the twist about the beam axis.
+    step.boundary_conditions[0].kind =
+        BoundaryKind::displacement([Some(0.0), Some(0.0), Some(0.0), Some(0.0), None, None]);
+    step.boundary_conditions.push(BoundaryCondition {
+        name: "Roller-1".into(),
+        active: true,
+        visible: true,
+        region: Region::NodeSet("TIP".into()),
+        kind: BoundaryKind::displacement([None, Some(0.0), Some(0.0), None, None, None]),
+        amplitude: None,
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(text.matches("*Rigid body").count(), 2, "{text}");
+    let Some(frd) = run_ccx("hinged-beam", &text) else {
+        return;
+    };
+    let sag = -node_value(&frd, "DISP", "U3", 539);
+    assert!(
+        (sag - expected).abs() < 0.02 * expected,
+        "{sag} != {expected}"
+    );
+    for bc in &mut model.steps[0].boundary_conditions {
+        if let BoundaryKind::Displacement(d) = &mut bc.kind {
+            d.behavior = Behavior::EachNode;
+        }
+    }
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let frd = run_ccx("clamped-beam", &text).unwrap();
+    let sag = -node_value(&frd, "DISP", "U3", 539);
+    assert!(sag < 0.6 * expected, "{sag} not stiffer than {expected}");
+}
+
 /// Each node held in a coordinate system of its own: a `*Transform` of the nodes.
 #[test]
 fn calculix_holds_each_node_in_its_coordinate_system() {

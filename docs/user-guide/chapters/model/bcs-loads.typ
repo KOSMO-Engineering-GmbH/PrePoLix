@@ -41,8 +41,8 @@ point at its centre instead, and the face follows the point, as Ansys' remote di
 a beam end on a hinge, a shaft end turned by an angle, a bolt hole held in place while the part
 turns about it. The line below #ui("Behavior") always says which of the two the input file gets.
 
-#screenshot("displacement-hinge.png", [A face of an I-beam held in `U1` to `U3` with its
-  rotations free: a rigid point at its centre, about which it turns])
+#screenshot("displacement-hinge.png", [End face of a beam held in `U1` to `U3` and in the twist
+  `UR1`, free to turn about `UR2` and `UR3`: a rigid point at its centre, about which it turns])
 
 #fields(
   [Behavior], [#ui("Automatic") (default) chooses as described below. #ui("Each node") holds
@@ -97,7 +97,7 @@ button, so a parameter study can vary them (@exposed-parameters). Only numbers t
 be exposed: tick the component, choose #ui("Coordinates") or tick the pinball region first. The
 angle Theta of a cylindrical system is the one number that cannot be exposed.
 
-#screenshot("remote-displacement-expose.png", [The #ui("P") buttons of a displacement on a
+#screenshot("displacement-expose.png", [The #ui("P") buttons of a displacement on a
   point: the location, the pinball radius and the prescribed components can be exposed])
 
 - Nodes of the selection that another boundary condition holds directly (a support of each
