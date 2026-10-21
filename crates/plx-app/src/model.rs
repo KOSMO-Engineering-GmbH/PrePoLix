@@ -332,10 +332,13 @@ fn companion_input(results: &Path) -> Option<PathBuf> {
 }
 
 /// Groups the elements of results into the parts of the input file they were computed from,
-/// with the part names as the input writes them; returns whether the input defines contact.
+/// with the part names as the input writes them, and drops the springs and gaps the
+/// constraints were written as: CalculiX makes each gap section a material of its own, which
+/// would show as a part per gap. Returns whether the input defines contact.
 fn adopt_input_parts(mesh: &mut FeMesh, input: &Path) -> bool {
     match read_inp(input) {
         Ok(import) => {
+            mesh.remove_elements(&import.skipped_elements);
             let parts: Vec<_> = (import.mesh.parts.into_iter())
                 .map(|mut part| {
                     if let Some(name) = import.part_names.get(&part.name) {
@@ -2943,6 +2946,30 @@ mod tests {
         assert_eq!(parts(&results.mesh), expected);
         assert_eq!(results.parts.len(), 3);
         assert_eq!(parts(&without_input.mesh), parts(&alone));
+    }
+
+    /// CalculiX makes a material of each `*Gap` section; the gaps are not parts of the results.
+    #[test]
+    fn results_leave_out_the_gaps_of_their_input() {
+        let dir = std::env::temp_dir().join(format!("prepolix-gaps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for extension in ["inp", "frd"] {
+            let name = format!("gap_stuetzen.{extension}");
+            std::fs::copy(testdata(&name), dir.join(&name)).unwrap();
+        }
+        let frd = dir.join("gap_stuetzen.frd");
+        let results = load(&frd, UnitSystem::Unitless).unwrap().model;
+        // Without the input the gaps are one part.
+        std::fs::remove_file(dir.join("gap_stuetzen.inp")).unwrap();
+        let without_input = load(&frd, UnitSystem::Unitless).unwrap().model;
+        std::fs::remove_dir_all(&dir).unwrap();
+        let names =
+            |mesh: &FeMesh| -> Vec<String> { mesh.parts.iter().map(|p| p.name.clone()).collect() };
+        assert_eq!(names(&results.mesh), ["SOLID"]);
+        assert_eq!(results.mesh.element_count(), 1);
+        // The ground nodes of the gaps stay, so the nodal results keep their order.
+        assert_eq!(results.mesh.node_count(), 12);
+        assert_eq!(names(&without_input.mesh), ["STEEL", "GAP"]);
     }
 
     #[test]

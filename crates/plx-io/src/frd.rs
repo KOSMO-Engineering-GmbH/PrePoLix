@@ -195,7 +195,12 @@ impl<'a> Reader<'a> {
                         "PART-1".to_string()
                     }
                 });
-            self.import.mesh.parts.push(Part { name, elements });
+            // CalculiX names a material per gap section "GAP": one part takes them all.
+            let parts = &mut self.import.mesh.parts;
+            match parts.iter_mut().find(|p| p.name == name) {
+                Some(part) => part.elements.extend(elements),
+                None => parts.push(Part { name, elements }),
+            }
         }
         Ok(self.import)
     }

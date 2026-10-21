@@ -47,6 +47,9 @@ pub struct InpImport {
     /// Element sets of `*ELEMENT` blocks, which become parts, as the file writes them; set
     /// and part names are upper case like CalculiX reads them.
     pub part_names: BTreeMap<String, String>,
+    /// Elements of types the mesh does not hold, such as the springs and gaps that
+    /// constraints are written as; skipped like their type.
+    pub skipped_elements: BTreeSet<ElementId>,
 }
 
 pub fn read_inp(path: &Path) -> Result<InpImport, InpError> {
@@ -78,6 +81,11 @@ pub fn read_inp_str(text: &str, base_dir: Option<&Path>) -> Result<InpImport, In
 
 enum Block {
     Skip,
+    /// Elements of an unsupported type: only their numbers are kept. `continued` is whether
+    /// the last line ended in a comma, so the next one holds more of its nodes.
+    SkipElements {
+        continued: bool,
+    },
     Node {
         set: Option<String>,
     },
@@ -176,7 +184,7 @@ impl Reader {
                     },
                     None => {
                         self.unsupported_elements.insert(type_name);
-                        Block::Skip
+                        Block::SkipElements { continued: false }
                     }
                 }
             }
@@ -208,6 +216,15 @@ impl Reader {
     fn data(&mut self, block: &mut Block, line: &SourceLine) -> Result<(), InpError> {
         match block {
             Block::Skip => {}
+            Block::SkipElements { continued } => {
+                let text = line.text.trim_end();
+                if !std::mem::replace(continued, text.ends_with(',')) {
+                    let first = fields(text).next();
+                    if let Some(id) = first.and_then(parse_id) {
+                        self.import.skipped_elements.insert(id);
+                    }
+                }
+            }
             Block::Node { set } => {
                 let values: Vec<&str> = fields(&line.text).collect();
                 let id =

@@ -264,7 +264,11 @@ impl Writer {
             None => default,
         };
         let name = super::name(&support.name);
-        for (count, (&node, &w)) in (1..).zip(weights.iter().filter(|(_, w)| **w != 0.0)) {
+        // Gaps of the same direction and properties, such as those of a flat face, share an
+        // element set and a `*Gap` section: CalculiX makes a material of each section.
+        let mut sections: Vec<(String, Vec<ElementId>)> = Vec::new();
+        let mut by_line: BTreeMap<String, usize> = BTreeMap::new();
+        for (&node, &w) in weights.iter().filter(|(_, w)| **w != 0.0) {
             let (Some(coords), Some(normal)) = (mesh.node(node), normals.get(&node)) else {
                 continue;
             };
@@ -272,15 +276,14 @@ impl Writer {
             // to the surface node, so that it closes when the surface moves towards the
             // ground: into the material from outside, or out of it when flipped.
             let normal = support.push_direction(normalized(*normal));
+            // Rounded, so that the gaps of a flat face get the same direction.
+            let direction = normal.map(|x| (x * 1e9).round() / 1e9 + 0.0);
             let ground = self.node(std::array::from_fn(|k| {
                 coords[k] - support.offset * normal[k]
             }));
             self.ground.push(ground);
             let element = self.element();
             self.gaps.push((element, [ground, node]));
-            let set = sets.unique(&format!("{name}_ElementSet-{count}"));
-            sets.element_sets
-                .push((set.clone(), Members::Ids(vec![element])));
             let properties =
                 if support.spring_stiffness.is_some() || support.tensile_force.is_some() {
                     format!(
@@ -299,13 +302,26 @@ impl Writer {
                 } else {
                     String::new()
                 };
-            self.out.sections.push(Keyword::generated(format!(
-                "*Gap, Elset={set}\n{}, {}, {}, {}{properties}\n",
+            let line = format!(
+                "{}, {}, {}, {}{properties}",
                 number(support.clearance),
-                number(normal[0]),
-                number(normal[1]),
-                number(normal[2])
-            )));
+                number(direction[0]),
+                number(direction[1]),
+                number(direction[2])
+            );
+            let index = *by_line.entry(line.clone()).or_insert_with(|| {
+                sections.push((line, Vec::new()));
+                sections.len() - 1
+            });
+            sections[index].1.push(element);
+        }
+        for (count, (line, elements)) in (1..).zip(sections) {
+            let set = sets.unique(&format!("{name}_ElementSet-{count}"));
+            sets.element_sets
+                .push((set.clone(), Members::Ids(elements)));
+            self.out
+                .sections
+                .push(Keyword::generated(format!("*Gap, Elset={set}\n{line}\n")));
         }
         Ok(())
     }
