@@ -775,6 +775,8 @@ struct Tree<'a> {
     symbols: HashMap<TreeItem, bool>,
     /// Number of steps, to disable "Move Down" on the last one.
     step_count: usize,
+    /// The parts listed in the tree for the menu of "Parts".
+    part_indices: Vec<usize>,
     /// The type of every step, which gives it its icon and tooltip.
     step_types: Vec<StepGlyph>,
 }
@@ -865,11 +867,20 @@ impl Tree<'_> {
         let creates = (creates(&item))
             .or_else(|| (self.view == TreeView::FeModel).then(|| creates_set(&item))?)
             .filter(|_| closed.is_none());
-        if self.view == TreeView::Geometry && item == TreeItem::Group("Parts") {
+        if item == TreeItem::Group("Parts") && !self.part_indices.is_empty() {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                if ui.button("Mesh All Parts").clicked() {
-                    self.response.generate_mesh = true;
+                if self.view == TreeView::Geometry {
+                    if ui.button("Mesh All Parts").clicked() {
+                        self.response.generate_mesh = true;
+                    }
+                    ui.separator();
+                }
+                for (label, visible) in [("Show All", true), ("Hide All", false)] {
+                    if ui.button(label).clicked() {
+                        (self.response.visibility)
+                            .extend(self.part_indices.iter().map(|&i| (i, visible)));
+                    }
                 }
             });
         }
@@ -1222,6 +1233,9 @@ impl Tree<'_> {
             .filter(|i| !self.hidden(&TreeItem::Part(*i)))
             .count();
         let parts = counted("Parts", shown);
+        self.part_indices = (0..model.parts.len())
+            .filter(|i| !self.hidden(&TreeItem::Part(*i)))
+            .collect();
         self.branch(ui, TreeItem::Group("Parts"), parts, true, |tree, ui| {
             for (index, part) in model.parts.iter_mut().enumerate() {
                 if tree.hidden(&TreeItem::Part(index)) {
@@ -1402,6 +1416,7 @@ pub fn show(
         symbols: HashMap::new(),
         master_slave: HashSet::new(),
         step_count: 0,
+        part_indices: Vec::new(),
         step_types: Vec::new(),
     };
     let expanding = tree.state.expand.clone();

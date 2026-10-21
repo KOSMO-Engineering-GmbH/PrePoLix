@@ -56,6 +56,14 @@ Each part in the tree has a visibility check box. #ui("Hide") and #ui("Show") in
 menu of a part act on all selected parts. Hidden parts cannot be picked and are ignored by box
 selection and by #ui("Zoom to Fit").
 
+#ui("Hide All") and #ui("Show All") in the context menu of the #ui("Parts") node switch all parts
+of the tree at once, in the geometry, FE model and results trees alike.
+
+#figure(
+  image("../../images/parts-hide-all.png", width: 60%),
+  caption: [Context menu of the #ui("Parts") node.],
+)
+
 === Screenshots <screenshot>
 
 The #ui("Screenshot") button on the toolbar captures the 3D view including legend and labels:
