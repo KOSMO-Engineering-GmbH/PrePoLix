@@ -222,6 +222,39 @@ impl RegionDraft {
         draft
     }
 
+    /// This region as a draft for another kind of item, which picks with `sources` and
+    /// `target`: kept where the new kind takes it, else empty. The flag says that picks were
+    /// dropped.
+    pub(crate) fn converted(
+        &self,
+        sources: &'static [Source],
+        target: Target,
+        mesh: &FeMesh,
+    ) -> (Self, bool) {
+        let region = self.region();
+        let selection = sources.contains(&Source::Selection);
+        let kept = !self.is_empty()
+            && match &region {
+                Region::Nodes(_) => selection && matches!(target, Target::Nodes | Target::Point),
+                Region::Faces(_) => {
+                    selection && matches!(target, Target::Faces | Target::Surfaces | Target::Edges)
+                }
+                Region::Edges(_) => selection && target == Target::Lines,
+                Region::Geometry(_) => selection,
+                Region::Parts(_) => sources.contains(&Source::Parts),
+                Region::NodeSet(_) => sources.contains(&Source::NodeSet),
+                Region::ElementSet(_) => sources.contains(&Source::ElementSet),
+                Region::Surface(_) => sources.contains(&Source::Surface),
+                Region::ReferencePoint(_) => sources.contains(&Source::ReferencePoint),
+                Region::RemotePoint(_) => sources.contains(&Source::RemotePoint),
+            };
+        if kept {
+            (Self::from_region(&region, sources, target, mesh), false)
+        } else {
+            (Self::new(sources, target), !self.is_empty())
+        }
+    }
+
     pub(crate) fn region(&self) -> Region {
         match self.source {
             Source::Selection if self.geometry.can_undo() => {
@@ -1544,6 +1577,18 @@ fn load_target(kind: &LoadKind) -> LoadTarget {
     }
 }
 
+/// What a load picks its region with.
+fn load_picks(kind: &LoadKind, fe: &FeModel) -> (&'static [Source], Target) {
+    match load_target(kind) {
+        // A force picks faces, edges or points of the geometry, like a boundary condition.
+        // Forces and moments also act on the reference point of a rigid body.
+        LoadTarget::Nodes if !kind.is_thermal() => (SUPPORT_SOURCES, Target::Nodes),
+        LoadTarget::Nodes => (NODE_SOURCES, Target::Nodes),
+        LoadTarget::Faces => (FACE_SOURCES, face_target(fe)),
+        LoadTarget::Elements => (SOLID_SOURCES, face_target(fe)),
+    }
+}
+
 /// An empty region for a load of the kind, or the load's region.
 fn load_region(
     kind: &LoadKind,
@@ -1551,17 +1596,35 @@ fn load_region(
     fe: &FeModel,
     mesh: &FeMesh,
 ) -> RegionDraft {
-    let (sources, target) = match load_target(kind) {
-        // A force picks faces, edges or points of the geometry, like a boundary condition.
-        // Forces and moments also act on the reference point of a rigid body.
-        LoadTarget::Nodes if !kind.is_thermal() => (SUPPORT_SOURCES, Target::Nodes),
-        LoadTarget::Nodes => (NODE_SOURCES, Target::Nodes),
-        LoadTarget::Faces => (FACE_SOURCES, face_target(fe)),
-        LoadTarget::Elements => (SOLID_SOURCES, face_target(fe)),
-    };
+    let (sources, target) = load_picks(kind, fe);
     match region {
         Some(region) => RegionDraft::from_region(region, sources, target, mesh),
         None => RegionDraft::new(sources, target),
+    }
+}
+
+/// Tells that picks did not fit the kind a dialog was switched to. [`show_dropped_note`]
+/// shows it for a few seconds.
+pub(crate) fn dropped_note(ui: &Ui, dropped: bool) {
+    let until = dropped.then(|| ui.input(|i| i.time) + DROPPED_NOTE_SECONDS);
+    ui.data_mut(|d| d.insert_temp(egui::Id::new("dropped note"), until));
+}
+
+const DROPPED_NOTE_SECONDS: f64 = 6.0;
+
+/// The hint row left by [`dropped_note`].
+pub(crate) fn show_dropped_note(ui: &mut Ui) {
+    let until = ui.data(|d| d.get_temp::<Option<f64>>(egui::Id::new("dropped note")));
+    if let Some(Some(until)) = until
+        && ui.input(|i| i.time) < until
+    {
+        ui.label("");
+        ui.weak("The picks do not fit this type and were cleared.");
+        ui.end_row();
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f64(
+                until - ui.input(|i| i.time),
+            ));
     }
 }
 
@@ -2488,12 +2551,17 @@ impl Editor {
                                 load.kind = kind;
                                 rename_default(&mut load.name, current, name, &taken);
                                 if moved {
-                                    *region = load_region(&load.kind, None, &model.fe, &model.mesh);
+                                    let (sources, target) = load_picks(&load.kind, &model.fe);
+                                    let (kept, dropped) =
+                                        region.converted(sources, target, &model.mesh);
+                                    *region = kept;
+                                    dropped_note(ui, dropped);
                                 }
                             }
                         }
                     });
                 ui.end_row();
+                show_dropped_note(ui);
                 match &mut load.kind {
                     LoadKind::Moment(moment) => {
                         if two_d {
@@ -3608,13 +3676,18 @@ pub fn item_region<'a>(fe: &'a FeModel, item: &TreeItem) -> Option<&'a Region> {
     }
 }
 
+/// What a history output picks its region with.
+fn history_picks(kind: &HistoryKind, fe: &FeModel) -> (&'static [Source], Target) {
+    match kind {
+        HistoryKind::Element { .. } => (SOLID_SOURCES, face_target(fe)),
+        _ => (HISTORY_NODE_SOURCES, Target::Nodes),
+    }
+}
+
 /// The region draft of a history output: nodes for nodal values, elements for element
 /// values.
 fn history_region(kind: &HistoryKind, fe: &FeModel, mesh: &FeMesh) -> RegionDraft {
-    let (sources, target) = match kind {
-        HistoryKind::Element { .. } => (SOLID_SOURCES, face_target(fe)),
-        _ => (HISTORY_NODE_SOURCES, Target::Nodes),
-    };
+    let (sources, target) = history_picks(kind, fe);
     match kind.region() {
         Some(region) => RegionDraft::from_region(region, sources, target, mesh),
         None => RegionDraft::new(sources, target),
@@ -3647,7 +3720,10 @@ fn history_output_form(
         for kind in kinds {
             let selected = kind.prefix() == current;
             if ui.radio(selected, kind.label()).clicked() && !selected {
-                *region = history_region(&kind, &model.fe, &model.mesh);
+                let (sources, target) = history_picks(&kind, &model.fe);
+                let (kept, dropped) = region.converted(sources, target, &model.mesh);
+                *region = kept;
+                dropped_note(ui, dropped);
                 let defaults = match &kind {
                     HistoryKind::Node { region } => HistoryOutput::node("", region.clone()),
                     HistoryKind::Element { region } => HistoryOutput::element("", region.clone()),
@@ -3660,6 +3736,7 @@ fn history_output_form(
         }
     });
     ui.end_row();
+    show_dropped_note(ui);
     ui.label("Variables");
     let choices = output.kind.choices();
     // Fixed rows of five in a nested grid; a wrapped layout inside the property grid
@@ -5041,6 +5118,39 @@ mod tests {
             fe.steps[0].history_outputs[0].kind.region(),
             Some(&Region::RemotePoint("Shaft".into()))
         );
+    }
+
+    #[test]
+    fn converting_a_region_keeps_what_the_new_kind_takes() {
+        let mesh = FeMesh::default();
+        let mut faces = RegionDraft::new(FACE_SOURCES, Target::Faces);
+        faces.take(&mesh, Items::Faces([(1, 2)].into()), Operation::Replace);
+        // A pressure's faces stay for a moving load's faces, but not for nodes.
+        let (kept, dropped) = faces.converted(FACE_SOURCES, Target::Faces, &mesh);
+        assert_eq!(
+            (kept.region(), dropped),
+            (Region::Faces(vec![(1, 2)]), false)
+        );
+        let (cleared, dropped) = faces.converted(NODE_SOURCES, Target::Nodes, &mesh);
+        assert!(cleared.is_empty() && dropped);
+        // A named surface needs a kind that lists surfaces.
+        let surface = RegionDraft::from_region(
+            &Region::Surface("BORE".into()),
+            FACE_SOURCES,
+            Target::Faces,
+            &mesh,
+        );
+        let (kept, _) = surface.converted(SUPPORT_SOURCES, Target::Nodes, &mesh);
+        assert_eq!(kept.region(), Region::Surface("BORE".into()));
+        let (cleared, dropped) = surface.converted(SOLID_SOURCES, Target::Faces, &mesh);
+        assert!(cleared.is_empty() && dropped);
+        // Nothing picked, nothing dropped.
+        let (_, dropped) = RegionDraft::new(FACE_SOURCES, Target::Faces).converted(
+            NODE_SOURCES,
+            Target::Nodes,
+            &mesh,
+        );
+        assert!(!dropped);
     }
 
     #[test]

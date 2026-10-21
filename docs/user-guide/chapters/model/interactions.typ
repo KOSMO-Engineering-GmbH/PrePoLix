@@ -29,6 +29,13 @@ Create them with #menu("Interaction", "Create Constraint ...") or with #ui("Crea
     elements to fixed ground nodes, one per node.],
 )
 
+Changing the #ui("Type") while creating a constraint keeps the picks the new type can use. A
+spring that you picked faces for becomes a Compression Only support with the same faces; picks
+that do not fit, such as nodes for a support, are cleared with a short note. Loads and history
+outputs behave the same when you change their type.
+
+#screenshot("constraint-type-switch.png", [The faces picked for a spring are still selected after switching to Compression Only])
+
 #ui("Connection") at the bottom of the spring dialog decides where the springs end.
 #ui("Surface to World") connects them to ground (`SPRING1` elements). #ui("Surface to Surface")
 adds a #ui("Target surface"): every node of the region is connected to the closest point of

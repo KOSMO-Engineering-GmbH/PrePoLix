@@ -12,7 +12,9 @@ use crate::contacts::{MasterSlave, Side};
 use crate::model::{Highlight, Model};
 use crate::numeric;
 use crate::selection::Target;
-use crate::setup::{FACE_SOURCES, NODE_SOURCES, RegionDraft, face_target};
+use crate::setup::{
+    FACE_SOURCES, NODE_SOURCES, RegionDraft, dropped_note, face_target, show_dropped_note,
+};
 
 /// The fixed width of the dialog's content, so it does not change with the type.
 pub(crate) const WIDTH: f32 = 440.0;
@@ -151,6 +153,15 @@ impl ConstraintDraft {
         matches!(&self.constraint, Constraint::Spring(s) if s.master.is_some())
     }
 
+    /// The picks of a constraint of the type, which stay when another type is chosen.
+    fn region_of(&self, kind: Type) -> &RegionDraft {
+        if kind == Type::Spring {
+            self.pair.current()
+        } else {
+            &self.region
+        }
+    }
+
     pub(crate) fn name(&self) -> &str {
         self.constraint.name()
     }
@@ -251,12 +262,14 @@ impl ConstraintDraft {
                         )
                     };
                     if response.clicked() && !selected {
-                        self.switch(kind, taken);
+                        let dropped = self.switch(kind, taken, model);
+                        dropped_note(ui, dropped);
                     }
                 }
             });
         });
         ui.end_row();
+        show_dropped_note(ui);
         hint(
             ui,
             "Ties are not constraints: create them with Interaction > Create Tie, they are \
@@ -314,8 +327,9 @@ impl ConstraintDraft {
         }
     }
 
-    /// Another type was picked in the list: its defaults, keeping a name the user chose.
-    fn switch(&mut self, kind: Type, taken: &[&str]) {
+    /// Another type was picked in the list: its defaults, keeping a name the user chose and
+    /// the picks the new type takes.
+    fn switch(&mut self, kind: Type, taken: &[&str], model: &Model) -> bool {
         let old = self.kind();
         let default_name = (self.constraint.name().strip_prefix(old.prefix()))
             .and_then(|n| n.strip_prefix('-'))
@@ -326,6 +340,27 @@ impl ConstraintDraft {
             self.constraint.name().to_owned()
         };
         self.constraint = kind.create(name);
+        let picks = self.region_of(old).clone();
+        if picks.is_empty() {
+            return false;
+        }
+        let mesh = &model.mesh;
+        let faces = face_target(&model.fe);
+        let (draft, dropped) = if kind == Type::Spring {
+            // A spring takes nodes, or faces where the picks are some.
+            match picks.converted(NODE_SOURCES, Target::Nodes, mesh) {
+                (_, true) => picks.converted(NODE_SOURCES, faces, mesh),
+                kept => kept,
+            }
+        } else {
+            picks.converted(FACE_SOURCES, faces, mesh)
+        };
+        if kind == Type::Spring {
+            self.pair.slave = draft;
+        } else {
+            self.region = draft;
+        }
+        dropped
     }
 }
 
@@ -533,6 +568,34 @@ fn hint(ui: &mut Ui, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::selection::{Items, Operation};
+
+    fn empty_model() -> Model {
+        Model::new(std::path::Path::new("test.inp"), FeMesh::default())
+    }
+
+    #[test]
+    fn switching_the_type_keeps_the_picks_the_new_type_takes() {
+        let model = empty_model();
+        let mut draft = ConstraintDraft::new(&model.fe);
+        draft
+            .pair
+            .slave
+            .take(&model.mesh, Items::Nodes([1, 2].into()), Operation::Replace);
+        // Nodes are no faces: the compression only support starts empty.
+        assert!(draft.switch(Type::CompressionOnly, &[], &model));
+        assert!(draft.region.is_empty());
+        draft.region.take(
+            &model.mesh,
+            Items::Faces([(1, 2)].into()),
+            Operation::Replace,
+        );
+        // Faces are the spring's region now, and back.
+        assert!(!draft.switch(Type::Spring, &[], &model));
+        assert_eq!(draft.pair.slave.region(), Region::Faces(vec![(1, 2)]));
+        assert!(!draft.switch(Type::RigidBody, &[], &model));
+        assert_eq!(draft.region.region(), Region::Faces(vec![(1, 2)]));
+    }
 
     #[test]
     fn switching_the_type_proposes_its_default_name() {
@@ -541,11 +604,11 @@ mod tests {
         let mut draft = ConstraintDraft::new(&fe);
         assert_eq!(draft.name(), "Spring-2");
         assert_eq!(draft.pair.slave.target, Target::Nodes);
-        draft.switch(Type::CompressionOnly, &["Spring-1"]);
+        draft.switch(Type::CompressionOnly, &["Spring-1"], &empty_model());
         assert_eq!(draft.name(), "Compression_Only-1");
         assert_eq!(draft.region.target, Target::Faces);
         *draft.constraint.name_mut() = "Lager".into();
-        draft.switch(Type::RigidBody, &[]);
+        draft.switch(Type::RigidBody, &[], &empty_model());
         assert_eq!(draft.name(), "Lager");
     }
 
@@ -555,7 +618,7 @@ mod tests {
         fe.properties.space = plx_model::ModelSpace::PlaneStrain;
         let mut draft = ConstraintDraft::new(&fe);
         assert_eq!(draft.pair.master.target, Target::Edges);
-        draft.switch(Type::CompressionOnly, &[]);
+        draft.switch(Type::CompressionOnly, &[], &empty_model());
         assert_eq!(draft.region.target, Target::Edges);
     }
 
