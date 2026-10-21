@@ -1040,19 +1040,16 @@ fn mesh_parts(geometry: &Geometry, parts: Option<Vec<String>>) -> Result<PartMes
 }
 
 /// Runs the meshing worker if the program was started as one, and returns its exit code;
-/// `None` for a normal start.
+/// `None` for a normal start. The worker ends itself at once, see [`plx_job::process::end`].
 pub fn worker_main() -> Option<i32> {
     let mut args = std::env::args_os().skip(1);
     if args.next()? != WORKER_ARGUMENT {
         return None;
     }
     let dir = PathBuf::from(args.next()?);
-    // The program keeps the worker's input open; it closes when the program ends, even if
-    // it crashes, and the worker must not mesh on for nobody.
-    std::thread::spawn(|| {
-        let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
-        std::process::exit(2);
-    });
+    let program = args.next().and_then(|id| id.to_str()?.parse::<u32>().ok());
+    // The worker must not mesh on for nobody once the program ends, even if it crashes.
+    plx_job::process::end_with(program);
     let result: WorkerResult = (|| {
         let text = std::fs::read_to_string(dir.join("request.ron")).map_err(|e| e.to_string())?;
         let request: WorkerRequest = ron::from_str(&text).map_err(|e| e.to_string())?;
@@ -1064,11 +1061,18 @@ pub fn worker_main() -> Option<i32> {
             .map(|g| (g.mesh, g.warnings))
             .collect())
     })();
+    // Written under another name first, so that the program never reads half a result.
     let written = ron::to_string(&result)
         .map_err(|e| e.to_string())
-        .and_then(|text| std::fs::write(dir.join("result.ron"), text).map_err(|e| e.to_string()));
-    Some(if written.is_ok() { 0 } else { 1 })
+        .and_then(|text| std::fs::write(dir.join("result.tmp"), text).map_err(|e| e.to_string()))
+        .and_then(|()| {
+            std::fs::rename(dir.join("result.tmp"), dir.join(RESULT)).map_err(|e| e.to_string())
+        });
+    plx_job::process::end(if written.is_ok() { 0 } else { 1 })
 }
+
+/// The file the worker leaves its result in, see [`WorkerResult`].
+const RESULT: &str = "result.ron";
 
 /// A folder of its own for one worker, removed when dropped.
 struct WorkerDir(PathBuf);
@@ -1111,6 +1115,7 @@ fn mesh_in_worker(
     command
         .arg(WORKER_ARGUMENT)
         .arg(&dir.0)
+        .arg(std::process::id().to_string())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -1118,21 +1123,28 @@ fn mesh_in_worker(
     let mut child = command
         .spawn()
         .map_err(|e| format!("Cannot start the mesher: {e}"))?;
-    let status = loop {
+    let result = dir.0.join(RESULT);
+    // The result counts once it is there, whether or not the worker has ended yet.
+    let text = loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(CANCELLED.into());
         }
+        if let Ok(text) = std::fs::read_to_string(&result) {
+            let _ = child.kill();
+            let _ = child.wait();
+            break text;
+        }
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            // It may have left its result just before it ended.
+            Ok(Some(status)) => match std::fs::read_to_string(&result) {
+                Ok(text) => break text,
+                Err(_) => return Err(format!("The mesher stopped unexpectedly ({status})")),
+            },
             Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
             Err(e) => return Err(format!("The mesher could not be watched: {e}")),
         }
-    };
-    let text = match std::fs::read_to_string(dir.0.join("result.ron")) {
-        Ok(text) => text,
-        Err(_) => return Err(format!("The mesher stopped unexpectedly ({status})")),
     };
     let result: WorkerResult = ron::from_str(&text).map_err(|e| e.to_string())?;
     Ok(PartMeshes {

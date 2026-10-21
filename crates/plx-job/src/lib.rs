@@ -10,6 +10,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+pub mod process;
 pub mod restart;
 
 /// Files of a previous run that would otherwise be mistaken for results of this one.
