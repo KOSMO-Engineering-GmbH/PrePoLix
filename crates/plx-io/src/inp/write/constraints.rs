@@ -239,7 +239,7 @@ impl Writer {
     ) -> Result<(), WriteError> {
         let mesh = sets.mesh;
         let faces = support.region.faces(mesh);
-        let (weights, area) = node_areas(mesh, &faces, false);
+        let (weights, area) = node_areas(mesh, &faces, false, true);
         if weights.is_empty() {
             return Err(empty(&support.name, "element faces"));
         }
@@ -328,8 +328,8 @@ impl Writer {
 }
 
 /// The factor of a spring's stiffness at each node of its region: like a force on faces by
-/// area, on edges by length and on points in equal shares, or 1 at every node with
-/// `each_node`. Nodes with no share get no spring.
+/// area (lumped, so that every node gets a positive share), on edges by length and on points
+/// in equal shares, or 1 at every node with `each_node`. Nodes with no share get no spring.
 fn spring_shares(mesh: &FeMesh, spring: &Spring) -> BTreeMap<NodeId, f64> {
     let region = &spring.region;
     if spring.each_node {
@@ -337,7 +337,7 @@ fn spring_shares(mesh: &FeMesh, spring: &Spring) -> BTreeMap<NodeId, f64> {
     }
     let faces = region.faces(mesh);
     let shares: Vec<(NodeId, f64)> = if !faces.is_empty() {
-        let (weights, area) = node_areas(mesh, &faces, false);
+        let (weights, area) = node_areas(mesh, &faces, false, true);
         let scale = if spring.per_area { 1.0 } else { 1.0 / area };
         weights.into_iter().map(|(n, w)| (n, w * scale)).collect()
     } else {
@@ -371,11 +371,15 @@ fn real(value: f64) -> String {
 /// `GetDistributedNodalValuesFromSurface`. Within a face the share follows the equivalent
 /// nodal forces of a constant pressure: equal parts on linear faces, only midside nodes on
 /// quadratic triangles, and -1/12 per corner and 1/3 per midside node on quadratic
-/// quadrilaterals.
+/// quadrilaterals. With `lumped` quadratic faces share their area as the diagonal of their
+/// mass matrix instead (Hinton-Rock-Zienkiewicz lumping): 1/19 per corner and 16/57 per
+/// midside node on triangles, 3/76 and 4/19 on quadrilaterals. Stiffness spread like a
+/// pressure would be negative at the corners of quadratic quadrilaterals.
 pub(super) fn node_areas(
     mesh: &FeMesh,
     faces: &[(ElementId, u8)],
     axisymmetric: bool,
+    lumped: bool,
 ) -> (BTreeMap<NodeId, f64>, f64) {
     let mut weights: BTreeMap<NodeId, f64> = BTreeMap::new();
     let mut total_area = 0.0;
@@ -418,6 +422,8 @@ pub(super) fn node_areas(
         let area = super::polygon_area(&corners);
         total_area += area;
         let (corner_weight, mid_weight) = match (corners.len(), quadratic) {
+            (3, true) if lumped => (1.0 / 19.0, 16.0 / 57.0),
+            (4, true) if lumped => (3.0 / 76.0, 4.0 / 19.0),
             (3, true) => (0.0, 1.0 / 3.0),
             (4, true) => (-1.0 / 12.0, 1.0 / 3.0),
             (n, _) => (1.0 / n as f64, 0.0),

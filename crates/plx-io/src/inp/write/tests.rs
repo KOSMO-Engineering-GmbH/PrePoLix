@@ -6700,3 +6700,19 @@ fn calculix_prints_the_rotation_of_a_deformable_remote_point() {
     let ur3 = set.field("ROTATIONS").unwrap().component("UR3").unwrap();
     assert!((ur3.entries[0].values[0] - 0.01).abs() < 1e-9);
 }
+
+/// Springs and gaps share a face's area lumped: a quadratic quadrilateral spread like a
+/// pressure gives its corners negative shares, a negative stiffness.
+#[test]
+fn stiffness_is_spread_with_positive_shares_on_quadratic_faces() {
+    let mesh = read_inp(&testdata("block_c3d20r.inp")).unwrap().mesh;
+    let element = mesh.elements()[0].id;
+    let faces: Vec<(ElementId, u8)> = (1..=6).map(|f| (element, f)).collect();
+    let (pressure, area) = constraints::node_areas(&mesh, &faces, false, false);
+    assert!(pressure.values().any(|&w| w < 0.0));
+    let (lumped, lumped_area) = constraints::node_areas(&mesh, &faces, false, true);
+    assert_eq!(lumped.len(), 20);
+    assert!(lumped.values().all(|&w| w > 0.0), "{lumped:?}");
+    let sum: f64 = lumped.values().sum();
+    assert!((sum - area).abs() < 1e-9 * area && lumped_area == area);
+}
