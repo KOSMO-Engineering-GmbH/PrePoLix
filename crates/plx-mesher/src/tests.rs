@@ -826,6 +826,81 @@ fn parts_deleted_together_are_renumbered_as_one_by_one() {
 }
 
 #[test]
+fn the_display_of_parts_that_stay_is_kept_as_tessellated_anew() {
+    if !gmsh_available() {
+        return;
+    }
+    let geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless)
+        .unwrap()
+        .geometry;
+    let paths = [testdata("platte_mit_loch.step")];
+    let three = add_cad_files(Some(&geometry), &paths, UnitSystem::Unitless, &[])
+        .unwrap()
+        .import
+        .geometry;
+    let display = tessellate(&three).unwrap();
+    let deleted = ["SOLID-1".to_string(), "SOLID-3".to_string()];
+    let (smaller, tags) = delete_parts_renumbered(&three, &deleted).unwrap();
+    let smaller = smaller.unwrap();
+    let kept = display
+        .clone()
+        .without_parts(&deleted, &smaller, &tags)
+        .unwrap();
+    let fresh = tessellate(&smaller).unwrap();
+    assert_eq!(kept.part_dimensions, fresh.part_dimensions);
+    assert_eq!(kept.topology, fresh.topology);
+    assert_eq!(
+        (kept.solids, kept.faces, kept.edges),
+        (fresh.solids, fresh.faces, fresh.edges)
+    );
+    let names = |d: &GeometryDisplay| -> Vec<String> {
+        d.mesh.parts.iter().map(|p| p.name.clone()).collect()
+    };
+    assert_eq!(names(&kept), ["SOLID-2"]);
+    assert_eq!(names(&kept), names(&fresh));
+    // The same faces and edges, each drawn with the same number of triangles and lines.
+    let counts = |d: &GeometryDisplay| -> BTreeMap<CadEntity, usize> {
+        let mut counts = BTreeMap::new();
+        for element in d.mesh.elements() {
+            *counts.entry(d.entity(element.id).unwrap()).or_default() += 1;
+        }
+        counts
+    };
+    assert_eq!(counts(&kept), counts(&fresh));
+    // A display the smaller geometry does not fit is tessellated anew.
+    assert!(
+        display
+            .without_parts(&deleted[..1], &smaller, &tags)
+            .is_none()
+    );
+}
+
+#[test]
+fn mesh_parts_deleted_together_are_deleted_as_one_by_one() {
+    if !gmsh_available() {
+        return;
+    }
+    let geometry = import_cad(&testdata("zwei_bloecke.step"), UnitSystem::Unitless)
+        .unwrap()
+        .geometry;
+    let paths = [testdata("platte_mit_loch.step")];
+    let mut three = add_cad_files(Some(&geometry), &paths, UnitSystem::Unitless, &[])
+        .unwrap()
+        .import
+        .geometry;
+    three.meshing.second_order = false;
+    three.meshing.max_size = 5.0;
+    let whole = generate_mesh(&three).unwrap().mesh;
+    let deleted = ["solid-1".to_string(), "SOLID-3".to_string()];
+    let together = delete_mesh_parts(&whole, &deleted);
+    let one_by_one = delete_mesh_part(&delete_mesh_part(&whole, "solid-1"), "SOLID-3");
+    assert_eq!(together.parts, one_by_one.parts);
+    assert_eq!(together.node_ids(), one_by_one.node_ids());
+    assert_eq!(together.elements(), one_by_one.elements());
+    assert_eq!(together.parts.len(), 1);
+}
+
+#[test]
 fn a_deleted_mesh_part_takes_its_elements_and_nodes() {
     if !gmsh_available() {
         return;

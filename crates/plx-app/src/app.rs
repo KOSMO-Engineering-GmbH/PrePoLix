@@ -4924,7 +4924,7 @@ impl Workbench {
         }
         let name = names.join(", ");
         // All in one go, so that Gmsh numbers the faces, edges and vertices anew once.
-        let smaller = match plx_mesher::delete_parts_renumbered(geometry, &names) {
+        let (smaller, tags) = match plx_mesher::delete_parts_renumbered(geometry, &names) {
             Ok((smaller, tags)) => {
                 // Gmsh numbers the faces, edges and vertices anew; the mesh and the
                 // selections on the geometry follow.
@@ -4934,7 +4934,7 @@ impl Workbench {
                     model.fe.renumber_cad(&tags);
                     model.set_mesh(mesh);
                 }
-                smaller
+                (smaller, tags)
             }
             Err(error) => {
                 self.output
@@ -4942,17 +4942,23 @@ impl Workbench {
                 return;
             }
         };
-        self.geometry = match &smaller {
-            Some(geometry) => match plx_mesher::tessellate(geometry) {
+        // The display keeps the triangles of the parts that stay; tessellating the
+        // geometry anew takes long for a large assembly.
+        let view = self.geometry.take();
+        self.geometry = smaller.as_ref().and_then(|geometry| {
+            let kept = view.and_then(|v| v.geometry_view_without(&names, geometry, &tags));
+            if kept.is_some() {
+                return kept;
+            }
+            match plx_mesher::tessellate(geometry) {
                 Ok(display) => Some(Model::geometry_view(&model.path, display)),
                 Err(error) => {
                     self.output
                         .push(format!("Geometry cannot be displayed: {error}"));
                     None
                 }
-            },
-            None => None,
-        };
+            }
+        });
         model.geometry = smaller;
         self.output.push(deleted_message(&names));
         self.after_parts_changed();
@@ -4970,11 +4976,8 @@ impl Workbench {
         if names.is_empty() {
             return;
         }
-        // By name, which stays while the others go.
-        let mut mesh = model.mesh.clone();
-        for name in &names {
-            mesh = plx_mesher::delete_mesh_part(&mesh, name);
-        }
+        // All in one go: each pass builds the whole mesh anew.
+        let mesh = plx_mesher::delete_mesh_parts(&model.mesh, &names);
         model.set_mesh(mesh);
         self.output.push(deleted_message(&names));
         self.after_parts_changed();
