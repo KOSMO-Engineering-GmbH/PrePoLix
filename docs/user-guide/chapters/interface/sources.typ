@@ -295,8 +295,9 @@ search them with #key("Shift+A").
   the variant, and both results are outputs of the study])
 
 Their inputs are rows with a violet pin on the left: type a number, or drag a value pin to it,
-from a Parameters block, from another Math or Switch block or from the #ui("Inputs") of a
-parameter study (@parameter-study). The #ui("Result") row at the bottom shows the number the
+from a Parameters block, from another Math or Switch block, from the #ui("Inputs") of a
+parameter study (@parameter-study) or from the value of a Measure block (@measure-block), such as the largest
+stress, to compute a key figure from results. The #ui("Result") row at the bottom shows the number the
 block gives; drag its pin on the right to any number of the same kind, to another Math or
 Switch block or to the #ui("Outputs") of a study. Blocks that take the result are out of date
 when it changes, as with a parameter.

@@ -3205,6 +3205,12 @@ impl ProjectApp {
                 .then(|| number.result(switch))
                 .flatten();
         }
+        if let Some(measure) = node.as_measure() {
+            let fresh = self.measure_state(id) == CellState::UpToDate;
+            return (cell == links::VALUE && name == RESULT && fresh)
+                .then_some(measure.value)
+                .flatten();
+        }
         if cell == links::LOOP {
             let study = node.as_study()?;
             let column = study.table.input(name)?;
@@ -5236,7 +5242,7 @@ impl ProjectApp {
                 .filter(|l| links::is_feedback(l))
                 .map(|l| (l.source, l.item.clone(), l.target, l.slot.clone()))
                 .collect(),
-            bottom: f32::MIN,
+            rects: Vec::new(),
             busy: self.busy(),
             frames: self.frames.clone(),
             sizes: std::mem::take(&mut self.block_sizes),
@@ -5258,7 +5264,7 @@ impl ProjectApp {
             .filter_map(|g| self.graph.get_node(g).copied())
             .collect();
         let clip = viewer.to_global.inverse() * ui.clip_rect();
-        draw_feedback(ui.ctx(), &viewer.feedback, viewer.bottom, clip);
+        draw_feedback(ui.ctx(), &viewer.feedback, &viewer.rects, clip);
         self.pin_rects = ui.ctx().data_mut(|d| {
             d.remove_temp::<Vec<(PinKey, egui::Rect)>>(egui::Id::new(PIN_RECTS))
                 .unwrap_or_default()
@@ -8432,6 +8438,11 @@ fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
     if node.as_number().is_some() {
         return node.number_kind(path).flatten();
     }
+    if let Some(measure) = node.as_measure() {
+        return (path == [links::VALUE, RESULT])
+            .then(|| crate::measure::value_kind(&measure.kind))
+            .flatten();
+    }
     match path {
         [cell, name] if cell == links::VALUE => (node.as_parameters()?.parameters.iter())
             .find(|p| &p.name == name)
@@ -9352,8 +9363,8 @@ struct Viewer {
     look_at: Option<(egui::Rect, egui::Pos2)>,
     /// The feedback wires of parameter studies: study, item, target and slot.
     feedback: Vec<(u64, Vec<String>, u64, Vec<String>)>,
-    /// The lowest edge of the blocks, which feedback wires go around below.
-    bottom: f32,
+    /// Where the blocks were drawn in this pass, which feedback wires go around below.
+    rects: Vec<egui::Rect>,
     /// The pin a wire is being dragged from.
     drag: Option<PinKey>,
     /// Why the wire being dragged cannot end at each pin of the other side; `None` for the
@@ -9500,7 +9511,11 @@ impl Viewer {
         let label = label.on_hover_text(&tip);
         if let RowWidget::Exposed(key) = widget {
             let name = (exposed.iter().find(|e| e.key == key)).map_or("", |e| e.name.as_str());
-            let mut text = name.to_owned();
+            // The name being typed is kept from frame to frame until the field lets go of the
+            // keyboard, and then becomes the parameter's.
+            let draft = egui::Id::new(("exposed name draft", id, key));
+            let mut text =
+                (ui.data(|d| d.get_temp::<String>(draft))).unwrap_or_else(|| name.to_owned());
             let studies: Vec<(u64, String)> = (self.nodes.iter())
                 .filter(|n| n.kind == Kind::Study)
                 .map(|n| (n.id, n.name.clone()))
@@ -9509,9 +9524,15 @@ impl Viewer {
             label.context_menu(|ui| {
                 ui.label("Name");
                 let edit = ui.text_edit_singleline(&mut text);
-                if edit.lost_focus() && !text.trim().is_empty() && text.trim() != name {
-                    (self.actions).push(Action::RenameExposed(id, key, text.trim().to_owned()));
-                    ui.close();
+                if edit.has_focus() {
+                    ui.data_mut(|d| d.insert_temp(draft, text.clone()));
+                }
+                if edit.lost_focus() {
+                    ui.data_mut(|d| d.remove::<String>(draft));
+                    if !text.trim().is_empty() && text.trim() != name {
+                        (self.actions).push(Action::RenameExposed(id, key, text.trim().to_owned()));
+                        ui.close();
+                    }
                 }
                 ui.separator();
                 let add = |ui: &mut egui::Ui| {
@@ -10182,7 +10203,7 @@ impl SnarlViewer<u64> for Viewer {
         _ui: &mut egui::Ui,
         snarl: &mut Snarl<u64>,
     ) {
-        self.bottom = self.bottom.max(rect.bottom());
+        self.rects.push(rect);
         if let Some(id) = snarl.get_node(node) {
             self.drawn.insert(*id, rect.size());
         }
@@ -10597,12 +10618,12 @@ fn feedback_end(target: u64, slot: &[String]) -> egui::Id {
 }
 
 /// Draws the feedback wires of loops dashed, between the pins drawn in this pass: from the
-/// input of the study out to the right, below the blocks back to the left and into the
-/// parameter, so that the loop reads as one.
+/// input of the study out to the right, below the blocks in its way back to the left and into
+/// the parameter, so that the loop reads as one.
 fn draw_feedback(
     ctx: &egui::Context,
     feedback: &[(u64, Vec<String>, u64, Vec<String>)],
-    bottom: f32,
+    rects: &[egui::Rect],
     clip: egui::Rect,
 ) {
     let pass = ctx.cumulative_pass_nr();
@@ -10619,8 +10640,14 @@ fn draw_feedback(
             continue;
         };
         // Several loops run below one another.
-        let below = bottom.max(from.y).max(to.y) + 30.0 + 14.0 * index as f32;
+        let gap = 30.0 + 14.0 * index as f32;
         let (out, back) = (from.x + 24.0, to.x - 24.0);
+        let below = feedback_level(
+            from.y.max(to.y) + gap,
+            back.min(out)..=back.max(out),
+            gap,
+            rects,
+        );
         let corners = [
             from,
             egui::pos2(out, from.y),
@@ -10639,6 +10666,27 @@ fn draw_feedback(
             5.0,
         ));
     }
+}
+
+/// The height at which a feedback wire runs back between `x` from `start`: below the blocks
+/// it would cross there, and only those, so that blocks elsewhere do not move it.
+fn feedback_level(
+    start: f32,
+    x: std::ops::RangeInclusive<f32>,
+    gap: f32,
+    rects: &[egui::Rect],
+) -> f32 {
+    let mut level = start;
+    // Going below one block can run into the next one under it.
+    while let Some(bottom) = (rects.iter())
+        .filter(|r| r.right() >= *x.start() && r.left() <= *x.end())
+        .filter(|r| r.top() - gap * 0.5 <= level && level < r.bottom() + gap)
+        .map(|r| r.bottom())
+        .reduce(f32::max)
+    {
+        level = bottom + gap;
+    }
+    level
 }
 
 /// A path through `corners` with each inner corner rounded by up to `radius`.
@@ -10933,6 +10981,25 @@ fn timestamped(message: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn feedback_wires_go_below_only_the_blocks_in_their_way() {
+        use super::feedback_level;
+        let block =
+            |x: f32, y: f32| egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(100.0, 80.0));
+        // The study and the analysis it varies, side by side.
+        let mut rects = vec![block(0.0, 0.0), block(200.0, 0.0)];
+        assert_eq!(feedback_level(70.0, -24.0..=324.0, 30.0, &rects), 110.0);
+        // A block far below, or off to the side, leaves the wire where it is.
+        rects.push(block(100.0, 600.0));
+        rects.push(block(600.0, 0.0));
+        rects.push(block(-400.0, 200.0));
+        assert_eq!(feedback_level(70.0, -24.0..=324.0, 30.0, &rects), 110.0);
+        // A block in its way, and one right under that, take it further down.
+        rects.push(block(100.0, 100.0));
+        rects.push(block(150.0, 200.0));
+        assert_eq!(feedback_level(70.0, -24.0..=324.0, 30.0, &rects), 310.0);
+    }
+
     #[test]
     fn rows_open_the_analysis_in_their_workspace() {
         use super::{Show, TreeView, workspace_of};
@@ -11641,6 +11708,47 @@ mod tests {
             Some(ProjectNode::Measure(written)) => assert_eq!(written, block),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_math_block_takes_the_value_of_a_measure_block() {
+        let measure = |id, kind| {
+            Node::read(ProjectNode::Measure(file::MeasureBlock {
+                id,
+                name: format!("Measure-{id}"),
+                kind,
+                value: Some(0.25),
+                ..Default::default()
+            }))
+        };
+        let stress = MeasureKind::default();
+        let frequency = MeasureKind::Eigenfrequency { mode: 1 };
+        let math = Node::read(ProjectNode::Math(file::MathBlock {
+            id: 3,
+            name: "Math".into(),
+            operation: MathOp::Multiply,
+            values: vec![0.0, 2.0],
+            ..Default::default()
+        }));
+        let mut nodes = vec![measure(1, stress), measure(2, frequency), math];
+        let value = vec![links::VALUE.to_owned(), RESULT.to_owned()];
+        let input = vec![links::PARAMETERS.to_owned(), "a".to_owned()];
+        assert_eq!(
+            value_kind(&nodes, 1, &value),
+            Some(ValueKind::Quantity(Quantity::Pressure))
+        );
+        assert_eq!(
+            value_kind(&nodes, 2, &value),
+            Some(ValueKind::Quantity(Quantity::Frequency))
+        );
+        // A Math block without a kind takes the value, and then only values of its kind.
+        assert_eq!(refusal(&nodes, &[], 1, &value, 3, &input), None);
+        let kind = value_kind(&nodes, 1, &value);
+        if let Some((number, _)) = nodes[2].as_number_mut() {
+            number.kind = kind;
+        }
+        assert_eq!(refusal(&nodes, &[], 1, &value, 3, &input), None);
+        assert!(refusal(&nodes, &[], 2, &value, 3, &input).is_some());
     }
 
     #[test]
