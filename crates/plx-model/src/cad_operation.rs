@@ -54,7 +54,10 @@ impl CadOperationKind {
     /// Whether it acts on entities of this kind.
     pub fn picks(self, entity: CadEntity) -> bool {
         match self {
-            Self::Fillet | Self::Chamfer => matches!(entity, CadEntity::Edge(_)),
+            // Edges of solids, or corners of flat faces.
+            Self::Fillet | Self::Chamfer => {
+                matches!(entity, CadEntity::Edge(_) | CadEntity::Vertex(_))
+            }
             Self::PushPull => matches!(entity, CadEntity::Face(_)),
         }
     }
@@ -104,6 +107,21 @@ impl Default for CadOperation {
 }
 
 impl CadOperation {
+    /// What it acts on, for texts, e.g. "2 edges" or "1 corner".
+    pub fn describe_picks(&self) -> String {
+        let count = self.entities.len();
+        if count == 0 {
+            return "nothing picked".to_owned();
+        }
+        let corners = (self.entities.iter()).any(|s| matches!(s.entity, CadEntity::Vertex(_)));
+        let (one, many) = if corners {
+            ("corner", "corners")
+        } else {
+            (self.kind.picked_one(), self.kind.picked_noun())
+        };
+        format!("{count} {}", if count == 1 { one } else { many })
+    }
+
     /// The picked entities in the geometry it is applied to, or why they cannot all be found.
     pub fn resolve(&self, input: &Geometry) -> Result<Vec<CadEntity>, String> {
         if self.entities.is_empty() {

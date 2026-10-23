@@ -1888,3 +1888,82 @@ fn push_pull_moves_planar_faces_along_their_normal() {
     let error = apply_cad_operation(&rounded, PushPull, &[curved], 1.0).unwrap_err();
     assert!(error.to_string().contains("planar"), "{error}");
 }
+
+#[test]
+fn corners_of_flat_faces_are_rounded_and_bevelled() {
+    use plx_model::CadOperationKind::{Chamfer, Fillet};
+    if !gmsh_available() {
+        return;
+    }
+    // Two squares side by side, sharing the edge at x = 10.
+    let file = TempFile::new("brep");
+    with_gmsh(|gmsh| {
+        gmsh.add_rectangle([0.0; 3], [10.0; 2], 0.0)?;
+        gmsh.add_rectangle([10.0, 0.0, 0.0], [10.0; 2], 0.0)?;
+        gmsh.remove_all_duplicates()?;
+        gmsh.write(&file.0)
+    })
+    .unwrap();
+    let input = with_signatures(Geometry {
+        source: "quadrate.brep".into(),
+        brep: std::fs::read_to_string(&file.0).unwrap(),
+        meshing: MeshingParameters {
+            max_size: 2.0,
+            ..MeshingParameters::default()
+        },
+        mesh_items: Vec::new(),
+        part_names: Vec::new(),
+        refinement: 1.0,
+        signatures: Vec::new(),
+    })
+    .unwrap();
+    let vertex = |geometry: &Geometry, x: f64, y: f64| {
+        (geometry.signatures.iter())
+            .find(|s| {
+                s.entity.dim() == 0
+                    && (s.centroid[0] - x).abs() < 1e-6
+                    && (s.centroid[1] - y).abs() < 1e-6
+            })
+            .unwrap()
+            .entity
+    };
+    // Area and how many faces each edge bounds.
+    let shape = |geometry: &Geometry| {
+        let file = TempFile::with_contents("brep", &geometry.brep).unwrap();
+        with_gmsh(|gmsh| {
+            gmsh.import_shapes(&file.0)?;
+            let mut area = 0.0;
+            for face in gmsh.entities(2)? {
+                area += gmsh.mass(2, face)?;
+            }
+            let mut shared = 0;
+            for edge in gmsh.entities(1)? {
+                shared += usize::from(gmsh.adjacencies(1, edge)?.0.len() == 2);
+            }
+            Ok((gmsh.entities(2)?.len(), area, shared))
+        })
+        .unwrap()
+    };
+    let rounded = apply_cad_operation(&input, Fillet, &[vertex(&input, 0.0, 0.0)], 2.0).unwrap();
+    let (faces, area, shared) = shape(&rounded);
+    assert_eq!((faces, shared), (2, 1));
+    assert!(
+        (area - (200.0 - (4.0 - std::f64::consts::PI))).abs() < 1e-6,
+        "{area}"
+    );
+    assert_eq!(part_names(&rounded).unwrap(), part_names(&input).unwrap());
+    let kinds: Vec<&str> = rounded.signatures.iter().map(|s| s.kind.as_str()).collect();
+    assert!(kinds.contains(&"TrimmedCurve"), "{kinds:?}");
+    // Two corners of the other square, bevelled.
+    let corners = [vertex(&input, 20.0, 10.0), vertex(&input, 20.0, 0.0)];
+    let bevelled = apply_cad_operation(&input, Chamfer, &corners, 3.0).unwrap();
+    let (faces, area, shared) = shape(&bevelled);
+    assert_eq!((faces, shared), (2, 1));
+    assert!((area - 191.0).abs() < 1e-6, "{area}");
+    // A corner of both squares, and a radius larger than the square: they fail.
+    let error = apply_cad_operation(&input, Fillet, &[vertex(&input, 10.0, 0.0)], 1.0)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("share"), "{error}");
+    assert!(apply_cad_operation(&input, Fillet, &[vertex(&input, 0.0, 0.0)], 20.0).is_err());
+}

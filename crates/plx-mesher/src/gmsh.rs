@@ -395,6 +395,13 @@ impl Gmsh {
         self.synchronize()
     }
 
+    /// Merges entities that lie on each other, e.g. the edge two faces share once one of them
+    /// was made anew, so that they are joined again.
+    pub fn remove_all_duplicates(&self) -> Result<(), GmshError> {
+        self.call(|e| unsafe { (self.api.occ_remove_all_duplicates)(e) })?;
+        self.synchronize()
+    }
+
     /// Removes entities given as (dimension, tag) and nothing else, so that the faces of a
     /// removed solid stay.
     pub fn remove_only(&self, entities: &[(i32, i32)]) -> Result<(), GmshError> {
