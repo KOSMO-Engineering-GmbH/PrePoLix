@@ -281,6 +281,11 @@ done <"$work/ccx-patches.txt"
 cd "$ccx/ccx_$CCX_VERSION/src"
 # The repository says DEVELOPMENT where the tarball names its version.
 sed -i "s/Version DEVELOPMENT/Version $CCX_VERSION/" "ccx_$CCX_VERSION.c" "ccx_${CCX_VERSION}step.c"
+# ccx prints its progress (increments, iterations) with printf. Into a pipe that is block
+# buffered, so PrePoLix would see it only every 4 KB, minutes late on large models: stdout is
+# line buffered from the start of main, unbuffered on Windows, whose C library has no line
+# buffering.
+perl -0pi -e 's/\n(\s*clock_gettime\(CLOCK_MONOTONIC, &totalCalculixTimeStart\);)/\n#ifdef _WIN32\n  setvbuf(stdout, NULL, _IONBF, 0);\n#else\n  setvbuf(stdout, NULL, _IOLBF, 0);\n#endif\n$1/ or die "main of ccx not found\n"' "ccx_$CCX_VERSION.c"
 cp "$recipe/date.pl" date.pl
 PKG_VERSION="$CCX_VERSION" perl date.pl
 if [ "$platform" = windows ]; then
