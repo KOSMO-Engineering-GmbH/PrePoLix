@@ -120,8 +120,8 @@ it was made from; with results kept with the project (@bind-result) it is saved 
 )
 
 The dialog shows minimum, maximum and a plot of the value over the distance. #ui("Copy to
-Clipboard") and #ui("Save as CSV...") export the values; #ui("Table") lists them. Points outside
-the mesh have no value. The dialog's height can be changed by dragging its bottom right corner; the
+Clipboard"), #ui("Save as CSV...") and #ui("Save as JSON...") export the values
+(@table-json); #ui("Table") lists them. Points outside the mesh have no value. The dialog's height can be changed by dragging its bottom right corner; the
 plot takes the extra height.
 
 #ui("Show in View") puts the plot into the 3D view as an annotation, where it stays after the
@@ -163,7 +163,8 @@ Changes show at once; #ui("Cancel") restores the plot.
 #ui("Create ...") on #ui("Plane Results") evaluates the displayed component on a plane defined
 under #ui("Features"): minimum and maximum with their position, the area-weighted mean, and the
 cut area. With its check box ticked, the 3D view shows only the cut, and the legend uses the
-values on it.
+values on it. #ui("Save as CSV...") and #ui("Save as JSON...") save the cut points with their
+values.
 
 == Hot spot stresses <hot-spots>
 
@@ -194,8 +195,9 @@ along the path from the toe to a quarter beyond the last read-out point. The rea
 the hot spot stress are blue dots, the extrapolation through them is dashed, so you can check at a
 glance whether the read-out points lie on the smooth part of the stress rise. The value axis
 leaves out a sharp notch peak right at the toe, which would otherwise flatten the plot; hover the
-curve to read values. #ui("Copy to Clipboard") and #ui("Save as CSV...") export the curve, the
-read-out points and the hot spot stress.
+curve to read values. #ui("Copy to Clipboard"), #ui("Save as CSV...") and #ui("Save as JSON...")
+export the curve, the read-out points and the hot spot stress; in JSON these are three tables in
+an array.
 
 #ui("Show in View") puts the plot into the 3D view as an annotation that stays after the dialog is
 closed and follows the displayed increment, like the plot of a path (@paths): drag it to move it,
@@ -246,6 +248,24 @@ model, it reports an error in the output pane and has no data until it is edited
 #note[The position is that of the step. Within a step with several increments the loads are
 ramped from the previous step, so the intermediate increments show the same position as the end
 of their step.]
+
+== Tables as JSON <table-json>
+
+Wherever a table can be saved as CSV (paths, plane results, hot spot plots, parameter studies and
+the Campbell diagram), it can also be saved as JSON, which other programs read without parsing
+text. The file holds the column names and the rows; numbers are numbers, empty cells `null`, and
+text such as a whirl direction stays text:
+
+```json
+{
+  "columns": ["Distance", "X", "Y", "Z", "S Mises [MPa]"],
+  "rows": [[0, 0, 5, 0, 212.4], [1.25, 1.25, 5, 0, 208.9]]
+}
+```
+
+A file with several tables, such as that of a hot spot plot, holds an array of them. In a Typst
+document, for example, `json("path.json")` reads the file, and its `rows` go straight into a
+table or a plot.
 
 == Query <query>
 
