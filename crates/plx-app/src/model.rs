@@ -276,6 +276,17 @@ impl Highlight {
             ..Self::default()
         }
     }
+
+    /// Adds what `other` highlights.
+    pub fn extend(&mut self, other: Highlight) {
+        self.parts.extend(other.parts);
+        self.outlines.extend(other.outlines);
+        self.faces.extend(other.faces);
+        self.secondary_faces.extend(other.secondary_faces);
+        self.nodes.extend(other.nodes);
+        self.lines.extend(other.lines);
+        self.secondary_lines.extend(other.secondary_lines);
+    }
 }
 
 /// A visible face or line under the mouse.

@@ -1307,8 +1307,8 @@ fn read_meshes_in_background(paths: Vec<PathBuf>, sender: Sender<LoadEvent>, ctx
     ctx.request_repaint();
 }
 
-/// The selected tree item and the parts selected along with it.
-type TreeSelection = (Option<(TreeView, TreeItem)>, BTreeSet<usize>);
+/// The selected tree item and the parts and items selected along with it.
+type TreeSelection = (Option<(TreeView, TreeItem)>, BTreeSet<usize>, Vec<TreeItem>);
 
 /// The output line after deleting parts.
 fn deleted_message(names: &[String]) -> String {
@@ -2344,12 +2344,14 @@ impl Workbench {
             self.create(kind);
         }
         if let Some(item) = response.delete {
-            // A part among several selected ones deletes them all.
+            // A part or item among several selected ones deletes them all.
             let parts = self.tree.selected_parts(view);
+            let selected = self.tree.selected_items(view);
             let items = match item {
                 TreeItem::Part(index) if parts.contains(&index) => {
                     parts.into_iter().map(TreeItem::Part).collect()
                 }
+                item if selected.contains(&item) => selected,
                 item => vec![item],
             };
             self.confirm_delete = Some((view, items));
@@ -2363,18 +2365,40 @@ impl Workbench {
             }
         }
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
-            crate::setup::toggle_active(&mut model.fe, &item);
+            // Several selected items all take the state the clicked one changes to.
+            let selected = self.tree.selected_items(view);
+            match crate::setup::is_active(&mut model.fe, &item) {
+                Some(active) if selected.len() > 1 && selected.contains(&item) => {
+                    for item in &selected {
+                        crate::setup::set_active(&mut model.fe, item, !active);
+                    }
+                }
+                _ => {
+                    crate::setup::toggle_active(&mut model.fe, &item);
+                }
+            }
         }
         if let Some(model) = self.model.as_mut() {
             for (item, visible) in &response.symbol_visibility {
                 crate::setup::set_visible(&mut model.fe, item, *visible);
             }
         }
-        if let (Some(item), Some(model)) = (response.swap_master_slave, self.model.as_mut())
-            && crate::setup::swap_master_slave(&mut model.fe, &item)
-        {
-            // The selection stays, but master and slave colours change places.
-            self.highlighted = None;
+        if let (Some(item), Some(model)) = (response.swap_master_slave, self.model.as_mut()) {
+            // Several selected items are all swapped.
+            let selected = self.tree.selected_items(view);
+            let items = if selected.contains(&item) {
+                selected
+            } else {
+                vec![item]
+            };
+            let mut swapped = false;
+            for item in &items {
+                swapped |= crate::setup::swap_master_slave(&mut model.fe, item);
+            }
+            if swapped {
+                // The selection stays, but master and slave colours change places.
+                self.highlighted = None;
+            }
         }
         if response.material_library {
             self.open_material_library();
@@ -4628,6 +4652,7 @@ impl Workbench {
             })
             .collect();
         let question = match parts.as_slice() {
+            [] if items.len() > 1 => format!("Delete the {} selected items?", items.len()),
             [] => "Delete the selected item?".into(),
             [name] => format!("Delete the selected part?\n{name}"),
             names => format!("Delete the selected parts?\n{}", names.join(", ")),
@@ -4663,8 +4688,16 @@ impl Workbench {
                         _ => None,
                     })
                     .collect();
+                let selected_items = self.tree.selected_items(view);
                 if !parts.is_empty() && parts.iter().all(|p| selected.contains(p)) {
                     self.delete_parts(view, &parts);
+                } else if items.len() > 1 && items.iter().all(|i| selected_items.contains(i)) {
+                    // From the back, so that the indices of the others stay valid.
+                    let mut items = items;
+                    items.sort();
+                    for item in items.into_iter().rev() {
+                        self.delete_item(view, item);
+                    }
                 } else if let [item] = items.as_slice()
                     && self.tree.selected.as_ref() == Some(&(view, item.clone()))
                 {
@@ -5203,14 +5236,22 @@ impl Workbench {
             editor.highlight(model)
         } else {
             let parts = self.tree.selected_parts(TreeView::FeModel);
-            let selection = (self.tree.selected.clone(), parts.clone());
+            let items = self.tree.selected_items(TreeView::FeModel);
+            let selection = (self.tree.selected.clone(), parts.clone(), items.clone());
             if self.highlighted.as_ref() == Some(&selection) {
                 return;
             }
             self.highlighted = Some(selection);
             match &self.tree.selected {
                 Some((TreeView::FeModel, TreeItem::Part(_))) => Highlight::parts(parts),
-                Some((TreeView::FeModel, item)) => crate::setup::item_highlight(model, item),
+                // Several selected items, such as contact pairs, show together.
+                Some((TreeView::FeModel, _)) => {
+                    let mut highlight = Highlight::default();
+                    for item in &items {
+                        highlight.extend(crate::setup::item_highlight(model, item));
+                    }
+                    highlight
+                }
                 _ => Default::default(),
             }
         };

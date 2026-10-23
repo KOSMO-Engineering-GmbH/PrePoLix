@@ -3559,7 +3559,22 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
 /// Activates a deactivated step, boundary condition or load, or deactivates an active one,
 /// like PrePoMax's Activate and Deactivate; returns false for other items.
 pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
-    let active = match *item {
+    active_mut(fe, item).map(|a| *a = !*a).is_some()
+}
+
+/// Activates or deactivates an item; returns false for items that cannot be.
+pub fn set_active(fe: &mut FeModel, item: &TreeItem, active: bool) -> bool {
+    active_mut(fe, item).map(|a| *a = active).is_some()
+}
+
+/// Whether a step, boundary condition, load and the like is active; `None` for items that
+/// cannot be deactivated.
+pub fn is_active(fe: &mut FeModel, item: &TreeItem) -> Option<bool> {
+    active_mut(fe, item).map(|a| *a)
+}
+
+fn active_mut<'a>(fe: &'a mut FeModel, item: &TreeItem) -> Option<&'a mut bool> {
+    match *item {
         TreeItem::Step(s) => fe.steps.get_mut(s).map(|st| &mut st.active),
         TreeItem::BoundaryCondition(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.boundary_conditions.get_mut(i))
@@ -3582,8 +3597,7 @@ pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::NodeTie(i) => fe.node_ties.get_mut(i).map(|t| &mut t.active),
         TreeItem::InitialCondition(i) => fe.initial_conditions.get_mut(i).map(|c| &mut c.active),
         _ => None,
-    };
-    active.map(|a| *a = !*a).is_some()
+    }
 }
 
 /// Shows or hides the symbol of a constraint, boundary condition or load in the 3D view;

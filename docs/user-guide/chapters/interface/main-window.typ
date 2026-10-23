@@ -79,7 +79,10 @@ has no mesh yet opens on the #ui("Geometry") tab, opening a result file switches
 - Selecting an item highlights its region in the 3D view. Master and slave regions of contacts and
   ties get different colours.
 - Parts can be selected together: #key("Ctrl")+click toggles a part, #key("Shift")+click
-  selects a range.
+  selects a range. The same works for the items of one container, for example many contact
+  pairs: the 3D view highlights them all, and #ui("Delete Selected"), #ui("Activate Selected") /
+  #ui("Deactivate Selected") (or #key("Del") and #key("Space")) and #ui("Swap Master/Slave of
+  Selected") in the context menu act on all of them.
 
 === Context menus
 
