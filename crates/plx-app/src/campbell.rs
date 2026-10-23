@@ -884,7 +884,10 @@ impl CampbellWindow {
         if min_speed >= max_speed {
             return Err("The lowest speed must be below the highest.".into());
         }
-        let job_solver = solver.job_solver();
+        // The speeds solved at the same time share the cores.
+        let job_solver = solver
+            .shared_by(solver.parallel_runs.max(1) as usize)
+            .job_solver();
         if let Some(message) = crate::settings::missing_executable(&job_solver.executable) {
             return Err(format!("CalculiX not started: {message}"));
         }

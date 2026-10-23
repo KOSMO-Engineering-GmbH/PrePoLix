@@ -33,7 +33,7 @@ pub const SHOW_LINKED_LABEL: &str = "Show linked items";
 pub const SHOW_LINKED_TIP: &str = "Lists the items of the FE Model tree that this analysis takes from another one. They stay in the model; hidden, the tree shows only what is set up here.";
 
 /// [`Settings::format`] of this version.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -54,6 +54,10 @@ impl Settings {
     pub fn upgrade(&mut self) {
         if self.format < 1 {
             self.solver.forget_old_default();
+        }
+        if self.format < 2 && self.solver.threads == 1 {
+            // The old default of one thread: now all cores.
+            self.solver.threads = AUTOMATIC_THREADS;
         }
         self.format = FORMAT;
     }
@@ -127,7 +131,8 @@ pub struct Solver {
     /// The CalculiX executable; a bare name is looked up on `PATH`, empty for the one shipped
     /// with prepolix (see [`bundled_ccx`]).
     pub executable: String,
-    /// Threads for the solver (`OMP_NUM_THREADS`).
+    /// Threads for the solver (`OMP_NUM_THREADS`); [`AUTOMATIC_THREADS`] for all cores,
+    /// shared by the analyses solved at the same time.
     pub threads: u32,
     /// Where analyses run; empty for the default, see [`default_work_dir`].
     pub work_dir: String,
@@ -142,6 +147,14 @@ pub struct Solver {
     pub restart_limit_mb: u64,
     /// Most analyses Update Project solves at the same time.
     pub parallel_runs: u32,
+}
+
+/// [`Solver::threads`] for as many threads as the computer has cores.
+pub const AUTOMATIC_THREADS: u32 = 0;
+
+/// Cores of this computer, at least one.
+pub fn cores() -> u32 {
+    std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
 }
 
 /// Result of [`crate::solver_check::available_solvers`] for one executable.
@@ -165,7 +178,7 @@ impl Default for Solver {
     fn default() -> Self {
         Self {
             executable: String::new(),
-            threads: 1,
+            threads: AUTOMATIC_THREADS,
             work_dir: String::new(),
             detected: None,
             keywords: None,
@@ -273,7 +286,26 @@ impl Solver {
                 "" => default_executable(),
                 path => path.into(),
             },
-            threads: self.threads.max(1),
+            threads: self.threads_of(1),
+        }
+    }
+
+    /// Threads of each of `concurrent` runs solved at the same time: the chosen number, or
+    /// with [`AUTOMATIC_THREADS`] an equal share of the cores, so that together they do not
+    /// ask for more than the computer has.
+    pub fn threads_of(&self, concurrent: usize) -> u32 {
+        match self.threads {
+            AUTOMATIC_THREADS => (cores() / concurrent.max(1) as u32).max(1),
+            threads => threads,
+        }
+    }
+
+    /// These settings for one of `concurrent` runs solved at the same time, see
+    /// [`Self::threads_of`].
+    pub fn shared_by(&self, concurrent: usize) -> Self {
+        Self {
+            threads: self.threads_of(concurrent),
+            ..self.clone()
         }
     }
 
@@ -284,6 +316,33 @@ impl Solver {
             self.executable.clear();
         }
     }
+}
+
+/// Automatic threads, or the number chosen.
+fn threads_ui(ui: &mut egui::Ui, threads: &mut u32) {
+    ui.horizontal(|ui| {
+        let mut automatic = *threads == AUTOMATIC_THREADS;
+        let tip = format!(
+            "Uses all {} cores of this computer. Analyses solved at the same time share them.",
+            cores()
+        );
+        if ui
+            .checkbox(&mut automatic, "Automatic")
+            .on_hover_text(tip)
+            .changed()
+        {
+            *threads = if automatic {
+                AUTOMATIC_THREADS
+            } else {
+                cores()
+            };
+        }
+        if automatic {
+            ui.weak(format!("{} cores", cores()));
+        } else {
+            ui.add(numeric::drag_value(threads).range(1..=256));
+        }
+    });
 }
 
 /// The fastest of the detected direct solvers, or CalculiX's own choice.
@@ -654,7 +713,7 @@ impl SettingsWindow {
                         );
                         ui.end_row();
                         ui.label("Threads");
-                        ui.add(numeric::drag_value(&mut solver.threads).range(1..=256));
+                        threads_ui(ui, &mut solver.threads);
                         ui.end_row();
                         ui.label("Work directory");
                         ui.add(
@@ -677,7 +736,7 @@ impl SettingsWindow {
                         ui.end_row();
                         ui.label("Parallel analyses");
                         ui.add(numeric::drag_value(&mut solver.parallel_runs).range(1..=64))
-                            .on_hover_text("Update Project solves up to this many independent analyses at the same time, each with the threads above; the Campbell sweep runs as many speeds at a time.");
+                            .on_hover_text("Update Project solves up to this many independent analyses at the same time, each with the threads above (with automatic threads they share the cores); the Campbell sweep runs as many speeds at a time.");
                         ui.end_row();
                         ui.label("Equation solvers");
                         ui.label(solvers_text(solver.solvers()))
@@ -949,6 +1008,30 @@ mod tests {
             std::path::Path::new("/opt/ccx")
         );
         assert_eq!(solver.work_dir(), std::path::Path::new("/tmp/plx"));
+    }
+
+    #[test]
+    fn automatic_threads_share_the_cores() {
+        let solver = Solver::default();
+        assert_eq!(solver.threads, AUTOMATIC_THREADS);
+        assert_eq!(solver.job_solver().threads, cores());
+        assert_eq!(solver.threads_of(2), (cores() / 2).max(1));
+        assert_eq!(solver.threads_of(10_000), 1);
+        let chosen = Solver {
+            threads: 3,
+            ..Solver::default()
+        };
+        assert_eq!(chosen.threads_of(4), 3);
+        assert_eq!(chosen.shared_by(4).job_solver().threads, 3);
+        // The old default of one thread becomes automatic, a later choice of one stays.
+        let mut old: Settings = ron::from_str("(format: 1, solver: (threads: 1))").unwrap();
+        old.upgrade();
+        assert_eq!(old.solver.threads, AUTOMATIC_THREADS);
+        let mut one = Settings::default();
+        one.solver.threads = 1;
+        let mut one: Settings = ron::from_str(&ron::to_string(&one).unwrap()).unwrap();
+        one.upgrade();
+        assert_eq!(one.solver.threads, 1);
     }
 
     #[test]

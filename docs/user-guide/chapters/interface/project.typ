@@ -269,9 +269,9 @@ first (@mesh-block).
   is not up to date itself; when it is solved again, the analyses that use its results are
   solved after it.
 - Independent analyses are solved at the same time, up to #ui("Parallel analyses") of the
-  CalculiX settings (default 2), each with the number of threads set there (@settings). Two
-  analyses on one computer are worth it when CalculiX spends its time in the equation solver on
-  few threads; set #ui("Threads") times #ui("Parallel analyses") to at most the number of
+  CalculiX settings (default 2), each with the number of threads set there (@settings). With
+  #ui("Automatic") threads the analyses solved at the same time share the processor cores; with
+  a fixed number, set #ui("Threads") times #ui("Parallel analyses") to at most the number of
   processor cores.
 - An analysis whose window is closed is solved in the background, without opening its window:
   PrePoLix meshes its geometry if the mesh is missing or out of date, writes the input file,
