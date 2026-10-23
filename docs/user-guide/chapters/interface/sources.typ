@@ -174,7 +174,7 @@ frequency step cannot be linked, as the `.frd` file does not hold them.]
 === CAD Operation <cad-operation-block>
 
 A CAD Operation block changes geometry before it is meshed: it rounds (#ui("Fillet")) or bevels
-(#ui("Chamfer")) picked edges, or moves picked planar faces (#ui("Push/Pull")), of the geometry
+(#ui("Chamfer")) picked edges of solids or corners of flat faces, or moves picked planar faces (#ui("Push/Pull")), of the geometry
 linked to it and gives the changed geometry on.
 Add it with #menu("Project", "Add CAD Operation") or from the picker, drag the
 #ui("Geometry") of a file block, of an analysis with imported geometry or of another CAD
@@ -193,10 +193,11 @@ radius, distance or offset; #ui("Preview") applies it and shows the result, #ui(
 #fields(
   [Geometry], [Left pin: the geometry to change. Right pin: the changed geometry, with its
     state.],
-  [Fillet / Chamfer / Push/Pull], [What it does and to how many edges or faces.],
+  [Fillet / Chamfer / Push/Pull], [What it does and to how many edges, corners or faces.],
   [Radius / Distance / Offset], [The radius of the fillet, the distance of the chamfer from
     the edge on both faces, or how far the faces move: outwards when positive, inwards when
-    negative. Type or drag it in place, or drop the value of a Parameters block or an
+    negative. Zero leaves the geometry as it is, so that a parameter study can
+    switch the operation off in some design points. Type or drag it in place, or drop the value of a Parameters block or an
     input of a parameter study on its pin (@parameter-study): every design point then makes the
     geometry again, and the analyses after it mesh and solve it anew.],
 )
@@ -209,6 +210,20 @@ and their size; one that is no longer found has to be picked again. When OpenCAS
 make the operation, for example because the radius is larger than the faces next to an edge,
 the row shows an error with the reason in its tooltip and the output pane, and the analyses
 after the block are not solved; in a parameter study the design point fails.
+
+==== Corners of 2D geometry <cad-corners-2d>
+
+When the linked geometry has no solids, only faces, as for a plane stress, plane strain or
+axisymmetric analysis, #ui("Fillet") and #ui("Chamfer") act on the corners of the faces: the
+editor looks straight onto their plane and a click picks the corner nearest to it, drawn as a red
+point. The fillet replaces the corner by an arc of the radius tangent to both edges; the chamfer
+cuts it with a straight line at the distance from the corner on both edges. A corner where the
+edges meet smoothly, such as the end of a fillet already in the sketch, has nothing to round and
+the operation fails with that reason. A corner on an edge two faces share cannot be rounded either.
+#ui("Push/Pull") is not offered for 2D geometry.
+
+#screenshot("cad-corners-2d.png", [Two corners of a flat shoulder picked (left) and rounded with
+  a radius of 4 mm (right)])
 
 ==== Push/Pull <push-pull>
 

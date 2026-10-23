@@ -158,6 +158,7 @@ gmsh_api! {
     occ_add_line = "gmshModelOccAddLine": fn(c_int, c_int, c_int, Ierr) -> c_int;
     occ_synchronize = "gmshModelOccSynchronize": fn(Ierr);
     occ_remove = "gmshModelOccRemove": fn(*const c_int, usize, c_int, Ierr);
+    occ_remove_all_duplicates = "gmshModelOccRemoveAllDuplicates": fn(Ierr);
     field_add = "gmshModelMeshFieldAdd": fn(*const c_char, c_int, Ierr) -> c_int;
     field_set_number = "gmshModelMeshFieldSetNumber": fn(c_int, *const c_char, c_double, Ierr);
     field_set_numbers = "gmshModelMeshFieldSetNumbers":
