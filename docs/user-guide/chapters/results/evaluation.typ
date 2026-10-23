@@ -267,6 +267,8 @@ A file with several tables, such as that of a hot spot plot, holds an array of t
 document, for example, `json("path.json")` reads the file, and its `rows` go straight into a
 table or a plot.
 
+#screenshot("path-json.png", [#ui("Save as CSV…") and #ui("Save as JSON…") in the path dialog])
+
 == Query <query>
 
 #menu("Tools", "Query ...") or the #ui("Query") button of the toolbar (the pipette) reads values from the model by clicking: #ui("Vertex/Node"),
