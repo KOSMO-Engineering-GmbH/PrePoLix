@@ -147,6 +147,14 @@ pub struct TreeState {
     /// Leave the linked items out of the FE Model tree; categories stay, so that items of
     /// the analysis itself can be added to them.
     pub hide_linked: bool,
+    /// What acts on the parts selected in the FE Model tree, such as their contact pairs and
+    /// loads: marked in the tree. Kept up to date by the app for the parts and the model
+    /// revision in `acting_for`.
+    pub acting: BTreeSet<TreeItem>,
+    pub acting_for: Option<(BTreeSet<usize>, u64)>,
+    /// The parts were clicked in the 3D view: open the branches of what acts on them in
+    /// the next frame, while the tree stays where it is.
+    pub reveal_acting: bool,
 }
 
 impl TreeState {
@@ -352,6 +360,20 @@ pub struct TreeResponse {
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
 /// that hovering never moves the rows below (egui's selectable label grows by its frame).
+/// The tinted frame behind the label of an item that acts on the selected part.
+fn acting_mark(rect: Rect) -> Shape {
+    let color = crate::style::highlight();
+    let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 48);
+    let stroke = egui::Stroke::new(1.0, color);
+    Shape::Rect(egui::epaint::RectShape::new(
+        rect,
+        0.0,
+        fill,
+        stroke,
+        egui::StrokeKind::Inside,
+    ))
+}
+
 pub(crate) fn row_label(
     ui: &mut Ui,
     selected: bool,
@@ -700,6 +722,9 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
         ),
         Group("Surface Interactions") => matches!(item, SurfaceInteraction(_)),
         Group("Contact Pairs") => matches!(item, ContactPair(_) | Tie(_) | NodeTie(_)),
+        Group("Steps") => matches!(item, BoundaryCondition(..) | Load(..)),
+        Step(s) | StepGroup(s, "BCs") if matches!(item, BoundaryCondition(t, _) if t == s) => true,
+        Step(s) | StepGroup(s, "Loads") if matches!(item, Load(t, _) if t == s) => true,
         _ => false,
     }
 }
@@ -892,7 +917,14 @@ impl Tree<'_> {
         } else {
             inactive.then_some(INACTIVE)
         };
-        let mut response = row_label(ui, self.is_selected(&item), color, text);
+        let selected = self.is_selected(&item);
+        // Drawn under the label once its size is known.
+        let mark = ui.painter().add(Shape::Noop);
+        let mut response = row_label(ui, selected, color, text);
+        if !selected && self.view == TreeView::FeModel && self.state.acting.contains(&item) {
+            ui.painter().set(mark, acting_mark(response.rect));
+            response = response.on_hover_text("Acts on the selected part");
+        }
         if let Some(source) = self.state.linked.get(&item) {
             let tip = format!(
                 "Linked from {source}: it changes there. Double-click to open {source} or \
@@ -1284,6 +1316,16 @@ impl Tree<'_> {
         {
             state.set_open(true);
         }
+        if self.state.reveal_acting
+            && self.view == TreeView::FeModel
+            && self
+                .state
+                .acting
+                .iter()
+                .any(|acting| contains(&item, acting))
+        {
+            state.set_open(true);
+        }
         if let Some(open) = self.forced_open {
             // While a branch closes, egui still draws its body for the animation, so the
             // descendants are collapsed as well.
@@ -1564,6 +1606,7 @@ pub fn show(
         tree.state.expand = None;
     }
     tree.state.reveal = false;
+    tree.state.reveal_acting = false;
     // Like PrePoMax, the space bar switches the selected item on or off; here only while the
     // pointer is over the tree, so that typing elsewhere never does.
     if let Some((selected_view, item)) = &tree.state.selected

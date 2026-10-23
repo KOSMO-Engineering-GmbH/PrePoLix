@@ -114,6 +114,17 @@ digits, `_` and `-`, up to 80 characters. Items that refer to a renamed part, ma
 amplitude follow the new name. Geometry parts cannot be renamed, because the mesh setup refers to
 them by name.
 
+=== What acts on a part <acting>
+
+A click on a part in the 3D view selects it in the #ui("FE Model") tree, where the tree stays
+where it is. Instead it marks with a blue frame the contact pairs and ties, constraints,
+boundary conditions and loads whose region lies on the part, and opens their branches. A load
+on a reference point counts for the parts of the rigid body the point drives. With several
+parts selected the tree marks what acts on any of them.
+
+#screenshot("part-acting.png", [BLOCK4 clicked in the 3D view: its two ties and the force on it
+  are marked])
+
 === Properties dialogs
 
 A double-click on a part opens its properties: name, number of elements and nodes, element types,

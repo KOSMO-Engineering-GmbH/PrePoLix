@@ -1987,6 +1987,7 @@ impl Workbench {
                     }
                     self.model = Some(model);
                     self.symbols_shown = None;
+                    self.tree.acting_for = None;
                     self.geometry = geometry_view;
                     // Results bound to the project open with it.
                     if self
@@ -2106,6 +2107,9 @@ impl Workbench {
             )
             .on_hover_text(settings::SHOW_LINKED_TIP);
             ui.separator();
+        }
+        if view == TreeView::FeModel {
+            self.update_acting();
         }
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
@@ -4184,11 +4188,32 @@ impl Workbench {
         );
     }
 
-    /// Selects a part clicked in the 3D view in the tree shown.
+    /// Selects a part clicked in the 3D view in the tree shown. In the FE Model tree the
+    /// tree stays where it is and opens what acts on the part instead, which it marks.
     fn select_part(&mut self, index: usize) {
         let view = self.tree_view;
         self.tree.select_part(view, index);
-        self.tree.reveal = true;
+        if view == TreeView::FeModel {
+            self.tree.reveal_acting = true;
+        } else {
+            self.tree.reveal = true;
+        }
+    }
+
+    /// Finds what acts on the parts selected in the FE Model tree, once for each selection
+    /// and change of the model.
+    fn update_acting(&mut self) {
+        let parts = self.tree.selected_parts(TreeView::FeModel);
+        let Some(model) = self.model.as_ref().filter(|_| !parts.is_empty()) else {
+            self.tree.acting.clear();
+            self.tree.acting_for = None;
+            return;
+        };
+        let key = (parts, model.revision);
+        if self.tree.acting_for.as_ref() != Some(&key) {
+            self.tree.acting = crate::setup::acting_on_parts(model, &key.0);
+            self.tree.acting_for = Some(key);
+        }
     }
 
     /// The context menu of the 3D view: on a part it starts with the part's menu from the

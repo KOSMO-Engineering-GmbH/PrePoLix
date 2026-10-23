@@ -939,6 +939,13 @@ impl Model {
         self.part_nodes.get_or_init(|| PartNodes::new(&self.mesh))
     }
 
+    /// The part a node belongs to; of several parts that share it, the first.
+    pub fn node_part(&self, id: NodeId) -> Option<usize> {
+        let index = self.mesh.node_index(id)?;
+        let part = *self.part_nodes().part_of.get(index)?;
+        (part != u32::MAX).then_some(part as usize)
+    }
+
     fn skin_lookup(&self) -> &SkinLookup {
         (self.skin_lookup).get_or_init(|| SkinLookup::new(&self.skins, self.mesh.elements().len()))
     }
