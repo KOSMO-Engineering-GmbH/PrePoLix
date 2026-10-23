@@ -30,6 +30,11 @@ pub fn apply_cad_operation(
     if let Some(problem) = operation.problem() {
         return Err(fail(capitalised(&problem)));
     }
+    // A radius, distance or offset of zero changes nothing: the input is given on as it is,
+    // so that a parameter study can switch the operation off.
+    if value == 0.0 {
+        return Ok(input.clone());
+    }
     let file = TempFile::with_contents("brep", &input.brep)?;
     let result = TempFile::new("brep");
     let names = with_gmsh(|gmsh| {

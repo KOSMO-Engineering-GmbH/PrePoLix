@@ -173,16 +173,15 @@ impl CadOperation {
 
     /// Why the operation cannot be applied as it is, before trying.
     pub fn problem(&self) -> Option<String> {
-        if self.kind.signed() {
-            if !(self.value.is_finite() && self.value != 0.0) {
-                return Some(format!(
-                    "the {} must not be zero",
-                    self.kind.value_label().to_lowercase()
-                ));
-            }
-        } else if !(self.value.is_finite() && self.value > 0.0) {
+        if !self.value.is_finite() {
             return Some(format!(
-                "the {} must be greater than zero",
+                "the {} is not a number",
+                self.kind.value_label().to_lowercase()
+            ));
+        }
+        if !self.kind.signed() && self.value < 0.0 {
+            return Some(format!(
+                "the {} must not be negative",
                 self.kind.value_label().to_lowercase()
             ));
         }
@@ -249,21 +248,27 @@ mod tests {
             value: 0.0,
             ..operation
         };
-        assert!(flat.problem().unwrap().contains("radius"));
-        // An offset may point inwards, but not be zero.
+        // Zero leaves the geometry as it is, so that a study may switch it off.
+        assert_eq!(flat.problem(), None);
+        let negative = CadOperation {
+            value: -1e-3,
+            ..flat.clone()
+        };
+        assert!(negative.problem().unwrap().contains("radius"));
+        // An offset may point inwards.
         let inwards = CadOperation {
             kind: CadOperationKind::PushPull,
             value: -2e-3,
             ..flat
         };
         assert_eq!(inwards.problem(), None);
-        assert!(
+        assert_eq!(
             CadOperation {
                 value: 0.0,
                 ..inwards
             }
-            .problem()
-            .is_some()
+            .problem(),
+            None
         );
         assert!(CadOperationKind::PushPull.picks(CadEntity::Face(1)));
         assert!(!CadOperationKind::PushPull.picks(CadEntity::Edge(1)));

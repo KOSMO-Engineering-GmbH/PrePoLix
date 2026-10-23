@@ -1841,7 +1841,15 @@ fn fillets_and_chamfers_change_the_solid_and_keep_its_faces_findable() {
     // edges of the geometry.
     assert!(apply_cad_operation(&input, Fillet, &[edge], 20.0).is_err());
     assert!(apply_cad_operation(&input, Fillet, &[CadEntity::Edge(99)], 1.0).is_err());
-    assert!(apply_cad_operation(&input, Fillet, &[edge], 0.0).is_err());
+    assert!(apply_cad_operation(&input, Fillet, &[edge], -1.0).is_err());
+    // A radius of zero leaves the solid as it is, so that a study can switch it off.
+    for kind in [Fillet, Chamfer] {
+        let same = apply_cad_operation(&input, kind, &[edge], 0.0).unwrap();
+        assert_eq!(
+            (same.brep, same.signatures),
+            (input.brep.clone(), input.signatures.clone())
+        );
+    }
 }
 
 #[test]
@@ -1875,7 +1883,8 @@ fn push_pull_moves_planar_faces_along_their_normal() {
     assert!((solid_volume(&wider) - 1440.0).abs() < 1e-3);
     // Through the whole solid, a curved face, nothing to move: it fails.
     assert!(apply_cad_operation(&input, PushPull, &[top], -10.0).is_err());
-    assert!(apply_cad_operation(&input, PushPull, &[top], 0.0).is_err());
+    let same = apply_cad_operation(&input, PushPull, &[top], 0.0).unwrap();
+    assert_eq!(same.brep, input.brep);
     let edge = (input.signatures.iter())
         .find(|s| s.entity.dim() == 1)
         .unwrap()
@@ -1966,4 +1975,6 @@ fn corners_of_flat_faces_are_rounded_and_bevelled() {
         .to_string();
     assert!(error.contains("share"), "{error}");
     assert!(apply_cad_operation(&input, Fillet, &[vertex(&input, 0.0, 0.0)], 20.0).is_err());
+    let same = apply_cad_operation(&input, Chamfer, &[vertex(&input, 0.0, 0.0)], 0.0).unwrap();
+    assert_eq!(same.brep, input.brep);
 }

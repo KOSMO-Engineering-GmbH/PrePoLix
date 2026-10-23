@@ -196,7 +196,8 @@ radius, distance or offset; #ui("Preview") applies it and shows the result, #ui(
   [Fillet / Chamfer / Push/Pull], [What it does and to how many edges, corners or faces.],
   [Radius / Distance / Offset], [The radius of the fillet, the distance of the chamfer from
     the edge on both faces, or how far the faces move: outwards when positive, inwards when
-    negative. Type or drag it in place, or drop the value of a Parameters block or an
+    negative. Zero leaves the geometry as it is, so that a parameter study can
+    switch the operation off in some design points. Type or drag it in place, or drop the value of a Parameters block or an
     input of a parameter study on its pin (@parameter-study): every design point then makes the
     geometry again, and the analyses after it mesh and solve it anew.],
 )
