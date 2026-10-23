@@ -3958,9 +3958,16 @@ impl ProjectApp {
             return;
         };
         if analysis.window.is_some() {
-            // Brought to the front.
+            // Brought to the front, also when minimized (Windows focuses only a window that
+            // is not). Wayland lets no program take the focus: there the taskbar marks it.
             let viewport = analysis_viewport(id);
-            ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
+            for command in [
+                egui::ViewportCommand::Minimized(false),
+                egui::ViewportCommand::Focus,
+                egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational),
+            ] {
+                ctx.send_viewport_cmd_to(viewport, command);
+            }
             if let (Some(view), Some(window)) = (view, &mut analysis.window) {
                 window.show_workspace(view.clone());
             }

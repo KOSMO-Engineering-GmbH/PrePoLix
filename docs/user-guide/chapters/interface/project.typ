@@ -107,7 +107,8 @@ the state of another analysis (@data-links).
 === Working with the schematic
 
 - *Double-click* a block to open its analysis in its own window. If the window is open
-  already, it comes to the front; while the analysis is solved in the background, it opens
+  already, it comes to the front, also when it is minimized. Wayland does not let a program
+  bring its own window to the front; there the taskbar marks the window instead. While the analysis is solved in the background, it opens
   once the solve is done. The header of an open analysis says #ui("(open)").
   Double-clicking a row opens the window in the matching workspace: #ui("Geometry") and
   #ui("Mesh") in the Geometry workspace, #ui("Setup") and its categories in the FE Model
