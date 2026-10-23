@@ -1735,6 +1735,9 @@ impl Workbench {
                 let mut rebuild = false;
                 // The camera of bound results as saved, replacing the fit to the model.
                 let mut camera = None;
+                // Results opened while another workspace stays shown, e.g. an analysis opened
+                // from a Setup row of its block.
+                let mut results_hidden = false;
                 if let Some(view) = &mut model.results {
                     let post = &self.settings.post;
                     let levels = view.color_scale.levels;
@@ -1829,11 +1832,13 @@ impl Workbench {
                     ));
                     let shown = results_workspace(&mut self.pinned_view);
                     self.set_tree_view(shown);
+                    results_hidden = self.tree_view != TreeView::Results;
                     // Results of a 2D model are flat in z and seen from the front.
-                    if model
-                        .mesh
-                        .bounds()
-                        .is_some_and(|(min, max)| (max[2] - min[2]).abs() < 1e-9)
+                    if !results_hidden
+                        && model
+                            .mesh
+                            .bounds()
+                            .is_some_and(|(min, max)| (max[2] - min[2]).abs() < 1e-9)
                     {
                         self.viewport
                             .apply(ViewCommand::View(StandardView::Front), None);
@@ -1985,6 +1990,14 @@ impl Workbench {
                     {
                         self.open_bound_results();
                     }
+                }
+                if results_hidden {
+                    // The view keeps the workspace shown and its camera; the results take
+                    // theirs, in their own units, when the Results tab is chosen, or a fit
+                    // without a saved one.
+                    self.parked_camera = camera;
+                    self.results_changed = true;
+                    return;
                 }
                 self.frame_cache.clear();
                 self.viewport.set_parts(&render_meshes);
