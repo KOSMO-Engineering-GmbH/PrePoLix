@@ -1625,7 +1625,13 @@ impl AnalysisWindow {
 
         if let Some(command) = self.workbench.view_command.take() {
             let bounds = self.workbench.shown().and_then(Model::visible_bounds);
-            self.workbench.viewport.apply(command, bounds);
+            if matches!(command, ViewCommand::Fit) && bounds.is_none() {
+                // Nothing to fit yet, e.g. on the empty Geometry tab of an analysis opened
+                // from its mesh: the FE Model tab, which shares the camera, fits instead.
+                self.workbench.view_command = Some(command);
+            } else {
+                self.workbench.viewport.apply(command, bounds);
+            }
         }
         // Last, after everything the user changed in this frame.
         if let Some(model) = &mut self.workbench.model {
