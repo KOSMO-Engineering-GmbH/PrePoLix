@@ -170,3 +170,71 @@ fn elements_of_unsupported_types_are_skipped_by_number() {
         [7, 8]
     );
 }
+
+#[test]
+fn reads_the_thickness_of_shells_and_the_area_of_trusses() {
+    let text = "\
+*Node
+1, 0, 0, 0
+2, 1, 0, 0
+3, 1, 1, 0
+4, 0, 1, 0
+5, 0, 0, 1
+6, 1, 1, 1
+7, 2, 1, 1
+*Element, Type=S4, Elset=Plate
+1, 1, 2, 3, 4
+*Element, Type=T3D2, Elset=Bar
+2, 1, 5
+*Element, Type=C3D4, Elset=Block
+3, 3, 6, 7, 5
+*Element, Type=B31, Elset=Beam
+4, 6, 7
+*Elset, Elset=Skin
+1
+*Shell section, Elset=Skin, Material=Steel, Offset=0.5
+2.5
+*Solid section, Elset=Bar, Material=Steel
+0.75
+*Solid section, Elset=Block, Material=Steel
+*Membrane section, Elset=Missing, Material=Steel
+1
+*Beam section, Elset=Beam, Material=Steel, Section=CIRC, Offset2=0.5
+4, 4
+0, 1, 0
+";
+    let import = read_inp_str(text, None).unwrap();
+    let kinds: Vec<(&str, &SectionKind)> = (import.sections.iter())
+        .map(|s| (s.name.as_str(), &s.kind))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (
+                "SKIN",
+                &SectionKind::Shell {
+                    thickness: 2.5,
+                    offset: 0.5
+                }
+            ),
+            ("BAR", &SectionKind::Truss { area: 0.75 }),
+            (
+                "MISSING",
+                &SectionKind::Membrane {
+                    thickness: 1.0,
+                    offset: 0.0
+                }
+            ),
+            (
+                "BEAM",
+                &SectionKind::Beam(BeamSection {
+                    profile: BeamProfile::Circ { radius: 2.0 },
+                    orientation: BeamOrientation::Direction([0.0, 1.0, 0.0]),
+                    offset: [0.0, 0.5],
+                })
+            ),
+        ]
+    );
+    assert_eq!(import.sections[0].region.elements(&import.mesh), vec![1]);
+    assert_eq!(import.skipped_keywords["SOLIDSECTION"], 2);
+}

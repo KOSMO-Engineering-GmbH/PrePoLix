@@ -1,5 +1,6 @@
 //! wgpu-Renderer für FE-Netze und Ergebnisse.
 
+mod beam;
 mod camera;
 pub mod contour;
 mod fe;
@@ -9,6 +10,7 @@ mod renderer;
 mod section;
 mod shell;
 
+pub use beam::{BeamShape, beam_mesh};
 pub use camera::{Camera, StandardView};
 pub use fe::{mesh_wireframe, part_color, part_render_mesh, wireframe_edges};
 pub use mesh::{Directions, NodeBlend, RenderMesh, Vertex};

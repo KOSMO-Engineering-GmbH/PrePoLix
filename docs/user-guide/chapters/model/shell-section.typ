@@ -25,7 +25,7 @@ internally, and the result file keeps the node numbers of the model.
 Shell nodes have rotations: #ui("Displacement/Rotation") boundary conditions can hold `UR1`,
 `UR2`, `UR3`, and #ui("Moment") loads can act on them.
 
-==== Shell thickness in the FE model
+==== Shell thickness in the FE model and the results
 
 The FE model shows the elements of shell and membrane sections as the solid their section
 gives them: the surface thickened by the #ui("Thickness"), with the mesh lying where the
@@ -36,6 +36,11 @@ to opposite sides show a step, which reveals a flipped normal before the analysi
 #screenshot("shell-thickness.png", [Shell sections drawn with their thickness: the plate with
 offset 0.5 hangs below its mesh, the half tube with offset 0.5 lies inside it.])
 
+The Results workspace draws the shells the same way, deformed and coloured by the shown
+result: CalculiX reports shells on their mid-surface (`OUTPUT=2D`, see above), and PrePoLix takes
+thickness and offset from the input file CalculiX ran. The solid takes the value of its node
+across the whole thickness; the stresses on the top and the bottom face are not drawn apart.
+
 Turn the display off and on with #menu("View", "Shell Thickness") or in the
-#link(<settings>)[settings] under #ui("Graphics"). Picking still selects the elements on the
-mesh, and the Results workspace is not affected.
+#link(<settings>)[settings] under #ui("Graphics"); the setting applies to both workspaces.
+Picking still selects the elements on the mesh.

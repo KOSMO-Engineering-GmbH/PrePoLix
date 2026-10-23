@@ -10,7 +10,10 @@ mod write;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use plx_mesh::{Element, ElementId, ElementShape, FeMesh, NodeId, Part, SurfaceDefinition};
+use plx_mesh::{
+    Element, ElementFamily, ElementId, ElementShape, FeMesh, NodeId, Part, SurfaceDefinition,
+};
+use plx_model::{BeamOrientation, BeamProfile, BeamSection, Region, Section, SectionKind};
 
 pub use write::{
     Keyword, KeywordKind, WriteError, model_keywords, write_check_inp, write_deformed_mesh_inp,
@@ -50,6 +53,10 @@ pub struct InpImport {
     /// Elements of types the mesh does not hold, such as the springs and gaps that
     /// constraints are written as; skipped like their type.
     pub skipped_elements: BTreeSet<ElementId>,
+    /// Shell, membrane and beam sections and the solid sections of line elements (trusses),
+    /// on element sets of `mesh`, to draw the elements with their thickness or profile. They stay in
+    /// `skipped_keywords`: the model does not take them over.
+    pub sections: Vec<Section>,
 }
 
 pub fn read_inp(path: &Path) -> Result<InpImport, InpError> {
@@ -107,6 +114,17 @@ enum Block {
     Surface {
         name: String,
         by_nodes: bool,
+    },
+    /// A section whose data lines give the thickness of shells, the area of trusses or the
+    /// profile and normal of beams; `kind` holds the parameters until they are read.
+    /// `values` collects the numbers of each data line.
+    Section {
+        set: String,
+        material: String,
+        kind: SectionKind,
+        /// `SECTION=` of a beam section.
+        profile: String,
+        values: Vec<Vec<f64>>,
     },
 }
 
@@ -202,13 +220,53 @@ impl Reader {
                     .param("TYPE")
                     .is_some_and(|t| t.eq_ignore_ascii_case("NODE")),
             },
-            _ => {
+            name => {
+                let section = match name {
+                    "SHELLSECTION" | "MEMBRANESECTION" => {
+                        let offset = keyword.param("OFFSET").and_then(parse_f64).unwrap_or(0.0);
+                        Some(if name == "SHELLSECTION" {
+                            SectionKind::Shell {
+                                thickness: 0.0,
+                                offset,
+                            }
+                        } else {
+                            SectionKind::Membrane {
+                                thickness: 0.0,
+                                offset,
+                            }
+                        })
+                    }
+                    "SOLIDSECTION" => Some(SectionKind::Truss { area: 0.0 }),
+                    "BEAMSECTION" => {
+                        let offset =
+                            |key: &str| keyword.param(key).and_then(parse_f64).unwrap_or(0.0);
+                        Some(SectionKind::Beam(BeamSection {
+                            offset: [offset("OFFSET1"), offset("OFFSET2")],
+                            ..BeamSection::DEFAULT
+                        }))
+                    }
+                    _ => None,
+                };
+                let set = keyword.param("ELSET").filter(|s| !s.is_empty());
+                let block = match (section, set) {
+                    (Some(kind), Some(set)) => Block::Section {
+                        set: set.to_ascii_uppercase(),
+                        material: keyword.param("MATERIAL").unwrap_or_default().to_string(),
+                        kind,
+                        profile: keyword
+                            .param("SECTION")
+                            .unwrap_or_default()
+                            .to_ascii_uppercase(),
+                        values: Vec::new(),
+                    },
+                    _ => Block::Skip,
+                };
                 *self
                     .import
                     .skipped_keywords
                     .entry(keyword.name)
                     .or_default() += 1;
-                Block::Skip
+                block
             }
         })
     }
@@ -316,6 +374,40 @@ impl Reader {
                     .extend(ids);
             }
             Block::Surface { name, by_nodes } => self.surface_data(line, name, *by_nodes)?,
+            Block::Section {
+                set,
+                material,
+                kind,
+                profile,
+                values,
+            } => {
+                // A beam section has the dimensions and the normal, the others one line.
+                let needed = if matches!(kind, SectionKind::Beam(_)) {
+                    2
+                } else {
+                    1
+                };
+                if values.len() >= needed {
+                    return Ok(());
+                }
+                values.push(fields(&line.text).map_while(parse_f64).collect());
+                if values.len() < needed {
+                    return Ok(());
+                }
+                let mesh = &self.import.mesh;
+                let elements = mesh.element_sets.get(set.as_str()).into_iter().flatten();
+                let lines = (elements.filter_map(|&id| mesh.element(id)))
+                    .any(|e| e.shape.family() == ElementFamily::Line);
+                if let Some(kind) = read_section(kind, profile, values, lines) {
+                    self.import.sections.push(Section {
+                        name: set.clone(),
+                        material: material.clone(),
+                        region: Region::ElementSet(set.clone()),
+                        thickness: plx_model::unit_thickness(),
+                        kind,
+                    });
+                }
+            }
         }
         Ok(())
     }
@@ -471,6 +563,58 @@ impl Reader {
             ));
         }
     }
+}
+
+/// The section `kind` stands for with the numbers of its data lines, if they make one;
+/// solid sections count only on `lines`, as trusses.
+fn read_section(
+    kind: &SectionKind,
+    profile: &str,
+    values: &[Vec<f64>],
+    lines: bool,
+) -> Option<SectionKind> {
+    let first = |k: usize| values[0].get(k).copied().filter(|v| *v > 0.0);
+    Some(match *kind {
+        SectionKind::Shell { offset, .. } => SectionKind::Shell {
+            thickness: first(0)?,
+            offset,
+        },
+        SectionKind::Membrane { offset, .. } => SectionKind::Membrane {
+            thickness: first(0)?,
+            offset,
+        },
+        // Solid sections of solid and plane elements have no area.
+        SectionKind::Truss { .. } if lines => SectionKind::Truss { area: first(0)? },
+        SectionKind::Beam(beam) => {
+            let profile = match profile {
+                "RECT" => BeamProfile::Rect {
+                    a: first(0)?,
+                    b: first(1)?,
+                },
+                // The diameter, see BeamProfile::data_line.
+                "CIRC" => BeamProfile::Circ {
+                    radius: first(0)? / 2.0,
+                },
+                "PIPE" => BeamProfile::Pipe {
+                    radius: first(0)?,
+                    thickness: first(1)?,
+                },
+                "BOX" => BeamProfile::Box {
+                    a: first(0)?,
+                    b: first(1)?,
+                    t: [first(2)?, first(3)?, first(4)?, first(5)?],
+                },
+                _ => return None,
+            };
+            let normal = values[1].get(..3)?;
+            SectionKind::Beam(BeamSection {
+                profile,
+                orientation: BeamOrientation::Direction([normal[0], normal[1], normal[2]]),
+                ..beam
+            })
+        }
+        _ => return None,
+    })
 }
 
 fn parse_id(field: &str) -> Option<NodeId> {

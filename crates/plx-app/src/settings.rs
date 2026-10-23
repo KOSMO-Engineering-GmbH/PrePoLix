@@ -26,7 +26,11 @@ pub struct Settings {
 
 /// Label and tooltip of [`Graphics::shell_thickness`], in the settings and the View menu.
 pub const SHELL_THICKNESS_LABEL: &str = "Shell thickness";
-pub const SHELL_THICKNESS_TIP: &str = "Draws shell and membrane elements of the FE model as solids of their section's thickness, placed by its offset.";
+pub const SHELL_THICKNESS_TIP: &str = "Draws shell and membrane elements of the FE model and the results as solids of their section's thickness, placed by its offset.";
+
+/// Label and tooltip of [`Graphics::beam_profiles`], in the settings and the View menu.
+pub const BEAM_PROFILES_LABEL: &str = "Beam profiles";
+pub const BEAM_PROFILES_TIP: &str = "Draws beam elements as their profile swept along the line, turned by the section's orientation and placed by its offsets, and trusses as round bars of their area, in the FE model and the results.";
 
 /// Label and tooltip of [`Graphics::show_linked`], in the settings, the View menu and the tree.
 pub const SHOW_LINKED_LABEL: &str = "Show linked items";
@@ -72,6 +76,8 @@ pub struct Graphics {
     /// Shell and membrane elements of the FE model drawn as the solid of their section's
     /// thickness and offset rather than as surfaces.
     pub shell_thickness: bool,
+    /// Beams and trusses drawn with their profile rather than as lines.
+    pub beam_profiles: bool,
     /// The FE Model tree lists the items an analysis takes from another one; off, it shows
     /// only its own items.
     pub show_linked: bool,
@@ -85,6 +91,7 @@ impl Default for Graphics {
             view_triad: true,
             scale_bar: true,
             shell_thickness: true,
+            beam_profiles: true,
             show_linked: false,
         }
     }
@@ -607,6 +614,8 @@ impl SettingsWindow {
                 ui.checkbox(&mut g.scale_bar, "Scale bar");
                 ui.checkbox(&mut g.shell_thickness, SHELL_THICKNESS_LABEL)
                     .on_hover_text(SHELL_THICKNESS_TIP);
+                ui.checkbox(&mut g.beam_profiles, BEAM_PROFILES_LABEL)
+                    .on_hover_text(BEAM_PROFILES_TIP);
                 ui.checkbox(&mut g.show_linked, SHOW_LINKED_LABEL)
                     .on_hover_text(SHOW_LINKED_TIP);
             }
