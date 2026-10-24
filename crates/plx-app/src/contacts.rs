@@ -574,7 +574,9 @@ impl Rows<'_> {
     fn surface_behavior(&mut self, ui: &mut Ui, behavior: &mut SurfaceBehavior) {
         let description = (
             "Pressure-overclosure",
-            "Hard: no penetration allowed, the usual choice. Linear: pressure grows linearly with \
+            "Hard: practically no penetration, the usual choice; in penalty contact a linear \
+             spring K = 10 E/h (E the softer material, h the slave element size). \
+             Linear: pressure grows linearly with \
              the overclosure, a soft penalty contact. Exponential: pressure rises \
              exponentially as the gap closes, which helps convergence from open contact. \
              Tabular: your own curve. Tied: the surfaces stay connected with the stiffness K \
@@ -659,7 +661,8 @@ impl Rows<'_> {
             ui.add_sized(field_size(ui), value)
         });
         let text = "Slope lambda of the shear stress over the slip in the stick range; \
-                    if empty, half the Young's modulus of the first material (CalculiX's default).";
+                    if empty, 1/100 of the normal contact stiffness, or all of it for a \
+                    Tied surface behavior.";
         self.optional(
             ui,
             ("Stick slope", text),

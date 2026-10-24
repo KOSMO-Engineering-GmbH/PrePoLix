@@ -43,8 +43,9 @@ pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
 pub use color_scale::{ColorScale, ColorSpectrum};
 pub use constraint::{CompressionOnly, NodeTie, RigidBody, Spring};
 pub use contact::{
-    Constraint, ContactMethod, ContactPair, CyclicSymmetry, DEFAULT_SURFACE_COLOR, Friction,
-    GapConductance, InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
+    Constraint, ContactMethod, ContactPair, ContactScale, CyclicSymmetry, DEFAULT_SURFACE_COLOR,
+    ElementYoung, Friction, GapConductance, InteractionProperty, NORMAL_STIFFNESS_FACTOR,
+    STICK_SLOPE_RATIO, SurfaceBehavior, SurfaceInteraction, Tie, default_stick_slope,
 };
 pub use element_type::{PartElementType, element_type_options};
 pub use exposed::{Exposed, Field, ItemRef, ValuePath};
