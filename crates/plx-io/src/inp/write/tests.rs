@@ -7121,3 +7121,86 @@ fn findings_on_what_a_region_becomes_belong_to_the_region() {
         .collect();
     assert_eq!(mortar, [ModelItem::Step(1)]);
 }
+
+/// The stacked blocks with a detection of all parts, and their skins.
+fn detected_blocks(gap: f64) -> (FeMesh, FeModel, Vec<plx_mesh::PartSkin>) {
+    let (mesh, _, _) = two_blocks(gap);
+    let mut model = stacked_blocks(&mesh);
+    model
+        .contact_detections
+        .push(plx_model::ContactDetection::new("Contacts"));
+    let skins = (mesh.parts.iter())
+        .map(|p| plx_mesh::extract_part_skin(&mesh, p, 30.0))
+        .collect();
+    (mesh, model, skins)
+}
+
+#[test]
+fn a_detection_finds_the_touching_blocks_and_keeps_regions_the_user_changed() {
+    let (mesh, mut model, skins) = detected_blocks(0.01);
+    // 0.5 % of the diagonal (about 0.11) is less than half the element size of 5 to 10.
+    let auto = plx_model::auto_detection_tolerance(&mesh, &skins, &[true, true]);
+    assert!(auto > 2.0 && auto < 5.0, "{auto}");
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!((report.added, report.replaced), (1, 0));
+    let region = &model.contact_regions[0];
+    assert_eq!(region.name, "Bonded - LOWER to UPPER");
+    assert_eq!(region.behavior, plx_model::ContactBehavior::Bonded);
+    assert_eq!(region.detected_by.as_deref(), Some("Contacts"));
+    assert_eq!(region.side_a.faces(&mesh).len(), 4);
+    assert_eq!(region.side_b.faces(&mesh).len(), 4);
+    assert_eq!(region.settings.tolerance, Some(auto));
+    // Detecting again replaces what it found.
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!((report.added, report.replaced), (1, 1));
+    assert_eq!(model.contact_regions.len(), 1);
+    // A region changed by the user stays, and nothing is added for its parts.
+    model.contact_regions[0].behavior = plx_model::ContactBehavior::Frictionless;
+    model.contact_regions[0].edited = true;
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!((report.added, report.replaced), (0, 0));
+    assert_eq!(report.kept, ["Bonded - LOWER to UPPER"]);
+    assert_eq!(model.contact_regions.len(), 1);
+    // Apart beyond the tolerance it is no longer found, but kept.
+    let (far, _, _) = two_blocks(1.0);
+    let far_skins: Vec<_> = (far.parts.iter())
+        .map(|p| plx_mesh::extract_part_skin(&far, p, 30.0))
+        .collect();
+    model.contact_detections[0].tolerance = Some(0.5);
+    let report = model
+        .detect_contacts(0, &far, &far_skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.added, 0);
+    assert_eq!(report.lost, ["Bonded - LOWER to UPPER"]);
+    // Parts left out of the detection are not searched.
+    model.contact_regions.clear();
+    model.contact_detections[0].tolerance = None;
+    model.contact_detections[0].parts = vec!["LOWER".into()];
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.added, 0);
+}
+
+#[test]
+fn calculix_carries_the_load_across_detected_contacts() {
+    let (mesh, mut model, skins) = detected_blocks(0.01);
+    model.detect_contacts(0, &mesh, &skins, &[true, true]);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Tie, Name=Bonded_-_LOWER_to_UPPER"),
+        "{text}"
+    );
+    let Some(frd) = run_ccx("detected-bonded", &text) else {
+        return;
+    };
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((reaction - 1000.0).abs() < 1.0, "{reaction}");
+}

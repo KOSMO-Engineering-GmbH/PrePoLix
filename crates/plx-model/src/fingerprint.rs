@@ -6,7 +6,7 @@
 
 use plx_mesh::{FeMesh, Fnv};
 
-use crate::{FeModel, Geometry, MeshSetupKind, ModelSpace};
+use crate::{ContactRegion, FeModel, Geometry, MeshSetupKind, ModelSpace};
 
 /// The inputs of the solution: everything that goes into the input file CalculiX runs, the
 /// mesh and the model definition. Items only used to evaluate results, result paths and
@@ -39,6 +39,7 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         ties,
         node_ties,
         contact_regions,
+        contact_detections: _,
         contact_defaults,
         amplitudes,
         initial_conditions,
@@ -74,7 +75,15 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
     hash.add_debug(ties);
     hash.add_debug(node_ties);
     if !contact_regions.is_empty() {
-        hash.add_debug(contact_regions);
+        // Who found a region and whether it was changed since is no input of the solver.
+        let regions: Vec<_> = (contact_regions.iter())
+            .map(|r| ContactRegion {
+                detected_by: None,
+                edited: false,
+                ..r.clone()
+            })
+            .collect();
+        hash.add_debug(&regions);
         hash.add_debug(contact_defaults);
     }
     hash.add_debug(amplitudes);

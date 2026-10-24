@@ -135,6 +135,44 @@ shows the derived value in brackets; choosing something else overrides it for th
 The stiffness is derived from E / h, so a model gives the same penetration whether its units are
 millimetres or metres. Bonded regions whose slave sides share nodes are written as one tie.
 
+==== Contact detection <contact-detection>
+
+Instead of picking every pair of sides by hand, let PrePoLix find them:
+#menu("Interaction", "Detect Contacts ...") or #ui("Detect Contacts ...") in the context menu of
+#ui("Connections") creates a contact detection. #ui("OK") searches the parts for surfaces that
+touch and adds a contact region for every pair it finds, listed under the detection in the tree.
+
+#screenshot("contact-detection-dialog.png", [A contact detection of all visible parts with the
+  derived tolerance])
+
+#fields(
+  [Parts], [#ui("All visible parts"), or untick it and choose the parts to search, e.g. only the
+    bolts and the plates they hold.],
+  [Tolerance], [Surfaces closer than this touch. Auto is 0.5 % of the size of the parts
+    searched, but at least half their element size, so that two meshes on a curved face still
+    meet. The regions found get it as their tolerance, so that a tie catches every node the
+    detection saw touching.],
+  [Angle], [Largest angle between the surfaces facing each other (default 35°).],
+  [Surfaces], [What is searched in 3D: outer faces of #ui("Solid") parts, the top and bottom of
+    #ui("Shell") and membrane parts, and their free edges (#ui("Shell edge")).],
+  [Group by], [#ui("Parts") (default): one region per pair of touching parts. #ui("Faces"): one
+    per pair of touching faces. #ui("Graph"): touching faces sharing nodes are merged, so that
+    every node is on the slave side of one region only.],
+  [Type], [The type of the regions found, #ui("Bonded") by default.],
+)
+
+The regions found are named from their definition, e.g. #ui("Bonded - Base to Block"), and work
+like regions made by hand. #ui("Detect Again") in the context menu of the detection searches
+again, after the geometry or the mesh changed, and replaces the regions it found before. Regions
+you changed since (in their dialog or in the worksheet) stay as they are; the worksheet shows
+them as #ui("changed"), and the output window names those that are no longer found. Several
+detections can live side by side, e.g. one for bonded housings and one for frictional bolt
+heads. Deleting a detection deletes the regions it found, except changed ones, which stay
+under #ui("Contact Regions").
+
+#screenshot("contact-detection-tree.png", [The regions found by the detection #ui("Contacts");
+  the frictional one was changed after the detection and stays when detecting again])
+
 ==== Connection settings
 
 #menu("Interaction", "Connection Settings ...") or the context menu of #ui("Connections") sets what
@@ -148,12 +186,13 @@ mortar contact in a step other than static.
 
 #menu("Interaction", "Contact Worksheet ...") or #ui("Contact Worksheet ...") in the context menu
 of #ui("Connections") lists all contact regions in a table: type, sides, master and what each
-is exported as. A click on a row selects the region in the tree, #key("Ctrl")+click and
+is exported as, and which detection found it. A click on a row selects the region in the tree, #key("Ctrl")+click and
 #key("Shift")+click select more. The buttons change all selected regions at once: set the type
 or the friction coefficient, flip the sides, activate or deactivate, name them from their
 definition, or delete them.
 
-#screenshot("contact-worksheet.png", [The contact worksheet with a bonded and a frictional region])
+#screenshot("contact-worksheet.png", [The contact worksheet with two detected regions, the
+  frictional one changed after the detection])
 
 === Surface interactions
 
@@ -272,7 +311,8 @@ by a hinge.
 === Searching contact pairs
 
 #menu("Interaction", "Advanced", "Search Contact Pairs ...") finds surfaces of different parts that touch and
-creates ties or contact pairs for them.
+creates ties or contact pairs for them. It is the manual counterpart of the contact detection
+(@contact-detection): what it creates is not found again when the model changes.
 
 #screenshot("contact-search.png", [Search Contact Pairs])
 
@@ -287,7 +327,7 @@ creates ties or contact pairs for them.
     2D the element edges. #ui("Line end") finds beam and truss ends at the same point;
     #ui("Ignore hidden parts") leaves out hidden parts.],
   [Type], [#ui("Tie") or #ui("Contact"), for contacts with #ui("Surface Interaction") and
-    #ui("Method").],
+    #ui("Method"): node to surface, surface to surface or mortar.],
   [Adjust mesh], [Writes the pairs with adjust.],
 )
 

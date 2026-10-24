@@ -5,9 +5,9 @@
 
 use egui::{RichText, Ui};
 use plx_model::{
-    BondedMethod, ContactBehavior, ContactDefaults, ContactMethod, ContactRegion, FeModel,
-    InterfaceTreatment, Quantity, Resolved, ResolvedContacts, ResolvedKind, STORED, SideRoles,
-    Stiffness, UnitSystem,
+    BondedMethod, ContactBehavior, ContactDefaults, ContactDetection, ContactMethod, ContactRegion,
+    DetectionGrouping, FeModel, InterfaceTreatment, Quantity, Resolved, ResolvedContacts,
+    ResolvedKind, STORED, SideRoles, Stiffness, UnitSystem, auto_detection_tolerance,
 };
 
 use crate::contacts::MasterSlave;
@@ -20,16 +20,18 @@ use crate::tree::{TreeItem, TreeState, TreeView};
 #[derive(Clone, Debug, Default)]
 pub struct RegionView {
     advanced: bool,
-    resolved: Option<(ContactRegion, ContactDefaults, Resolved)>,
+    /// Boxed, as the dialog holds it by value.
+    resolved: Option<Box<(ContactRegion, ContactDefaults, Resolved)>>,
 }
 
 impl RegionView {
     fn resolved(&mut self, model: &Model, region: &ContactRegion) -> &Resolved {
         let defaults = &model.fe.contact_defaults;
-        let stale = !matches!(&self.resolved, Some((r, d, _)) if r == region && d == defaults);
+        let stale =
+            !matches!(self.resolved.as_deref(), Some((r, d, _)) if r == region && d == defaults);
         if stale {
             let resolved = model.fe.resolve_contact(region, &model.mesh);
-            self.resolved = Some((region.clone(), defaults.clone(), resolved));
+            self.resolved = Some(Box::new((region.clone(), defaults.clone(), resolved)));
         }
         &self.resolved.as_ref().expect("resolved above").2
     }
@@ -61,28 +63,7 @@ pub fn region_form(
     view: &mut RegionView,
 ) {
     (region.side_a, region.side_b) = sides.regions();
-    ui.label("Type");
-    egui::ComboBox::from_id_salt("contact region type")
-        .selected_text(region.behavior.name())
-        .width(200.0)
-        .show_ui(ui, |ui| {
-            for behavior in ContactBehavior::ALL {
-                let selected = behavior.name() == region.behavior.name();
-                let response = ui.selectable_label(selected, behavior.name());
-                if response.on_hover_text(behavior.summary()).clicked() && !selected {
-                    region.behavior = behavior;
-                }
-            }
-        });
-    ui.end_row();
-    if let ContactBehavior::Frictional { mu } = &mut region.behavior {
-        ui.label("Friction coefficient");
-        ui.add(numeric::drag_value(mu).speed(0.01).range(0.0..=5.0));
-        ui.end_row();
-    }
-    ui.label("");
-    ui.add(egui::Label::new(RichText::new(region.behavior.summary()).weak()).wrap());
-    ui.end_row();
+    behavior_rows(ui, "contact region type", "Type", &mut region.behavior);
     sides.ui_named(ui, model, ["Side A", "Side B"]);
     (region.side_a, region.side_b) = sides.regions();
     ui.label("Side A color");
@@ -108,6 +89,207 @@ pub fn region_form(
         ui.add(egui::Label::new(RichText::new(text).weak()).wrap());
         ui.end_row();
     }
+}
+
+/// The type of a region with its friction coefficient and what it means.
+fn behavior_rows(ui: &mut Ui, id: &str, label: &str, behavior: &mut ContactBehavior) {
+    ui.label(label);
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(behavior.name())
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            for choice in ContactBehavior::ALL {
+                let selected = choice.name() == behavior.name();
+                let response = ui.selectable_label(selected, choice.name());
+                if response.on_hover_text(choice.summary()).clicked() && !selected {
+                    *behavior = choice;
+                }
+            }
+        });
+    ui.end_row();
+    if let ContactBehavior::Frictional { mu } = behavior {
+        ui.label("Friction coefficient");
+        ui.add(numeric::drag_value(mu).speed(0.01).range(0.0..=5.0));
+        ui.end_row();
+    }
+    ui.label("");
+    ui.add(egui::Label::new(RichText::new(behavior.summary()).weak()).wrap());
+    ui.end_row();
+}
+
+/// The contact detection dialog below the name: which parts it searches, how close and
+/// how parallel surfaces must be to touch, and the type of the regions it finds.
+pub fn detection_form(ui: &mut Ui, model: &Model, detection: &mut ContactDetection) {
+    let units = model.fe.properties.units;
+    ui.label("Parts");
+    ui.vertical(|ui| {
+        let mut all = detection.parts.is_empty();
+        if ui
+            .checkbox(&mut all, "All visible parts")
+            .on_hover_text("Untick to choose the parts to search.")
+            .changed()
+        {
+            detection.parts = if all {
+                Vec::new()
+            } else {
+                (model.parts.iter())
+                    .filter(|p| p.visible)
+                    .map(|p| p.name.clone())
+                    .collect()
+            };
+        }
+        if !all {
+            egui::ScrollArea::vertical()
+                .max_height(160.0)
+                .id_salt("detection parts")
+                .show(ui, |ui| {
+                    for part in &model.mesh.parts {
+                        let mut on = detection.parts.contains(&part.name);
+                        if ui.checkbox(&mut on, &part.name).changed() {
+                            if on {
+                                detection.parts.push(part.name.clone());
+                            } else {
+                                detection.parts.retain(|p| *p != part.name);
+                            }
+                        }
+                    }
+                });
+        }
+    });
+    ui.end_row();
+    ui.label("Tolerance").on_hover_text(
+        "Largest gap between surfaces that touch. Auto: 0.5 % of the size of the parts \
+         searched, at least half their element size.",
+    );
+    ui.horizontal(|ui| {
+        let auto = auto_tolerance(ui, model, &detection.parts);
+        let mut set = detection.tolerance.is_some();
+        ui.checkbox(&mut set, "").on_hover_text(format!(
+            "Untick for Auto ({})",
+            with_unit(auto, units, Quantity::Length)
+        ));
+        if set {
+            let mut value = detection.tolerance.unwrap_or(auto);
+            ui.add(numeric::physical(&mut value, units, Quantity::Length));
+            detection.tolerance = Some(value);
+        } else {
+            detection.tolerance = None;
+            ui.weak(format!(
+                "Auto ({})",
+                with_unit(auto, units, Quantity::Length)
+            ));
+        }
+    });
+    ui.end_row();
+    ui.label("Angle").on_hover_text(
+        "Largest angle between the normals of surfaces facing each other, in degrees.",
+    );
+    ui.add(
+        numeric::drag_value(&mut detection.angle_deg)
+            .speed(1.0)
+            .range(0.0..=90.0)
+            .suffix(" °"),
+    );
+    ui.end_row();
+    if !model.fe.properties.space.is_2d() {
+        ui.label("Surfaces");
+        ui.horizontal(|ui| {
+            let filter = &mut detection.filter;
+            ui.checkbox(&mut filter.solid, "Solid")
+                .on_hover_text("Outer faces of solids.");
+            ui.checkbox(&mut filter.shell, "Shell")
+                .on_hover_text("Top and bottom of shells and membranes.");
+            ui.checkbox(&mut filter.shell_edge, "Shell edge")
+                .on_hover_text("Free edges of shells and membranes.");
+        });
+        ui.end_row();
+    }
+    ui.label("Group by");
+    egui::ComboBox::from_id_salt("detection grouping")
+        .selected_text(detection.grouping.name())
+        .show_ui(ui, |ui| {
+            for (grouping, hint) in [
+                (
+                    DetectionGrouping::Parts,
+                    "One region per pair of touching parts.",
+                ),
+                (
+                    DetectionGrouping::Faces,
+                    "One region per pair of touching faces.",
+                ),
+                (
+                    DetectionGrouping::Graph,
+                    "Touching faces sharing nodes are merged, so that every node is on the \
+                     slave side of one region only.",
+                ),
+            ] {
+                ui.selectable_value(&mut detection.grouping, grouping, grouping.name())
+                    .on_hover_text(hint);
+            }
+        });
+    ui.end_row();
+    behavior_rows(ui, "detection type", "Type", &mut detection.behavior);
+    ui.label("");
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "OK searches the parts and replaces the regions found before, except those \
+                 you changed since.",
+            )
+            .weak(),
+        )
+        .wrap(),
+    );
+    ui.end_row();
+}
+
+/// The derived tolerance of a detection of `parts`, kept while they and the mesh stay the
+/// same: it walks the skins of all parts searched.
+fn auto_tolerance(ui: &Ui, model: &Model, parts: &[String]) -> f64 {
+    let searched: Vec<bool> = (model.mesh.parts.iter().zip(&model.parts))
+        .map(|(part, shown)| {
+            if parts.is_empty() {
+                shown.visible
+            } else {
+                parts.contains(&part.name)
+            }
+        })
+        .collect();
+    let key = (
+        searched.clone(),
+        model.mesh.coords().len(),
+        model.mesh.elements().len(),
+    );
+    let id = egui::Id::new("detection auto tolerance");
+    let cached: Option<(Vec<bool>, usize, usize, f64)> = ui.data(|d| d.get_temp(id));
+    if let Some((s, n, e, value)) = cached
+        && (s, n, e) == key
+    {
+        return value;
+    }
+    let value = auto_detection_tolerance(&model.mesh, model.skins(), &searched);
+    ui.data_mut(|d| d.insert_temp(id, (key.0, key.1, key.2, value)));
+    value
+}
+
+/// Why the detection cannot be applied as it is.
+pub fn validate_detection(detection: &ContactDetection) -> Result<(), String> {
+    if detection
+        .tolerance
+        .is_some_and(|t| !(t.is_finite() && t > 0.0))
+    {
+        return Err("The tolerance must be positive.".into());
+    }
+    let filter = detection.filter;
+    if !(filter.solid || filter.shell || filter.shell_edge) {
+        return Err("Choose at least one kind of surface to search.".into());
+    }
+    if let ContactBehavior::Frictional { mu } = detection.behavior
+        && !(mu.is_finite() && mu >= 0.0)
+    {
+        return Err("The friction coefficient must not be negative.".into());
+    }
+    Ok(())
 }
 
 /// One line on what the region becomes, e.g. "tie constraint (linear), slave: side B,
@@ -402,7 +584,11 @@ pub fn validate_region(region: &ContactRegion, sides: &MasterSlave) -> Result<()
             return Err("Stiffnesses must be greater than 0.".into());
         }
     }
-    if region.settings.tolerance.is_some_and(|t| !(t.is_finite() && t >= 0.0)) {
+    if region
+        .settings
+        .tolerance
+        .is_some_and(|t| !(t.is_finite() && t >= 0.0))
+    {
         return Err("The tolerance must not be negative.".into());
     }
     Ok(())
@@ -518,11 +704,12 @@ pub fn worksheet(ctx: &egui::Context, open: &mut bool, model: &mut Model, tree: 
                 .show(ui, |ui| {
                     egui::Grid::new("contact worksheet grid")
                         .striped(true)
-                        .num_columns(7)
+                        .num_columns(8)
                         .spacing([14.0, 4.0])
                         .show(ui, |ui| {
                             for title in [
                                 "Name",
+                                "Detection",
                                 "Type",
                                 "Side A",
                                 "Side B",
@@ -553,6 +740,19 @@ pub fn worksheet(ctx: &egui::Context, open: &mut bool, model: &mut Model, tree: 
                                 }
                                 if response.double_clicked() {
                                     tree.reveal = true;
+                                }
+                                match &region.detected_by {
+                                    Some(name) if region.edited => {
+                                        ui.label(format!("{name}, changed")).on_hover_text(
+                                            "Changed by you: detecting again keeps it.",
+                                        );
+                                    }
+                                    Some(name) => {
+                                        ui.label(name);
+                                    }
+                                    None => {
+                                        ui.weak("by hand");
+                                    }
                                 }
                                 let behavior = match region.behavior {
                                     ContactBehavior::Frictional { mu } => {
@@ -613,6 +813,8 @@ pub fn worksheet(ctx: &egui::Context, open: &mut bool, model: &mut Model, tree: 
             Change::Rename => region.name = region.name_from_definition(&model.mesh),
             Change::Delete => {}
         }
+        // A detected region the user changed is kept when detecting again.
+        region.edited |= region.detected_by.is_some();
     }
     if let Change::Rename = change {
         // Names stay unique: a repeated one gets a number.

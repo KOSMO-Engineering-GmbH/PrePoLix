@@ -767,6 +767,7 @@ fn category_fingerprint(hash: &mut Fnv, fe: &FeModel, category: &str, name: Opti
             add(hash, &fe.contact_regions, |r| &r.name, name);
             if name.is_none() {
                 hash.add_debug(&fe.contact_defaults);
+                hash.add_debug(&fe.contact_detections);
             }
             add(hash, &fe.surface_interactions, |s| &s.name, name);
             add(hash, &fe.contact_pairs, |c| &c.name, name);
@@ -896,6 +897,7 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
             // The settings shared by all regions come with the whole category.
             if matches!(name, Mode::All | Mode::Bundle { .. }) {
                 target.contact_defaults = source.contact_defaults.clone();
+                target.contact_detections = source.contact_detections.clone();
             }
             copy(
                 &mut target.surface_interactions,

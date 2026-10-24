@@ -32,6 +32,12 @@ pub struct ContactRegion {
     pub settings: ContactSettings,
     pub color_a: [u8; 3],
     pub color_b: [u8; 3],
+    /// The contact detection that found the region; `None` for a region made by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_by: Option<String>,
+    /// Changed by the user after its detection: detecting again keeps it as it is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub edited: bool,
 }
 
 impl ContactRegion {
@@ -45,6 +51,8 @@ impl ContactRegion {
             settings: ContactSettings::default(),
             color_a: [255, 0, 0],
             color_b: [0, 0, 255],
+            detected_by: None,
+            edited: false,
         }
     }
 
@@ -60,12 +68,8 @@ impl ContactRegion {
     /// parts of both sides, e.g. "Bonded - Housing to Cover".
     pub fn name_from_definition(&self, mesh: &FeMesh) -> String {
         let parts = |region: &Region| -> String {
-            let elements: BTreeSet<ElementId> = (region.elements(mesh).into_iter())
-                .chain(region.faces(mesh).into_iter().map(|(e, _)| e))
-                .collect();
-            let names: Vec<&str> = (mesh.parts.iter())
-                .filter(|p| p.elements.iter().any(|e| elements.contains(e)))
-                .map(|p| p.name.as_str())
+            let names: Vec<&str> = (parts_of(region, mesh).into_iter())
+                .map(|p| mesh.parts[p].name.as_str())
                 .collect();
             match names.len() {
                 0 => "?".into(),
@@ -87,6 +91,17 @@ impl ContactRegion {
         std::mem::swap(&mut self.color_a, &mut self.color_b);
         self.settings.sides = self.settings.sides.map(SideRoles::flipped);
     }
+}
+
+/// The indices of the mesh parts a region lies on.
+pub(crate) fn parts_of(region: &Region, mesh: &FeMesh) -> BTreeSet<usize> {
+    let elements: BTreeSet<ElementId> = (region.elements(mesh).into_iter())
+        .chain(region.faces(mesh).into_iter().map(|(e, _)| e))
+        .collect();
+    (mesh.parts.iter().enumerate())
+        .filter(|(_, p)| p.elements.iter().any(|e| elements.contains(e)))
+        .map(|(i, _)| i)
+        .collect()
 }
 
 /// How the two sides of a contact region behave towards each other, Ansys' contact types.
@@ -503,7 +518,7 @@ impl FeModel {
     }
 
     /// Young's modulus of each element with a section whose material has one.
-    fn young_of_elements(&self, mesh: &FeMesh) -> HashMap<ElementId, f64> {
+    pub(crate) fn young_of_elements(&self, mesh: &FeMesh) -> HashMap<ElementId, f64> {
         let mut young = HashMap::new();
         for section in &self.sections {
             let Some(e) = (self.materials.iter())
