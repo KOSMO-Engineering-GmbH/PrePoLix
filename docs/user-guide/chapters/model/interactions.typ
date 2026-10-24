@@ -98,6 +98,7 @@ side is A does not matter: PrePoLix chooses the master side itself.
 
 #fields(
   [Type], [#ui("Bonded"): the sides are glued together, no gap and no sliding.
+    #ui("No Separation"): no gap opens, but the sides slide freely along each other.
     #ui("Frictionless"): the sides may separate and slide freely, but not penetrate.
     #ui("Frictional"): like frictionless, but the sides stick until the shear exceeds the
     #ui("Friction coefficient") times the pressure. #ui("Rough"): the sides may separate but
@@ -126,11 +127,31 @@ shows the derived value in brackets; choosing something else overrides it for th
     stiffness / 100 for a frictional contact and the normal stiffness for rough and tied
     contacts.],
   [Initial gap], [#ui("Adjust to touch") moves the slave nodes onto the master side at the start,
-    so that small gaps from meshing are closed. #ui("As is") keeps the mesh. Auto adjusts.],
-  [Tolerance], [Distance within which the sides count as touching: tied by a tie, closed by the
-    adjustment. Auto is a quarter of the slave mesh size.],
+    so that small gaps from meshing are closed. #ui("As is") keeps the mesh. #ui("Offset")
+    sets the distance of the sides wherever they face each other, whatever the mesh: negative
+    for an interference fit, such as a shaft pressed into a hub (`*CLEARANCE`, surface to
+    surface contacts only). Auto adjusts bonded regions and keeps the others as they are.],
+  [Tolerance], [Distance within which the sides count as touching: tied by a tie, held by no
+    separation, closed by the adjustment. Auto is a quarter of the slave mesh size.],
+  [Heat conductance], [Shown when a step solves temperatures and displacements together: the
+    heat flow across the closed contact per area and temperature difference. Auto is
+    100 #sym.times k / h, k the thermal conductivity of the less conducting side: so much that
+    the contact hardly shows in the temperatures. A bonded tie conducts heat anyway.],
   [Small sliding], [Only for the node to surface formulation, see below.],
 )
+
+#screenshot("contact-offset-dialog.png", [The advanced settings of a frictional region with an
+  offset of -0.01 mm: the sides press into each other by 0.01 mm like an interference fit])
+
+#ui("No Separation") is written without contact iterations: one equation per slave node within
+the tolerance holds it to the master side normal to the surface, while it slides freely along
+it. The equations stay linear, so the region needs no contact pair and no stiffness, but they
+hold for small displacements only: the model check warns about a region of no separation in a
+step with large deformations. A part held only by no separation can still slide, so it needs
+other supports along the surface.
+
+#screenshot("contact-no-separation.png", [A region of no separation in the worksheet, written
+  as constraint equations])
 
 The stiffness is derived from E / h, so a model gives the same penetration whether its units are
 millimetres or metres. Bonded regions whose slave sides share nodes are written as one tie.

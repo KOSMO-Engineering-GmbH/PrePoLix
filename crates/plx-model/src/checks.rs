@@ -121,6 +121,9 @@ pub enum Problem {
     /// A contact region whose sides do not touch in the mesh: a bonded one ties nothing,
     /// another one lets its parts move freely until they meet.
     ContactRegionOpen,
+    /// A region of no separation in a step with large deformations: its equations hold for
+    /// small displacements only.
+    NoSeparationLargeDeformation,
     /// A wheel of a moving load that is off the selected surface at some positions.
     WheelOffSurface,
     /// Found in the solver output only.
@@ -157,6 +160,7 @@ impl Problem {
             | Problem::ContactWithCoriolis
             | Problem::WheelOffSurface
             | Problem::ContactRegionOpen
+            | Problem::NoSeparationLargeDeformation
             | Problem::DesignRegionIgnored
             | Problem::RigidBeamNodes
             | Problem::NoCreep => Severity::Warning,
@@ -212,6 +216,7 @@ impl Problem {
             Problem::ContactFormulationsDiffer => "Contact formulations differ",
             Problem::MortarNotSupported => "Mortar contact not possible in this step",
             Problem::ContactRegionOpen => "Contact region open",
+            Problem::NoSeparationLargeDeformation => "No separation with large deformations",
             Problem::WheelOffSurface => "Wheel off the surface",
             Problem::NoConvergence => "No convergence",
             Problem::MpcAndSpc => "Degree of freedom bound twice",
@@ -479,6 +484,12 @@ impl Problem {
                  connected. A contact that starts open holds nothing until the parts meet, \
                  so a part held only by it can move freely and the solution fails."
             }
+            Problem::NoSeparationLargeDeformation => {
+                "No separation is written as linear equations between each slave node and \
+                 the master side, along the normal of the undeformed surfaces. With large \
+                 deformations the sides slide and turn, and the equations no longer keep \
+                 them together: gaps open or the sides press into each other."
+            }
             Problem::InvalidTiedContact => {
                 "CalculiX offers the Tied surface behavior only for Surface to surface \
                  contact pairs, and it needs a Friction model in the same surface \
@@ -714,6 +725,11 @@ impl Problem {
                  Worksheet. Pick faces that touch, raise the Tolerance in the region's \
                  advanced settings, or close the gap in the geometry."
             }
+            Problem::NoSeparationLargeDeformation => {
+                "Switch off large deformations in the step if the displacements are small, \
+                 or make the region Frictionless with Adjust to touch: a contact that may \
+                 open, but follows the sides."
+            }
             Problem::InvalidTiedContact => {
                 "Edit the surface interaction and add Friction, and set the method of the \
                  contact pairs to Surface to surface. To bond parts, a Tie (Interaction > \
@@ -948,6 +964,18 @@ impl FeModel {
                         region.name,
                         check.status.name().to_lowercase()
                     ),
+                ));
+            }
+        }
+        let nlgeom = (self.steps.iter()).find(|s| s.active && s.kind.nlgeom());
+        for (i, region) in self.contact_regions.iter().enumerate() {
+            if let Some(step) = nlgeom.filter(|_| {
+                region.active && region.behavior == crate::ContactBehavior::NoSeparation
+            }) {
+                findings.push(Finding::new(
+                    ModelItem::ContactRegion(i),
+                    Problem::NoSeparationLargeDeformation,
+                    format!("{}: {} has large deformations", region.name, step.name),
                 ));
             }
         }
@@ -2053,6 +2081,15 @@ impl FeModel {
                 join(&mut ties, &a, &b);
             }
             join(&mut contacts, &a, &b);
+        }
+        // Regions of no separation, left in the lowered model, hold normal to the surfaces
+        // only: like a contact.
+        for region in self.contact_regions.iter().filter(|r| r.active) {
+            join(
+                &mut contacts,
+                &pieces(&region.side_a),
+                &pieces(&region.side_b),
+            );
         }
         let sum = |union: &mut UnionFind| {
             let mut sums: HashMap<usize, [[f64; 6]; 6]> = HashMap::new();

@@ -45,10 +45,10 @@ pub use cad_operation::{CadOperation, CadOperationKind};
 pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
 pub use color_scale::{ColorScale, ColorSpectrum};
 pub use connection::{
-    BondedMethod, ContactBehavior, ContactDefaults, ContactRegion, ContactSettings,
-    InterfaceTreatment, Lowered, ROUGH_FRICTION, Resolved, ResolvedContacts, ResolvedKind,
-    STICK_SLOPE_RATIO, STIFFNESS_FACTOR, SideRoles, Stiffness, TIED_STIFFNESS_FACTOR,
-    TOLERANCE_FACTOR, mortar_supports,
+    BondedMethod, CONDUCTANCE_FACTOR, ContactBehavior, ContactDefaults, ContactRegion,
+    ContactSettings, InterfaceTreatment, Lowered, ROUGH_FRICTION, Resolved, ResolvedContacts,
+    ResolvedKind, STICK_SLOPE_RATIO, STIFFNESS_FACTOR, SideRoles, Stiffness, TIED_STIFFNESS_FACTOR,
+    TOLERANCE_FACTOR, conducts_across_contacts, mortar_supports,
 };
 pub use constraint::{CompressionOnly, NodeTie, RigidBody, Spring};
 pub use contact::{

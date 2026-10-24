@@ -1702,6 +1702,13 @@ fn contact_pair(pair: &ContactPair, master: &str, slave: &str) -> String {
         let _ = write!(out, ", Adjust={}", number(size));
     }
     let _ = writeln!(out, "\n{slave}, {master}");
+    if let Some(clearance) = pair.clearance {
+        let _ = writeln!(
+            out,
+            "*Clearance, Master={master}, Slave={slave}, Value={}",
+            number(clearance)
+        );
+    }
     out
 }
 

@@ -109,6 +109,8 @@ pub(crate) fn parts_of(region: &Region, mesh: &FeMesh) -> BTreeSet<usize> {
 pub enum ContactBehavior {
     /// Glued: no separation, no sliding.
     Bonded,
+    /// Held together normal to the surfaces, free to slide without friction.
+    NoSeparation,
     /// Free to separate and to slide without friction.
     Frictionless,
     /// Free to separate, sliding with Coulomb friction of this coefficient.
@@ -120,8 +122,9 @@ pub enum ContactBehavior {
 impl ContactBehavior {
     /// The behaviors in the order the dialog offers them, frictional with a typical
     /// coefficient for steel on steel.
-    pub const ALL: [ContactBehavior; 4] = [
+    pub const ALL: [ContactBehavior; 5] = [
         ContactBehavior::Bonded,
+        ContactBehavior::NoSeparation,
         ContactBehavior::Frictionless,
         ContactBehavior::Frictional { mu: 0.15 },
         ContactBehavior::Rough,
@@ -130,6 +133,7 @@ impl ContactBehavior {
     pub fn name(self) -> &'static str {
         match self {
             ContactBehavior::Bonded => "Bonded",
+            ContactBehavior::NoSeparation => "No Separation",
             ContactBehavior::Frictionless => "Frictionless",
             ContactBehavior::Frictional { .. } => "Frictional",
             ContactBehavior::Rough => "Rough",
@@ -141,6 +145,10 @@ impl ContactBehavior {
         match self {
             ContactBehavior::Bonded => {
                 "Glued together: no gap opens, no sliding. Linear, no contact iterations."
+            }
+            ContactBehavior::NoSeparation => {
+                "No gap opens, but the sides slide freely along each other. Linear, for small \
+                 displacements."
             }
             ContactBehavior::Frictionless => {
                 "The sides may separate and slide freely. Nonlinear, symmetric matrix."
@@ -158,7 +166,10 @@ impl ContactBehavior {
 
     /// Whether the behavior is a contact (nonlinear, may separate).
     pub fn separates(self) -> bool {
-        !matches!(self, ContactBehavior::Bonded)
+        !matches!(
+            self,
+            ContactBehavior::Bonded | ContactBehavior::NoSeparation
+        )
     }
 
     /// The friction coefficient written for the behavior; rough contact sticks by a
@@ -167,7 +178,9 @@ impl ContactBehavior {
         match self {
             ContactBehavior::Frictional { mu } => Some(mu),
             ContactBehavior::Rough => Some(ROUGH_FRICTION),
-            ContactBehavior::Bonded | ContactBehavior::Frictionless => None,
+            ContactBehavior::Bonded
+            | ContactBehavior::NoSeparation
+            | ContactBehavior::Frictionless => None,
         }
     }
 }
@@ -195,6 +208,9 @@ pub struct ContactSettings {
     pub tolerance: Option<f64>,
     /// Pairing once per increment, node-to-surface contact only.
     pub small_sliding: Option<bool>,
+    /// Heat conductance across the contact [power / (area temperature)], for steps with
+    /// temperatures and displacements.
+    pub conductance: Option<f64>,
 }
 
 /// How a bonded region is written.
@@ -226,23 +242,35 @@ pub enum Stiffness {
 }
 
 /// What happens to an initial gap or penetration between the sides.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum InterfaceTreatment {
     /// The geometry as it is.
     AsIs,
     /// Slave nodes within the tolerance are moved onto the master at the start.
     AdjustToTouch,
+    /// The sides count as this far apart wherever they face each other, whatever the
+    /// geometry; negative for an interference fit.
+    Offset(f64),
 }
 
 impl InterfaceTreatment {
-    pub const ALL: [InterfaceTreatment; 2] =
-        [InterfaceTreatment::AsIs, InterfaceTreatment::AdjustToTouch];
+    pub const ALL: [InterfaceTreatment; 3] = [
+        InterfaceTreatment::AsIs,
+        InterfaceTreatment::AdjustToTouch,
+        InterfaceTreatment::Offset(0.0),
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             InterfaceTreatment::AsIs => "As is",
             InterfaceTreatment::AdjustToTouch => "Adjust to touch",
+            InterfaceTreatment::Offset(_) => "Offset",
         }
+    }
+
+    /// Whether two treatments are of the same kind, whatever their offset.
+    pub fn same_kind(self, other: InterfaceTreatment) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
     }
 }
 
@@ -294,6 +322,10 @@ pub const TIED_STIFFNESS_FACTOR: f64 = 100.0;
 pub const STICK_SLOPE_RATIO: f64 = 0.01;
 /// Tie tolerance in units of the slave side's mesh size.
 pub const TOLERANCE_FACTOR: f64 = 0.25;
+/// Heat conductance across a closed contact in units of k / h, k the thermal conductivity
+/// of the less conductive side and h its mesh size: far more than the layer of elements
+/// next to it conducts, so that the contact hardly shows in the temperatures.
+pub const CONDUCTANCE_FACTOR: f64 = 100.0;
 
 /// Everything the derivation decided for the contact regions of a model.
 #[derive(Clone, Debug, PartialEq)]
@@ -315,6 +347,8 @@ pub struct Resolved {
     /// The softer side's Young's modulus and the mesh size the stiffness derives from.
     pub young: Option<f64>,
     pub mesh_size: Option<f64>,
+    /// The less conducting side's thermal conductivity the heat conductance derives from.
+    pub conductivity: Option<f64>,
     /// Plain-language reasons, one per decision, for the dialog: "Bonded as a tie
     /// constraint: linear, no contact iterations".
     pub why: Vec<String>,
@@ -334,7 +368,14 @@ pub enum ResolvedKind {
         /// Adjustment distance of `ADJUST=`.
         adjust: Option<f64>,
         small_sliding: bool,
+        /// Distance between the sides that replaces the geometric one (`*CLEARANCE`).
+        clearance: Option<f64>,
+        /// Heat conductance across the contact (`*GAP CONDUCTANCE`).
+        conductance: Option<f64>,
     },
+    /// No separation: one equation per slave node within the tolerance of the master that
+    /// holds it to the master normal to the surface.
+    NoSeparation { tolerance: Option<f64> },
 }
 
 impl Resolved {
@@ -352,14 +393,16 @@ impl Resolved {
     pub fn tangential_stiffness(&self) -> Option<f64> {
         match &self.kind {
             ResolvedKind::Pair { friction, .. } => friction.as_ref()?.stick_slope,
-            ResolvedKind::Tie { .. } => None,
+            ResolvedKind::Tie { .. } | ResolvedKind::NoSeparation { .. } => None,
         }
     }
 
     /// The tie tolerance or the adjustment distance.
     pub fn tolerance(&self) -> Option<f64> {
         match &self.kind {
-            ResolvedKind::Tie { tolerance, .. } => *tolerance,
+            ResolvedKind::Tie { tolerance, .. } | ResolvedKind::NoSeparation { tolerance } => {
+                *tolerance
+            }
             ResolvedKind::Pair { adjust, .. } => *adjust,
         }
     }
@@ -369,6 +412,7 @@ impl Resolved {
         match &self.kind {
             ResolvedKind::Tie { adjust, .. } => *adjust,
             ResolvedKind::Pair { adjust, .. } => adjust.is_some(),
+            ResolvedKind::NoSeparation { .. } => false,
         }
     }
 }
@@ -378,6 +422,7 @@ impl ResolvedKind {
     pub fn describe(&self) -> String {
         match self {
             ResolvedKind::Tie { .. } => "tie constraint (linear)".into(),
+            ResolvedKind::NoSeparation { .. } => "normal constraint equations (linear)".into(),
             ResolvedKind::Pair {
                 behavior, friction, ..
             } => match (behavior, friction) {
@@ -398,6 +443,9 @@ pub struct Lowered {
     pub tie_regions: Vec<Vec<usize>>,
     pub first_pair: usize,
     pub pair_regions: Vec<usize>,
+    /// The region of each contact region left in the lowered model: those of no separation,
+    /// which the writer turns into equations.
+    pub equation_regions: Vec<usize>,
 }
 
 impl Lowered {
@@ -411,9 +459,35 @@ impl Lowered {
             crate::ModelItem::ContactPair(i) => i
                 .checked_sub(self.first_pair)
                 .and_then(|i| self.pair_regions.get(i).copied()),
+            crate::ModelItem::ContactRegion(i) => self.equation_regions.get(i).copied(),
             _ => None,
         }
     }
+}
+
+/// Material properties by element.
+struct Properties {
+    young: HashMap<ElementId, f64>,
+    conductivity: HashMap<ElementId, f64>,
+}
+
+/// What the derivation needs to know about the model.
+struct Derivation<'a> {
+    formulation: ContactMethod,
+    defaults: &'a ContactDefaults,
+    /// Some active step has large deformations.
+    nlgeom: bool,
+    /// Some active step conducts heat across contacts.
+    thermal: bool,
+}
+
+/// Whether CalculiX conducts heat across the contact pairs in a step: those with
+/// temperatures and displacements.
+pub fn conducts_across_contacts(kind: &StepKind) -> bool {
+    matches!(
+        kind,
+        StepKind::CoupledTempDisp(_) | StepKind::UncoupledTempDisp(_)
+    )
 }
 
 /// What the derivation needs to know about one side of a region.
@@ -421,23 +495,30 @@ impl Lowered {
 struct Side {
     /// The largest Young's modulus of the elements of the side.
     young: Option<f64>,
+    /// The largest thermal conductivity of the elements of the side.
+    conductivity: Option<f64>,
     /// Mean edge length of the faces, weighted by area.
     mesh_size: f64,
     area: f64,
 }
 
 impl Side {
-    fn new(region: &Region, mesh: &FeMesh, young_of: &HashMap<ElementId, f64>) -> Self {
+    fn new(region: &Region, mesh: &FeMesh, properties: &Properties) -> Self {
         let faces = region.faces(mesh);
         let (mut area, mut weighted) = (0.0, 0.0);
         let mut young: Option<f64> = None;
+        let mut conductivity: Option<f64> = None;
+        let largest = |value: &mut Option<f64>, of: &HashMap<ElementId, f64>, e: ElementId| {
+            if let Some(&v) = of.get(&e) {
+                *value = Some(value.map_or(v, |x| x.max(v)));
+            }
+        };
         for &(element_id, face) in &faces {
             let Some(element) = mesh.element(element_id) else {
                 continue;
             };
-            if let Some(&e) = young_of.get(&element_id) {
-                young = Some(young.map_or(e, |y| y.max(e)));
-            }
+            largest(&mut young, &properties.young, element_id);
+            largest(&mut conductivity, &properties.conductivity, element_id);
             let Some(topology) = element.faces().get(usize::from(face).saturating_sub(1)) else {
                 continue;
             };
@@ -448,15 +529,15 @@ impl Side {
             area += face_area;
             weighted += face_area * size;
         }
-        if young.is_none() {
+        if faces.is_empty() {
             for element in region.elements(mesh) {
-                if let Some(&e) = young_of.get(&element) {
-                    young = Some(young.map_or(e, |y| y.max(e)));
-                }
+                largest(&mut young, &properties.young, element);
+                largest(&mut conductivity, &properties.conductivity, element);
             }
         }
         Self {
             young,
+            conductivity,
             mesh_size: if area > 0.0 { weighted / area } else { 0.0 },
             area,
         }
@@ -519,20 +600,35 @@ impl FeModel {
 
     /// Young's modulus of each element with a section whose material has one.
     pub(crate) fn young_of_elements(&self, mesh: &FeMesh) -> HashMap<ElementId, f64> {
-        let mut young = HashMap::new();
+        self.material_of_elements(mesh, |m| m.elastic.map(|e| e.young))
+    }
+
+    /// A property of the material of each element with a section whose material has it.
+    fn material_of_elements(
+        &self,
+        mesh: &FeMesh,
+        property: impl Fn(&crate::Material) -> Option<f64>,
+    ) -> HashMap<ElementId, f64> {
+        let mut values = HashMap::new();
         for section in &self.sections {
-            let Some(e) = (self.materials.iter())
+            let Some(value) = (self.materials.iter())
                 .find(|m| m.name == section.material)
-                .and_then(|m| m.elastic)
-                .map(|e| e.young)
+                .and_then(&property)
             else {
                 continue;
             };
             for element in section.region.elements(mesh) {
-                young.insert(element, e);
+                values.insert(element, value);
             }
         }
-        young
+        values
+    }
+
+    fn properties_of_elements(&self, mesh: &FeMesh) -> Properties {
+        Properties {
+            young: self.young_of_elements(mesh),
+            conductivity: self.material_of_elements(mesh, |m| m.conductivity),
+        }
     }
 
     /// The formulation of all contact pairs and why: the one chosen at the connections, else
@@ -560,9 +656,9 @@ impl FeModel {
     /// What each contact region becomes in the input file and why.
     pub fn resolve_contacts(&self, mesh: &FeMesh) -> ResolvedContacts {
         let (formulation, formulation_reason) = self.contact_formulation();
-        let young_of = self.young_of_elements(mesh);
+        let properties = self.properties_of_elements(mesh);
         let items = (self.contact_regions.iter())
-            .map(|region| self.resolve_with(region, mesh, &young_of, formulation))
+            .map(|region| self.resolve_with(region, mesh, &properties, formulation))
             .collect();
         ResolvedContacts {
             formulation,
@@ -573,27 +669,36 @@ impl FeModel {
 
     /// What a contact region, of the model or not yet, becomes in the input file and why.
     pub fn resolve_contact(&self, region: &ContactRegion, mesh: &FeMesh) -> Resolved {
-        let young_of = self.young_of_elements(mesh);
-        self.resolve_with(region, mesh, &young_of, self.contact_formulation().0)
+        let properties = self.properties_of_elements(mesh);
+        self.resolve_with(region, mesh, &properties, self.contact_formulation().0)
     }
 
     fn resolve_with(
         &self,
         region: &ContactRegion,
         mesh: &FeMesh,
-        young_of: &HashMap<ElementId, f64>,
+        properties: &Properties,
         formulation: ContactMethod,
     ) -> Resolved {
-        let nlgeom = (self.steps.iter()).any(|s| s.active && s.kind.nlgeom());
-        let a = Side::new(&region.side_a, mesh, young_of);
-        let b = Side::new(&region.side_b, mesh, young_of);
-        resolve(region, &a, &b, formulation, &self.contact_defaults, nlgeom)
+        let active = self.steps.iter().filter(|s| s.active);
+        let nlgeom = active.clone().any(|s| s.kind.nlgeom());
+        let thermal = active.clone().any(|s| conducts_across_contacts(&s.kind));
+        let a = Side::new(&region.side_a, mesh, properties);
+        let b = Side::new(&region.side_b, mesh, properties);
+        let model = Derivation {
+            formulation,
+            defaults: &self.contact_defaults,
+            nlgeom,
+            thermal,
+        };
+        resolve(region, &a, &b, &model)
     }
 
     /// The model with its contact regions replaced by the ties, surface interactions and
     /// contact pairs they stand for, added after those defined by hand, and which region each
     /// added item comes from. Bonded regions whose slave sides share nodes become one tie, as
-    /// CalculiX ties a node to one master only.
+    /// CalculiX ties a node to one master only. Active regions of no separation stay, with
+    /// their master and tolerance settled, for the writer to turn into equations.
     pub fn lower_contacts(&self, mesh: &FeMesh) -> (FeModel, Lowered) {
         let mut lowered = self.clone();
         let mut origin = Lowered {
@@ -658,15 +763,33 @@ impl FeModel {
                         None => ties.push((tie, nodes, vec![r])),
                     }
                 }
+                ResolvedKind::NoSeparation { tolerance } => {
+                    if region.active {
+                        let mut kept = region.clone();
+                        kept.settings.sides = Some(if item.a_is_master {
+                            SideRoles::AIsMaster
+                        } else {
+                            SideRoles::BIsMaster
+                        });
+                        kept.settings.tolerance = *tolerance;
+                        lowered.contact_regions.push(kept);
+                        origin.equation_regions.push(r);
+                    }
+                }
                 ResolvedKind::Pair {
                     behavior,
                     friction,
                     adjust,
                     small_sliding,
+                    clearance,
+                    conductance,
                 } => {
                     let mut properties =
                         vec![InteractionProperty::SurfaceBehavior(behavior.clone())];
                     properties.extend(friction.clone().map(InteractionProperty::Friction));
+                    properties.extend(conductance.map(|c| {
+                        InteractionProperty::GapConductance(crate::GapConductance::Constant(c))
+                    }));
                     let interaction = match (lowered.surface_interactions.iter())
                         .skip(self.surface_interactions.len())
                         .find(|i| i.properties == properties)
@@ -690,6 +813,7 @@ impl FeModel {
                     pair.small_sliding = *small_sliding;
                     pair.adjust = adjust.is_some();
                     pair.adjustment_size = *adjust;
+                    pair.clearance = *clearance;
                     pair.master = master.clone();
                     pair.slave = slave.clone();
                     pair.master_color = master_color;
@@ -753,14 +877,13 @@ fn union(a: &Region, b: &Region, mesh: &FeMesh) -> Region {
 }
 
 /// The derivation for one region.
-fn resolve(
-    region: &ContactRegion,
-    a: &Side,
-    b: &Side,
-    formulation: ContactMethod,
-    defaults: &ContactDefaults,
-    nlgeom: bool,
-) -> Resolved {
+fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Resolved {
+    let Derivation {
+        formulation,
+        defaults,
+        nlgeom,
+        thermal,
+    } = *model;
     let settings = &region.settings;
     let mut why = Vec::new();
     // Master: the coarser mesh, so that the finer mesh's nodes cannot pass through it; then
@@ -789,10 +912,12 @@ fn resolve(
     };
     let slave = if a_is_master { b } else { a };
     let master = if a_is_master { a } else { b };
-    let young = match (a.young, b.young) {
+    let smaller = |x: Option<f64>, y: Option<f64>| match (x, y) {
         (Some(x), Some(y)) => Some(x.min(y)),
         (x, y) => x.or(y),
     };
+    let young = smaller(a.young, b.young);
+    let conductivity = smaller(a.conductivity, b.conductivity);
     let mesh_size = [slave.mesh_size, master.mesh_size]
         .into_iter()
         .find(|&h| h > 0.0);
@@ -829,10 +954,40 @@ fn resolve(
     };
     let adjust_to_touch = match settings.interface {
         Some(InterfaceTreatment::AdjustToTouch) => true,
-        Some(InterfaceTreatment::AsIs) => false,
+        Some(InterfaceTreatment::AsIs | InterfaceTreatment::Offset(_)) => false,
         None => region.behavior == ContactBehavior::Bonded,
     };
-    let kind = if bonded_method == Some(BondedMethod::Constraint) {
+    let offset = match settings.interface {
+        Some(InterfaceTreatment::Offset(offset)) => Some(offset),
+        _ => None,
+    };
+    let kind = if region.behavior == ContactBehavior::NoSeparation {
+        why.push(
+            "No separation as equations normal to the master side: linear, the sides slide \
+             freely"
+                .into(),
+        );
+        if settings.tolerance.is_none() && tolerance.is_some() {
+            why.push(format!(
+                "Tolerance: {TOLERANCE_FACTOR} x mesh size; slave nodes further from the \
+                 master stay free"
+            ));
+        }
+        if nlgeom {
+            why.push(
+                "The equations hold for small displacements only; with large deformations the \
+                 sides drift apart as they slide or turn"
+                    .into(),
+            );
+        }
+        if settings.interface.is_some() {
+            why.push("The initial gap stays as it is: the equations keep it".into());
+        }
+        ResolvedKind::NoSeparation { tolerance }
+    } else if bonded_method == Some(BondedMethod::Constraint) {
+        if offset.is_some() {
+            why.push("No offset: a tie keeps the sides as they are".into());
+        }
         if settings.tolerance.is_none() && tolerance.is_some() {
             why.push(format!("Tolerance: {TOLERANCE_FACTOR} x mesh size"));
         }
@@ -901,6 +1056,39 @@ fn resolve(
         if adjust_to_touch {
             why.push("Adjusted to touch at the start".into());
         }
+        // CalculiX takes a clearance for face-to-face penalty contact only.
+        let clearance = match offset {
+            Some(offset) if formulation == ContactMethod::SurfaceToSurface && !tied => Some(offset),
+            Some(_) => {
+                why.push(format!(
+                    "No offset: it needs a contact of {} that is not tied",
+                    ContactMethod::SurfaceToSurface.name()
+                ));
+                None
+            }
+            None => None,
+        };
+        if let Some(offset) = clearance {
+            why.push(if offset < 0.0 {
+                "Offset: the sides overlap by the offset (interference fit)".into()
+            } else {
+                "Offset: the sides are the offset apart wherever they face each other".into()
+            });
+        }
+        let conductance = match settings.conductance {
+            Some(c) => Some(c),
+            None if thermal => {
+                let c = conductivity
+                    .zip(mesh_size)
+                    .map(|(k, h)| CONDUCTANCE_FACTOR * k / h);
+                why.push(match c {
+                    Some(_) => format!("Heat conductance: {CONDUCTANCE_FACTOR} x k/h"),
+                    None => "No heat conductance: no thermal conductivity known".into(),
+                });
+                c
+            }
+            None => None,
+        };
         let small_sliding = formulation == ContactMethod::NodeToSurface
             && settings.small_sliding.unwrap_or(!nlgeom);
         ResolvedKind::Pair {
@@ -908,6 +1096,8 @@ fn resolve(
             friction,
             adjust,
             small_sliding,
+            clearance,
+            conductance,
         }
     };
     Resolved {
@@ -915,6 +1105,7 @@ fn resolve(
         kind,
         young,
         mesh_size,
+        conductivity,
         why,
     }
 }

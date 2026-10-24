@@ -831,6 +831,7 @@ impl ContactSearchDialog {
                         method: row.method,
                         adjust: row.adjust,
                         adjustment_size: Some(row.distance),
+                        clearance: None,
                         master,
                         slave,
                         ..ContactPair::new(unique(&row.name, &mut pair_names), &row.interaction)

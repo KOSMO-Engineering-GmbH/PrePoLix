@@ -3,13 +3,16 @@
 //! and direction, compression only supports become `GAPUNI` elements to fixed ground nodes.
 //! Springs to a surface, which PrePoMax lacks, become `SPRING2` elements from each node of
 //! the region to a new node that `*Equation`s tie to the closest point of the master
-//! surface.
+//! surface. Contact regions of no separation become one `*Equation` per slave node that
+//! holds it to the closest point of the master normal to the surface.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use plx_mesh::{ElementId, FeMesh, NodeId};
-use plx_model::{CompressionOnly, Constraint, FeModel, Spring};
+use plx_model::{
+    CompressionOnly, Constraint, ContactBehavior, ContactRegion, FeModel, SideRoles, Spring,
+};
 
 use super::{Keyword, Members, Sets, WriteError, empty, number};
 
@@ -49,6 +52,13 @@ pub(super) fn springs(sets: &mut Sets, model: &FeModel) -> Result<Generated, Wri
         dofs: if model.properties.space.is_2d() { 2 } else { 3 },
     };
     let mut nonlinear = false;
+    // The lowered model keeps the active regions of no separation only.
+    let mut held = std::collections::BTreeSet::new();
+    for region in &model.contact_regions {
+        if region.active && region.behavior == ContactBehavior::NoSeparation {
+            writer.no_separation(mesh, region, &mut held)?;
+        }
+    }
     for constraint in model.constraints.iter().filter(|c| c.active()) {
         match constraint {
             Constraint::Spring(spring) => writer.spring(sets, spring)?,
@@ -229,6 +239,85 @@ impl Writer {
             springs.push((format!("{name}_{node}"), vec![vec![node, other]], k));
         }
         self.springs(sets, &name, springs);
+        Ok(())
+    }
+
+    /// One equation per slave node within the tolerance of the master side: the slave node
+    /// moves with the closest point of the master normal to the surface, while it slides
+    /// freely along it. The slave node's largest component of the normal is the dependent
+    /// term. Nodes `held` by an earlier region are left out, as a node can be the dependent
+    /// one of a single equation only.
+    fn no_separation(
+        &mut self,
+        mesh: &FeMesh,
+        region: &ContactRegion,
+        held: &mut std::collections::BTreeSet<NodeId>,
+    ) -> Result<(), WriteError> {
+        let (master, slave) = match region.settings.sides {
+            Some(SideRoles::BIsMaster) => (&region.side_b, &region.side_a),
+            _ => (&region.side_a, &region.side_b),
+        };
+        let target = Target::new(mesh, &master.faces(mesh));
+        let slave_faces = slave.faces(mesh);
+        if target.faces.is_empty() || slave_faces.is_empty() {
+            return Err(empty(&region.name, "element faces on both sides"));
+        }
+        let mut normals: BTreeMap<NodeId, [f64; 3]> = BTreeMap::new();
+        for &(element, face) in &slave_faces {
+            let Some(normal) = face_normal(mesh, element, face) else {
+                continue;
+            };
+            for node in face_node_ids(mesh, element, face) {
+                let sum = normals.entry(node).or_default();
+                for k in 0..3 {
+                    sum[k] += normal[k];
+                }
+            }
+        }
+        let tolerance = region.settings.tolerance.unwrap_or(f64::INFINITY);
+        for (node, normal) in normals {
+            let Some(coords) = mesh.node(node) else {
+                continue;
+            };
+            let Some((point, terms)) = target.closest(coords) else {
+                continue;
+            };
+            let gap = sub(point, coords);
+            if dot(gap, gap).sqrt() > tolerance || held.contains(&node) {
+                continue;
+            }
+            if let [(other, _)] = terms.as_slice()
+                && *other == node
+            {
+                continue;
+            }
+            let normal = normalized(normal);
+            let dofs = 1..=self.dofs as u8;
+            let Some(dependent) = (dofs.clone()).max_by(|&i, &j| {
+                normal[usize::from(i) - 1]
+                    .abs()
+                    .total_cmp(&normal[usize::from(j) - 1].abs())
+            }) else {
+                continue;
+            };
+            let component = |dof: u8| normal[usize::from(dof) - 1];
+            let mut equation = vec![(node, dependent, component(dependent))];
+            for dof in dofs.clone().filter(|&d| d != dependent) {
+                if component(dof).abs() > 1e-9 {
+                    equation.push((node, dof, component(dof)));
+                }
+            }
+            for &(other, weight) in &terms {
+                for dof in dofs.clone() {
+                    let factor = -weight * component(dof);
+                    if factor.abs() > 1e-9 {
+                        equation.push((other, dof, factor));
+                    }
+                }
+            }
+            held.insert(node);
+            self.equations.push(equation);
+        }
         Ok(())
     }
 
@@ -492,6 +581,29 @@ pub(super) fn outward_normal(mesh: &FeMesh, element: ElementId, face: u8) -> Opt
         if outward < 0.0 {
             normal = normal.map(|v| -v);
         }
+    }
+    let length = dot(normal, normal).sqrt();
+    (length > 0.0).then(|| normal.map(|v| v / length))
+}
+
+/// [`outward_normal`] of a face; of an edge of a 2D element the normal in the plane of the
+/// model pointing out of the element.
+fn face_normal(mesh: &FeMesh, element: ElementId, face: u8) -> Option<[f64; 3]> {
+    if let Some(normal) = outward_normal(mesh, element, face) {
+        return Some(normal);
+    }
+    let e = mesh.element(element)?;
+    let topology = e.faces().get(usize::from(face).checked_sub(1)?)?;
+    let [a, b] = topology.corners[..] else {
+        return None;
+    };
+    let (a, b) = (mesh.node(*e.nodes.get(a)?)?, mesh.node(*e.nodes.get(b)?)?);
+    let mut normal = [b[1] - a[1], a[0] - b[0], 0.0];
+    let all: Vec<[f64; 3]> = e.nodes.iter().filter_map(|&n| mesh.node(n)).collect();
+    let centre: [f64; 3] =
+        std::array::from_fn(|k| all.iter().map(|p| p[k]).sum::<f64>() / all.len() as f64);
+    if dot(normal, sub(a, centre)) < 0.0 {
+        normal = normal.map(|v| -v);
     }
     let length = dot(normal, normal).sqrt();
     (length > 0.0).then(|| normal.map(|v| v / length))

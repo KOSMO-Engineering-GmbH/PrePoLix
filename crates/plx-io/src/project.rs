@@ -1046,6 +1046,7 @@ mod tests {
             }],
             contact_pairs: vec![ContactPair {
                 adjustment_size: Some(0.01),
+                clearance: None,
                 master_color: [255, 0, 0],
                 ..ContactPair::new("Contact_Pair-1", "Surface_Interaction-1")
             }],

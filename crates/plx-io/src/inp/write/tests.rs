@@ -7272,3 +7272,172 @@ fn contact_regions_write_contact_results() {
     let pressure = node_value(&frd, "CONTACT", "CPRESS", 105);
     assert!(pressure > 5.0 && pressure < 20.0, "{pressure}");
 }
+
+/// No separation holds the upper block to the lower one normal to the surfaces, one
+/// equation per slave node, while it slides freely along them: pulled up and pushed
+/// sideways at its top, the lower block takes the pull but no shear.
+#[test]
+fn calculix_holds_a_region_of_no_separation_together_and_lets_it_slide() {
+    let (mesh, mut model) = blocks_in_contact(0.0, plx_model::ContactBehavior::NoSeparation);
+    model.contact_regions[0].settings.sides = Some(plx_model::SideRoles::AIsMaster);
+    model.steps[0].loads[0].kind = LoadKind::Pressure(-10.0);
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Side-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes((110..=118).collect()),
+        kind: each_node([Some(0.01), Some(0.0), None, None, None, None]),
+        amplitude: None,
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Contact pair") && !text.contains("*Tie"));
+    // The nine nodes of the upper block's bottom, each on a node of the lower block's top.
+    assert_eq!(text.matches("*Equation\n2\n").count(), 9, "{text}");
+    assert!(
+        text.contains("*Equation\n2\n105, 3, -1, 14, 3, 1\n"),
+        "{text}"
+    );
+    let Some(frd) = run_ccx("region-no-separation", &text) else {
+        return;
+    };
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let pull = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((pull + 1000.0).abs() < 1.0, "{pull}");
+    let shear = node_sum(&frd, "FORC", "F1", &bottom);
+    assert!(shear.abs() < 1.0, "{shear}");
+    assert!(
+        (node_value(&frd, "DISP", "U3", 14) - node_value(&frd, "DISP", "U3", 105)).abs() < 1e-9
+    );
+    let slide = node_value(&frd, "DISP", "U1", 105) - node_value(&frd, "DISP", "U1", 14);
+    assert!((slide - 0.01).abs() < 1e-3, "{slide}");
+}
+
+/// An offset replaces the geometric gap: a negative one presses blocks that just touch
+/// apart like an interference fit, the pressure from the overlap over the compliance of
+/// both blocks and the contact.
+#[test]
+fn calculix_presses_regions_apart_by_a_negative_offset() {
+    let (mesh, mut model) = blocks_in_contact(0.0, plx_model::ContactBehavior::Frictionless);
+    model.contact_regions[0].settings.interface =
+        Some(plx_model::InterfaceTreatment::Offset(-0.01));
+    model.steps[0].loads.clear();
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Top-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes((110..=118).collect()),
+        kind: BoundaryKind::displacement([Some(0.0); 6]),
+        amplitude: None,
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "*Clearance, Master=Internal_Selection-1_Region-1_Master, \
+             Slave=Internal_Selection-1_Region-1_Slave, Value=-0.01\n"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("Adjust="));
+    let Some(frd) = run_ccx("region-offset", &text) else {
+        return;
+    };
+    // 0.01 = p (10/E + 10/E + h/(10 E)) without the lateral restraint, about 100 MPa.
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let force = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!(force > 5000.0 && force < 20_000.0, "{force}");
+    assert!(node_value(&frd, "DISP", "U3", 14) < 0.0);
+    assert!(node_value(&frd, "DISP", "U3", 105) > 0.0);
+}
+
+/// A tie or another formulation leaves the offset out and says why.
+#[test]
+fn an_offset_needs_a_surface_to_surface_contact() {
+    let (mesh, mut model) = blocks_in_contact(0.0, plx_model::ContactBehavior::Bonded);
+    model.contact_regions[0].settings.interface = Some(plx_model::InterfaceTreatment::Offset(0.1));
+    let resolved = model.resolve_contacts(&mesh);
+    assert!(
+        resolved.items[0]
+            .why
+            .iter()
+            .any(|w| w.contains("No offset"))
+    );
+    model.contact_regions[0].behavior = plx_model::ContactBehavior::Frictionless;
+    model.contact_defaults.formulation = Some(plx_model::ContactMethod::NodeToSurface);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Clearance"));
+}
+
+/// In a coupled step heat flows across a contact region: its contact pair conducts 100 k / h,
+/// so that the temperature hardly jumps at the contact. Hot at the bottom and cold at the
+/// top, the blocks meet at about the mean.
+#[test]
+fn calculix_conducts_heat_across_contact_regions_in_coupled_steps() {
+    let (mesh, mut model) = blocks_in_contact(0.0, plx_model::ContactBehavior::Frictionless);
+    let material = &mut model.materials[0];
+    material.conductivity = Some(CONDUCTIVITY);
+    material.specific_heat = Some(SPECIFIC_HEAT);
+    let step = &mut model.steps[0];
+    step.kind = StepKind::CoupledTempDisp(HeatTransferStep::default());
+    step.field_outputs = FieldOutput::coupled_defaults();
+    step.boundary_conditions.extend([
+        temperature("Hot", Region::Nodes((1..=9).collect()), 100.0),
+        temperature("Cold", Region::Nodes((110..=118).collect()), 0.0),
+    ]);
+    step.boundary_conditions.push(BoundaryCondition {
+        name: "Side-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes((110..=118).collect()),
+        kind: each_node([Some(0.0), Some(0.0), None, None, None, None]),
+        amplitude: None,
+    });
+    model.initial_conditions.push(plx_model::InitialCondition {
+        name: "Initial-1".into(),
+        active: true,
+        region: Region::Parts(vec!["LOWER".into(), "UPPER".into()]),
+        kind: plx_model::InitialConditionKind::Temperature(50.0),
+    });
+    let resolved = model.resolve_contacts(&mesh);
+    let plx_model::ResolvedKind::Pair { conductance, .. } = resolved.items[0].kind else {
+        panic!("{:?}", resolved.items[0].kind);
+    };
+    assert_eq!(conductance, Some(100.0 * CONDUCTIVITY / 5.0));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Gap conductance\n1000\n"), "{text}");
+    let Some(frd) = run_ccx("region-conductance", &text) else {
+        return;
+    };
+    let (below, above) = (
+        node_value(&frd, "NDTEMP", "T", 14),
+        node_value(&frd, "NDTEMP", "T", 105),
+    );
+    assert!((below - 50.0).abs() < 5.0, "{below}");
+    assert!((below - above).abs() < 2.0, "{below} {above}");
+}
+
+/// The equations of no separation hold for small displacements only; with large
+/// deformations the model check warns.
+#[test]
+fn no_separation_with_large_deformations_is_a_warning() {
+    use plx_model::{MeshCheck, ModelItem, Problem};
+    let (mesh, mut model) = blocks_in_contact(0.0, plx_model::ContactBehavior::NoSeparation);
+    let check = MeshCheck::new(&mesh, model.properties.space);
+    let warned = |model: &FeModel| {
+        (model.check(&mesh, &check).iter()).any(|f| {
+            f.problem == Problem::NoSeparationLargeDeformation
+                && f.item == ModelItem::ContactRegion(0)
+        })
+    };
+    assert!(!warned(&model));
+    if let StepKind::Static(s) = &mut model.steps[0].kind {
+        s.nlgeom = true;
+    }
+    assert!(warned(&model));
+    let resolved = model.resolve_contacts(&mesh);
+    assert!(
+        resolved.items[0]
+            .why
+            .iter()
+            .any(|w| w.contains("small displacements"))
+    );
+}

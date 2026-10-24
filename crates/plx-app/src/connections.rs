@@ -8,7 +8,7 @@ use plx_model::{
     BondedMethod, ContactBehavior, ContactCheck, ContactDefaults, ContactDetection, ContactMethod,
     ContactRegion, ContactStatus, DetectionGrouping, FeModel, InterfaceTreatment, Quantity,
     Resolved, ResolvedContacts, ResolvedKind, STORED, SideRoles, Stiffness, UnitSystem,
-    auto_detection_tolerance,
+    auto_detection_tolerance, conducts_across_contacts,
 };
 
 use crate::contacts::MasterSlave;
@@ -342,6 +342,22 @@ fn exported_as(model: &Model, resolved: &Resolved) -> String {
     if resolved.adjusts() {
         text += ", adjusted to touch";
     }
+    if let ResolvedKind::Pair {
+        clearance,
+        conductance,
+        ..
+    } = resolved.kind
+    {
+        if let Some(offset) = clearance {
+            text += &format!(", offset {}", with_unit(offset, units, Quantity::Length));
+        }
+        if let Some(c) = conductance {
+            text += &format!(
+                ", heat conductance {}",
+                with_unit(c, units, Quantity::HeatTransferCoefficient)
+            );
+        }
+    }
     text
 }
 
@@ -446,6 +462,7 @@ fn advanced_rows(ui: &mut Ui, model: &Model, region: &mut ContactRegion, resolve
         ],
     );
     let tie = matches!(resolved.kind, ResolvedKind::Tie { .. });
+    let pair = matches!(resolved.kind, ResolvedKind::Pair { .. });
     if region.behavior == ContactBehavior::Bonded {
         let auto = if tie { "constraint" } else { "contact" };
         auto_combo(
@@ -457,7 +474,7 @@ fn advanced_rows(ui: &mut Ui, model: &Model, region: &mut ContactRegion, resolve
             &BondedMethod::ALL.map(|m| (m, m.name())),
         );
     }
-    if !tie {
+    if pair {
         stiffness_row(
             ui,
             "region normal",
@@ -484,19 +501,9 @@ fn advanced_rows(ui: &mut Ui, model: &Model, region: &mut ContactRegion, resolve
             );
         }
     }
-    let auto = if resolved.adjusts() {
-        "adjust to touch"
-    } else {
-        "as is"
-    };
-    auto_combo(
-        ui,
-        "region interface",
-        "Initial gap",
-        &mut settings.interface,
-        auto.into(),
-        &InterfaceTreatment::ALL.map(|t| (t, t.name())),
-    );
+    if region.behavior != ContactBehavior::NoSeparation {
+        interface_row(ui, &mut settings.interface, resolved, units);
+    }
     ui.label("Tolerance").on_hover_text(
         "Distance within which the sides count as touching: tied by a tie, closed by \
          the adjustment.",
@@ -519,7 +526,11 @@ fn advanced_rows(ui: &mut Ui, model: &Model, region: &mut ContactRegion, resolve
         }
     });
     ui.end_row();
-    if model.fe.contact_formulation().0 == ContactMethod::NodeToSurface && !tie {
+    let thermal = (model.fe.steps.iter()).any(|s| s.active && conducts_across_contacts(&s.kind));
+    if pair && (thermal || settings.conductance.is_some()) {
+        conductance_row(ui, &mut settings.conductance, resolved, units);
+    }
+    if model.fe.contact_formulation().0 == ContactMethod::NodeToSurface && pair {
         let auto = match &resolved.kind {
             ResolvedKind::Pair { small_sliding, .. } if *small_sliding => "on",
             _ => "off",
@@ -533,6 +544,87 @@ fn advanced_rows(ui: &mut Ui, model: &Model, region: &mut ContactRegion, resolve
             &[(true, "On"), (false, "Off")],
         );
     }
+}
+
+/// What happens to an initial gap: derived, as is, adjusted to touch or an offset with its
+/// value.
+fn interface_row(
+    ui: &mut Ui,
+    value: &mut Option<InterfaceTreatment>,
+    resolved: &Resolved,
+    units: UnitSystem,
+) {
+    ui.label("Initial gap").on_hover_text(
+        "Adjust to touch closes gaps within the tolerance at the start. An offset sets the \
+         distance of the sides wherever they face each other, whatever the geometry: \
+         negative for an interference fit (surface to surface contact only).",
+    );
+    ui.horizontal(|ui| {
+        let auto = format!(
+            "Auto ({})",
+            if resolved.adjusts() {
+                "adjust to touch"
+            } else {
+                "as is"
+            }
+        );
+        let text = value.map_or(auto.clone(), |t| t.name().to_owned());
+        egui::ComboBox::from_id_salt("region interface")
+            .selected_text(text)
+            .width(170.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(value, None, auto);
+                for option in InterfaceTreatment::ALL {
+                    let selected = value.is_some_and(|v| v.same_kind(option));
+                    if ui.selectable_label(selected, option.name()).clicked() && !selected {
+                        *value = Some(option);
+                    }
+                }
+            });
+        if let Some(InterfaceTreatment::Offset(offset)) = value {
+            ui.add(numeric::physical(offset, units, Quantity::Length));
+        }
+    });
+    ui.end_row();
+}
+
+/// Heat conductance across the contact, derived or a value.
+fn conductance_row(ui: &mut Ui, value: &mut Option<f64>, resolved: &Resolved, units: UnitSystem) {
+    let auto = match resolved.kind {
+        ResolvedKind::Pair {
+            conductance: Some(c),
+            ..
+        } if value.is_none() => Some(c),
+        _ => (resolved.conductivity.zip(resolved.mesh_size))
+            .map(|(k, h)| plx_model::CONDUCTANCE_FACTOR * k / h),
+    };
+    ui.label("Heat conductance").on_hover_text(format!(
+        "Heat flow across the closed contact per area and temperature difference, in steps \
+         with temperatures and displacements. Auto is {} k / h of the less conducting \
+         side: nearly ideal.",
+        plx_model::CONDUCTANCE_FACTOR
+    ));
+    ui.horizontal(|ui| {
+        let mut set = value.is_some();
+        let auto_text = auto.map_or("none, no conductivity".into(), |c| {
+            with_unit(c, units, Quantity::HeatTransferCoefficient)
+        });
+        ui.checkbox(&mut set, "")
+            .on_hover_text(format!("Untick for Auto ({auto_text})"));
+        if set {
+            let mut c = value.or(auto).unwrap_or(0.0);
+            ui.add(numeric::physical(
+                &mut c,
+                units,
+                Quantity::HeatTransferCoefficient,
+            ));
+            *value = Some(c);
+        } else {
+            *value = None;
+            ui.weak(format!("Auto ({auto_text})"));
+        }
+    });
+    ui.end_row();
 }
 
 /// The settings all contact regions share, at the Connections of the tree.
@@ -616,6 +708,14 @@ pub fn validate_region(region: &ContactRegion, sides: &MasterSlave) -> Result<()
         .is_some_and(|t| !(t.is_finite() && t >= 0.0))
     {
         return Err("The tolerance must not be negative.".into());
+    }
+    if let Some(InterfaceTreatment::Offset(offset)) = region.settings.interface
+        && !offset.is_finite()
+    {
+        return Err("The offset must be a number.".into());
+    }
+    if (region.settings.conductance).is_some_and(|c| !(c.is_finite() && c >= 0.0)) {
+        return Err("The heat conductance must not be negative.".into());
     }
     Ok(())
 }
