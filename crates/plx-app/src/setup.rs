@@ -36,6 +36,13 @@ use crate::selection::{History, Items, Operation, PartPicks, Picker, PickerActio
 use crate::tree::TreeItem;
 use crate::viewport::{BoxSelect, Preview};
 
+/// A contact region or a contact pair, by index, whose contact values an output gives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContactItem {
+    Region(usize),
+    Pair(usize),
+}
+
 /// Kinds of items the tree can create.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NewItem {
@@ -49,6 +56,12 @@ pub enum NewItem {
     FieldOutput(usize),
     /// A history output of a step, printed into the `.dat` file.
     HistoryOutput(usize),
+    /// A history output of a step printing the contact values of a contact region or pair,
+    /// created in the menu of the contact.
+    ContactHistoryOutput(usize, ContactItem),
+    /// A contact field output of a step, created in the menu of a contact; a step that has
+    /// one already opens it.
+    ContactFieldOutput(usize),
     /// A defined temperature of a step.
     DefinedField(usize),
     /// A spring, support or rigid body, chosen in the dialog.
@@ -1815,6 +1828,32 @@ impl Editor {
                 );
                 Draft::FieldOutput(step, output)
             }
+            NewItem::ContactHistoryOutput(step, contact) => {
+                let target = fe.steps.get(step)?;
+                let pair = match contact {
+                    ContactItem::Region(i) => &fe.contact_regions.get(i)?.name,
+                    ContactItem::Pair(i) => &fe.contact_pairs.get(i)?.name,
+                };
+                let mut output = HistoryOutput::contact(
+                    next_name("CH_Output", names(&target.history_outputs, |h| &h.name)),
+                    pair.clone(),
+                );
+                // The contact forces too, summed over the slave side.
+                output.variables.push("CF".into());
+                output.normalize_variables();
+                let region = history_region(&output.kind, fe, &FeMesh::default());
+                Draft::HistoryOutput(step, output, region)
+            }
+            NewItem::ContactFieldOutput(step) => {
+                let target = fe.steps.get(step)?;
+                let kind = OutputKind::Contact;
+                let output = FieldOutput::new(
+                    next_name(kind.prefix(), names(&target.field_outputs, |f| &f.name)),
+                    kind,
+                    kind.default_variables(),
+                );
+                Draft::FieldOutput(step, output)
+            }
             NewItem::HistoryOutput(step) => {
                 let target = fe.steps.get(step)?;
                 let output = HistoryOutput::node(
@@ -2893,22 +2932,26 @@ impl Editor {
                             numeric::format_physical(*speed * 60.0 / std::f64::consts::TAU)
                         ));
                         ui.end_row();
-                        for (value, label) in
-                            point
-                                .iter_mut()
-                                .zip(["Axis point X", "Axis point Y", "Axis point Z"])
+                        for ((value, label), field) in point
+                            .iter_mut()
+                            .zip(["Axis point X", "Axis point Y", "Axis point Z"])
+                            .zip(Field::LOCATION)
                         {
                             ui.label(label);
-                            ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1));
+                            expose::field(ui, field, |ui| {
+                                ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1))
+                            });
                             ui.end_row();
                         }
-                        for (value, label) in axis.iter_mut().zip([
-                            "Axis direction X",
-                            "Axis direction Y",
-                            "Axis direction Z",
-                        ]) {
+                        for ((value, label), field) in axis
+                            .iter_mut()
+                            .zip(["Axis direction X", "Axis direction Y", "Axis direction Z"])
+                            .zip(Field::AXIS)
+                        {
                             ui.label(label);
-                            ui.add(numeric::drag_value(value).speed(0.01));
+                            expose::field(ui, field, |ui| {
+                                ui.add(numeric::drag_value(value).speed(0.01))
+                            });
                             ui.end_row();
                         }
                         ui.label("");
@@ -3001,19 +3044,33 @@ impl Editor {
                         vector_rows(ui, v, ["V1", "V2", "V3"], two_d, Quantity::Velocity, units);
                     }
                     InitialConditionKind::AngularVelocity { point, axis, speed } => {
-                        vector_rows(ui, point, ["X", "Y", "Z"], two_d, Quantity::Length, units);
+                        let count = if two_d { 2 } else { 3 };
+                        let labels = ["Axis point X", "Axis point Y", "Axis point Z"]
+                            .into_iter()
+                            .zip(Field::LOCATION);
+                        for (value, (label, field)) in point.iter_mut().zip(labels).take(count) {
+                            ui.label(label);
+                            expose::field(ui, field, |ui| {
+                                ui.add(numeric::quantity(value, units, Quantity::Length).speed(1.0))
+                            });
+                            ui.end_row();
+                        }
                         if two_d {
                             ui.label("Axis");
                             ui.label("Z");
                             ui.end_row();
                         } else {
-                            ui.label("Axis");
-                            ui.horizontal(|ui| {
-                                for a in axis.iter_mut() {
-                                    ui.add(numeric::drag_value(a).speed(0.1));
-                                }
-                            });
-                            ui.end_row();
+                            let labels =
+                                ["Axis direction X", "Axis direction Y", "Axis direction Z"]
+                                    .into_iter()
+                                    .zip(Field::AXIS);
+                            for (value, (label, field)) in axis.iter_mut().zip(labels) {
+                                ui.label(label);
+                                expose::field(ui, field, |ui| {
+                                    ui.add(numeric::drag_value(value).speed(0.1))
+                                });
+                                ui.end_row();
+                            }
                         }
                         ui.label("Rotational speed");
                         expose::field(ui, Field::Speed, |ui| {

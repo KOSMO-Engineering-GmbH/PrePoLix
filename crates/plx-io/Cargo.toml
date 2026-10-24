@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 base64.workspace = true
 flate2.workspace = true
+glam.workspace = true
 plx-mesh.workspace = true
 plx-model.workspace = true
 plx-results.workspace = true

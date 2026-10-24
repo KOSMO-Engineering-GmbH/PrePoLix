@@ -3024,7 +3024,21 @@ impl Workbench {
             return;
         }
         if let Some(model) = self.setup_model() {
-            self.editor = Editor::create(kind, &model.fe);
+            // CalculiX writes the values of all contacts with one contact field output, so
+            // a step that has one opens it.
+            let existing = match kind {
+                NewItem::ContactFieldOutput(step) => (model.fe.steps.get(step))
+                    .and_then(|s| {
+                        (s.field_outputs.iter())
+                            .position(|f| f.kind == plx_model::OutputKind::Contact)
+                    })
+                    .map(|i| TreeItem::FieldOutput(step, i)),
+                _ => None,
+            };
+            self.editor = match existing {
+                Some(item) => Editor::edit(&item, &model.fe, &model.mesh),
+                None => Editor::create(kind, &model.fe),
+            };
             self.set_tree_view(TreeView::FeModel);
         }
     }
@@ -7247,6 +7261,8 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
         | NewItem::Load(s)
         | NewItem::FieldOutput(s)
         | NewItem::HistoryOutput(s)
+        | NewItem::ContactHistoryOutput(s, _)
+        | NewItem::ContactFieldOutput(s)
         | NewItem::DefinedField(s) => TreeItem::Step(*s),
         NewItem::Constraint => TreeItem::Group("Constraints"),
         NewItem::SurfaceInteraction

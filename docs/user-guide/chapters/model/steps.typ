@@ -134,8 +134,9 @@ a variable shows what it is.
   [Last iterations], [#ui("On") writes every iteration of the last increment, to find out why a
     solution diverges.],
   [Contact elements], [#ui("On") writes the contact elements to a `.cel` file.],
-  [Output (2D/3D)], [Element outputs only. #ui("3D") writes 1D and 2D elements in their expanded
-    3D form; #ui("Default") writes shell and plane models in 2D.],
+  [Output (2D/3D)], [Element outputs; the node outputs of the step follow them. #ui("Default")
+    and #ui("3D") write shells and beams in the 3D form CalculiX expands them to, #ui("2D") at
+    their own nodes, where the stresses of shells lack the bending.],
   [Global], [Node and element outputs. #ui("No") writes the results in the local coordinate
     systems.],
 )

@@ -8,7 +8,8 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use plx_mesh::{Element, ElementShape, FeMesh, Part};
+use glam::DVec3;
+use plx_mesh::{Element, ElementFamily, ElementShape, FeMesh, NodeId, Part};
 use plx_results::{AnalysisKind, Component, Field, Increment, add_derived_components};
 
 #[derive(Debug, thiserror::Error)]
@@ -736,6 +737,80 @@ fn float_at(bytes: &[u8], offset: usize, size: usize) -> f64 {
         f64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
     } else {
         f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as f64
+    }
+}
+
+/// The nodes CalculiX expanded each node of the shells, membranes and beams of `input` to,
+/// by the ids of `input`'s nodes, where `results` holds the expanded solids (`OUTPUT=3D`,
+/// CalculiX's default). The expanded elements keep their element numbers, their nodes get new
+/// ones. A node lies off the one it was expanded from along the shell's normal, or across
+/// the beam: each node of an expanded element belongs to the node of the original element
+/// it is closest to in the other directions.
+pub fn expanded_nodes(input: &FeMesh, results: &FeMesh) -> BTreeMap<NodeId, Vec<NodeId>> {
+    let mut expanded: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+    let point = |mesh: &FeMesh, id: NodeId| mesh.node(id).map(DVec3::from);
+    for element in input.elements() {
+        let family = element.shape.family();
+        if !matches!(family, ElementFamily::Surface | ElementFamily::Line) {
+            continue;
+        }
+        let Some(solid) =
+            (results.element(element.id)).filter(|e| e.shape.family() == ElementFamily::Solid)
+        else {
+            continue;
+        };
+        let Some(nodes) = (element.nodes.iter())
+            .map(|&id| point(input, id))
+            .collect::<Option<Vec<DVec3>>>()
+        else {
+            continue;
+        };
+        // The direction a node is expanded along drops out: the normal of a shell, the
+        // plane of a beam's section.
+        let distance: Box<dyn Fn(DVec3) -> f64> = if family == ElementFamily::Surface {
+            let corners = match element.shape {
+                ElementShape::Tri3 | ElementShape::Tri6 => 3,
+                _ => 4,
+            };
+            let normal = (0..corners)
+                .map(|k| nodes[k].cross(nodes[(k + 1) % corners]))
+                .sum::<DVec3>()
+                .normalize_or_zero();
+            Box::new(move |v: DVec3| (v - normal * v.dot(normal)).length())
+        } else {
+            let tangent = (nodes[nodes.len() - 1] - nodes[0]).normalize_or_zero();
+            Box::new(move |v: DVec3| v.dot(tangent).abs())
+        };
+        for &id in &solid.nodes {
+            let Some(p) = point(results, id) else {
+                continue;
+            };
+            let closest = (element.nodes.iter().zip(&nodes))
+                .map(|(&original, &q)| (distance(p - q), original))
+                .min_by(|a, b| a.0.total_cmp(&b.0));
+            if let Some((_, original)) = closest {
+                let list = expanded.entry(original).or_default();
+                if !list.contains(&id) {
+                    list.push(id);
+                }
+            }
+        }
+    }
+    expanded
+}
+
+/// The indices of the nodes of `results` that stand for node `node` of the mesh CalculiX ran:
+/// the node itself, or the nodes it was expanded to (see [`expanded_nodes`]).
+pub fn node_indices(
+    results: &FeMesh,
+    expanded: &BTreeMap<NodeId, Vec<NodeId>>,
+    node: NodeId,
+) -> Vec<usize> {
+    match results.node_index(node) {
+        Some(index) => vec![index],
+        None => (expanded.get(&node).into_iter().flatten())
+            .filter_map(|&id| results.node_index(id))
+            .collect(),
     }
 }
 

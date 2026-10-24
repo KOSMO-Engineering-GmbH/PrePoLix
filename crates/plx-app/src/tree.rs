@@ -11,7 +11,7 @@ use plx_model::{FeModel, Finding, ModelItem, SetKind, Severity};
 
 use crate::features::{FeatureItem, FeatureKind};
 use crate::model::{Model, PartInfo};
-use crate::setup::NewItem;
+use crate::setup::{ContactItem, NewItem};
 use crate::tree_icons::{self, StepGlyph, TreeIcon};
 
 /// Which of the three trees is shown.
@@ -922,6 +922,8 @@ struct Tree<'a> {
     symbols: HashMap<TreeItem, bool>,
     /// Number of steps, to disable "Move Down" on the last one.
     step_count: usize,
+    /// Names of the steps, for the menus that create an item in one of them.
+    step_names: Vec<String>,
     /// The parts listed in the tree for the menu of "Parts".
     part_indices: Vec<usize>,
     /// The type of every step, which gives it its icon and tooltip.
@@ -931,6 +933,47 @@ struct Tree<'a> {
 }
 
 impl Tree<'_> {
+    /// A menu entry creating an item in a step: a button with one step, a submenu of the
+    /// steps with several, disabled without any.
+    fn step_item_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        label: &str,
+        hint: &str,
+        create: impl Fn(usize) -> NewItem,
+    ) {
+        match &self.step_names[..] {
+            [] => {
+                ui.add_enabled(false, egui::Button::new(format!("{label} …")))
+                    .on_disabled_hover_text("Create a step first.");
+            }
+            [_] => {
+                if ui
+                    .button(format!("{label} …"))
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    self.response.create = Some(create(0));
+                }
+            }
+            names => {
+                let mut chosen = None;
+                ui.menu_button(label, |ui| {
+                    for (step, name) in names.iter().enumerate() {
+                        if ui.button(name).on_hover_text(hint).clicked() {
+                            chosen = Some(step);
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(hint);
+                if let Some(step) = chosen {
+                    self.response.create = Some(create(step));
+                }
+            }
+        }
+    }
+
     fn is_selected(&self, item: &TreeItem) -> bool {
         match item {
             TreeItem::Part(index) => self.state.selected_parts(self.view).contains(index),
@@ -1200,6 +1243,28 @@ impl Tree<'_> {
                         {
                             self.response.move_step = Some((s, false));
                         }
+                        ui.separator();
+                    }
+                    let contact = match item {
+                        TreeItem::ContactRegion(i) => Some(ContactItem::Region(i)),
+                        TreeItem::ContactPair(i) => Some(ContactItem::Pair(i)),
+                        _ => None,
+                    };
+                    if let Some(contact) = contact.filter(|_| !several) {
+                        self.step_item_menu(
+                            ui,
+                            "Create Contact History Output",
+                            "Prints the contact forces, slip and pressure of this contact into \
+                             the .dat file at every increment of the step.",
+                            |step| NewItem::ContactHistoryOutput(step, contact),
+                        );
+                        self.step_item_menu(
+                            ui,
+                            "Create Contact Field Output",
+                            "Writes the contact pressure, slip and gap of all contacts into the \
+                             .frd file; a step that writes them already opens its output.",
+                            NewItem::ContactFieldOutput,
+                        );
                         ui.separator();
                     }
                     if self.master_slave.contains(&item) {
@@ -1690,6 +1755,7 @@ pub fn show(
         master_slave: HashSet::new(),
         detected: HashMap::new(),
         step_count: 0,
+        step_names: Vec::new(),
         part_indices: Vec::new(),
         step_types: Vec::new(),
         siblings: Vec::new(),
@@ -1760,6 +1826,8 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
     let model = model.filter(|m| !m.is_results());
     if let Some(model) = &model {
         let fe = &model.fe;
+        // Before the contacts, whose menus create outputs in the steps.
+        tree.step_names = fe.steps.iter().map(|s| s.name.clone()).collect();
         for (r, region) in fe.contact_regions.iter().enumerate() {
             let detection = (region.detected_by.as_deref())
                 .and_then(|name| fe.contact_detections.iter().position(|d| d.name == name));

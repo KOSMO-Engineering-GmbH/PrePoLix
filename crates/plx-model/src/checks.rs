@@ -129,6 +129,9 @@ pub enum Problem {
     /// A step switches a contact region off or on that CalculiX cannot switch: a tie, the
     /// equations of no separation, or a region deactivated as a whole.
     ContactChangeIgnored,
+    /// A history output prints the contact values of a region that has none: a tie, the
+    /// equations of no separation, or a region deactivated as a whole.
+    ContactOutputIgnored,
     /// A wheel of a moving load that is off the selected surface at some positions.
     WheelOffSurface,
     /// Found in the solver output only.
@@ -168,6 +171,7 @@ impl Problem {
             | Problem::ContactRegionOpen
             | Problem::NoSeparationLargeDeformation
             | Problem::ContactChangeIgnored
+            | Problem::ContactOutputIgnored
             | Problem::DesignRegionIgnored
             | Problem::RigidBeamNodes
             | Problem::NoCreep => Severity::Warning,
@@ -226,6 +230,7 @@ impl Problem {
             Problem::ContactRegionOpen => "Contact region open",
             Problem::NoSeparationLargeDeformation => "No separation with large deformations",
             Problem::ContactChangeIgnored => "Contact cannot change in steps",
+            Problem::ContactOutputIgnored => "No contact values to print",
             Problem::WheelOffSurface => "Wheel off the surface",
             Problem::NoConvergence => "No convergence",
             Problem::MpcAndSpc => "Degree of freedom bound twice",
@@ -503,6 +508,12 @@ impl Problem {
                  deformations the sides slide and turn, and the equations no longer keep \
                  them together: gaps open or the sides press into each other."
             }
+            Problem::ContactOutputIgnored => {
+                "CalculiX prints contact values (*CONTACT PRINT) of contact pairs only: a \
+                 bonded region written as a tie and a region of no separation have no \
+                 contact elements, and a deactivated region is not written. The history \
+                 output is left out."
+            }
             Problem::ContactChangeIgnored => {
                 "CalculiX switches contact pairs off and on within the steps, but not ties \
                  and constraint equations: a bonded region written as a tie and a region of \
@@ -752,6 +763,11 @@ impl Problem {
                 "Switch off large deformations in the step if the displacements are small, \
                  or make the region Frictionless with Adjust to touch: a contact that may \
                  open, but follows the sides."
+            }
+            Problem::ContactOutputIgnored => {
+                "Set Bonded as to Auto or Contact (tied contact) with the Surface to surface \
+                 formulation, so that the bonded region becomes a contact pair, or activate \
+                 the region."
             }
             Problem::ContactChangeIgnored => {
                 "Set Bonded as to Auto or Contact (tied contact) with the Surface to surface \
@@ -1010,6 +1026,25 @@ impl FeModel {
                 ModelItem::ContactRegion(i),
                 Problem::ContactChangeIgnored,
                 format!("{}: a step switches it, but {reason}", region.name),
+            ));
+        }
+        for (i, (region, item)) in self.contact_regions.iter().zip(&resolved.items).enumerate() {
+            if !region.prints_contact(&self.steps) {
+                continue;
+            }
+            let reason = match item.kind {
+                _ if !region.active => "it is deactivated as a whole",
+                crate::ResolvedKind::Tie { .. } => "it is written as a tie",
+                crate::ResolvedKind::NoSeparation { .. } => "no separation is written as equations",
+                crate::ResolvedKind::Pair { .. } => continue,
+            };
+            findings.push(Finding::new(
+                ModelItem::ContactRegion(i),
+                Problem::ContactOutputIgnored,
+                format!(
+                    "{}: a history output prints its contact values, but {reason}",
+                    region.name
+                ),
             ));
         }
         let nlgeom = (self.steps.iter()).find(|s| s.active && s.kind.nlgeom());
