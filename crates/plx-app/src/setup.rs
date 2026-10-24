@@ -2864,22 +2864,26 @@ impl Editor {
                             numeric::format_physical(*speed * 60.0 / std::f64::consts::TAU)
                         ));
                         ui.end_row();
-                        for (value, label) in
-                            point
-                                .iter_mut()
-                                .zip(["Axis point X", "Axis point Y", "Axis point Z"])
+                        for ((value, label), field) in point
+                            .iter_mut()
+                            .zip(["Axis point X", "Axis point Y", "Axis point Z"])
+                            .zip(Field::LOCATION)
                         {
                             ui.label(label);
-                            ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1));
+                            expose::field(ui, field, |ui| {
+                                ui.add(numeric::quantity(value, units, Quantity::Length).speed(0.1))
+                            });
                             ui.end_row();
                         }
-                        for (value, label) in axis.iter_mut().zip([
-                            "Axis direction X",
-                            "Axis direction Y",
-                            "Axis direction Z",
-                        ]) {
+                        for ((value, label), field) in axis
+                            .iter_mut()
+                            .zip(["Axis direction X", "Axis direction Y", "Axis direction Z"])
+                            .zip(Field::AXIS)
+                        {
                             ui.label(label);
-                            ui.add(numeric::drag_value(value).speed(0.01));
+                            expose::field(ui, field, |ui| {
+                                ui.add(numeric::drag_value(value).speed(0.01))
+                            });
                             ui.end_row();
                         }
                         ui.label("");
@@ -2967,19 +2971,33 @@ impl Editor {
                         vector_rows(ui, v, ["V1", "V2", "V3"], two_d, Quantity::Velocity, units);
                     }
                     InitialConditionKind::AngularVelocity { point, axis, speed } => {
-                        vector_rows(ui, point, ["X", "Y", "Z"], two_d, Quantity::Length, units);
+                        let count = if two_d { 2 } else { 3 };
+                        let labels = ["Axis point X", "Axis point Y", "Axis point Z"]
+                            .into_iter()
+                            .zip(Field::LOCATION);
+                        for (value, (label, field)) in point.iter_mut().zip(labels).take(count) {
+                            ui.label(label);
+                            expose::field(ui, field, |ui| {
+                                ui.add(numeric::quantity(value, units, Quantity::Length).speed(1.0))
+                            });
+                            ui.end_row();
+                        }
                         if two_d {
                             ui.label("Axis");
                             ui.label("Z");
                             ui.end_row();
                         } else {
-                            ui.label("Axis");
-                            ui.horizontal(|ui| {
-                                for a in axis.iter_mut() {
-                                    ui.add(numeric::drag_value(a).speed(0.1));
-                                }
-                            });
-                            ui.end_row();
+                            let labels =
+                                ["Axis direction X", "Axis direction Y", "Axis direction Z"]
+                                    .into_iter()
+                                    .zip(Field::AXIS);
+                            for (value, (label, field)) in axis.iter_mut().zip(labels) {
+                                ui.label(label);
+                                expose::field(ui, field, |ui| {
+                                    ui.add(numeric::drag_value(value).speed(0.1))
+                                });
+                                ui.end_row();
+                            }
                         }
                         ui.label("Rotational speed");
                         expose::field(ui, Field::Speed, |ui| {
