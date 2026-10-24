@@ -894,6 +894,11 @@ impl AnalysisWindow {
                 )
                 .on_hover_text(settings::SHELL_THICKNESS_TIP);
                 ui.checkbox(
+                    &mut self.workbench.settings.graphics.beam_profiles,
+                    "Beam Profiles",
+                )
+                .on_hover_text(settings::BEAM_PROFILES_TIP);
+                ui.checkbox(
                     &mut self.workbench.settings.graphics.show_linked,
                     settings::SHOW_LINKED_LABEL,
                 )
@@ -6422,25 +6427,34 @@ impl Workbench {
         }
     }
 
-    /// Draws the shells of the shown FE model thick or thin as the setting asks, again after
-    /// their sections changed.
+    /// Draws the shells and beams of the shown FE model or results as solids or as surfaces
+    /// and lines, as the settings ask, again after their sections changed.
     fn update_thick_shells(&mut self) {
-        if self.tree_view != TreeView::FeModel {
-            return;
-        }
-        let Some(model) = self.model.as_mut() else {
+        let model = match self.tree_view {
+            TreeView::FeModel => self.model.as_mut(),
+            TreeView::Results => self.results.get_mut(self.current_result),
+            TreeView::Geometry => None,
+        };
+        let Some(model) = model else {
             return;
         };
-        let wanted = self.settings.graphics.shell_thickness;
-        let current = &model.thick_shells;
-        if wanted && model.shell_sections().eq(current) || !wanted && current.is_empty() {
-            return;
-        }
-        model.thick_shells = if wanted {
-            model.shell_sections().cloned().collect()
+        let graphics = &self.settings.graphics;
+        let (shells, lines) = (graphics.shell_thickness, graphics.beam_profiles);
+        let shells_current = if shells {
+            model.shell_sections().eq(&model.thick_shells)
         } else {
-            Vec::new()
+            model.thick_shells.is_empty()
         };
+        let lines_current = if lines {
+            model.line_sections().eq(&model.thick_lines)
+        } else {
+            model.thick_lines.is_empty()
+        };
+        if shells_current && lines_current {
+            return;
+        }
+        model.thick_shells = (model.shell_sections().filter(|_| shells).cloned()).collect();
+        model.thick_lines = (model.line_sections().filter(|_| lines).cloned()).collect();
         self.results_changed = true;
     }
 

@@ -23,7 +23,7 @@ pub struct NodeBlend {
 }
 
 impl NodeBlend {
-    /// A vertex at no node, such as one of a thick shell drawn around its surface.
+    /// A vertex at no node, such as one of a section face cut through an element.
     pub const NONE: NodeBlend = NodeBlend {
         a: u32::MAX,
         b: u32::MAX,

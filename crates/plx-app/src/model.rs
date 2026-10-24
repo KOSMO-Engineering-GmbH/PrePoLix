@@ -11,11 +11,11 @@ use plx_mesh::{
 use plx_mesher::{CadEntity, GeometryDisplay};
 #[cfg(test)]
 use plx_model::SectionKind;
-use plx_model::{FeModel, Finding, Geometry, MeshCheck, UnitSystem};
+use plx_model::{BeamOrientation, FeModel, Finding, Geometry, MeshCheck, UnitSystem};
 use plx_render::{
-    ClipPlane, RenderMesh, SectionCells, SectionValues, ShellThickness, Vertex, lighten,
-    mesh_wireframe, part_color, part_render_mesh, section_mesh, section_values, thick_shell_mesh,
-    wireframe_edges,
+    BeamShape, ClipPlane, RenderMesh, SectionCells, SectionValues, ShellThickness, Vertex,
+    beam_mesh, lighten, mesh_wireframe, part_color, part_render_mesh, section_mesh, section_values,
+    thick_shell_mesh, wireframe_edges,
 };
 
 use crate::exploded::{Assembly, Explosion, Parameters, PartShape};
@@ -141,6 +141,11 @@ pub struct Model {
     /// Shell and membrane sections whose elements are drawn as the solid of their
     /// thickness and offset, see [`Model::shell_sections`]; empty draws them as surfaces.
     pub thick_shells: Vec<plx_model::Section>,
+    /// Beam and truss sections whose elements are drawn as their profile swept along the
+    /// line, see [`Model::line_sections`]; empty draws them as lines.
+    pub thick_lines: Vec<plx_model::Section>,
+    /// Results: the shell, membrane, beam and truss sections of the input CalculiX ran.
+    input_sections: InputSections,
     /// The global results of a submodel, see [`ResultsView::show_global_contours`].
     pub global: Option<Box<GlobalModel>>,
 }
@@ -163,6 +168,23 @@ impl GlobalModel {
             .or_else(|| view.increments.len().checked_sub(1))?;
         Some(Self { model, increment })
     }
+}
+
+/// The sections of the input CalculiX ran, in the units the results show, see
+/// [`plx_io::inp::InpImport::sections`], with the element sets they refer to. The sets stay
+/// out of the mesh: the results tree would list them.
+#[derive(Default)]
+struct InputSections {
+    sections: Vec<plx_model::Section>,
+    sets: BTreeMap<String, Vec<ElementId>>,
+}
+
+/// Elements drawn as the solid they stand for, by element index: shells thickened, lines
+/// with their profile.
+#[derive(Default)]
+struct SolidElements {
+    shells: HashMap<usize, ShellThickness>,
+    lines: HashMap<usize, BeamShape>,
 }
 
 /// Findings of the model checks with what they were computed for.
@@ -346,10 +368,16 @@ fn companion_input(results: &Path) -> Option<PathBuf> {
 /// with the part names as the input writes them, and drops the springs and gaps the
 /// constraints were written as: CalculiX makes each gap section a material of its own, which
 /// would show as a part per gap. Returns whether the input defines contact.
-fn adopt_input_parts(mesh: &mut FeMesh, input: &Path) -> bool {
+fn adopt_input_parts(
+    mesh: &mut FeMesh,
+    input: &Path,
+    units: UnitSystem,
+    sections: &mut InputSections,
+) -> bool {
     match read_inp(input) {
-        Ok(import) => {
+        Ok(mut import) => {
             mesh.remove_elements(&import.skipped_elements);
+            *sections = shown_sections(&mut import, units);
             let parts: Vec<_> = (import.mesh.parts.into_iter())
                 .map(|mut part| {
                     if let Some(name) = import.part_names.get(&part.name) {
@@ -365,6 +393,41 @@ fn adopt_input_parts(mesh: &mut FeMesh, input: &Path) -> bool {
         }
         Err(_) => plx_io::inp::defines_contact(input).unwrap_or(false),
     }
+}
+
+/// The sections of the input CalculiX ran that let the results draw their elements as
+/// solids, with their dimensions converted from the stored SI units into `units`.
+fn shown_sections(import: &mut InpImport, units: UnitSystem) -> InputSections {
+    let length = plx_model::STORED.factor_to(plx_model::Quantity::Length, units);
+    let mut sections = InputSections {
+        sections: std::mem::take(&mut import.sections),
+        sets: BTreeMap::new(),
+    };
+    for section in &mut sections.sections {
+        match &mut section.kind {
+            plx_model::SectionKind::Shell { thickness, .. }
+            | plx_model::SectionKind::Membrane { thickness, .. } => *thickness *= length,
+            plx_model::SectionKind::Truss { area } => *area *= length * length,
+            plx_model::SectionKind::Beam(beam) => match &mut beam.profile {
+                plx_model::BeamProfile::Rect { a, b } => [*a, *b] = [*a * length, *b * length],
+                plx_model::BeamProfile::Circ { radius } => *radius *= length,
+                plx_model::BeamProfile::Pipe { radius, thickness } => {
+                    [*radius, *thickness] = [*radius * length, *thickness * length];
+                }
+                plx_model::BeamProfile::Box { a, b, t } => {
+                    [*a, *b] = [*a * length, *b * length];
+                    *t = t.map(|t| t * length);
+                }
+            },
+            plx_model::SectionKind::Solid => {}
+        }
+        if let plx_model::Region::ElementSet(set) = &section.region
+            && let Some(elements) = import.mesh.element_sets.remove(set)
+        {
+            sections.sets.insert(set.clone(), elements);
+        }
+    }
+    sections
 }
 
 /// Loads an input, results or CAD file for a model shown in `units`: the mesh of an input file
@@ -385,6 +448,7 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     }
     let mut fe = FeModel::default();
     let mut contact = None;
+    let mut input_sections = InputSections::default();
     let (mesh, warnings, skipped_keywords, included_files, increments) = if extension("frd") {
         let FrdImport {
             mut mesh,
@@ -398,7 +462,8 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
         crate::results::convert_results(&mut mesh, &mut increments, units);
         // The results group the elements by material; the input it ran, named like the
         // results, knows the parts.
-        contact = companion_input(path).map(|input| adopt_input_parts(&mut mesh, &input));
+        contact = companion_input(path)
+            .map(|input| adopt_input_parts(&mut mesh, &input, units, &mut input_sections));
         (
             mesh,
             warnings,
@@ -433,6 +498,7 @@ pub fn load(path: &Path, units: UnitSystem) -> Result<LoadedModel, String> {
     }
     let mut model = Model::new(path, mesh);
     model.fe = fe;
+    model.input_sections = input_sections;
     model.warnings = warnings;
     model.skipped_keywords = skipped_keywords;
     model.included_files = included_files;
@@ -670,6 +736,8 @@ impl Model {
             history: Default::default(),
             revision: 0,
             thick_shells: Vec::new(),
+            thick_lines: Vec::new(),
+            input_sections: InputSections::default(),
             global: None,
         };
         let meshes = model.render_meshes();
@@ -1157,11 +1225,18 @@ impl Model {
                 );
             }
         }
-        for (instance, scalars) in self.transformed_copies() {
+        let copies = self.transformed_copies();
+        let solids = if copies.is_empty() {
+            SolidElements::default()
+        } else {
+            self.solid_elements()
+        };
+        for (instance, scalars) in copies {
             let moved = transform_coords(&coords, &instance);
             let undeformed = deformed.then(|| transform_coords(&self.exploded_coords(), &instance));
             let parts = meshes.iter_mut().zip(&self.parts).zip(&self.skins);
             for (index, ((mesh, info), skin)) in parts.enumerate() {
+                let surface_scalars = surface(scalars.clone());
                 let mut copy = part_render_mesh(
                     &moved,
                     skin,
@@ -1169,8 +1244,10 @@ impl Model {
                     info.color,
                     |_| None,
                     SMOOTH_ANGLE_DEG,
-                    surface(scalars.clone()).as_deref(),
+                    surface_scalars.as_deref(),
                 );
+                let surface_scalars = surface_scalars.as_deref();
+                self.append_solids(&mut copy, index, &moved, surface_scalars, &solids, false);
                 if let Some(arrows) = &arrows {
                     copy.glyphs =
                         arrows.lines(index, &moved, scalars.as_deref(), &instance, self.origin);
@@ -1258,18 +1335,9 @@ impl Model {
         } else {
             std::borrow::Cow::Borrowed(&[][..])
         };
-        let shells = self.thick_shell_elements();
+        let solids = self.solid_elements();
         (0..self.parts.len().min(self.skins.len()))
-            .map(|index| {
-                self.part_mesh(
-                    index,
-                    coords,
-                    scalars,
-                    &undeformed,
-                    deformed,
-                    shells.as_ref(),
-                )
-            })
+            .map(|index| self.part_mesh(index, coords, scalars, &undeformed, deformed, &solids))
             .collect()
     }
 
@@ -1281,7 +1349,7 @@ impl Model {
         scalars: Option<&[f32]>,
         undeformed: &[[f64; 3]],
         deformed: bool,
-        shells: Option<&HashMap<usize, ShellThickness>>,
+        solids: &SolidElements,
     ) -> RenderMesh {
         let (info, skin) = (&self.parts[index], &self.skins[index]);
         let mut mesh = part_render_mesh(
@@ -1294,17 +1362,7 @@ impl Model {
             scalars,
         );
         self.highlight_outline(index, skin, &mut mesh);
-        if let Some(thick) = shells {
-            mesh.append(thick_shell_mesh(
-                coords,
-                skin,
-                self.origin,
-                info.color,
-                self.face_highlight(index, skin),
-                |face| thick.get(&skin.faces[face].element).copied(),
-                SMOOTH_ANGLE_DEG,
-            ));
-        }
+        self.append_solids(&mut mesh, index, coords, scalars, solids, true);
         if deformed {
             mesh.wireframe_edges = wireframe_edges(undeformed, skin, self.origin);
         }
@@ -1322,8 +1380,8 @@ impl Model {
             return None;
         }
         let coords = self.shown_coords();
-        let shells = self.thick_shell_elements();
-        Some(self.part_mesh(index, &coords, None, &[], false, shells.as_ref()))
+        let solids = self.solid_elements();
+        Some(self.part_mesh(index, &coords, None, &[], false, &solids))
     }
 
     /// The parts drawn differently with the highlight `new` than with `old`; `None` when
@@ -1353,28 +1411,59 @@ impl Model {
         Some(parts)
     }
 
-    /// The shell and membrane sections of a 3D FE model, whose elements can be drawn as the
-    /// solid they stand for.
-    pub fn shell_sections(&self) -> impl Iterator<Item = &plx_model::Section> {
+    /// The sections whose elements can be drawn as the solid they stand for: those of a 3D
+    /// FE model, or for results those of the input CalculiX ran.
+    fn solid_sections(&self) -> impl Iterator<Item = &plx_model::Section> {
         let three_d = self.fe.properties.space == plx_model::ModelSpace::ThreeD;
-        let model = !self.is_geometry && self.results.is_none();
-        (self.fe.sections.iter())
-            .filter(move |_| three_d && model)
-            .filter(|s| {
-                matches!(
-                    s.kind,
-                    plx_model::SectionKind::Shell { .. } | plx_model::SectionKind::Membrane { .. }
-                )
-            })
+        let sections = match &self.results {
+            _ if self.is_geometry => &[][..],
+            Some(_) => &self.input_sections.sections[..],
+            None if three_d => &self.fe.sections[..],
+            None => &[][..],
+        };
+        sections.iter()
     }
 
-    /// Thickness and offset of the surface elements of [`Model::thick_shells`] by element
-    /// index; `None` when there are none.
-    fn thick_shell_elements(&self) -> Option<HashMap<usize, ShellThickness>> {
-        if self.thick_shells.is_empty() || self.is_geometry || self.results.is_some() {
-            return None;
+    /// The shell and membrane sections whose elements can be drawn as the solid they stand
+    /// for, see [`Model::thick_shells`].
+    pub fn shell_sections(&self) -> impl Iterator<Item = &plx_model::Section> {
+        self.solid_sections().filter(|s| {
+            matches!(
+                s.kind,
+                plx_model::SectionKind::Shell { .. } | plx_model::SectionKind::Membrane { .. }
+            )
+        })
+    }
+
+    /// The beam and truss sections whose elements can be drawn as their profile swept along
+    /// the line, see [`Model::thick_lines`]. Results hold beams as lines only where the
+    /// input asked for `OUTPUT=2D`, as it does with shells; else CalculiX expanded them.
+    pub fn line_sections(&self) -> impl Iterator<Item = &plx_model::Section> {
+        self.solid_sections().filter(|s| {
+            matches!(
+                s.kind,
+                plx_model::SectionKind::Beam(_) | plx_model::SectionKind::Truss { .. }
+            )
+        })
+    }
+
+    /// The elements of [`Model::thick_shells`] and [`Model::thick_lines`] with what they are
+    /// drawn as, by element index.
+    fn solid_elements(&self) -> SolidElements {
+        let mut solids = SolidElements::default();
+        if self.is_geometry {
+            return solids;
         }
-        let mut elements = HashMap::new();
+        let of_family = |id: ElementId, family: ElementFamily| {
+            (self.mesh.element_index(id))
+                .filter(|&index| self.mesh.elements()[index].shape.family() == family)
+        };
+        let elements = |section: &plx_model::Section| match &section.region {
+            plx_model::Region::ElementSet(set) if self.results.is_some() => {
+                (self.input_sections.sets.get(set).cloned()).unwrap_or_default()
+            }
+            region => region.elements(&self.mesh),
+        };
         for section in &self.thick_shells {
             let (plx_model::SectionKind::Shell { thickness, offset }
             | plx_model::SectionKind::Membrane { thickness, offset }) = section.kind
@@ -1382,15 +1471,79 @@ impl Model {
                 continue;
             };
             let shell = ShellThickness { thickness, offset };
-            for id in section.region.elements(&self.mesh) {
-                if let Some(index) = self.mesh.element_index(id)
-                    && self.mesh.elements()[index].shape.family() == ElementFamily::Surface
-                {
-                    elements.insert(index, shell);
+            for id in elements(section) {
+                if let Some(index) = of_family(id, ElementFamily::Surface) {
+                    solids.shells.insert(index, shell);
                 }
             }
         }
-        (!elements.is_empty()).then_some(elements)
+        for section in &self.thick_lines {
+            for id in elements(section) {
+                let Some(index) = of_family(id, ElementFamily::Line) else {
+                    continue;
+                };
+                let shape = match &section.kind {
+                    plx_model::SectionKind::Truss { area } => BeamShape::truss(*area),
+                    plx_model::SectionKind::Beam(beam) => {
+                        let element = &self.mesh.elements()[index];
+                        let tangent = plx_model::line_tangent(&self.mesh, element);
+                        // CalculiX refuses a normal along the beam; the model checks say so.
+                        let normal = (beam.orientation.normal_for(tangent))
+                            .or_else(|| BeamOrientation::Automatic.normal_for(tangent))
+                            .unwrap_or([0.0, 0.0, 1.0]);
+                        Some(BeamShape {
+                            profile: beam.profile,
+                            normal: DVec3::from(normal),
+                            offset: beam.offset,
+                        })
+                    }
+                    _ => None,
+                };
+                if let Some(shape) = shape {
+                    solids.lines.insert(index, shape);
+                }
+            }
+        }
+        solids
+    }
+
+    /// Adds the solids of the thick shells and lines of a part to its mesh; `highlight`
+    /// colours them like the part's highlighted faces.
+    fn append_solids(
+        &self,
+        mesh: &mut RenderMesh,
+        index: usize,
+        coords: &[[f64; 3]],
+        scalars: Option<&[f32]>,
+        solids: &SolidElements,
+        highlight: bool,
+    ) {
+        let (info, skin) = (&self.parts[index], &self.skins[index]);
+        if !solids.shells.is_empty() {
+            let faces = self.face_highlight(index, skin);
+            mesh.append(thick_shell_mesh(
+                coords,
+                skin,
+                self.origin,
+                info.color,
+                |face| faces(face).filter(|_| highlight),
+                |face| solids.shells.get(&skin.faces[face].element).copied(),
+                SMOOTH_ANGLE_DEG,
+                scalars,
+            ));
+        }
+        if !solids.lines.is_empty() {
+            let whole = highlight && self.highlight.parts.contains(&index);
+            mesh.append(beam_mesh(
+                coords,
+                skin,
+                self.origin,
+                info.color,
+                |_| whole.then_some(HIGHLIGHT_COLOR),
+                |segment| solids.lines.get(&skin.line_elements[segment]).copied(),
+                scalars,
+            ));
+        }
     }
 
     /// Section faces of all parts where a plane in model coordinates cuts them, deformed and
@@ -2745,6 +2898,176 @@ mod tests {
         );
         model.fe.properties.space = plx_model::ModelSpace::PlaneStress;
         assert_eq!(model.shell_sections().count(), 0);
+    }
+
+    /// Beams of a beam section are drawn with their profile, turned by its orientation, in 3D
+    /// FE models only.
+    #[test]
+    fn beam_sections_are_drawn_with_their_profile() {
+        let mut mesh = FeMesh::default();
+        mesh.set_node(1, [0.0, 0.0, 0.0]);
+        mesh.set_node(2, [10.0, 0.0, 0.0]);
+        mesh.add_element(plx_mesh::Element {
+            id: 1,
+            type_name: "B31".into(),
+            shape: plx_mesh::ElementShape::Line2,
+            nodes: vec![1, 2],
+        })
+        .unwrap();
+        mesh.parts.push(plx_mesh::Part {
+            name: "Beam".into(),
+            elements: vec![1],
+        });
+        let mut model = Model::new(Path::new("beam.inp"), mesh);
+        model.fe.sections.push(plx_model::Section {
+            name: "Beam_Section-1".into(),
+            material: "Steel".into(),
+            region: plx_model::Region::Parts(vec!["Beam".into()]),
+            thickness: 1.0,
+            kind: SectionKind::Beam(plx_model::BeamSection {
+                profile: plx_model::BeamProfile::Rect { a: 4.0, b: 2.0 },
+                orientation: BeamOrientation::Direction([0.0, 1.0, 0.0]),
+                offset: [0.0; 2],
+            }),
+        });
+        let extent = |model: &Model| {
+            let (min, max) = model.render_meshes()[0].bounds().unwrap();
+            max - min
+        };
+        assert_eq!(extent(&model), Vec3::new(10.0, 0.0, 0.0));
+        model.thick_lines = model.line_sections().cloned().collect();
+        assert_eq!(model.thick_lines.len(), 1);
+        // 4 along the normal y, 2 along x cross y = z.
+        let size = extent(&model);
+        assert!((size - Vec3::new(10.0, 4.0, 2.0)).length() < 1e-5, "{size}");
+        model.fe.properties.space = plx_model::ModelSpace::PlaneStress;
+        assert_eq!(model.line_sections().count(), 0);
+    }
+
+    /// Results draw shells with the thickness, beams with the profile and trusses with the
+    /// area of the input CalculiX ran, in the units they show, coloured by the results.
+    #[test]
+    fn results_draw_shells_beams_and_trusses_of_the_input_as_solids() {
+        if std::process::Command::new("ccx")
+            .arg("-v")
+            .output()
+            .is_err()
+        {
+            eprintln!("ccx not found, test skipped");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("plx-thick-results-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A plate 1 by 1 m, 0.02 m thick with its nodes on the top face, and beside it a held
+        // truss of 1e-4 m^2 and a held beam 0.1 by 0.04 m, which shells keep a line in the
+        // results (OUTPUT=2D).
+        let input = "\
+*Node
+1, 0, 0, 0
+2, 1, 0, 0
+3, 1, 1, 0
+4, 0, 1, 0
+5, 2, 0, 0
+6, 2, 0, -1
+7, 3, 0, 0
+8, 3, 0, 1
+*Element, Type=S4, Elset=Plate
+1, 1, 2, 3, 4
+*Element, Type=T3D2, Elset=Bar
+2, 5, 6
+*Element, Type=B31, Elset=Post
+3, 7, 8
+*Material, Name=Steel
+*Elastic
+2.1e11, 0.3
+*Shell section, Elset=Plate, Material=Steel, Offset=0.5
+0.02
+*Solid section, Elset=Bar, Material=Steel
+1e-4
+*Beam section, Elset=Post, Material=Steel, Section=RECT
+0.1, 0.04
+1, 0, 0
+*Step
+*Static
+*Boundary
+1, 1, 6
+2, 1, 6
+4, 1, 6
+5, 1, 3
+6, 1, 3
+7, 1, 6
+8, 1, 6
+*Cload
+3, 3, -1000
+*Node file, Output=2D
+U
+*El file, Output=2D
+S
+*End step
+";
+        std::fs::write(dir.join("thick.inp"), input).unwrap();
+        let output = std::process::Command::new("ccx")
+            .args(["-i", "thick"])
+            .current_dir(&dir)
+            .env("OMP_NUM_THREADS", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let mut model = load(&dir.join("thick.frd"), UnitSystem::MmTonSC)
+            .unwrap()
+            .model;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(model.shell_sections().count(), 1);
+        assert_eq!(model.line_sections().count(), 2);
+        // The sets of the input stay out of the results tree.
+        assert!(model.mesh.element_sets.is_empty());
+        if let Some(view) = model.results.as_mut() {
+            view.deformation = crate::results::Deformation::Undeformed;
+        }
+        let z_range = |model: &Model| {
+            let meshes = model.render_meshes();
+            let (min, max) = (meshes.iter().filter_map(RenderMesh::bounds))
+                .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
+                .unwrap();
+            let origin = model.origin.z as f32;
+            (min.z + origin, max.z + origin)
+        };
+        let thin = z_range(&model);
+        model.thick_shells = model.shell_sections().cloned().collect();
+        model.thick_lines = model.line_sections().cloned().collect();
+        let thick = z_range(&model);
+        // In millimetres: the bar reaches down to -1000 and the post up to 1000 either way.
+        for range in [thin, thick] {
+            assert!(
+                (range.0 + 1000.0).abs() < 1e-2 && (range.1 - 1000.0).abs() < 1e-2,
+                "{range:?}"
+            );
+        }
+        let plate = model.parts.iter().position(|p| p.name == "Plate").unwrap();
+        let mesh = &model.render_meshes()[plate];
+        let lowest = (mesh.vertices.iter().map(|v| v.position[2])).fold(f32::MAX, f32::min);
+        assert!(
+            (lowest + model.origin.z as f32 + 20.0).abs() < 1e-3,
+            "{lowest}"
+        );
+        // The solids take the contour values of their nodes.
+        assert!(mesh.vertices.iter().all(|v| v.scalar >= 0.0));
+        let bar = model.parts.iter().position(|p| p.name == "Bar").unwrap();
+        let mesh = &model.render_meshes()[bar];
+        let x = (mesh
+            .vertices
+            .iter()
+            .map(|v| v.position[0] + model.origin.x as f32))
+        .fold((f32::MAX, f32::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)));
+        let radius = (100.0 / std::f32::consts::PI).sqrt();
+        assert!((x.1 - x.0 - 2.0 * radius).abs() < 1e-2, "{x:?}");
+        let post = model.parts.iter().position(|p| p.name == "Post").unwrap();
+        let (min, max) = model.render_meshes()[post].bounds().unwrap();
+        let size = max - min;
+        assert!(
+            (size - Vec3::new(100.0, 40.0, 1000.0)).length() < 1e-2,
+            "{size}"
+        );
     }
 
     /// A flat disk in a 3D model is meshed as shells and thickened by a shell section; thin,

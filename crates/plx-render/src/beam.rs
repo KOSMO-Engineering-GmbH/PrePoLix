@@ -1,0 +1,575 @@
+//! Beam and truss elements drawn as the solid their section gives them: the profile swept
+//! along the line, turned by the section's normal and moved off the nodes by its offset, as
+//! CalculiX expands the beam.
+
+use std::collections::HashMap;
+
+use glam::DVec3;
+use plx_mesh::PartSkin;
+use plx_model::BeamProfile;
+
+use crate::contour::NO_VALUE;
+use crate::fe::{EDGE_COLOR, FEATURE_EDGE_OPACITY};
+use crate::mesh::{NodeBlend, RenderMesh, Vertex};
+
+/// Points on the outline of a round profile.
+const ROUND_POINTS: usize = 24;
+
+/// Largest angle in degrees between two segments of a line whose profiles are joined
+/// without an end face in between.
+const JOIN_ANGLE_DEG: f64 = 45.0;
+
+/// The cross-section of a beam element as CalculiX places it: direction 1 is `normal`
+/// projected onto the plane normal to the beam, direction 2 the beam axis crossed with
+/// direction 1. `offset` moves the beam axis off the nodes in the 1- and 2-direction in
+/// multiples of the profile's thickness there; 0.5 puts the nodes on the positive face.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BeamShape {
+    pub profile: BeamProfile,
+    pub normal: DVec3,
+    pub offset: [f64; 2],
+}
+
+impl BeamShape {
+    /// A truss of cross-section `area` drawn as a round bar of the same area.
+    pub fn truss(area: f64) -> Option<Self> {
+        (area > 0.0 && area.is_finite()).then(|| Self {
+            profile: BeamProfile::Circ {
+                radius: (area / std::f64::consts::PI).sqrt(),
+            },
+            normal: DVec3::Z,
+            offset: [0.0; 2],
+        })
+    }
+
+    /// The thickness of the profile in the 1- and 2-direction, which the offsets refer to.
+    fn size(&self) -> [f64; 2] {
+        match self.profile {
+            BeamProfile::Rect { a, b } | BeamProfile::Box { a, b, .. } => [a, b],
+            BeamProfile::Circ { radius } | BeamProfile::Pipe { radius, .. } => {
+                [2.0 * radius, 2.0 * radius]
+            }
+        }
+    }
+
+    /// The outlines of the profile about its centre in the 1-2 plane, counter-clockwise: the
+    /// outer one first, then the hole of a hollow profile with as many points.
+    fn loops(&self) -> Vec<Outline> {
+        let circle = |r: f64| Outline {
+            points: (0..ROUND_POINTS)
+                .map(|k| {
+                    let angle = std::f64::consts::TAU * k as f64 / ROUND_POINTS as f64;
+                    [r * angle.cos(), r * angle.sin()]
+                })
+                .collect(),
+            round: true,
+        };
+        let rect = |[u0, v0]: [f64; 2], [u1, v1]: [f64; 2]| Outline {
+            points: vec![[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
+            round: false,
+        };
+        match self.profile {
+            BeamProfile::Rect { a, b } => vec![rect([-a / 2.0, -b / 2.0], [a / 2.0, b / 2.0])],
+            BeamProfile::Circ { radius } => vec![circle(radius)],
+            BeamProfile::Pipe { radius, thickness } => {
+                vec![circle(radius), circle(radius - thickness)]
+            }
+            // Walls at +1, +2, -1 and -2.
+            BeamProfile::Box { a, b, t } => vec![
+                rect([-a / 2.0, -b / 2.0], [a / 2.0, b / 2.0]),
+                rect(
+                    [-a / 2.0 + t[2], -b / 2.0 + t[3]],
+                    [a / 2.0 - t[0], b / 2.0 - t[1]],
+                ),
+            ],
+        }
+    }
+}
+
+/// An outline of a profile; a round one is shaded smooth around.
+struct Outline {
+    points: Vec<[f64; 2]>,
+    round: bool,
+}
+
+/// Where a profile sits at one end of a segment.
+#[derive(Clone, Copy)]
+struct Frame {
+    centre: DVec3,
+    n1: DVec3,
+    n2: DVec3,
+    tangent: DVec3,
+}
+
+impl Frame {
+    fn at(&self, [u, v]: [f64; 2]) -> DVec3 {
+        self.centre + self.n1 * u + self.n2 * v
+    }
+
+    fn direction(&self, [u, v]: [f64; 2]) -> DVec3 {
+        (self.n1 * u + self.n2 * v).normalize_or_zero()
+    }
+}
+
+/// The solid of the line segments of `skin` that `shape` gives a profile, by their index in
+/// [`PartSkin::lines`]. Two segments meeting at a node at a small angle share the profile
+/// there; it ends with a face where a line ends, branches or kinks. The outline of the
+/// profile is a mesh edge where elements meet, and the corners of a flat profile run along
+/// the beam as feature edges.
+///
+/// `scalars` holds a normalized contour value per node, as [`crate::part_render_mesh`]
+/// takes it.
+pub fn beam_mesh(
+    coords: &[[f64; 3]],
+    skin: &PartSkin,
+    origin: DVec3,
+    color: [f32; 3],
+    segment_color: impl Fn(usize) -> Option<[f32; 3]>,
+    shape: impl Fn(usize) -> Option<BeamShape>,
+    scalars: Option<&[f32]>,
+) -> RenderMesh {
+    let mut render = RenderMesh::default();
+    let shapes: Vec<Option<BeamShape>> = (0..skin.lines.len())
+        .map(|index| shape(index).filter(|s| s.profile.is_valid()))
+        .collect();
+    if shapes.iter().all(Option::is_none) {
+        return render;
+    }
+    let point = |node: usize| DVec3::from(coords[node]);
+    let direction = |index: usize| {
+        let [a, b] = skin.lines[index];
+        (point(b) - point(a)).normalize_or_zero()
+    };
+    // The ends of the segments with a profile at each node: (segment, end).
+    let mut ends: HashMap<usize, Vec<(usize, usize)>> = HashMap::new();
+    for (index, line) in skin.lines.iter().enumerate() {
+        if shapes[index].is_some() {
+            for (end, &node) in line.iter().enumerate() {
+                ends.entry(node).or_default().push((index, end));
+            }
+        }
+    }
+    // The segment end joined to each segment end without an end face, if any.
+    let joined = |index: usize, end: usize| -> Option<(usize, usize)> {
+        let at = &ends[&skin.lines[index][end]];
+        let &[first, second] = at.as_slice() else {
+            return None;
+        };
+        let other = if first == (index, end) { second } else { first };
+        // Along the line the other segment runs the same way when it starts where this
+        // one ends.
+        let sign = if other.1 == end { -1.0 } else { 1.0 };
+        let cos = direction(index).dot(direction(other.0) * sign);
+        (other.0 != index && cos >= JOIN_ANGLE_DEG.to_radians().cos()).then_some(other)
+    };
+    let frame = |index: usize, end: usize| -> Frame {
+        let shape = shapes[index].expect("segments with a profile only");
+        let mut tangent = direction(index);
+        if let Some((other, other_end)) = joined(index, end) {
+            let sign = if other_end == end { -1.0 } else { 1.0 };
+            tangent = (tangent + direction(other) * sign).normalize_or(tangent);
+        }
+        let projected = shape.normal - tangent * shape.normal.dot(tangent);
+        let n1 = projected
+            .try_normalize()
+            .unwrap_or_else(|| tangent.any_orthonormal_vector());
+        let n2 = tangent.cross(n1);
+        let size = shape.size();
+        let centre = point(skin.lines[index][end])
+            - n1 * (shape.offset[0] * size[0])
+            - n2 * (shape.offset[1] * size[1]);
+        Frame {
+            centre,
+            n1,
+            n2,
+            tangent,
+        }
+    };
+    let render_position = |p: DVec3| (p - origin).as_vec3().to_array();
+    let scalar = |node: usize| scalars.map_or(NO_VALUE, |s| s[node]);
+    let line = |p: DVec3| Vertex {
+        position: render_position(p),
+        normal: [0.0; 3],
+        color: EDGE_COLOR,
+        scalar: FEATURE_EDGE_OPACITY,
+    };
+
+    for (index, &[a, b]) in skin.lines.iter().enumerate() {
+        let Some(shape) = shapes[index] else {
+            continue;
+        };
+        let color = segment_color(index).unwrap_or(color);
+        let frames = [frame(index, 0), frame(index, 1)];
+        let nodes = [a, b];
+        let vertex = |end: usize, position: DVec3, normal: DVec3| Vertex {
+            position: render_position(position),
+            normal: normal.as_vec3().to_array(),
+            color,
+            scalar: scalar(nodes[end]),
+        };
+        let loops = shape.loops();
+        // The walls along the segment; a hole faces inwards.
+        for (k, outline) in loops.iter().enumerate() {
+            let hole = k > 0;
+            let n = outline.points.len();
+            for i in 0..n {
+                let (p, q) = (outline.points[i], outline.points[(i + 1) % n]);
+                let flat = DVec3::new(q[1] - p[1], p[0] - q[0], 0.0).normalize_or_zero();
+                let normal = |frame: &Frame, at: [f64; 2]| {
+                    let outward = if outline.round {
+                        frame.direction(at)
+                    } else {
+                        (frame.n1 * flat.x + frame.n2 * flat.y).normalize_or_zero()
+                    };
+                    if hole { -outward } else { outward }
+                };
+                let base = render.vertices.len() as u32;
+                for (end, at) in [(0, p), (0, q), (1, q), (1, p)] {
+                    let frame = &frames[end];
+                    render
+                        .vertices
+                        .push(vertex(end, frame.at(at), normal(frame, at)));
+                    render.origins.push(NodeBlend::at(nodes[end]));
+                }
+                let quad = if hole {
+                    [2, 1, 0, 3, 2, 0]
+                } else {
+                    [0, 1, 2, 0, 2, 3]
+                };
+                render.triangles.extend(quad.map(|j| base + j));
+                // The outline where the segment ends at another element, drawn by one of
+                // the two.
+                for end in 0..2 {
+                    let other = joined(index, end);
+                    if other.is_some_and(|(o, other_end)| {
+                        skin.line_elements[o] != skin.line_elements[index]
+                            && (index, end) < (o, other_end)
+                    }) {
+                        let pair = if end == 0 { [0, 1] } else { [3, 2] };
+                        render.mesh_edges.extend(pair.map(|j| base + j));
+                    }
+                }
+                if !outline.round {
+                    render
+                        .feature_edges
+                        .extend([line(frames[0].at(p)), line(frames[1].at(p))]);
+                }
+            }
+        }
+        // End faces where the profile does not continue into another segment.
+        for end in 0..2 {
+            if joined(index, end).is_some() {
+                continue;
+            }
+            let frame = &frames[end];
+            // The face looks along the beam at the far end, against it at the near one.
+            let facing = if end == 1 { 1.0 } else { -1.0 };
+            let normal = frame.tangent * facing;
+            let outer = &loops[0].points;
+            let n = outer.len();
+            let base = render.vertices.len() as u32;
+            let mut push = |at: [f64; 2]| {
+                render.vertices.push(vertex(end, frame.at(at), normal));
+                render.origins.push(NodeBlend::at(nodes[end]));
+            };
+            let mut triangles: Vec<[u32; 3]> = Vec::new();
+            match loops.get(1) {
+                Some(hole) => {
+                    for &at in outer.iter().chain(&hole.points) {
+                        push(at);
+                    }
+                    let n = n as u32;
+                    for i in 0..n {
+                        let j = (i + 1) % n;
+                        triangles.push([i, j, n + j]);
+                        triangles.push([i, n + j, n + i]);
+                    }
+                }
+                None => {
+                    push([0.0, 0.0]);
+                    for &at in outer {
+                        push(at);
+                    }
+                    let n = n as u32;
+                    for i in 0..n {
+                        triangles.push([0, 1 + i, 1 + (i + 1) % n]);
+                    }
+                }
+            }
+            for [p, q, r] in triangles {
+                let triangle = if end == 1 { [p, q, r] } else { [r, q, p] };
+                render.triangles.extend(triangle.map(|j| base + j));
+            }
+            for outline in &loops {
+                let m = outline.points.len();
+                for i in 0..m {
+                    let (p, q) = (outline.points[i], outline.points[(i + 1) % m]);
+                    render
+                        .feature_edges
+                        .extend([line(frame.at(p)), line(frame.at(q))]);
+                }
+            }
+        }
+    }
+    render
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use plx_mesh::{Element, ElementShape, FeMesh, Part, extract_part_skin};
+
+    /// A straight beam along x from 0 to 2 of two `Line2` elements.
+    fn beam() -> FeMesh {
+        let mut mesh = FeMesh::default();
+        for i in 0..3 {
+            mesh.set_node(i + 1, [i as f64, 0.0, 0.0]);
+        }
+        for id in 1..3 {
+            mesh.add_element(Element {
+                id,
+                type_name: "B31".into(),
+                shape: ElementShape::Line2,
+                nodes: vec![id, id + 1],
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "P".into(),
+            elements: vec![1, 2],
+        });
+        mesh
+    }
+
+    fn swept(mesh: &FeMesh, shape: Option<BeamShape>) -> RenderMesh {
+        let skin = extract_part_skin(mesh, &mesh.parts[0], 30.0);
+        beam_mesh(
+            mesh.coords(),
+            &skin,
+            DVec3::ZERO,
+            [1.0; 3],
+            |_| None,
+            |_| shape,
+            None,
+        )
+    }
+
+    fn range(render: &RenderMesh, axis: usize) -> (f32, f32) {
+        (render.vertices.iter().map(|v| v.position[axis]))
+            .fold((f32::MAX, f32::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)))
+    }
+
+    /// The enclosed volume of a closed triangle mesh.
+    fn volume(render: &RenderMesh) -> f32 {
+        (render.triangles.chunks(3))
+            .map(|t| {
+                let [a, b, c] =
+                    [0, 1, 2].map(|k| glam::Vec3::from(render.vertices[t[k] as usize].position));
+                a.dot(b.cross(c)) / 6.0
+            })
+            .sum()
+    }
+
+    fn rect(a: f64, b: f64) -> BeamShape {
+        BeamShape {
+            profile: BeamProfile::Rect { a, b },
+            normal: DVec3::Z,
+            offset: [0.0; 2],
+        }
+    }
+
+    #[test]
+    fn the_rectangle_lies_along_the_normal_and_the_axis_crossed_with_it() {
+        // Direction 1 is z, direction 2 is x cross z = -y.
+        let render = swept(&beam(), Some(rect(0.4, 0.2)));
+        let (lo, hi) = range(&render, 2);
+        assert!(
+            (lo + 0.2).abs() < 1e-6 && (hi - 0.2).abs() < 1e-6,
+            "{lo} {hi}"
+        );
+        let (lo, hi) = range(&render, 1);
+        assert!(
+            (lo + 0.1).abs() < 1e-6 && (hi - 0.1).abs() < 1e-6,
+            "{lo} {hi}"
+        );
+        // Closed and facing outwards: the volume is positive.
+        assert!(
+            (volume(&render) - 2.0 * 0.4 * 0.2).abs() < 1e-5,
+            "{}",
+            volume(&render)
+        );
+        // One outline where the two elements meet, four corner lines along each element and
+        // the outlines of the two end faces.
+        assert_eq!(render.mesh_edges.len(), 4 * 2);
+        assert_eq!(render.feature_edges.len(), (4 * 2 + 4 * 2) * 2);
+    }
+
+    #[test]
+    fn offset_moves_the_profile_off_the_nodes() {
+        let shape = BeamShape {
+            offset: [0.5, -0.5],
+            ..rect(0.4, 0.2)
+        };
+        let render = swept(&beam(), Some(shape));
+        // The nodes on the positive face in 1 (z): the profile below them.
+        let (lo, hi) = range(&render, 2);
+        assert!((lo + 0.4).abs() < 1e-6 && hi.abs() < 1e-6, "{lo} {hi}");
+        // On the negative face in 2 (-y): the profile in 2, along -y.
+        let (lo, hi) = range(&render, 1);
+        assert!((lo + 0.2).abs() < 1e-6 && hi.abs() < 1e-6, "{lo} {hi}");
+    }
+
+    #[test]
+    fn hollow_profiles_enclose_their_walls_only() {
+        let pipe = BeamShape {
+            profile: BeamProfile::Pipe {
+                radius: 0.2,
+                thickness: 0.05,
+            },
+            normal: DVec3::Z,
+            offset: [0.0; 2],
+        };
+        let polygon = |r: f64| {
+            let n = ROUND_POINTS as f64;
+            0.5 * n * r * r * (std::f64::consts::TAU / n).sin()
+        };
+        let wall = 2.0 * (polygon(0.2) - polygon(0.15)) as f32;
+        let render = swept(&beam(), Some(pipe));
+        assert!(
+            (volume(&render) - wall).abs() < 1e-5,
+            "{} {wall}",
+            volume(&render)
+        );
+        let boxed = BeamShape {
+            profile: BeamProfile::Box {
+                a: 0.4,
+                b: 0.2,
+                t: [0.01, 0.02, 0.03, 0.04],
+            },
+            ..pipe
+        };
+        let wall = 2.0 * (0.4 * 0.2 - (0.4 - 0.04) * (0.2 - 0.06)) as f32;
+        let render = swept(&beam(), Some(boxed));
+        assert!(
+            (volume(&render) - wall).abs() < 1e-5,
+            "{} {wall}",
+            volume(&render)
+        );
+        // The thicker wall at +1 (z) is t1, at -1 t3.
+        let inner_top = (render.vertices.iter().map(|v| v.position[2]))
+            .filter(|&z| z < 0.199)
+            .fold(f32::MIN, f32::max);
+        assert!((inner_top - 0.19).abs() < 1e-6, "{inner_top}");
+    }
+
+    #[test]
+    fn a_kink_ends_both_profiles_with_a_face() {
+        let mut mesh = beam();
+        mesh.set_node(3, [1.0, 1.0, 0.0]);
+        let render = swept(&mesh, Some(rect(0.1, 0.1)));
+        // Four walls of two triangles along each element and four end faces, fans of four.
+        assert_eq!(render.triangles.len(), (2 * 4 * 2 + 4 * 4) * 3);
+        assert!(render.mesh_edges.is_empty());
+    }
+
+    #[test]
+    fn segments_without_a_profile_stay_lines() {
+        assert!(swept(&beam(), None).vertices.is_empty());
+        assert!(swept(&beam(), Some(rect(0.0, 0.1))).vertices.is_empty());
+    }
+
+    /// The profile lies where CalculiX puts the nodes of the expanded beam: a rectangle with
+    /// offsets on a beam askew to the axes, its normal not perpendicular to it.
+    #[test]
+    fn rectangles_lie_where_calculix_expands_the_beam() {
+        if std::process::Command::new("ccx")
+            .arg("-v")
+            .output()
+            .is_err()
+        {
+            eprintln!("ccx not found, test skipped");
+            return;
+        }
+        let direction = DVec3::new(1.0, 2.0, 0.5).normalize();
+        let mut mesh = FeMesh::default();
+        let mut text = String::from("*Node\n");
+        for i in 0..3 {
+            let p = direction * (i as f64 * 10.0) + DVec3::new(3.0, -2.0, 1.0);
+            mesh.set_node(i + 1, p.to_array());
+            text.push_str(&format!("{}, {}, {}, {}\n", i + 1, p.x, p.y, p.z));
+        }
+        for id in 1..3 {
+            mesh.add_element(Element {
+                id,
+                type_name: "B31".into(),
+                shape: ElementShape::Line2,
+                nodes: vec![id, id + 1],
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "P".into(),
+            elements: vec![1, 2],
+        });
+        let shape = BeamShape {
+            profile: BeamProfile::Rect { a: 2.0, b: 1.0 },
+            normal: DVec3::new(0.2, 0.0, 1.0),
+            offset: [0.5, -0.3],
+        };
+        text.push_str(
+            "*Element, Type=B31, Elset=Beam\n1, 1, 2\n2, 2, 3\n\
+             *Material, Name=Steel\n*Elastic\n210000, 0.3\n\
+             *Beam section, Elset=Beam, Material=Steel, Section=RECT, Offset1=0.5, Offset2=-0.3\n\
+             2, 1\n0.2, 0, 1\n\
+             *Step\n*Static\n*Boundary\n1, 1, 6\n*Node file\nU\n*End step\n",
+        );
+        let dir = std::env::temp_dir().join(format!("plx-beam-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("beam.inp"), text).unwrap();
+        let output = std::process::Command::new("ccx")
+            .args(["-i", "beam"])
+            .current_dir(&dir)
+            .env("OMP_NUM_THREADS", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let frd = plx_io::frd::read_frd(&dir.join("beam.frd")).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let render = swept(&mesh, Some(shape));
+        let near =
+            |p: glam::Vec3, points: &[glam::Vec3]| points.iter().any(|q| (p - *q).length() < 1e-4);
+        let expanded: Vec<glam::Vec3> = (frd.mesh.coords().iter())
+            .map(|c| DVec3::from(*c).as_vec3())
+            .collect();
+        // Every corner of the drawn profile is a node of the expanded beam; the centres of
+        // the end faces are not.
+        let axis = direction.as_vec3();
+        let corners: Vec<glam::Vec3> = (render.vertices.iter())
+            .filter(|v| glam::Vec3::from(v.normal).dot(axis).abs() < 0.5)
+            .map(|v| glam::Vec3::from(v.position))
+            .collect();
+        for &p in &corners {
+            assert!(near(p, &expanded), "{p} not expanded");
+        }
+        // And the expanded nodes at the beam's nodes are corners of the profile.
+        let ends = [0.0f32, 10.0, 20.0];
+        let along =
+            |p: glam::Vec3| (p - DVec3::new(3.0, -2.0, 1.0).as_vec3()).dot(direction.as_vec3());
+        let at_ends = |p: &&glam::Vec3| ends.iter().any(|e| (along(**p) - e).abs() < 1e-4);
+        let checked: Vec<_> = expanded.iter().filter(at_ends).collect();
+        assert_eq!(checked.len(), 3 * 4);
+        for &p in checked {
+            assert!(near(p, &corners), "{p} not drawn");
+        }
+    }
+
+    #[test]
+    fn trusses_are_round_bars_of_their_area() {
+        let shape = BeamShape::truss(std::f64::consts::PI * 0.04).unwrap();
+        let BeamProfile::Circ { radius } = shape.profile else {
+            panic!("{shape:?}");
+        };
+        assert!((radius - 0.2).abs() < 1e-12, "{radius}");
+        assert!(BeamShape::truss(0.0).is_none());
+    }
+}
