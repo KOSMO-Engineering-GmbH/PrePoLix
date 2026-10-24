@@ -6,6 +6,7 @@
 use plx_model::{FillMode, FillRule, PointState, UnitSystem, ValueKind};
 
 use crate::numeric::format_physical;
+use crate::table_export;
 
 /// A change the editor asks for.
 pub enum StudyEdit {
@@ -346,29 +347,23 @@ impl StudyEditor {
             ui.ctx().copy_text(table_text(view, '\t'));
             self.message = Some("Table copied.".into());
         }
-        if ui
-            .add_enabled(some, egui::Button::new("Export CSV ..."))
-            .clicked()
-        {
-            self.export_csv(view);
+        for (label, format) in [
+            ("Export CSV ...", table_export::Format::Csv),
+            ("Export JSON ...", table_export::Format::Json),
+        ] {
+            if ui.add_enabled(some, egui::Button::new(label)).clicked() {
+                self.export(view, format);
+            }
         }
     }
 
-    fn export_csv(&mut self, view: &StudyView) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Export Parameter Study")
-            .add_filter("CSV file", &["csv"])
-            .set_file_name(format!("{}.csv", self.name))
-            .save_file()
+    fn export(&mut self, view: &StudyView, format: table_export::Format) {
+        let Some(path) = table_export::save_dialog("Export Parameter Study", &self.name, format)
         else {
             return;
         };
-        let path = if path.extension().is_none() {
-            path.with_extension("csv")
-        } else {
-            path
-        };
-        self.message = Some(match std::fs::write(&path, table_text(view, ',')) {
+        let text = table_text(view, ',');
+        self.message = Some(match table_export::write(&path, &text, ',', format) {
             Ok(()) => format!("Exported: {}", path.display()),
             Err(err) => format!("Export failed ({}): {err}", path.display()),
         });

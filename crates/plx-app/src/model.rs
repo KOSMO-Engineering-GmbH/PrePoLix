@@ -276,6 +276,17 @@ impl Highlight {
             ..Self::default()
         }
     }
+
+    /// Adds what `other` highlights.
+    pub fn extend(&mut self, other: Highlight) {
+        self.parts.extend(other.parts);
+        self.outlines.extend(other.outlines);
+        self.faces.extend(other.faces);
+        self.secondary_faces.extend(other.secondary_faces);
+        self.nodes.extend(other.nodes);
+        self.lines.extend(other.lines);
+        self.secondary_lines.extend(other.secondary_lines);
+    }
 }
 
 /// A visible face or line under the mouse.
@@ -926,6 +937,13 @@ impl Model {
 
     fn part_nodes(&self) -> &PartNodes {
         self.part_nodes.get_or_init(|| PartNodes::new(&self.mesh))
+    }
+
+    /// The part a node belongs to; of several parts that share it, the first.
+    pub fn node_part(&self, id: NodeId) -> Option<usize> {
+        let index = self.mesh.node_index(id)?;
+        let part = *self.part_nodes().part_of.get(index)?;
+        (part != u32::MAX).then_some(part as usize)
     }
 
     fn skin_lookup(&self) -> &SkinLookup {

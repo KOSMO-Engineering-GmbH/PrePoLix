@@ -3964,9 +3964,16 @@ impl ProjectApp {
             return;
         };
         if analysis.window.is_some() {
-            // Brought to the front.
+            // Brought to the front, also when minimized (Windows focuses only a window that
+            // is not). Wayland lets no program take the focus: there the taskbar marks it.
             let viewport = analysis_viewport(id);
-            ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
+            for command in [
+                egui::ViewportCommand::Minimized(false),
+                egui::ViewportCommand::Focus,
+                egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational),
+            ] {
+                ctx.send_viewport_cmd_to(viewport, command);
+            }
             if let (Some(view), Some(window)) = (view, &mut analysis.window) {
                 window.show_workspace(view.clone());
             }
@@ -4492,7 +4499,10 @@ impl ProjectApp {
         let path = self.model_path();
         let mut work_dir = self.settings.solver.work_dir();
         work_dir.push(crate::analysis::job_name(&self.project_name()));
-        let settings = self.settings.solver.clone();
+        // The analyses solved at the same time share the cores.
+        let parallel = self.settings.solver.parallel_runs.max(1) as usize;
+        let concurrent = (self.updating.len() + self.update_queue.len() + 1).min(parallel);
+        let settings = self.settings.solver.shared_by(concurrent);
         let force = self.forced.remove(&id);
         let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) else {
             return Start::Refused;

@@ -16,7 +16,8 @@
   [#key("Ctrl") + middle button drag], [Zoom],
   [Double-click (left)], [Zoom to fit],
   [Left click on a part], [Select the part in the tree; #key("Ctrl") toggles, #key("Shift")
-    adds. A click into empty space clears the selection.],
+    adds. On the #ui("FE Model") tab the tree marks what acts on the part (@acting).
+    A click into empty space clears the selection.],
   [Left drag], [Box selection, only while a dialog is picking (@selection)],
   [Right click], [Context menu: the menu of the part under the cursor followed by the view
     commands],
