@@ -867,6 +867,24 @@ mod tests {
                 master_color: [255, 0, 0],
                 ..ContactPair::new("Contact_Pair-1", "Surface_Interaction-1")
             }],
+            contact_regions: vec![plx_model::ContactRegion {
+                side_a: Region::Parts(vec!["A".into()]),
+                side_b: Region::Faces(vec![(1, 2)]),
+                settings: plx_model::ContactSettings {
+                    normal_stiffness: Some(plx_model::Stiffness::Factor(20.0)),
+                    sides: Some(plx_model::SideRoles::BIsMaster),
+                    tolerance: Some(1e-4),
+                    ..Default::default()
+                },
+                ..plx_model::ContactRegion::new(
+                    "Frictional - A to B",
+                    plx_model::ContactBehavior::Frictional { mu: 0.2 },
+                )
+            }],
+            contact_defaults: plx_model::ContactDefaults {
+                formulation: Some(plx_model::ContactMethod::Mortar),
+                stiffness_factor: 5.0,
+            },
             amplitudes: vec![plx_model::Amplitude {
                 time_span: plx_model::AmplitudeTime::Total,
                 points: vec![[0.0, 0.0], [1.0, 2.5]],

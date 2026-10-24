@@ -10,6 +10,7 @@ mod cad_operation;
 pub mod campbell;
 mod checks;
 pub mod color_scale;
+mod connection;
 mod constraint;
 mod contact;
 pub mod convert;
@@ -41,6 +42,12 @@ pub use amplitude::{Amplitude, AmplitudeTime};
 pub use cad_operation::{CadOperation, CadOperationKind};
 pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
 pub use color_scale::{ColorScale, ColorSpectrum};
+pub use connection::{
+    BondedMethod, ContactBehavior, ContactDefaults, ContactRegion, ContactSettings,
+    InterfaceTreatment, Lowered, ROUGH_FRICTION, Resolved, ResolvedContacts, ResolvedKind,
+    STICK_SLOPE_RATIO, STIFFNESS_FACTOR, SideRoles, Stiffness, TIED_STIFFNESS_FACTOR,
+    TOLERANCE_FACTOR, mortar_supports,
+};
 pub use constraint::{CompressionOnly, NodeTie, RigidBody, Spring};
 pub use contact::{
     Constraint, ContactMethod, ContactPair, CyclicSymmetry, DEFAULT_SURFACE_COLOR, Friction,
@@ -126,6 +133,13 @@ pub struct FeModel {
     /// Ends of beams and trusses tied node to node, shown among the contact pairs.
     #[serde(default)]
     pub node_ties: Vec<NodeTie>,
+    /// Surfaces in contact by the behavior the user wants, written as the ties and contact
+    /// pairs they stand for ([`FeModel::lower_contacts`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contact_regions: Vec<ContactRegion>,
+    /// Settings shared by the contact regions.
+    #[serde(default)]
+    pub contact_defaults: ContactDefaults,
     /// Time curves boundary conditions and loads refer to by name.
     #[serde(default)]
     pub amplitudes: Vec<Amplitude>,
@@ -185,6 +199,7 @@ impl FeModel {
             .chain((self.contact_pairs.iter()).flat_map(|c| [&c.master, &c.slave]))
             .chain((self.ties.iter()).flat_map(|t| [&t.master, &t.slave]))
             .chain(self.node_ties.iter().map(|t| &t.region))
+            .chain(self.contact_regions.iter().flat_map(ContactRegion::regions))
             .chain(self.mesh_sets.iter().map(|s| &s.region))
             .chain(self.steps.iter().flat_map(|step| {
                 (step.boundary_conditions.iter().map(|b| &b.region))
@@ -313,6 +328,7 @@ impl FeModel {
             .chain((self.contact_pairs.iter_mut()).flat_map(|c| [&mut c.master, &mut c.slave]))
             .chain((self.ties.iter_mut()).flat_map(|t| [&mut t.master, &mut t.slave]))
             .chain(self.node_ties.iter_mut().map(|t| &mut t.region))
+            .chain((self.contact_regions.iter_mut()).flat_map(ContactRegion::regions_mut))
             .chain(self.mesh_sets.iter_mut().map(|s| &mut s.region))
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
@@ -394,6 +410,7 @@ impl FeModel {
                     .flat_map(Constraint::regions_mut),
             )
             .chain((self.contact_pairs.iter_mut()).flat_map(|c| [&mut c.master, &mut c.slave]))
+            .chain((self.contact_regions.iter_mut()).flat_map(ContactRegion::regions_mut))
             .chain(self.initial_conditions.iter_mut().map(|i| &mut i.region))
             .chain(self.mesh_sets.iter_mut().map(|s| &mut s.region))
             .chain(self.steps.iter_mut().flat_map(|step| {

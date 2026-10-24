@@ -545,8 +545,9 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
             containers.remove(0);
             (TreeItem::StepGroup(s, "BCs"), containers)
         }
-        // The analysis has no item; what CalculiX reported shows on the model.
-        ModelItem::Analysis => (TreeItem::Model, vec![]),
+        // The analysis has no item; what CalculiX reported shows on the model, as do contact
+        // regions until the tree lists them.
+        ModelItem::Analysis | ModelItem::ContactRegion(_) => (TreeItem::Model, vec![]),
         ModelItem::InitialCondition(i) => (
             TreeItem::InitialCondition(i),
             vec![TreeItem::Group("Initial Conditions"), TreeItem::Model],

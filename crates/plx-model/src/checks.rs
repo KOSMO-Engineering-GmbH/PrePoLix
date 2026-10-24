@@ -113,6 +113,11 @@ pub enum Problem {
     /// A contact pair with tied surface behavior that CalculiX rejects: without friction in
     /// its surface interaction or with another method than surface to surface.
     InvalidTiedContact,
+    /// Contact pairs of different formulations: CalculiX takes one for all of them.
+    ContactFormulationsDiffer,
+    /// Mortar contact in a step that is not static: CalculiX takes mortar in static steps
+    /// only.
+    MortarNotSupported,
     /// A wheel of a moving load that is off the selected surface at some positions.
     WheelOffSurface,
     /// Found in the solver output only.
@@ -200,6 +205,8 @@ impl Problem {
             Problem::ContactIgnored => "Contact ignored",
             Problem::ContactWithCoriolis => "Contact with Coriolis",
             Problem::InvalidTiedContact => "Tied contact not possible like this",
+            Problem::ContactFormulationsDiffer => "Contact formulations differ",
+            Problem::MortarNotSupported => "Mortar contact not possible in this step",
             Problem::WheelOffSurface => "Wheel off the surface",
             Problem::NoConvergence => "No convergence",
             Problem::MpcAndSpc => "Degree of freedom bound twice",
@@ -450,6 +457,17 @@ impl Problem {
                  pairs, tied ones included, are left out without a message: parts held only \
                  by them float and give eigenfrequencies near zero or on weak springs."
             }
+            Problem::ContactFormulationsDiffer => {
+                "CalculiX takes one formulation (node to surface, surface to surface, mortar \
+                 or massless) for all contact pairs of a model. A contact pair defined by hand \
+                 has another one than the contact regions, which use the formulation of the \
+                 Connections."
+            }
+            Problem::MortarNotSupported => {
+                "CalculiX takes mortar contact in static steps only. In frequency, \
+                 buckling, dynamic and thermal steps the run aborts or the contact is left \
+                 out."
+            }
             Problem::InvalidTiedContact => {
                 "CalculiX offers the Tied surface behavior only for Surface to surface \
                  contact pairs, and it needs a Friction model in the same surface \
@@ -672,6 +690,14 @@ impl Problem {
                 "Tick Perturbation in the Frequency step (after a static step), or join \
                  bonded parts with a Tie constraint instead of a tied contact pair (Interaction > Create Tie)."
             }
+            Problem::ContactFormulationsDiffer => {
+                "Set the contact pair to the formulation of the contact regions, or choose \
+                 the pair's formulation for all contacts at the Connections."
+            }
+            Problem::MortarNotSupported => {
+                "Set the formulation at the Connections to Auto or Surface to surface, or \
+                 deactivate the step."
+            }
             Problem::InvalidTiedContact => {
                 "Edit the surface interaction and add Friction, and set the method of the \
                  contact pairs to Surface to surface. To bond parts, a Tie (Interaction > \
@@ -870,6 +896,55 @@ impl FeModel {
     }
 
     pub fn check(&self, mesh: &FeMesh, mesh_check: &MeshCheck) -> Vec<Finding> {
+        if self.contact_regions.is_empty() {
+            return self.check_explicit(mesh, mesh_check);
+        }
+        // Contact regions are checked as the ties and contact pairs they become; what is
+        // found on those belongs to the region.
+        let (lowered, origin) = self.lower_contacts(mesh);
+        let mut findings = lowered.check_explicit(mesh, mesh_check);
+        for finding in &mut findings {
+            if let Some(region) = origin.region_of(finding.item) {
+                finding.item = ModelItem::ContactRegion(region);
+            }
+        }
+        self.check_contact_regions(&lowered, &mut findings);
+        findings
+    }
+
+    /// Contact pairs whose formulation differs from that of the others, and the mortar
+    /// formulation where CalculiX does not take it.
+    fn check_contact_regions(&self, lowered: &FeModel, findings: &mut Vec<Finding>) {
+        let (formulation, _) = self.contact_formulation();
+        for (i, pair) in self.contact_pairs.iter().enumerate() {
+            if pair.active && pair.method != formulation {
+                findings.push(Finding::new(
+                    ModelItem::ContactPair(i),
+                    Problem::ContactFormulationsDiffer,
+                    format!(
+                        "{}: {}, the contact regions use {}",
+                        pair.name,
+                        pair.method.name(),
+                        formulation.name()
+                    ),
+                ));
+            }
+        }
+        if formulation != ContactMethod::Mortar || !lowered.contact_pairs.iter().any(|p| p.active) {
+            return;
+        }
+        for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
+            if !crate::mortar_supports(&step.kind) {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::MortarNotSupported,
+                    format!("{}: mortar contact in a step that is not static", step.name),
+                ));
+            }
+        }
+    }
+
+    fn check_explicit(&self, mesh: &FeMesh, mesh_check: &MeshCheck) -> Vec<Finding> {
         let constants =
             self.properties.absolute_zero.is_some() && self.properties.stefan_boltzmann.is_some();
         let mut findings: Vec<Finding> = (self.invalid_items(mesh).into_iter())

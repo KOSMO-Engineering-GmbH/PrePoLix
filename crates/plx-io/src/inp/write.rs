@@ -254,6 +254,14 @@ pub fn model_keywords(
     } else {
         mesh
     };
+    // Contact regions become the ties and contact pairs they stand for.
+    let lowered;
+    let model = if model.contact_regions.is_empty() {
+        model
+    } else {
+        lowered = model.lower_contacts(mesh).0;
+        &lowered
+    };
     let lines = LineElements::new(mesh, model)?;
     // Node ties of beams, and of anything without rotations, are written as one shared node.
     let merged_nodes = node_merges(mesh, model, &lines);
