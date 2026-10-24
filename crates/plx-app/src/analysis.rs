@@ -770,6 +770,7 @@ mod tests {
             elements: vec![1, 2, 3],
         });
         let bc = |name: &str, nodes: Vec<u32>, kind| BoundaryCondition {
+            distribution: None,
             name: name.into(),
             active: true,
             visible: true,
@@ -967,6 +968,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("prepolix-linked-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let bc = |name: &str, nodes: Vec<u32>, kind| BoundaryCondition {
+            distribution: None,
             name: name.into(),
             active: true,
             visible: true,
@@ -995,6 +997,7 @@ mod tests {
         let mut modal = Step::new_modal_dynamics("Shake");
         modal.boundary_conditions = frequency.boundary_conditions.clone();
         modal.loads.push(Load {
+            distribution: None,
             name: "Push".into(),
             active: true,
             visible: true,

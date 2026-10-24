@@ -14,10 +14,10 @@ use plx_model::{
     ContactMethod, ContactPair, ContactScale, DefinedFieldKind, DynamicStep, FeModel, FieldOutput,
     Formulation, FrequencyStep, GapConductance, HeatTransferStep, HistoryKind, HistoryOutput,
     Incrementation, InitialConditionKind, InteractionProperty, LoadKind, ModalDamping,
-    ModalDynamicsStep, ModelSpace, MovingFrame, NodeTie, OutputDimension, OutputKind, Region,
-    RemoteBehavior, RemoteDof, Section, SectionKind, SensitivityStep, StaticStep,
+    ModalDynamicsStep, ModelSpace, MovingFrame, NodeTie, OutputDimension, OutputKind, Quantity,
+    Region, RemoteBehavior, RemoteDof, Sampler, Section, SectionKind, SensitivityStep, StaticStep,
     SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals,
-    ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
+    UnitSystem, ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -32,6 +32,15 @@ pub enum WriteError {
     UnknownAmplitude { item: String, amplitude: String },
     #[error("{item}: {reason}")]
     InvalidAmplitude { item: String, reason: String },
+    #[error("{item}: Distribution {distribution} does not exist")]
+    UnknownDistribution { item: String, distribution: String },
+    /// A distribution whose equation is invalid or that has no points.
+    #[error("{item}: Distribution {distribution}: {reason}")]
+    InvalidDistribution {
+        item: String,
+        distribution: String,
+        reason: String,
+    },
     #[error("{item}: Surface {surface} does not exist")]
     UnknownSurface { item: String, surface: String },
     /// Contact forces need the surfaces of an active contact pair.
@@ -1054,6 +1063,63 @@ fn amplitude_parameter(
     Ok(format!(", {parameter}={}", name(reference)))
 }
 
+/// The distribution an item scales its value by, ready to sample; `None` without one.
+fn distribution(
+    model: &FeModel,
+    item: &str,
+    reference: &Option<String>,
+) -> Result<Option<Sampler>, WriteError> {
+    let Some(name) = reference else {
+        return Ok(None);
+    };
+    let Some(distribution) = model.distribution(name) else {
+        return Err(WriteError::UnknownDistribution {
+            item: item.to_owned(),
+            distribution: name.clone(),
+        });
+    };
+    (distribution.sampler(model.properties.units))
+        .map(Some)
+        .map_err(|reason| WriteError::InvalidDistribution {
+            item: item.to_owned(),
+            distribution: name.clone(),
+            reason,
+        })
+}
+
+/// One line per node of `nodes` with the value scaled by the distribution at the node, after
+/// the node and `columns` (such as `11, 11, ` for a temperature boundary condition).
+fn distributed_nodes(
+    out: &mut String,
+    mesh: &FeMesh,
+    nodes: &[NodeId],
+    columns: &str,
+    value: f64,
+    sampler: &Sampler,
+    units: UnitSystem,
+) {
+    for &node in nodes {
+        if let Some(position) = mesh.node(node) {
+            let scaled = sampler.scale(value, Quantity::Temperature, units, position);
+            let _ = writeln!(out, "{node}, {columns}{}", number(scaled));
+        }
+    }
+}
+
+/// Center of an element face, the mean of its corners.
+fn face_center(mesh: &FeMesh, element: ElementId, face: u8) -> Option<[f64; 3]> {
+    let element = mesh.element(element)?;
+    let topology = element.faces().get(usize::from(face).checked_sub(1)?)?;
+    let mut center = [0.0; 3];
+    for &local in topology.corners {
+        let point = mesh.node(*element.nodes.get(local)?)?;
+        for k in 0..3 {
+            center[k] += point[k] / topology.corners.len() as f64;
+        }
+    }
+    Some(center)
+}
+
 /// Initial temperatures and velocities as PrePoMax's `CalInitialTemperature`,
 /// `CalInitialTranslationalVelocity` and `CalInitialAngularVelocity` write them: one line
 /// per set or node and non-zero component, 2D models without the third.
@@ -1075,11 +1141,24 @@ fn initial_conditions(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, 
         };
         match condition.kind {
             InitialConditionKind::Temperature(t) => {
-                let set = sets.node_set(&condition.name, &condition.region)?;
-                out.push_str(&format!(
-                    "*Initial conditions, Type=Temperature\n{set}, {}\n",
-                    number(t)
-                ));
+                match distribution(model, &condition.name, &condition.distribution)? {
+                    Some(sampler) => {
+                        let nodes = condition.region.nodes(sets.mesh);
+                        if nodes.is_empty() {
+                            return Err(empty(&condition.name, "nodes"));
+                        }
+                        out.push_str("*Initial conditions, Type=Temperature\n");
+                        let units = model.properties.units;
+                        distributed_nodes(&mut out, sets.mesh, &nodes, "", t, &sampler, units);
+                    }
+                    None => {
+                        let set = sets.node_set(&condition.name, &condition.region)?;
+                        out.push_str(&format!(
+                            "*Initial conditions, Type=Temperature\n{set}, {}\n",
+                            number(t)
+                        ));
+                    }
+                }
             }
             InitialConditionKind::Velocity(v) => {
                 let set = sets.node_set(&condition.name, &condition.region)?;
@@ -2169,7 +2248,27 @@ fn step_block<'f>(
         } else {
             dofs
         };
-        let set = if cyclic_slaves.is_empty() {
+        // A distributed temperature takes a value per node, which needs no set.
+        let distributed = match bc.kind {
+            BoundaryKind::Temperature(_) => distribution(model, &bc.name, &bc.distribution)?,
+            _ => None,
+        };
+        let set = if let Some(sampler) = &distributed {
+            let nodes: Vec<NodeId> = (bc.region.nodes(sets.mesh).into_iter())
+                .filter(|n| !cyclic_slaves.contains(n))
+                .collect();
+            if nodes.is_empty() {
+                return Err(empty(&bc.name, "nodes"));
+            }
+            let amplitude = amplitude_parameter(amplitudes, &bc.name, "Amplitude", &bc.amplitude)?;
+            let mut out = format!("** Name: {}\n*Boundary{amplitude}\n", bc.name);
+            if let BoundaryKind::Temperature(t) = bc.kind {
+                let units = model.properties.units;
+                distributed_nodes(&mut out, sets.mesh, &nodes, "11, 11, ", t, sampler, units);
+            }
+            boundaries.push(Keyword::generated(out));
+            continue;
+        } else if cyclic_slaves.is_empty() {
             sets.node_set(&bc.name, &bc.region)?
         } else {
             let nodes = bc.region.nodes(sets.mesh);
@@ -2352,8 +2451,25 @@ fn step_block<'f>(
             }
             LoadKind::Pressure(pressure) => {
                 let _ = writeln!(out, "*Dload{amplitude}");
-                for (set, face) in sets.face_sets(&load.name, &load.region)? {
-                    let _ = writeln!(out, "{set}, P{face}, {}", number(pressure));
+                match distribution(model, &load.name, &load.distribution)? {
+                    // Every face takes the pressure scaled at its center.
+                    Some(sampler) => {
+                        let faces = load.region.faces(sets.mesh);
+                        if faces.is_empty() {
+                            return Err(empty(&load.name, "element faces"));
+                        }
+                        for (element, face) in faces {
+                            if let Some(center) = face_center(sets.mesh, element, face) {
+                                let p = pressure * sampler.factor(center);
+                                let _ = writeln!(out, "{element}, P{face}, {}", number(p));
+                            }
+                        }
+                    }
+                    None => {
+                        for (set, face) in sets.face_sets(&load.name, &load.region)? {
+                            let _ = writeln!(out, "{set}, P{face}, {}", number(pressure));
+                        }
+                    }
                 }
             }
             LoadKind::PreTension {
@@ -2476,7 +2592,7 @@ fn step_block<'f>(
         }
         loads.push(Keyword::generated(out));
     }
-    let defined_fields = defined_fields(sets, step, amplitudes)?;
+    let defined_fields = defined_fields(sets, step, amplitudes, model)?;
     let mut history_outputs = Vec::new();
     for output in &step.history_outputs {
         if !output.active {
@@ -2561,6 +2677,7 @@ fn defined_fields(
     sets: &mut Sets,
     step: &Step,
     amplitudes: &[Amplitude],
+    model: &FeModel,
 ) -> Result<Vec<Keyword>, WriteError> {
     let mut keywords = Vec::new();
     for field in &step.defined_fields {
@@ -2572,14 +2689,24 @@ fn defined_fields(
         }
         let out = match &field.kind {
             DefinedFieldKind::Temperature(t) => {
-                let set = sets.node_set(&field.name, &field.region)?;
                 let amplitude =
                     amplitude_parameter(amplitudes, &field.name, "Amplitude", &field.amplitude)?;
-                format!(
-                    "** Name: {}\n*Temperature{amplitude}\n{set}, {}\n",
-                    field.name,
-                    number(*t)
-                )
+                let mut out = format!("** Name: {}\n*Temperature{amplitude}\n", field.name);
+                match distribution(model, &field.name, &field.distribution)? {
+                    Some(sampler) => {
+                        let nodes = field.region.nodes(sets.mesh);
+                        if nodes.is_empty() {
+                            return Err(empty(&field.name, "nodes"));
+                        }
+                        let units = model.properties.units;
+                        distributed_nodes(&mut out, sets.mesh, &nodes, "", *t, &sampler, units);
+                    }
+                    None => {
+                        let set = sets.node_set(&field.name, &field.region)?;
+                        let _ = writeln!(out, "{set}, {}", number(*t));
+                    }
+                }
+                out
             }
             DefinedFieldKind::TemperatureFromFile { file, step } => {
                 let name = file.file_name().map(|n| n.to_string_lossy());

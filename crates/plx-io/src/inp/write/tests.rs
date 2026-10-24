@@ -29,6 +29,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
     let mesh = read_inp(&testdata(file)).unwrap().mesh;
     let mut step = Step::new_static("Step-1");
     step.boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Fixed-1".into(),
         active: true,
         visible: true,
@@ -63,6 +64,7 @@ fn analysis(file: &str, load: Load) -> (FeMesh, FeModel) {
 
 fn tip_force() -> Load {
     Load {
+        distribution: None,
         name: "Force-1".into(),
         active: true,
         visible: true,
@@ -175,6 +177,7 @@ fn the_chosen_solver_is_written_with_the_procedure() {
 #[test]
 fn picked_faces_become_one_element_set_per_face_number() {
     let load = Load {
+        distribution: None,
         name: "Pressure 1".into(),
         active: true,
         visible: true,
@@ -199,6 +202,7 @@ fn picked_faces_become_one_element_set_per_face_number() {
 #[test]
 fn empty_regions_and_unknown_materials_are_errors() {
     let (mesh, mut model) = cantilever(Load {
+        distribution: None,
         name: "Force-1".into(),
         active: true,
         visible: true,
@@ -405,6 +409,7 @@ fn rigid_tip(load: Option<Load>, bc: Option<BoundaryCondition>) -> (FeMesh, FeMo
 
 fn moment(moment: [f64; 3]) -> Load {
     Load {
+        distribution: None,
         name: "Moment-1".into(),
         active: true,
         visible: true,
@@ -418,6 +423,7 @@ fn moment(moment: [f64; 3]) -> Load {
 #[test]
 fn a_rigid_body_and_its_reference_point_are_written_like_prepomax_does() {
     let bc = BoundaryCondition {
+        distribution: None,
         name: "Turn-1".into(),
         active: true,
         visible: true,
@@ -526,6 +532,7 @@ fn calculix_bends_the_cantilever_by_a_moment_on_the_rigid_tip() {
 fn calculix_turns_the_rigid_tip_by_the_rotation_of_its_reference_point() {
     let angle = 0.01;
     let bc = BoundaryCondition {
+        distribution: None,
         name: "Turn-1".into(),
         active: true,
         visible: true,
@@ -555,6 +562,7 @@ fn each_node(values: [Option<f64>; 6]) -> BoundaryKind {
 
 fn remote(name: &str, values: [Option<f64>; 6]) -> BoundaryCondition {
     BoundaryCondition {
+        distribution: None,
         name: name.into(),
         active: true,
         visible: true,
@@ -658,6 +666,7 @@ fn calculix_supports_a_solid_beam_on_two_hinged_faces() {
     step.boundary_conditions[0].kind =
         BoundaryKind::displacement([Some(0.0), Some(0.0), Some(0.0), Some(0.0), None, None]);
     step.boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Roller-1".into(),
         active: true,
         visible: true,
@@ -743,6 +752,7 @@ fn a_face_free_to_turn_follows_a_rigid_point() {
     model.steps[0].boundary_conditions[1].kind = BoundaryKind::displacement(hinge);
     let node = Region::Surface("TIP".into()).nodes(&mesh)[0];
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Pin-1".into(),
         active: true,
         visible: true,
@@ -945,6 +955,7 @@ fn a_plastic_material_is_written_like_prepomax_does() {
 fn calculix_yields_the_bar_pulled_beyond_its_yield_stress() {
     let stress = 300.0;
     let load = Load {
+        distribution: None,
         name: "Pressure-1".into(),
         active: true,
         visible: true,
@@ -968,6 +979,7 @@ fn calculix_yields_the_bar_pulled_beyond_its_yield_stress() {
         let mut dofs = [None; 6];
         dofs[axis] = Some(0.0);
         BoundaryCondition {
+            distribution: None,
             name: format!("Symmetry-{}", axis + 1),
             active: true,
             visible: true,
@@ -1017,6 +1029,7 @@ fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
     let faces = cut_faces(&mesh);
     assert_eq!(faces.len(), 4);
     model.steps[0].loads = vec![Load {
+        distribution: None,
         name: "Pre_Tension-1".into(),
         active: true,
         visible: true,
@@ -1031,6 +1044,7 @@ fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
     }];
     // Both ends held: the bolt is clamped between them.
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Fixed-2".into(),
         active: true,
         visible: true,
@@ -1535,6 +1549,7 @@ fn calculix_shortens_the_bolt_by_the_prescribed_displacement() {
 #[test]
 fn calculix_pressure_on_a_surface_balances_the_reactions() {
     let load = Load {
+        distribution: None,
         name: "Pressure-1".into(),
         active: true,
         visible: true,
@@ -1560,6 +1575,7 @@ fn calculix_reads_quadratic_elements_over_two_lines() {
     const NODE: NodeId = 141;
     const FORCE: [f64; 3] = [0.0, -500.0, 0.0];
     let load = Load {
+        distribution: None,
         name: "Force-1".into(),
         active: true,
         visible: true,
@@ -1630,6 +1646,7 @@ fn surface_traction_spreads_the_total_force_by_area() {
 #[test]
 fn calculix_balances_a_surface_traction() {
     let load = Load {
+        distribution: None,
         name: "Surface_Traction-1".into(),
         active: true,
         visible: true,
@@ -1956,6 +1973,7 @@ fn buckle_analysis() -> (FeMesh, FeModel) {
     let (mesh, mut model) = analysis(
         "kragbalken_c3d20r.inp",
         Load {
+            distribution: None,
             name: "Force-1".into(),
             active: true,
             visible: true,
@@ -2234,6 +2252,7 @@ fn a_preloaded_buckle_step_counts_its_modes_from_one() {
 fn deactivated_items_are_left_out_as_comments() {
     let (mesh, mut model) = cantilever(tip_force());
     model.steps[0].loads.push(Load {
+        distribution: None,
         name: "Empty-1".into(),
         active: false,
         visible: true,
@@ -2370,6 +2389,7 @@ fn plane_model(
     let mut step = Step::new_static("Step-1");
     for (k, (nodes, values)) in bcs.into_iter().enumerate() {
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: format!("Displacement_Rotation-{}", k + 1),
             active: true,
             visible: true,
@@ -2379,6 +2399,7 @@ fn plane_model(
         });
     }
     step.loads.push(Load {
+        distribution: None,
         name: "Load-1".into(),
         active: true,
         visible: true,
@@ -2633,6 +2654,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         .collect();
     let mut step = Step::new_static("Step-1");
     step.boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Fixed-1".into(),
         active: true,
         visible: true,
@@ -2641,6 +2663,7 @@ fn stacked_blocks(mesh: &FeMesh) -> FeModel {
         amplitude: None,
     });
     step.loads.push(Load {
+        distribution: None,
         name: "Pressure-1".into(),
         active: true,
         visible: true,
@@ -2703,6 +2726,7 @@ fn calculix_preloads_a_bolt_split_into_two_tied_parts() {
         let step = &mut model.steps[0];
         step.boundary_conditions[0].region = Region::Nodes(ends.clone());
         step.loads = vec![Load {
+            distribution: None,
             name: "Pre_Tension-1".into(),
             active: true,
             visible: true,
@@ -2860,6 +2884,7 @@ fn calculix_carries_the_load_across_a_contact() {
         // Held sideways at its top, the upper block rests on the lower one only by contact.
         let top: Vec<NodeId> = (119..=127).collect();
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Side-1".into(),
             active: true,
             visible: true,
@@ -2895,6 +2920,7 @@ fn calculix_carries_shear_across_a_tied_contact_without_stick_slope() {
     // The top of the upper block is pushed sideways.
     let top: Vec<NodeId> = (110..=118).collect();
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Shift-1".into(),
         active: true,
         visible: true,
@@ -3006,6 +3032,7 @@ fn calculix_gives_the_same_contact_in_mm_and_in_m() {
         let (mesh, mut model) = blocks_in_contact(properties, ContactMethod::SurfaceToSurface);
         // 100 MPa shear on the top of the upper block, 10 kN on 10 x 10 mm.
         model.steps[0].loads.push(Load {
+            distribution: None,
             name: "Shear-1".into(),
             active: true,
             visible: true,
@@ -3018,6 +3045,7 @@ fn calculix_gives_the_same_contact_in_mm_and_in_m() {
             // Held sideways at its top, the upper block rests on the lower one by contact.
             model.steps[0].loads.pop();
             model.steps[0].boundary_conditions.push(BoundaryCondition {
+                distribution: None,
                 name: "Side-1".into(),
                 active: true,
                 visible: true,
@@ -3066,6 +3094,7 @@ fn calculix_carries_the_load_across_a_true_hard_mortar_contact() {
     let hard = vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)];
     let (mesh, mut model) = blocks_in_contact(hard, ContactMethod::Mortar);
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Side-1".into(),
         active: true,
         visible: true,
@@ -3239,6 +3268,7 @@ fn blocks_model(
 ) -> FeModel {
     let mut step = Step::new_static("Step-1");
     step.boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Fixed-1".into(),
         active: true,
         visible: true,
@@ -3247,6 +3277,7 @@ fn blocks_model(
         amplitude: None,
     });
     step.loads.push(Load {
+        distribution: None,
         name: "Surface_Traction-1".into(),
         active: true,
         visible: true,
@@ -3548,6 +3579,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
     let tip = *mesh.node_ids().last().unwrap();
     let mut step = Step::new_static("Step-1");
     step.boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Fixed-1".into(),
         active: true,
         visible: true,
@@ -3556,6 +3588,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
         amplitude: None,
     });
     step.loads.push(Load {
+        distribution: None,
         name: "Force-1".into(),
         active: true,
         visible: true,
@@ -3806,6 +3839,7 @@ fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
     // Tied rigidly, the second beam starts at the first one's end node; the node set of a
     // boundary condition on the merged node names the node that stays.
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Held".into(),
         active: true,
         visible: true,
@@ -3935,6 +3969,7 @@ fn calculix_stretches_two_trusses_tied_at_a_node_like_one() {
         .filter(|&n| n % 2 == 1)
         .collect();
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Sideways".into(),
         active: true,
         visible: true,
@@ -4128,6 +4163,7 @@ fn calculix_stretches_a_truss_by_f_l_over_e_a() {
         .filter(|&n| n % 2 == 1)
         .collect();
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Sideways".into(),
         active: true,
         visible: true,
@@ -4174,6 +4210,7 @@ const SPECIFIC_HEAT: f64 = 4.6e8;
 
 fn temperature(name: &str, region: Region, value: f64) -> BoundaryCondition {
     BoundaryCondition {
+        distribution: None,
         name: name.into(),
         active: true,
         visible: true,
@@ -4185,6 +4222,7 @@ fn temperature(name: &str, region: Region, value: f64) -> BoundaryCondition {
 
 fn heat_load(name: &str, region: Region, kind: LoadKind) -> Load {
     Load {
+        distribution: None,
         name: name.into(),
         active: true,
         visible: true,
@@ -4229,6 +4267,7 @@ fn writes_heat_transfer_keywords() {
         vec![
             temperature("Temperature-1", Region::NodeSet("FIX".into()), 20.0),
             BoundaryCondition {
+                distribution: None,
                 name: "Fixed-1".into(),
                 active: true,
                 visible: true,
@@ -4262,6 +4301,7 @@ fn writes_heat_transfer_keywords() {
     model.properties.absolute_zero = Some(-273.15);
     model.properties.stefan_boltzmann = Some(5.67e-11);
     model.initial_conditions.push(plx_model::InitialCondition {
+        distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
         region: Region::Parts(vec!["EALL".into()]),
@@ -4322,6 +4362,7 @@ fn calculix_conducts_heat_along_a_bar() {
 
 fn defined_temperature(name: &str, region: Region, value: f64) -> DefinedField {
     DefinedField {
+        distribution: None,
         name: name.into(),
         active: true,
         region,
@@ -4332,6 +4373,7 @@ fn defined_temperature(name: &str, region: Region, value: f64) -> DefinedField {
 
 fn temperature_from_file(name: &str, file: &str, step: u32) -> DefinedField {
     DefinedField {
+        distribution: None,
         name: name.into(),
         active: true,
         region: Region::Nodes(Vec::new()),
@@ -4418,6 +4460,7 @@ fn calculix_strains_the_bar_by_the_temperatures_of_a_result_file() {
     );
     // CalculiX refuses a *Temperature without an initial temperature.
     model.initial_conditions.push(plx_model::InitialCondition {
+        distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
         region: Region::Parts(vec!["EALL".into()]),
@@ -4435,6 +4478,7 @@ fn calculix_strains_the_bar_by_the_temperatures_of_a_result_file() {
         .max_by(|&a, &b| at(a)[1].total_cmp(&at(b)[1]))
         .unwrap();
     let hold = |name: &str, nodes: Vec<NodeId>, held: [bool; 3]| BoundaryCondition {
+        distribution: None,
         name: name.into(),
         active: true,
         visible: true,
@@ -4550,6 +4594,7 @@ fn calculix_cools_the_bar_by_radiation() {
     model.properties.stefan_boltzmann = Some(sigma);
     // Radiation is nonlinear; CalculiX iterates from the initial temperature.
     model.initial_conditions.push(plx_model::InitialCondition {
+        distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
         region: Region::Parts(vec!["EALL".into()]),
@@ -4651,6 +4696,7 @@ fn calculix_warms_the_bar_transiently() {
         Vec::new(),
     );
     model.initial_conditions.push(plx_model::InitialCondition {
+        distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
         region: Region::Parts(vec!["EALL".into()]),
@@ -4704,6 +4750,7 @@ fn expand_bar(kind: StepKind, name: &str) -> String {
         mesh.node_ids()[index]
     };
     let support = |name: &str, nodes: Vec<NodeId>, values: [Option<f64>; 6]| BoundaryCondition {
+        distribution: None,
         name: name.into(),
         active: true,
         visible: true,
@@ -4736,6 +4783,7 @@ fn expand_bar(kind: StepKind, name: &str) -> String {
         Vec::new(),
     );
     model.initial_conditions.push(plx_model::InitialCondition {
+        distribution: None,
         name: "Initial_Temperature-1".into(),
         active: true,
         region: Region::Parts(vec!["EALL".into()]),
@@ -4815,6 +4863,7 @@ fn writes_amplitudes_and_their_references() {
     model.amplitudes.push(amplitude("Half", vec![[0.0, 0.5]]));
     let step = &mut model.steps[0];
     step.boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Displacement-1".into(),
         active: true,
         visible: true,
@@ -5104,6 +5153,7 @@ fn calculix_prints_the_contact_force_of_a_pair() {
     let mut model = stacked_blocks(&mesh);
     let top: Vec<NodeId> = (119..=127).collect();
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Side-1".into(),
         active: true,
         visible: true,
@@ -5160,6 +5210,7 @@ fn coasting_cantilever(kind: plx_model::InitialConditionKind) -> (FeMesh, FeMode
     step.boundary_conditions.clear();
     step.loads.clear();
     model.initial_conditions.push(plx_model::InitialCondition {
+        distribution: None,
         name: "Initial_Velocity-1".into(),
         active: true,
         region: Region::Parts(vec!["EALL".into()]),
@@ -5176,6 +5227,7 @@ fn initial_velocities_are_written_like_prepomax_does() {
     model.initial_conditions[0].region = Region::NodeSet("FIX".into());
     let tip = mesh.node(99).unwrap();
     model.initial_conditions.push(plx_model::InitialCondition {
+        distribution: None,
         name: "Initial_Angular_Velocity-1".into(),
         active: true,
         region: Region::Nodes(vec![99]),
@@ -5232,6 +5284,7 @@ fn calculix_starts_the_cantilever_from_its_initial_velocity() {
 
 fn body_load(kind: LoadKind) -> Load {
     Load {
+        distribution: None,
         name: "Body-1".into(),
         active: true,
         visible: true,
@@ -5387,6 +5440,7 @@ fn cantilever_submodel(dofs: [bool; 6]) -> (FeMesh, FeModel) {
     let step = &mut model.steps[0];
     step.loads.clear();
     step.boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Submodel-1".into(),
         active: true,
         visible: true,
@@ -5595,6 +5649,7 @@ fn half_shell_plate(angle: f64) -> (FeMesh, FeModel, NodeId) {
         offset: 0.0,
     };
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Symmetry-1".into(),
         active: true,
         visible: true,
@@ -5709,6 +5764,7 @@ fn calculix_holds_solids_in_a_skewed_symmetry_plane_alike() {
         let side = nodes_at(&mesh, 1, 0.0);
         turn(&mut mesh, angle);
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Symmetry-1".into(),
             active: true,
             visible: true,
@@ -5755,6 +5811,7 @@ fn calculix_holds_a_2d_model_in_a_skewed_symmetry_line_alike() {
             Region::Nodes(vec![tip]),
         );
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Symmetry-1".into(),
             active: true,
             visible: true,
@@ -5844,6 +5901,7 @@ fn moving_cantilever() -> (FeMesh, FeModel) {
         }
     }
     let load = Load {
+        distribution: None,
         name: "Moving-1".into(),
         active: true,
         visible: true,
@@ -6130,6 +6188,7 @@ fn a_visco_step_and_a_creep_law_are_written() {
 fn calculix_creeps_the_bar_by_nortons_law() {
     let stress = 100.0;
     let load = Load {
+        distribution: None,
         name: "Pressure-1".into(),
         active: true,
         visible: true,
@@ -6156,6 +6215,7 @@ fn calculix_creeps_the_bar_by_nortons_law() {
         let mut dofs = [None; 6];
         dofs[axis] = Some(0.0);
         BoundaryCondition {
+            distribution: None,
             name: format!("Symmetry-{}", axis + 1),
             active: true,
             visible: true,
@@ -6438,6 +6498,7 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
     }
     let mut step = Step::new_static("Step-1");
     let bc = |name: &str, nodes: Vec<NodeId>, kind| BoundaryCondition {
+        distribution: None,
         name: name.into(),
         active: true,
         visible: true,
@@ -6455,6 +6516,7 @@ fn block_on_plate(plate_type: &str) -> (FeMesh, FeModel) {
     step.boundary_conditions
         .push(bc("Guided-1", (10..=18).collect(), sideways));
     step.loads.push(Load {
+        distribution: None,
         name: "Pressure-1".into(),
         active: true,
         visible: true,
@@ -6541,6 +6603,7 @@ fn calculix_bends_a_box_of_a_mesh_block_held_and_loaded_on_its_sides() {
     };
     let mesh = primitive.generate(ModelSpace::ThreeD, "BOX");
     let load = Load {
+        distribution: None,
         name: "Pressure-1".into(),
         active: true,
         visible: true,
@@ -6589,6 +6652,7 @@ fn calculix_bends_a_rectangle_of_a_mesh_block_held_and_loaded_on_its_edges() {
     );
     model.sections[0].region = Region::Parts(vec!["RECTANGLE".into()]);
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Fixed-1".into(),
         active: true,
         visible: true,
@@ -6674,6 +6738,7 @@ fn calculix_turns_the_reference_point_of_a_plane_model() {
     body.region = Region::Nodes(nodes_at(&mesh, 0, 10.0));
     model.constraints.push(Constraint::RigidBody(body));
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Turn-1".into(),
         active: true,
         visible: true,
@@ -6917,6 +6982,7 @@ fn point_moment(
 #[test]
 fn calculix_prints_the_moment_and_rotation_of_a_reference_point() {
     let bc = BoundaryCondition {
+        distribution: None,
         name: "Turn-1".into(),
         active: true,
         visible: true,
@@ -7014,6 +7080,7 @@ fn blocks_joined_by_region(gap: f64, behavior: plx_model::ContactBehavior) -> (F
 fn push_top(model: &mut FeModel, shift: f64) -> Vec<NodeId> {
     let top: Vec<NodeId> = (110..=118).collect();
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Shift-1".into(),
         active: true,
         visible: true,
@@ -7106,6 +7173,7 @@ fn calculix_carries_the_load_across_a_frictionless_region_in_any_units() {
         model.steps[0].loads[0].kind = LoadKind::Pressure(10.0 * stress);
         // Held sideways at its top, the upper block rests on the lower one only by contact.
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Side-1".into(),
             active: true,
             visible: true,
@@ -7189,6 +7257,7 @@ fn calculix_takes_mortar_contact_regions() {
     let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Frictionless);
     model.contact_defaults.formulation = Some(ContactMethod::Mortar);
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Side-1".into(),
         active: true,
         visible: true,
@@ -7437,6 +7506,7 @@ fn calculix_holds_a_region_of_no_separation_together_and_lets_it_slide() {
     model.contact_regions[0].settings.sides = Some(plx_model::SideRoles::AIsMaster);
     model.steps[0].loads[0].kind = LoadKind::Pressure(-10.0);
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Side-1".into(),
         active: true,
         visible: true,
@@ -7477,6 +7547,7 @@ fn calculix_presses_regions_apart_by_a_negative_offset() {
         Some(plx_model::InterfaceTreatment::Offset(-0.01));
     model.steps[0].loads.clear();
     model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Top-1".into(),
         active: true,
         visible: true,
@@ -7539,6 +7610,7 @@ fn calculix_conducts_heat_across_contact_regions_in_coupled_steps() {
         temperature("Cold", Region::Nodes((110..=118).collect()), 0.0),
     ]);
     step.boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Side-1".into(),
         active: true,
         visible: true,
@@ -7547,6 +7619,7 @@ fn calculix_conducts_heat_across_contact_regions_in_coupled_steps() {
         amplitude: None,
     });
     model.initial_conditions.push(plx_model::InitialCondition {
+        distribution: None,
         name: "Initial-1".into(),
         active: true,
         region: Region::Parts(vec!["LOWER".into(), "UPPER".into()]),
@@ -7615,6 +7688,7 @@ fn calculix_switches_contact_regions_off_and_on_in_steps() {
     use plx_model::{ContactBehavior, ContactState};
     let (mesh, mut model) = blocks_joined_by_region(0.0, ContactBehavior::Frictionless);
     let side = |values| BoundaryCondition {
+        distribution: None,
         name: "Side-1".into(),
         active: true,
         visible: true,
@@ -7757,4 +7831,154 @@ fn switched_bonded_regions_become_tied_contacts() {
     );
     model.contact_regions[0].behavior = ContactBehavior::NoSeparation;
     assert!(ignored(&model));
+}
+
+fn equation(name: &str, text: &str) -> plx_model::Distribution {
+    plx_model::Distribution {
+        name: name.into(),
+        kind: plx_model::DistributionKind::Equation(text.into()),
+    }
+}
+
+/// A pressure scaled by a distribution takes its value at the center of every face: y / 10
+/// over the 10 x 10 tip face is 0.5 on average, so 2 MPa push with 100 N.
+#[test]
+fn calculix_pressure_follows_its_distribution() {
+    let load = Load {
+        distribution: Some("Rising".into()),
+        name: "Pressure-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Surface("TIP".into()),
+        kind: LoadKind::Pressure(2.0),
+        amplitude: None,
+        factor_amplitude: None,
+    };
+    let (mesh, mut model) = cantilever(load);
+    model.properties.units = UnitSystem::MKgSC;
+    model.distributions.push(equation("Rising", "=y / 10"));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // One line per face, no surface sets.
+    assert!(!text.contains("Internal_Selection-1_Pressure-1"), "{text}");
+    let faces = Region::Surface("TIP".into()).faces(&mesh);
+    let (element, face) = faces[0];
+    let center = face_center(&mesh, element, face).unwrap();
+    let line = format!("\n{element}, P{face}, {}\n", number(2.0 * center[1] / 10.0));
+    assert!(text.contains(&line), "{line}\n{text}");
+    let Some(frd) = run_ccx("druck-verteilt", &text) else {
+        return;
+    };
+    let reaction: f64 = mesh.node_sets["FIX"]
+        .iter()
+        .map(|&node| node_value(&frd, "FORC", "F1", node))
+        .sum();
+    assert!((reaction.abs() - 100.0).abs() < 1e-3, "{reaction}");
+}
+
+#[test]
+fn distributed_temperatures_are_written_per_node() {
+    let (mesh, mut model) = thermal_bar(
+        steady(),
+        vec![temperature(
+            "Temperature-1",
+            Region::NodeSet("FIX".into()),
+            50.0,
+        )],
+        Vec::new(),
+    );
+    model.properties.units = UnitSystem::MKgSC;
+    model.distributions.push(equation("Half", "=0.5"));
+    model.steps[0].boundary_conditions[0].distribution = Some("Half".into());
+    model.initial_conditions.push(plx_model::InitialCondition {
+        distribution: Some("Half".into()),
+        name: "Initial_Temperature-1".into(),
+        active: true,
+        region: Region::Nodes(vec![1, 2]),
+        kind: plx_model::InitialConditionKind::Temperature(20.0),
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for expected in [
+        "*Initial conditions, Type=Temperature\n1, 10\n2, 10\n",
+        "** Name: Temperature-1\n*Boundary\n1, 11, 11, 25\n",
+    ] {
+        assert!(text.contains(expected), "{expected}\n{text}");
+    }
+    assert!(
+        !text.contains("Internal_Selection-1_Temperature-1"),
+        "{text}"
+    );
+    model.distributions[0].kind = plx_model::DistributionKind::Equation("=x +".into());
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidDistribution { .. })
+    ));
+    model.distributions.clear();
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::UnknownDistribution { .. })
+    ));
+}
+
+/// A defined temperature of 20 + x over the bar, given as 120 times a distribution, makes it
+/// grow by alpha times the integral of T - 20, as the same field read from a heat transfer
+/// run does.
+#[test]
+fn calculix_strains_the_bar_by_a_distributed_temperature() {
+    let (mesh, mut model) = thermal_bar(
+        StepKind::Static(StaticStep::default()),
+        Vec::new(),
+        Vec::new(),
+    );
+    model.properties.units = UnitSystem::MKgSC;
+    model
+        .distributions
+        .push(equation("Gradient", "=(20 + x) / 120"));
+    model.initial_conditions.push(plx_model::InitialCondition {
+        distribution: None,
+        name: "Initial_Temperature-1".into(),
+        active: true,
+        region: Region::Parts(vec!["EALL".into()]),
+        kind: plx_model::InitialConditionKind::Temperature(20.0),
+    });
+    let mut field = defined_temperature(
+        "Defined_Temperature-1",
+        Region::Parts(vec!["EALL".into()]),
+        120.0,
+    );
+    field.distribution = Some("Gradient".into());
+    model.steps[0].defined_fields = vec![field];
+    // Held at x = 0 in x, and against rigid motion at the corner and an edge node.
+    let hold = |name: &str, nodes: Vec<NodeId>, held: [bool; 3]| BoundaryCondition {
+        distribution: None,
+        name: name.into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(nodes),
+        kind: BoundaryKind::displacement([
+            held[0].then_some(0.0),
+            held[1].then_some(0.0),
+            held[2].then_some(0.0),
+            None,
+            None,
+            None,
+        ]),
+        amplitude: None,
+    };
+    // Node 1 is the corner at the origin, node 12 lies along y from it.
+    model.steps[0].boundary_conditions = vec![
+        hold("Axial", nodes_at(&mesh, 0, 0.0), [true, false, false]),
+        hold("Corner", vec![1], [false, true, true]),
+        hold("Edge", vec![12], [false, false, true]),
+    ];
+    let Some(frd) = run_ccx(
+        "verteilte-temperatur",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    assert_all_close(&temperatures_at(&mesh, &frd, 100.0), 120.0, 1e-6);
+    let growth: Vec<f64> = (nodes_at(&mesh, 0, 100.0).iter())
+        .map(|&n| node_value(&frd, "DISP", "U1", n))
+        .collect();
+    assert_all_close(&growth, 1e-5 * 100.0 * 100.0 / 2.0, 1e-3);
 }

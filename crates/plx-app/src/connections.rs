@@ -1524,6 +1524,7 @@ mod tests {
         });
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Fix".into(),
             active: true,
             visible: true,
@@ -1532,6 +1533,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            distribution: None,
             name: "Press".into(),
             active: true,
             visible: true,
@@ -1673,6 +1675,7 @@ mod tests {
         });
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Fix".into(),
             active: true,
             visible: true,
@@ -1681,6 +1684,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            distribution: None,
             name: "Press".into(),
             active: true,
             visible: true,

@@ -915,6 +915,7 @@ mod tests {
         }
         let mut step = plx_model::Step::new_static("Step-1");
         step.boundary_conditions.push(plx_model::BoundaryCondition {
+            distribution: None,
             name: "Fixed-1".into(),
             active: true,
             visible: true,
@@ -925,6 +926,7 @@ mod tests {
         // The cap held sideways at its top, pressed down.
         let cap_nodes = Region::Faces(cap_top.clone()).nodes(&mesh);
         step.boundary_conditions.push(plx_model::BoundaryCondition {
+            distribution: None,
             name: "Guide-1".into(),
             active: true,
             visible: true,
@@ -940,6 +942,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(plx_model::Load {
+            distribution: None,
             name: "Pressure-1".into(),
             active: true,
             visible: true,
@@ -983,6 +986,7 @@ mod tests {
             .unwrap()
             .mesh;
         let model = FeModel {
+            distributions: Vec::new(),
             properties: Default::default(),
             materials: vec![Material {
                 name: "Steel".into(),
@@ -1102,6 +1106,7 @@ mod tests {
                 ..plx_model::Amplitude::new("Amplitude-1")
             }],
             initial_conditions: vec![plx_model::InitialCondition {
+                distribution: None,
                 name: "Initial_Temperature-1".into(),
                 active: true,
                 region: Region::Parts(vec!["A".into()]),

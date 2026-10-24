@@ -505,6 +505,7 @@ mod tests {
         });
         let mut step = Step::new_static("Step-1");
         step.loads.push(Load {
+            distribution: None,
             name: "Pressure-1".into(),
             active: true,
             visible: true,
@@ -514,6 +515,7 @@ mod tests {
             factor_amplitude: None,
         });
         step.loads.push(Load {
+            distribution: None,
             name: "Force-1".into(),
             active: true,
             visible: true,

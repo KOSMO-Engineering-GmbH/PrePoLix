@@ -2808,6 +2808,7 @@ mod tests {
         let (fixed, pulled) = (nodes_at(0.0), nodes_at(100.0));
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Fix".into(),
             active: true,
             visible: true,
@@ -2816,6 +2817,7 @@ mod tests {
             amplitude: None,
         });
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Pull".into(),
             active: true,
             visible: true,
@@ -3129,6 +3131,7 @@ S
         let part = model.mesh.parts[0].name.clone();
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Clamped".into(),
             active: true,
             visible: true,
@@ -3137,6 +3140,7 @@ S
             amplitude: None,
         });
         step.loads.push(Load {
+            distribution: None,
             name: "Weight".into(),
             active: true,
             visible: true,
@@ -3251,6 +3255,7 @@ S
             ),
         ] {
             step.boundary_conditions.push(BoundaryCondition {
+                distribution: None,
                 name: name.into(),
                 active: true,
                 visible: true,

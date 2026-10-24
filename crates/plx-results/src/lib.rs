@@ -6,7 +6,7 @@
 
 mod derived;
 pub mod display;
-pub mod equation;
+pub use plx_model::equation;
 pub mod field_output;
 pub mod history_output;
 pub mod hot_spot;

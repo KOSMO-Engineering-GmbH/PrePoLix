@@ -21,7 +21,8 @@ plates (rotations).
     Nlgeom steps such a node mostly stops the step from converging, so the model check warns
     "Beam rotations partly held". On a reference point of a rigid body (@rigid-body) the
     components move the point and so the rigid body.],
-  [Temperature], [Prescribed temperature (heat transfer, coupled and uncoupled steps).],
+  [Temperature], [Prescribed temperature (heat transfer, coupled and uncoupled steps); a
+    #ui("Distribution") (@distributions) makes it vary over the region.],
   [Submodel], [Displacements taken from the global model (static steps of a submodel,
     @submodel). The check boxes select the displacements U1 to U3; the step of the global
     results is the one linked to the #ui("Global results") row. The global results hold no
@@ -151,7 +152,8 @@ Loads are created like boundary conditions, with #ui("Create ...") on #ui("Loads
     default.],
   [Moment], [`M1`, `M2`, `M3` at the reference point of a rigid body (@rigid-body) or at every
     node of beams and shells, which have rotations. 3D models only.],
-  [Pressure], [Pressure on faces; positive values push into the material (`*DLOAD`).],
+  [Pressure], [Pressure on faces; positive values push into the material (`*DLOAD`). A
+    #ui("Distribution") (@distributions) makes it vary over the faces, e.g. with depth.],
   [Moving Load], [Wheel forces that travel over faces, one static step per position
     (@moving-load).],
   [Concentrated Flux], [Heat flow into every node of the region (`*CFLUX`).],

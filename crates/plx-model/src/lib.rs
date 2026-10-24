@@ -17,7 +17,9 @@ mod contact_check;
 mod contact_steps;
 pub mod convert;
 mod detection;
+mod distribution;
 mod element_type;
+pub mod equation;
 mod exposed;
 mod features;
 mod field;
@@ -63,6 +65,7 @@ pub use detection::{
     ContactDetection, DetectionFilter, DetectionGeometry, DetectionGrouping, DetectionReport,
     auto_detection_tolerance, auto_geometry_detection_tolerance,
 };
+pub use distribution::{Distribution, DistributionKind, Interpolation, Sampler, parse_points};
 pub use element_type::{PartElementType, element_type_options};
 pub use exposed::{Exposed, Field, ItemRef, ValuePath};
 pub use features::{
@@ -156,6 +159,9 @@ pub struct FeModel {
     /// Time curves boundary conditions and loads refer to by name.
     #[serde(default)]
     pub amplitudes: Vec<Amplitude>,
+    /// Factors over the model that pressures and temperatures refer to by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub distributions: Vec<Distribution>,
     /// State of the model before the first step, such as its initial temperature.
     #[serde(default)]
     pub initial_conditions: Vec<InitialCondition>,
@@ -415,6 +421,48 @@ impl FeModel {
     /// The amplitude of the name, if the model has it.
     pub fn amplitude(&self, name: &str) -> Option<&Amplitude> {
         self.amplitudes.iter().find(|a| a.name == name)
+    }
+
+    pub fn distribution(&self, name: &str) -> Option<&Distribution> {
+        self.distributions.iter().find(|d| d.name == name)
+    }
+
+    /// Every reference to a distribution: of boundary conditions, loads, initial conditions
+    /// and defined fields.
+    fn distribution_references(&mut self) -> impl Iterator<Item = &mut Option<String>> {
+        let initial = self
+            .initial_conditions
+            .iter_mut()
+            .map(|c| &mut c.distribution);
+        let steps = self.steps.iter_mut().flat_map(|step| {
+            (step
+                .boundary_conditions
+                .iter_mut()
+                .map(|b| &mut b.distribution))
+            .chain(step.loads.iter_mut().map(|l| &mut l.distribution))
+            .chain(step.defined_fields.iter_mut().map(|f| &mut f.distribution))
+        });
+        initial.chain(steps)
+    }
+
+    /// Follows a renamed distribution: the items that use it keep using it.
+    pub fn rename_distribution(&mut self, old: &str, new: &str) {
+        for reference in self.distribution_references() {
+            if reference.as_deref() == Some(old) {
+                *reference = Some(new.to_string());
+            }
+        }
+    }
+
+    /// The names of the distributions some item uses.
+    pub fn used_distributions(&self) -> std::collections::BTreeSet<&str> {
+        let initial = self.initial_conditions.iter().map(|c| &c.distribution);
+        let steps = self.steps.iter().flat_map(|step| {
+            (step.boundary_conditions.iter().map(|b| &b.distribution))
+                .chain(step.loads.iter().map(|l| &l.distribution))
+                .chain(step.defined_fields.iter().map(|f| &f.distribution))
+        });
+        initial.chain(steps).filter_map(|d| d.as_deref()).collect()
     }
 
     /// Follows a renamed part: regions on the part, or on the element set an input file
@@ -1517,6 +1565,10 @@ pub struct BoundaryCondition {
     /// Amplitude the values follow over time; `None` is CalculiX's default ramp or step.
     #[serde(default)]
     pub amplitude: Option<String>,
+    /// Distribution the value is scaled by over the region; `None` is the same value
+    /// everywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1584,6 +1636,10 @@ pub struct Load {
     /// `RADIATION AMPLITUDE`); other loads have none.
     #[serde(default)]
     pub factor_amplitude: Option<String>,
+    /// Distribution the value is scaled by over the region; `None` is the same value
+    /// everywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1683,6 +1739,10 @@ pub struct InitialCondition {
     pub active: bool,
     pub region: Region,
     pub kind: InitialConditionKind,
+    /// Distribution the value is scaled by over the region; `None` is the same value
+    /// everywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -1755,6 +1815,10 @@ pub struct DefinedField {
     /// read from a file has none.
     #[serde(default)]
     pub amplitude: Option<String>,
+    /// Distribution the value is scaled by over the region; `None` is the same value
+    /// everywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1855,6 +1919,7 @@ mod tests {
         });
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Fixed-1".into(),
             active: true,
             visible: true,
@@ -1863,6 +1928,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            distribution: None,
             name: "Pressure-1".into(),
             active: true,
             visible: true,
