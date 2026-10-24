@@ -17,10 +17,15 @@ solids. Create it with #menu("Model", "Create Section ...") and choose #ui("Shel
     only; a shell section on solid or line elements is reported as an invalid section.],
 )
 
-Written as `*SHELL SECTION, ELSET=..., MATERIAL=...` with the thickness on the next line. As soon
-as the model has a shell section, the field outputs are written with `OUTPUT=2D`, so that the
-results are reported at the shell nodes instead of the nodes CalculiX expands the shells to
-internally, and the result file keeps the node numbers of the model.
+Written as `*SHELL SECTION, ELSET=..., MATERIAL=...` with the thickness on the next line.
+CalculiX expands shells into solid elements and reports the results on these solids, with new
+node numbers; their stresses differ on the top and the bottom face, as bending makes them. A
+Measure block on shell nodes takes the values of the nodes they were expanded to: a node set
+the extremes over the thickness, a single node the mean (forces their sum).
+
+#note[A field output with #ui("Output (2D/3D)") set to #ui("2D") reports the shells at their
+own nodes instead. CalculiX then gives the stresses of the mid-surface only: the bending
+stresses are missing.]
 
 Shell nodes have rotations: #ui("Displacement/Rotation") boundary conditions can hold `UR1`,
 `UR2`, `UR3`, and #ui("Moment") loads can act on them.
@@ -36,10 +41,15 @@ to opposite sides show a step, which reveals a flipped normal before the analysi
 #screenshot("shell-thickness.png", [Shell sections drawn with their thickness: the plate with
 offset 0.5 hangs below its mesh, the half tube with offset 0.5 lies inside it.])
 
-The Results workspace draws the shells the same way, deformed and coloured by the shown
-result: CalculiX reports shells on their mid-surface (`OUTPUT=2D`, see above), and PrePoLix takes
-thickness and offset from the input file CalculiX ran. The solid takes the value of its node
-across the whole thickness; the stresses on the top and the bottom face are not drawn apart.
+The Results workspace shows the solids CalculiX expanded the shells to, so a section view
+cuts through the thickness and shows how the stresses change across it.
+
+#screenshot("shell-section-cut.png", [A section view through a shell roof and a beam in the
+results: the stress S11 runs from the top to the bottom face of the shell.])
+
+Results with `OUTPUT=2D` hold the shells as surfaces; the Results workspace then draws them
+thickened like the FE model, with thickness and offset from the input file CalculiX ran, and
+the value of each node across the whole thickness.
 
 Turn the display off and on with #menu("View", "Shell Thickness") or in the
 #link(<settings>)[settings] under #ui("Graphics"); the setting applies to both workspaces.

@@ -331,12 +331,6 @@ pub fn model_keywords(
                 flux_kinds,
                 amplitudes: &model.amplitudes,
                 pair_surfaces: &pair_surfaces,
-                shells: (model.sections.iter()).any(|s| {
-                    matches!(
-                        s.kind,
-                        SectionKind::Shell { .. } | SectionKind::Membrane { .. }
-                    )
-                }),
                 model,
             };
             write_step(&mut sets, step, &context)
@@ -1812,9 +1806,6 @@ struct StepContext<'a> {
     flux_kinds: FluxKinds,
     amplitudes: &'a [Amplitude],
     pair_surfaces: &'a PairSurfaces,
-    /// The model has shells: results are written at the shell nodes (`Output=2D`) rather
-    /// than at the nodes CalculiX expands them to, so they fit the mesh.
-    shells: bool,
     /// `*STEP, PERTURBATION` of the frequency step whose stored modes a complex frequency
     /// step uses; CalculiX stops when the two differ.
     stored_perturbation: bool,
@@ -2090,7 +2081,6 @@ fn step_block<'f>(
         flux_kinds,
         amplitudes,
         pair_surfaces,
-        shells,
         stored_perturbation,
         cyclic,
         cyclic_slaves,
@@ -2485,8 +2475,15 @@ fn step_block<'f>(
             history_outputs.push(keyword);
         }
     }
+    // CalculiX writes all results of the step in one form: the node outputs follow the
+    // element outputs.
+    let dimension = (step.field_outputs.iter())
+        .filter(|o| o.active && o.kind == OutputKind::Element)
+        .map(|o| o.dimension)
+        .find(|&d| d != OutputDimension::Default)
+        .unwrap_or_default();
     let field_outputs = (step.field_outputs.iter())
-        .filter_map(|output| field_output(output, shells))
+        .filter_map(|output| field_output(output, dimension))
         .collect();
     let end = Keyword::generated("*End step\n".into());
     let mut contents = vec![
@@ -3102,7 +3099,8 @@ fn buckle_step(settings: &BuckleStep) -> (String, String) {
 
 /// `*Node file`, `*El file` or `*Contact file` of a field output, as PrePoMax's
 /// `CalNodeFile`, `CalElFile` and `CalContactFile` write them; none without variables.
-fn field_output(output: &FieldOutput, shells: bool) -> Option<Keyword> {
+/// Node outputs are written in the form `dimension` of the step's element outputs.
+fn field_output(output: &FieldOutput, dimension: OutputDimension) -> Option<Keyword> {
     if !output.active {
         return Some(deactivated(&output.name));
     }
@@ -3132,10 +3130,11 @@ fn field_output(output: &FieldOutput, shells: bool) -> Option<Keyword> {
     if output.kind != OutputKind::Contact {
         let dimension = match output.kind {
             OutputKind::Element => output.dimension,
-            _ => OutputDimension::Default,
+            _ => dimension,
         };
+        // CalculiX's default writes shells and beams as the solids it expands them to; at
+        // the shell nodes (2D) the stresses are those of the mid-surface, without bending.
         match dimension {
-            OutputDimension::Default if shells => header.push_str(", Output=2D"),
             OutputDimension::Default => {}
             OutputDimension::TwoD => header.push_str(", Output=2D"),
             OutputDimension::ThreeD => header.push_str(", Output=3D"),

@@ -53,14 +53,11 @@ bars of their cross-section area.
 #screenshot("beam-profiles.png", [A frame with a rectangular beam (left), a pipe frame (right),
 truss bracing and a roof of shells, drawn with their sections.])
 
-In the Results workspace CalculiX usually hands the beams back as the solids it expanded them
-to. A model with shells makes it report them as lines, though (`OUTPUT=2D`), and trusses are
-always lines; PrePoLix then sweeps the profiles of the input file CalculiX ran along the
-deformed lines, coloured by the shown result. The profile is moved with its nodes, not turned
-by their rotations.
-
-#screenshot("beam-profiles-results.png", [The same frame solved: shells, beams and trusses
-drawn with their sections in the results.])
+In the Results workspace CalculiX hands the beams back as the solids it expanded them to
+(pipes and boxes without their hollow). Trusses stay lines, and so do beams in results written with
+`OUTPUT=2D`; PrePoLix then sweeps the profiles of the input file CalculiX ran along the deformed
+lines, coloured by the shown result. Such a profile is moved with its nodes, not turned by
+their rotations.
 
 Turn the profiles off with #menu("View", "Beam Profiles") or in the #link(<settings>)[settings]
 under #ui("Graphics") to see the lines only. Picking still selects the lines.

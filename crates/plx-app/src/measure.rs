@@ -13,6 +13,7 @@ use plx_results::AnalysisKind;
 
 /// The value of `kind` in the results of step `step` (CalculiX's numbering, from 1): of its
 /// last increment, or of a mode. `node_sets` are those of the mesh the results belong to.
+#[cfg(test)]
 pub fn evaluate(
     kind: &MeasureKind,
     step: u32,
@@ -21,6 +22,24 @@ pub fn evaluate(
     node_sets: &BTreeMap<String, Vec<NodeId>>,
     units: UnitSystem,
 ) -> Result<f64, String> {
+    evaluate_expanded(kind, step, frd, dat, node_sets, &BTreeMap::new(), units)
+}
+
+/// The value of `kind` in the results of step `step` (CalculiX's numbering, from 1), as
+/// [`evaluate`] gives it, on results in which CalculiX expanded shells and beams: `expanded` gives the
+/// nodes of the results each of their nodes became (see [`plx_io::frd::expanded_nodes`]). A
+/// region takes the values of all of them, so its extremes are those on the faces of the
+/// shells; a node takes their mean, or their sum for forces.
+pub fn evaluate_expanded(
+    kind: &MeasureKind,
+    step: u32,
+    frd: &FrdImport,
+    dat: Option<&plx_io::dat::DatImport>,
+    node_sets: &BTreeMap<String, Vec<NodeId>>,
+    expanded: &BTreeMap<NodeId, Vec<NodeId>>,
+    units: UnitSystem,
+) -> Result<f64, String> {
+    let indices = |node: NodeId| plx_io::frd::node_indices(&frd.mesh, expanded, node);
     let increments: Vec<_> = frd.increments.iter().filter(|i| i.step == step).collect();
     let component = |field: &str, component: &str| {
         let increment = (increments.iter().rev())
@@ -44,7 +63,7 @@ pub fn evaluate(
                     let nodes = (node_sets.get(set))
                         .ok_or_else(|| format!("the mesh has no node set {set}"))?;
                     (nodes.iter())
-                        .filter_map(|&id| frd.mesh.node_index(id))
+                        .flat_map(|&id| indices(id))
                         .filter_map(|index| values.get(index))
                         .map(|&v| f64::from(v))
                         .collect()
@@ -60,12 +79,21 @@ pub fn evaluate(
             node,
         } => {
             let values = component(field, name)?;
-            let index = (frd.mesh.node_index(*node))
-                .ok_or_else(|| format!("the results have no node {node}"))?;
-            values
-                .get(index)
-                .map(|&v| f64::from(v))
-                .ok_or_else(|| format!("no value at node {node}"))
+            let at = indices(*node);
+            if at.is_empty() {
+                return Err(format!("the results have no node {node}"));
+            }
+            let picked = (at.iter())
+                .map(|&index| values.get(index).map(|&v| f64::from(v)))
+                .collect::<Option<Vec<f64>>>()
+                .ok_or_else(|| format!("no value at node {node}"))?;
+            let sum: f64 = picked.iter().sum();
+            // Forces of the expanded nodes add up to the force at the node.
+            Ok(if matches!(field.as_str(), "FORC" | "RF") {
+                sum
+            } else {
+                sum / picked.len() as f64
+            })
         }
         MeasureKind::PointValue {
             field,
@@ -165,12 +193,17 @@ fn run(job: &Job) -> Result<f64, String> {
         plx_io::project::restore_results(&job.results, &job.dir).map_err(|e| e.to_string())?;
     let frd = plx_io::frd::read_frd(&frd_path).map_err(|e| e.to_string())?;
     let dat = read_dat_beside(&frd_path);
-    evaluate(
+    // The input CalculiX ran knows the shells and beams it expanded.
+    let expanded = plx_io::inp::read_inp(&frd_path.with_extension("inp"))
+        .map(|input| plx_io::frd::expanded_nodes(&input.mesh, &frd.mesh))
+        .unwrap_or_default();
+    evaluate_expanded(
         &job.kind,
         job.step,
         &frd,
         dat.as_ref(),
         &job.node_sets,
+        &expanded,
         job.units,
     )
 }
@@ -624,6 +657,108 @@ mod tests {
         assert!(evaluate(&missing, step, &frd, None, &sets, UnitSystem::default()).is_err());
         let eigen = MeasureKind::Eigenfrequency { mode: 1 };
         assert!(evaluate(&eigen, step, &frd, None, &sets, UnitSystem::default()).is_err());
+    }
+
+    /// On shells CalculiX expanded, a node set takes the stresses on both faces and a node
+    /// the mean displacement through the thickness.
+    #[test]
+    fn measures_on_expanded_shells_take_the_expanded_nodes() {
+        if std::process::Command::new("ccx")
+            .arg("-v")
+            .output()
+            .is_err()
+        {
+            eprintln!("ccx not found, test skipped");
+            return;
+        }
+        // A cantilever strip 100 x 20 x 2 of S4 shells, clamped at x = 0, 10 N down at the
+        // tip: 75 MPa bending stress at the clamp after beam theory.
+        let mut text = String::from("*Node\n");
+        for i in 0..=20 {
+            for j in 0..=2 {
+                let id = i * 3 + j + 1;
+                text.push_str(&format!(
+                    "{id}, {}, {}, 0\n",
+                    5.0 * i as f64,
+                    10.0 * j as f64
+                ));
+            }
+        }
+        text.push_str("*Element, Type=S4, Elset=Strip\n");
+        for i in 0..20 {
+            for j in 0..2 {
+                let n = i * 3 + j + 1;
+                let e = i * 2 + j + 1;
+                text.push_str(&format!("{e}, {n}, {}, {}, {}\n", n + 3, n + 4, n + 1));
+            }
+        }
+        text.push_str(
+            "*Material, Name=S\n*Elastic\n210000, 0.3\n\
+             *Shell section, Elset=Strip, Material=S\n2\n\
+             *Step\n*Static\n*Boundary\n1, 1, 6\n2, 1, 6\n3, 1, 6\n\
+             *Cload\n61, 3, -2.5\n62, 3, -5\n63, 3, -2.5\n\
+             *Node file\nU, RF\n*El file\nS\n*End step\n",
+        );
+        let dir = std::env::temp_dir().join(format!("plx-measure-shell-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("strip.inp"), &text).unwrap();
+        let output = std::process::Command::new("ccx")
+            .args(["-i", "strip"])
+            .current_dir(&dir)
+            .env("OMP_NUM_THREADS", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let frd = plx_io::frd::read_frd(&dir.join("strip.frd")).unwrap();
+        let input = plx_io::inp::read_inp(&dir.join("strip.inp")).unwrap().mesh;
+        let _ = std::fs::remove_dir_all(&dir);
+        let expanded = plx_io::frd::expanded_nodes(&input, &frd.mesh);
+        let step = frd.increments.last().unwrap().step;
+        let sets = BTreeMap::from([("CLAMP".to_owned(), vec![1, 2, 3])]);
+        let measure = |kind: &MeasureKind| {
+            evaluate_expanded(
+                kind,
+                step,
+                &frd,
+                None,
+                &sets,
+                &expanded,
+                UnitSystem::default(),
+            )
+        };
+        let s11 = |extreme| MeasureKind::FieldExtreme {
+            field: "STRESS".into(),
+            component: "S11".into(),
+            extreme,
+            region: MeasureRegion::NodeSet("CLAMP".into()),
+        };
+        let top = measure(&s11(Extreme::Max)).unwrap();
+        let bottom = measure(&s11(Extreme::Min)).unwrap();
+        assert!(top > 60.0 && bottom < -60.0, "{top} {bottom}");
+        // The tip sags by F L^3 / (3 E I) = 10 * 100^3 / (3 * 210000 * 20 * 8 / 12).
+        let tip = measure(&MeasureKind::NodeValue {
+            field: "DISP".into(),
+            component: "U3".into(),
+            node: 62,
+        })
+        .unwrap();
+        let expected = -10.0 * 1e6 / (3.0 * 210_000.0 * 20.0 * 8.0 / 12.0);
+        assert!(
+            (tip - expected).abs() < 0.05 * expected.abs(),
+            "{tip} vs {expected}"
+        );
+        // The clamp holds the 10 N.
+        let held: f64 = (1..=3)
+            .map(|node| {
+                measure(&MeasureKind::NodeValue {
+                    field: "FORC".into(),
+                    component: "F3".into(),
+                    node,
+                })
+                .unwrap()
+            })
+            .sum();
+        assert!((held - 10.0).abs() < 1e-3, "{held}");
     }
 
     #[test]

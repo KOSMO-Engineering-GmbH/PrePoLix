@@ -43,7 +43,7 @@ pub enum OutputKind {
 /// CalculiX's `OUTPUT` parameter of `*EL FILE`, PrePoMax's "Output (2D/3D)".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputDimension {
-    /// Left to CalculiX; shell and plane models are written with `OUTPUT=2D`.
+    /// Left to CalculiX, which writes shells and beams as the solids it expands them to.
     #[default]
     Default,
     /// `OUTPUT=2D`
