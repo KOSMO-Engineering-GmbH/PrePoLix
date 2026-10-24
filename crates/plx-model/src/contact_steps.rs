@@ -73,6 +73,17 @@ impl ContactRegion {
         self.changes(steps).any(|c| c.active.is_some())
     }
 
+    /// Whether an active step prints contact values of the region, a contact history
+    /// output of it (`*CONTACT PRINT`).
+    pub fn prints_contact(&self, steps: &[Step]) -> bool {
+        (steps.iter().filter(|s| s.active))
+            .flat_map(|s| &s.history_outputs)
+            .any(|o| {
+                o.active
+                    && matches!(&o.kind, crate::HistoryKind::Contact { pair } if *pair == self.name)
+            })
+    }
+
     /// Whether a step changes the friction coefficient.
     pub fn friction_changed(&self, steps: &[Step]) -> bool {
         self.changes(steps).any(|c| c.friction.is_some())
