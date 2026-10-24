@@ -402,7 +402,11 @@ pub fn validate_region(region: &ContactRegion, sides: &MasterSlave) -> Result<()
             return Err("Stiffnesses must be greater than 0.".into());
         }
     }
-    if region.settings.tolerance.is_some_and(|t| !(t.is_finite() && t >= 0.0)) {
+    if region
+        .settings
+        .tolerance
+        .is_some_and(|t| !(t.is_finite() && t >= 0.0))
+    {
         return Err("The tolerance must not be negative.".into());
     }
     Ok(())
