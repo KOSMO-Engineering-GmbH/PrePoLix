@@ -124,7 +124,8 @@ fn field_outputs_are_written_with_their_options_like_prepomax_does() {
     outputs.push(off);
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
-        "** Name: NF-Output-1\n*Node file, Last iterations, Global=No\nRF, U\n",
+        // The node output follows the element output's form.
+        "** Name: NF-Output-1\n*Node file, Last iterations, Output=3D, Global=No\nRF, U\n",
         "** Name: EF-Output-1\n*El file, Contact elements, Output=3D\nS, ERR\n",
         "** Name: CF_Output-1\n*Contact file\nCDIS, CSTR\n",
         "** Name: NF_Output-1: Deactivated\n",
@@ -266,6 +267,33 @@ fn node_value(frd: &FrdImport, field: &str, component: &str, node: NodeId) -> f6
     let increment = frd.increments.last().unwrap();
     let field = increment.field(field).unwrap();
     f64::from(field.component(component).unwrap().values[index])
+}
+
+/// The value at a node of `mesh`, which CalculiX may have expanded: the mean over the nodes
+/// it was expanded to, or with `sum` their sum, as of forces.
+fn expanded_value(
+    frd: &FrdImport,
+    mesh: &FeMesh,
+    (field, component): (&str, &str),
+    node: NodeId,
+    sum: bool,
+) -> f64 {
+    let expanded = crate::frd::expanded_nodes(mesh, &frd.mesh);
+    let indices = crate::frd::node_indices(&frd.mesh, &expanded, node);
+    assert!(!indices.is_empty(), "no node {node} in the results");
+    let increment = frd.increments.last().unwrap();
+    let values = &increment
+        .field(field)
+        .unwrap()
+        .component(component)
+        .unwrap()
+        .values;
+    let total: f64 = indices.iter().map(|&i| f64::from(values[i])).sum();
+    if sum {
+        total
+    } else {
+        total / indices.len() as f64
+    }
 }
 
 #[test]
@@ -1056,7 +1084,18 @@ fn a_shell_section_is_written_like_prepomax_does() {
         ),
         "{text}"
     );
-    // Results at the shell nodes, not at the nodes CalculiX expands the shells to.
+    // Results on the solids CalculiX expands the shells to: at the shell nodes (2D) the
+    // stresses would lack the bending.
+    assert!(text.contains("*Node file\nRF, U\n"), "{text}");
+    assert!(text.contains("*El file\nS, E, NOE\n"), "{text}");
+    // Asked for 2D, the node outputs follow the element outputs.
+    let mut two_d = model.clone();
+    for output in &mut two_d.steps[0].field_outputs {
+        if output.kind == OutputKind::Element {
+            output.dimension = OutputDimension::TwoD;
+        }
+    }
+    let text = write_inp(&mesh, &two_d, "").unwrap();
     assert!(text.contains("*Node file, Output=2D\nRF, U\n"), "{text}");
     assert!(text.contains("*El file, Output=2D\nS, E, NOE\n"), "{text}");
     // A shell section on solid elements is refused before CalculiX would be.
@@ -1090,8 +1129,8 @@ fn a_membrane_section_is_written_for_membrane_elements() {
         ),
         "{text}"
     );
-    // Results at the membrane nodes, as for shells.
-    assert!(text.contains("*Node file, Output=2D\nRF, U\n"), "{text}");
+    // Results on the expanded solids, as for shells.
+    assert!(text.contains("*Node file\nRF, U\n"), "{text}");
     // Linear shells under a membrane section are written as membranes without choosing an
     // element type; the mesh keeps its shells.
     model.element_types.clear();
@@ -1233,7 +1272,7 @@ fn calculix_bends_the_shell_plate_like_a_beam() {
     let tip = nodes_at(&mesh, 0, 100.0);
     let deflection: f64 = tip
         .iter()
-        .map(|&n| node_value(&frd, "DISP", "U3", n))
+        .map(|&n| expanded_value(&frd, &mesh, ("DISP", "U3"), n, false))
         .sum::<f64>()
         / tip.len() as f64;
     assert!(
@@ -1287,14 +1326,14 @@ fn calculix_bends_the_shell_plate_by_a_traction_on_its_edge() {
         return;
     };
     let reaction: f64 = (nodes_at(&mesh, 0, 0.0).iter())
-        .map(|&n| node_value(&frd, "FORC", "F3", n))
+        .map(|&n| expanded_value(&frd, &mesh, ("FORC", "F3"), n, true))
         .sum();
     assert!((reaction - 1.0).abs() < 1e-4, "{reaction}");
     let inertia = 10.0 * 2.0f64.powi(3) / 12.0;
     let expected = -100.0f64.powi(3) / (3.0 * 210_000.0 * inertia);
     let tip = nodes_at(&mesh, 0, 100.0);
     let deflection: f64 = (tip.iter())
-        .map(|&n| node_value(&frd, "DISP", "U3", n))
+        .map(|&n| expanded_value(&frd, &mesh, ("DISP", "U3"), n, false))
         .sum::<f64>()
         / tip.len() as f64;
     assert!(
@@ -5659,14 +5698,14 @@ fn calculix_bends_the_half_shell_plate_like_the_full_one() {
     let corner = (nodes_at(&mesh, 0, 100.0).into_iter())
         .find(|&n| mesh.node(n).unwrap()[1] == 0.0)
         .unwrap();
-    let expected = node_value(&full, "DISP", "U3", corner);
+    let expected = expanded_value(&full, &mesh, ("DISP", "U3"), corner, false);
     // CalculiX joins the expanded shell nodes of a *Transform by a knot, which makes the
     // only element across this narrow plate a little softer than without.
     for (angle, tolerance) in [(0.0, 1e-4), (30.0, 1e-2)] {
         let (mesh, model, corner) = half_shell_plate(angle);
         let text = write_inp(&mesh, &model, "").unwrap();
         let half = run_ccx(&format!("symmetrie-{angle}"), &text).unwrap();
-        let ours = node_value(&half, "DISP", "U3", corner);
+        let ours = expanded_value(&half, &mesh, ("DISP", "U3"), corner, false);
         assert!(
             (ours - expected).abs() < tolerance * expected.abs(),
             "{angle} degrees: {ours} != {expected}"
@@ -5682,7 +5721,7 @@ fn calculix_bends_the_half_shell_plate_like_the_full_one() {
     };
     let text = write_inp(&mesh, &model, "").unwrap();
     let free = run_ccx("symmetrie-frei", &text).unwrap();
-    let softer = node_value(&free, "DISP", "U3", corner);
+    let softer = expanded_value(&free, &mesh, ("DISP", "U3"), corner, false);
     assert!(
         softer.abs() > 1.002 * expected.abs(),
         "{softer} vs {expected}"
