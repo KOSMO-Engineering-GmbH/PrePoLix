@@ -1515,6 +1515,9 @@ impl MeshBlock {
 /// it started, and whether Update Project was asked for it.
 struct StudyRun {
     id: u64,
+    /// The fingerprint of the blocks as they stood at the current point when it started,
+    /// which every point it solves takes, see [`ProjectApp::study_body_key`].
+    body: Option<u64>,
     points: VecDeque<usize>,
     current: Option<(usize, Instant)>,
     updating: bool,
@@ -2624,12 +2627,6 @@ impl ProjectApp {
             match &node.block {
                 Block::Analysis(_) | Block::Materials(_) => {
                     let data = node.link_data()?;
-                    let mut fe = data.fe.clone();
-                    for exposed in &data.fe.exposed {
-                        if driven(links::PARAMETERS, &exposed.key.to_string()) {
-                            fe.set_value(&exposed.path, 0.0);
-                        }
-                    }
                     // A mesh the study makes anew counts by the block that makes it.
                     let remeshed = (self.links.iter()).any(|l| {
                         l.target == at
@@ -2637,13 +2634,15 @@ impl ProjectApp {
                             && (l.item.first())
                                 .is_some_and(|c| c == links::MESH || c == links::GEOMETRY)
                     });
-                    let empty = plx_mesh::FeMesh::default();
-                    let mesh = if remeshed || node.kind() == Kind::Materials {
-                        &empty
+                    let mesh = if node.kind() == Kind::Materials {
+                        StudyMesh::None
+                    } else if remeshed {
+                        StudyMesh::Remeshed
                     } else {
-                        data.mesh
+                        StudyMesh::Own
                     };
-                    print.add(&plx_model::fingerprint::solve_input(mesh, &fe).to_le_bytes());
+                    let exposed = |key: u32| driven(links::PARAMETERS, &key.to_string());
+                    print.add(&study_analysis_print(data, mesh, exposed).to_le_bytes());
                 }
                 Block::Mesh(mesh) => {
                     let mut primitive = mesh.primitive.clone();
@@ -2691,6 +2690,11 @@ impl ProjectApp {
             .map(|n| n.id)
             .collect();
         for id in ids {
+            // A running study keeps the fingerprint it started with: between its points the
+            // blocks stand at other values, and the picks that follow the shapes with them.
+            if self.looping.as_ref().is_some_and(|run| run.id == id) {
+                continue;
+            }
             let body = self.study_body_key(id);
             if let Some(study) = self.node(id).and_then(Node::as_study_mut) {
                 study.body = body;
@@ -2899,6 +2903,7 @@ impl ProjectApp {
         self.update_scope = None;
         self.looping = Some(StudyRun {
             id,
+            body,
             points: points.into(),
             current: None,
             updating: false,
@@ -2961,7 +2966,11 @@ impl ProjectApp {
                     })
                     .collect();
                 let failed = outputs.iter().any(Option::is_none);
-                let body = self.study_body_key(id);
+                // A study started while a block was loading takes the fingerprint now.
+                let body = match self.looping.as_ref().and_then(|run| run.body) {
+                    Some(body) => Some(body),
+                    None => self.study_body_key(id),
+                };
                 let elements = self.study_elements(id);
                 self.output.push(format!(
                     "{}: DP {point}: {}",
@@ -2983,6 +2992,7 @@ impl ProjectApp {
                     study.body = body;
                 }
                 if let Some(run) = &mut self.looping {
+                    run.body = body;
                     run.current = None;
                     run.updating = false;
                     run.solved += 1;
@@ -8822,6 +8832,46 @@ fn measure_regions(data: &links::Data) -> BTreeMap<String, Vec<plx_mesh::NodeId>
 }
 
 /// The key of the factor of a refine mesh block, the parameter row it takes numbers at.
+/// Which mesh of an analysis counts for the fingerprint of the blocks a study runs.
+#[derive(Clone, Copy, PartialEq)]
+enum StudyMesh {
+    /// Its own mesh, which the study leaves as it is.
+    Own,
+    /// A mesh it makes anew from what a block of the study gives it: not the mesh, which
+    /// changes from point to point, but how it is made.
+    Remeshed,
+    /// None, as for a materials block.
+    None,
+}
+
+/// The fingerprint of an analysis that a study runs, see [`ProjectApp::study_body_key`]:
+/// its model without the exposed values the study gives, `driven`, and its mesh as `mesh`
+/// says.
+fn study_analysis_print(data: links::Data, mesh: StudyMesh, driven: impl Fn(u32) -> bool) -> u64 {
+    let mut fe = data.fe.clone();
+    for exposed in &data.fe.exposed {
+        if driven(exposed.key) {
+            fe.set_value(&exposed.path, 0.0);
+        }
+    }
+    let empty = plx_mesh::FeMesh::default();
+    let fe_mesh = match mesh {
+        StudyMesh::Own => data.mesh,
+        StudyMesh::Remeshed | StudyMesh::None => &empty,
+    };
+    let mut print = plx_mesh::Fnv::new();
+    print.add(&plx_model::fingerprint::solve_input(fe_mesh, &fe).to_le_bytes());
+    // How it meshes: the element sizes, the mesh setup and the refinement.
+    if mesh != StudyMesh::None
+        && let Some(geometry) = data.geometry
+    {
+        print.add_debug(&geometry.meshing);
+        print.add_debug(&geometry.mesh_items);
+        print.add(&geometry.refinement.to_le_bytes());
+    }
+    print.finish()
+}
+
 const REFINEMENT: &str = "refinement";
 
 /// The rows of a parameters block: a number each, edited in place, with a pin to give it.
@@ -12016,6 +12066,66 @@ mod tests {
         assert_eq!(row.text, "Global results of Global");
         assert_eq!(row.linked_from.as_deref(), Some("Global"));
         assert!(row.state.is_none());
+    }
+
+    #[test]
+    fn a_study_counts_how_its_analyses_mesh() {
+        let geometry = |brep: &str, max_size: f64| plx_model::Geometry {
+            source: "part.step".into(),
+            brep: brep.into(),
+            meshing: plx_model::MeshingParameters {
+                max_size,
+                ..Default::default()
+            },
+            mesh_items: Vec::new(),
+            part_names: Vec::new(),
+            refinement: 1.0,
+            signatures: Vec::new(),
+        };
+        let fe = plx_model::FeModel::default();
+        let inputs = std::collections::BTreeMap::new();
+        let mut meshed = plx_mesh::FeMesh::default();
+        meshed.set_node(1, [0.0; 3]);
+        let print = |geometry: &plx_model::Geometry, mesh: &plx_mesh::FeMesh, kind| {
+            let data = links::Data {
+                geometry: Some(geometry),
+                mesh,
+                fe: &fe,
+                mesh_inputs: &inputs,
+            };
+            study_analysis_print(data, kind, |_| false)
+        };
+        let empty = plx_mesh::FeMesh::default();
+        let coarse = geometry("a", 10.0);
+        let fine = geometry("a", 5.0);
+        // An analysis that meshes the shapes a block of the study gives it anew: the shapes
+        // and the mesh change from point to point and do not count, how it meshes does.
+        let remeshed = print(&coarse, &empty, StudyMesh::Remeshed);
+        assert_eq!(
+            print(&geometry("b", 10.0), &meshed, StudyMesh::Remeshed),
+            remeshed
+        );
+        assert_ne!(print(&fine, &empty, StudyMesh::Remeshed), remeshed);
+        let mut setup = coarse.clone();
+        setup.mesh_items.push(plx_model::MeshSetupItem {
+            name: "Local-1".into(),
+            kind: plx_model::MeshSetupKind::LocalMeshSize {
+                faces: vec![1],
+                edges: Vec::new(),
+                size: 1.0,
+            },
+        });
+        assert_ne!(print(&setup, &empty, StudyMesh::Remeshed), remeshed);
+        // Its own mesh counts as it is.
+        assert_ne!(
+            print(&coarse, &meshed, StudyMesh::Own),
+            print(&coarse, &empty, StudyMesh::Own)
+        );
+        // A materials block has no mesh.
+        assert_eq!(
+            print(&coarse, &empty, StudyMesh::None),
+            print(&fine, &meshed, StudyMesh::None)
+        );
     }
 
     #[test]
