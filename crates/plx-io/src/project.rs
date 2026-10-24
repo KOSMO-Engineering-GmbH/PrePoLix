@@ -909,7 +909,10 @@ mod tests {
         frictional.side_a = Region::Faces(block_top);
         frictional.side_b = Region::Faces(cap_bottom.clone());
         frictional.settings.interface = Some(plx_model::InterfaceTreatment::AdjustToTouch);
-        model.contact_regions = vec![bonded, frictional];
+        // Without regions, to show the contact detection.
+        if std::env::var_os("PLX_CONTACT_DEMO_DETECT").is_none() {
+            model.contact_regions = vec![bonded, frictional];
+        }
         let mut step = plx_model::Step::new_static("Step-1");
         step.boundary_conditions.push(plx_model::BoundaryCondition {
             name: "Fixed-1".into(),
@@ -1055,10 +1058,19 @@ mod tests {
                     tolerance: Some(1e-4),
                     ..Default::default()
                 },
+                detected_by: Some("Contacts".into()),
+                edited: true,
                 ..plx_model::ContactRegion::new(
                     "Frictional - A to B",
                     plx_model::ContactBehavior::Frictional { mu: 0.2 },
                 )
+            }],
+            contact_detections: vec![plx_model::ContactDetection {
+                parts: vec!["A".into()],
+                tolerance: Some(2e-4),
+                grouping: plx_model::DetectionGrouping::Graph,
+                behavior: plx_model::ContactBehavior::Rough,
+                ..plx_model::ContactDetection::new("Contacts")
             }],
             contact_defaults: plx_model::ContactDefaults {
                 formulation: Some(plx_model::ContactMethod::Mortar),

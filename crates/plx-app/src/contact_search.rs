@@ -35,10 +35,11 @@ impl PairType {
     }
 }
 
-/// The methods PrePoMax offers in the search.
-const METHODS: [ContactMethod; 2] = [
+/// The methods PrePoMax offers in the search, and mortar.
+const METHODS: [ContactMethod; 3] = [
     ContactMethod::NodeToSurface,
     ContactMethod::SurfaceToSurface,
+    ContactMethod::Mortar,
 ];
 
 /// A row of the table: a pair found with the settings it is created with, or line ends

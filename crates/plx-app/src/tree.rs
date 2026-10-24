@@ -50,6 +50,8 @@ pub enum TreeItem {
     SurfaceInteraction(usize),
     /// Two surfaces in contact by the behavior the user wants, under Connections.
     ContactRegion(usize),
+    /// A search for contact regions under Connections, holding the regions it found.
+    ContactDetection(usize),
     ContactPair(usize),
     /// A tie of two surfaces, listed with the contact pairs.
     Tie(usize),
@@ -356,6 +358,8 @@ pub struct TreeResponse {
     pub search_contacts: bool,
     /// Open the table of all contact regions.
     pub contact_worksheet: bool,
+    /// Run this contact detection again.
+    pub detect: Option<usize>,
     /// The warning sign of an item was clicked: explain its findings.
     pub findings: Option<Vec<Finding>>,
     /// Show the results on a plane, by index, or none.
@@ -658,6 +662,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
             | TreeItem::Constraint(_)
             | TreeItem::SurfaceInteraction(_)
             | TreeItem::ContactRegion(_)
+            | TreeItem::ContactDetection(_)
             | TreeItem::ContactPair(_)
             | TreeItem::Tie(_)
             | TreeItem::NodeTie(_)
@@ -725,6 +730,7 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
             item,
             SurfaceInteraction(_)
                 | ContactRegion(_)
+                | ContactDetection(_)
                 | ContactPair(_)
                 | Tie(_)
                 | NodeTie(_)
@@ -901,6 +907,8 @@ struct Tree<'a> {
     inactive: HashSet<TreeItem>,
     /// Items with a master and a slave, whose menu offers to swap them.
     master_slave: HashSet<TreeItem>,
+    /// The detection each detected contact region is shown under.
+    detected: HashMap<usize, usize>,
     /// Constraints, boundary conditions and loads with a symbol in the 3D view, and whether
     /// it is shown; hidden ones get PrePoMax's hide icon.
     symbols: HashMap<TreeItem, bool>,
@@ -1056,6 +1064,9 @@ impl Tree<'_> {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 if connections {
+                    if ui.button("Detect Contacts …").clicked() {
+                        self.response.create = Some(NewItem::ContactDetection);
+                    }
                     if ui.button("Create Contact Region …").clicked() {
                         self.response.create = Some(NewItem::ContactRegion);
                     }
@@ -1070,6 +1081,19 @@ impl Tree<'_> {
                     if creates.is_some() {
                         ui.separator();
                     }
+                }
+                if let TreeItem::ContactDetection(d) = item {
+                    if ui
+                        .button("Detect Again")
+                        .on_hover_text(
+                            "Searches again and replaces the regions found before, except \
+                             those you changed since.",
+                        )
+                        .clicked()
+                    {
+                        self.response.detect = Some(d);
+                    }
+                    ui.separator();
                 }
                 if let Some(kind) = creates
                     && ui.button("Create …").clicked()
@@ -1226,6 +1250,7 @@ impl Tree<'_> {
             TreeItem::Group("Surface Interactions") => TreeIcon::SurfaceInteraction,
             TreeItem::Group("Contact Pairs") => TreeIcon::ContactPair,
             TreeItem::Group(CONTACT_REGIONS) => TreeIcon::ContactPair,
+            TreeItem::ContactDetection(_) => TreeIcon::Contacts,
             TreeItem::Group("Distributions") => TreeIcon::Distribution,
             TreeItem::Group("Amplitudes") => TreeIcon::Amplitude,
             TreeItem::Group("Initial Conditions") => TreeIcon::InitialConditions,
@@ -1324,6 +1349,20 @@ impl Tree<'_> {
     }
 
     /// Node without children, aligned with the labels of sibling branches.
+    /// Whether `item` lies in the branch `branch`; detected contact regions lie in their
+    /// detection, not among the regions made by hand.
+    fn contains(&self, branch: &TreeItem, item: &TreeItem) -> bool {
+        match (branch, item) {
+            (TreeItem::ContactDetection(d), TreeItem::ContactRegion(r)) => {
+                self.detected.get(r) == Some(d)
+            }
+            (TreeItem::Group(CONTACT_REGIONS), TreeItem::ContactRegion(r)) => {
+                !self.detected.contains_key(r)
+            }
+            _ => contains(branch, item),
+        }
+    }
+
     fn leaf(&mut self, ui: &mut Ui, item: TreeItem, text: impl Into<WidgetText>) -> Response {
         let icon = self.icon(&item, false);
         self.row(ui, None, None, icon, item, text).1
@@ -1354,7 +1393,7 @@ impl Tree<'_> {
             .flatten()
             .filter(|(view, _)| *view == self.view);
         if let Some((_, selected)) = revealing
-            && contains(&item, selected)
+            && self.contains(&item, selected)
         {
             state.set_open(true);
         }
@@ -1364,7 +1403,7 @@ impl Tree<'_> {
                 .state
                 .acting
                 .iter()
-                .any(|acting| contains(&item, acting))
+                .any(|acting| self.contains(&item, acting))
         {
             state.set_open(true);
         }
@@ -1551,6 +1590,23 @@ impl Tree<'_> {
         });
     }
 
+    /// A contact detection with the regions it found.
+    fn detection(&mut self, ui: &mut Ui, index: usize, name: &str, items: Vec<(TreeItem, &str)>) {
+        let item = TreeItem::ContactDetection(index);
+        if items.is_empty() {
+            self.leaf(ui, item, name);
+            return;
+        }
+        let text = counted(name, items.len());
+        self.branch(ui, item, text, true, |tree, ui| {
+            tree.siblings = items.iter().map(|(item, _)| item.clone()).collect();
+            for (item, label) in items {
+                tree.leaf(ui, item, label);
+            }
+            tree.siblings.clear();
+        });
+    }
+
     fn step_container(
         &mut self,
         ui: &mut Ui,
@@ -1624,6 +1680,7 @@ pub fn show(
         inactive: HashSet::new(),
         symbols: HashMap::new(),
         master_slave: HashSet::new(),
+        detected: HashMap::new(),
         step_count: 0,
         part_indices: Vec::new(),
         step_types: Vec::new(),
@@ -1694,8 +1751,21 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
     // A results file has no FE model, as in PrePoMax; its mesh lives in the Results tree.
     let model = model.filter(|m| !m.is_results());
     if let Some(model) = &model {
+        let fe = &model.fe;
+        for (r, region) in fe.contact_regions.iter().enumerate() {
+            let detection = (region.detected_by.as_deref())
+                .and_then(|name| fe.contact_detections.iter().position(|d| d.name == name));
+            if let Some(d) = detection {
+                tree.detected.insert(r, d);
+            }
+        }
         for finding in model.findings().into_iter().chain(solver.iter().cloned()) {
-            let (item, containers) = tree_items(finding.item);
+            let (item, mut containers) = tree_items(finding.item);
+            if let TreeItem::ContactRegion(r) = item
+                && let Some(&d) = tree.detected.get(&r)
+            {
+                containers[0] = TreeItem::ContactDetection(d);
+            }
             if finding.severity() == Severity::Error {
                 tree.holds_invalid.extend(containers);
             }
@@ -1756,10 +1826,18 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             || !fe.contact_pairs.is_empty()
             || !fe.ties.is_empty()
             || !fe.node_ties.is_empty();
-        let open = advanced || !fe.contact_regions.is_empty();
+        let open = advanced || !fe.contact_regions.is_empty() || !fe.contact_detections.is_empty();
         // The group keeps its name "Contacts", which links of the project schematic use.
         tree.branch(ui, contacts, "Connections", open, |tree, ui| {
+            for (d, detection) in fe.contact_detections.iter().enumerate() {
+                let regions = (fe.contact_regions.iter().enumerate())
+                    .filter(|(r, _)| tree.detected.get(r) == Some(&d))
+                    .map(|(r, region)| (TreeItem::ContactRegion(r), region.name.as_str()))
+                    .collect();
+                tree.detection(ui, d, &detection.name, regions);
+            }
             let regions = (fe.contact_regions.iter().enumerate())
+                .filter(|(r, _)| !tree.detected.contains_key(r))
                 .map(|(i, r)| (TreeItem::ContactRegion(i), r.name.as_str()))
                 .collect();
             tree.container(ui, CONTACT_REGIONS, regions);

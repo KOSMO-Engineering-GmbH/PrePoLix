@@ -14,6 +14,7 @@ mod connection;
 mod constraint;
 mod contact;
 pub mod convert;
+mod detection;
 mod element_type;
 mod exposed;
 mod features;
@@ -52,6 +53,9 @@ pub use constraint::{CompressionOnly, NodeTie, RigidBody, Spring};
 pub use contact::{
     Constraint, ContactMethod, ContactPair, CyclicSymmetry, DEFAULT_SURFACE_COLOR, Friction,
     GapConductance, InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
+};
+pub use detection::{
+    ContactDetection, DetectionFilter, DetectionGrouping, DetectionReport, auto_detection_tolerance,
 };
 pub use element_type::{PartElementType, element_type_options};
 pub use exposed::{Exposed, Field, ItemRef, ValuePath};
@@ -137,6 +141,9 @@ pub struct FeModel {
     /// pairs they stand for ([`FeModel::lower_contacts`]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contact_regions: Vec<ContactRegion>,
+    /// Searches that found contact regions, kept to run them again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contact_detections: Vec<ContactDetection>,
     /// Settings shared by the contact regions.
     #[serde(default)]
     pub contact_defaults: ContactDefaults,

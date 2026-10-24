@@ -2459,6 +2459,9 @@ impl Workbench {
                 self.generate_mesh(ctx, Some(names));
             }
         }
+        if let Some(index) = response.detect {
+            self.detect_contacts(index);
+        }
         if response.search_contacts {
             self.open_contact_search();
         }
@@ -3312,6 +3315,9 @@ impl Workbench {
             return;
         }
         let mut kind = None;
+        if ui.button("Detect Contacts …").clicked() {
+            kind = Some(NewItem::ContactDetection);
+        }
         if ui.button("Create Contact Region …").clicked() {
             kind = Some(NewItem::ContactRegion);
         }
@@ -4667,6 +4673,29 @@ impl Workbench {
         }
     }
 
+    /// Runs the contact detection `index` on the parts of the model and reports what it
+    /// found.
+    fn detect_contacts(&mut self, index: usize) {
+        let Some(model) = &mut self.model else {
+            return;
+        };
+        let visible: Vec<bool> = model.parts.iter().map(|p| p.visible).collect();
+        let mut fe = model.fe.clone();
+        let Some(report) = fe.detect_contacts(index, &model.mesh, model.skins(), &visible) else {
+            return;
+        };
+        let name = fe.contact_detections[index].name.clone();
+        model.fe = fe;
+        let units = model.fe.properties.units;
+        self.output.push(format!(
+            "{} (tolerance {})",
+            report.summary(&name),
+            crate::connections::with_unit(report.tolerance, units, plx_model::Quantity::Length)
+        ));
+        self.tree.selected = Some((TreeView::FeModel, TreeItem::ContactDetection(index)));
+        self.tree.reveal = true;
+    }
+
     /// The table of all contact regions, Ansys' worksheet: rows select the regions in the
     /// tree, and the type, friction, sides and state of all selected ones change at once.
     fn contact_worksheet_window(&mut self, ctx: &egui::Context) {
@@ -5222,6 +5251,7 @@ impl Workbench {
             EditorResult::Ok => {
                 if let Some(editor) = self.editor.take() {
                     let created = editor.new_interaction_item(&model.fe);
+                    let detection = editor.detection(&model.fe);
                     let sets = model.fe.mesh_sets.clone();
                     if let Some((kind, name)) = editor.replaced_set() {
                         kind.remove(&mut model.mesh, name);
@@ -5234,6 +5264,9 @@ impl Workbench {
                     if let Some(item) = created {
                         self.tree.selected = Some((TreeView::FeModel, item));
                         self.tree.reveal = true;
+                    }
+                    if let Some(index) = detection {
+                        self.detect_contacts(index);
                     }
                 }
                 self.highlighted = None;
