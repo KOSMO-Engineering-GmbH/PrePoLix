@@ -505,9 +505,261 @@ impl Tie {
     }
 }
 
+/// Factor f of the normal stiffness K = f E / h of a penalty contact whose surface behavior
+/// leaves it open (Hard): E is the smaller Young's modulus of the two sides, h the mean edge
+/// length of the slave faces. CalculiX's own default, 50 E, is not a stiffness per length and
+/// so depends on the unit system: in SI (as PrePoLix writes) it is about 1000 times softer
+/// than in mm. f E / h is the same in every unit system.
+pub const NORMAL_STIFFNESS_FACTOR: f64 = 10.0;
+
+/// Stick slope of a friction without one, as a fraction of the normal stiffness; the
+/// CalculiX manual recommends about 1/100.
+pub const STICK_SLOPE_RATIO: f64 = 0.01;
+
+/// What the stiffness of a contact between two surfaces scales with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ContactScale {
+    /// The smaller Young's modulus of the materials on both sides.
+    pub young: f64,
+    /// Mean edge length of the slave faces.
+    pub edge_length: f64,
+}
+
+/// Young's modulus of each element with an elastic material, for [`ContactScale::with`].
+pub type ElementYoung = std::collections::HashMap<plx_mesh::ElementId, f64>;
+
+impl ContactScale {
+    /// Of a master and a slave region, see [`Self::with`]. For many regions of a model, look
+    /// up [`Self::element_young`] once and use [`Self::with`].
+    pub fn of(
+        model: &crate::FeModel,
+        mesh: &plx_mesh::FeMesh,
+        master: &Region,
+        slave: &Region,
+    ) -> Option<Self> {
+        Self::with(&Self::element_young(model, mesh), mesh, master, slave)
+    }
+
+    /// Young's modulus of each element of a section with an elastic material; the smaller
+    /// one for an element in several sections.
+    pub fn element_young(model: &crate::FeModel, mesh: &plx_mesh::FeMesh) -> ElementYoung {
+        let mut young = ElementYoung::new();
+        for section in &model.sections {
+            let Some(e) = (model.materials.iter())
+                .find(|m| m.name == section.material)
+                .and_then(|m| m.elastic)
+                .map(|elastic| elastic.young)
+                .filter(|&e| e > 0.0)
+            else {
+                continue;
+            };
+            for id in section.region.elements(mesh) {
+                let value = young.entry(id).or_insert(e);
+                *value = value.min(e);
+            }
+        }
+        young
+    }
+
+    /// Of a master and a slave region: the smaller Young's modulus of the elements the faces
+    /// of both regions belong to, and the mean edge length of the slave faces (of the master
+    /// faces for a slave of nodes). `None` without element faces or without an elastic
+    /// material on them.
+    pub fn with(
+        young: &ElementYoung,
+        mesh: &plx_mesh::FeMesh,
+        master: &Region,
+        slave: &Region,
+    ) -> Option<Self> {
+        let master_faces = master.faces(mesh);
+        let slave_faces = slave.faces(mesh);
+        let edges = if slave_faces.is_empty() {
+            &master_faces
+        } else {
+            &slave_faces
+        };
+        let lengths: Vec<f64> = (edges.iter())
+            .filter_map(|&(id, face)| face_edge_length(mesh, id, face))
+            .collect();
+        if lengths.is_empty() {
+            return None;
+        }
+        let edge_length = lengths.iter().sum::<f64>() / lengths.len() as f64;
+        let young = (master_faces.iter().chain(&slave_faces))
+            .filter_map(|(id, _)| young.get(id).copied())
+            .reduce(f64::min)?;
+        (edge_length > 0.0).then_some(Self { young, edge_length })
+    }
+
+    /// The normal stiffness K = f E / h, see [`NORMAL_STIFFNESS_FACTOR`].
+    pub fn normal_stiffness(self) -> f64 {
+        NORMAL_STIFFNESS_FACTOR * self.young / self.edge_length
+    }
+}
+
+/// Stick slope of a friction without one, from the normal stiffness of the contact: all of it
+/// for a tied contact, which should not slide at all, otherwise [`STICK_SLOPE_RATIO`] of it.
+pub fn default_stick_slope(normal_stiffness: f64, tied: bool) -> f64 {
+    if tied {
+        normal_stiffness
+    } else {
+        STICK_SLOPE_RATIO * normal_stiffness
+    }
+}
+
+impl SurfaceInteraction {
+    /// The normal stiffness the surface behavior gives itself (Linear and Tied K); `None` for
+    /// the others, which leave it to [`ContactScale::normal_stiffness`].
+    pub fn own_normal_stiffness(&self) -> Option<f64> {
+        (self.properties.iter()).find_map(|p| match p {
+            InteractionProperty::SurfaceBehavior(SurfaceBehavior::Linear { k, .. })
+            | InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tied { k }) => Some(*k),
+            _ => None,
+        })
+    }
+}
+
+/// Mean length of the edges around a face of an element, of the corner nodes; the length of
+/// the face of a 2D element, which is an edge.
+fn face_edge_length(mesh: &plx_mesh::FeMesh, id: plx_mesh::ElementId, face: u8) -> Option<f64> {
+    let element = mesh.element(id)?;
+    let topology = element.faces().get(usize::from(face).checked_sub(1)?)?;
+    let points: Vec<[f64; 3]> = (topology.corners.iter())
+        .map(|&i| mesh.node(*element.nodes.get(i)?))
+        .collect::<Option<_>>()?;
+    let distance =
+        |a: [f64; 3], b: [f64; 3]| ((0..3).map(|i| (b[i] - a[i]).powi(2)).sum::<f64>()).sqrt();
+    match points[..] {
+        [] | [_] => None,
+        [a, b] => Some(distance(a, b)),
+        _ => {
+            let n = points.len();
+            Some(
+                (0..n)
+                    .map(|i| distance(points[i], points[(i + 1) % n]))
+                    .sum::<f64>()
+                    / n as f64,
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two cubes of 2 x 2 x 2 elements of size `size`, one on top of the other, steel below
+    /// and aluminium above; the top faces of the lower and the bottom faces of the upper one.
+    fn stacked_cubes(size: f64) -> (crate::FeModel, plx_mesh::FeMesh, Region, Region) {
+        use plx_mesh::{Element, ElementShape, FeMesh, Part};
+        let mut mesh = FeMesh::default();
+        let mut faces = [Vec::new(), Vec::new()];
+        for block in 0..2u32 {
+            let node = |i: u32, j: u32, k: u32| 100 * block + 1 + i + 3 * j + 9 * k;
+            for k in 0..3 {
+                for j in 0..3 {
+                    for i in 0..3 {
+                        let z = f64::from(2 * block + k) * size;
+                        mesh.set_node(node(i, j, k), [f64::from(i) * size, f64::from(j) * size, z]);
+                    }
+                }
+            }
+            let mut elements = Vec::new();
+            for k in 0..2 {
+                for j in 0..2 {
+                    for i in 0..2 {
+                        let id = 100 * block + 1 + i + 2 * j + 4 * k;
+                        let mut nodes = Vec::new();
+                        for k in [k, k + 1] {
+                            nodes.extend([node(i, j, k), node(i + 1, j, k)]);
+                            nodes.extend([node(i + 1, j + 1, k), node(i, j + 1, k)]);
+                        }
+                        let element = Element {
+                            id,
+                            type_name: "C3D8".into(),
+                            shape: ElementShape::Hex8,
+                            nodes,
+                        };
+                        mesh.add_element(element).unwrap();
+                        elements.push(id);
+                        if (block, k) == (0, 1) {
+                            faces[0].push((id, 2));
+                        } else if (block, k) == (1, 0) {
+                            faces[1].push((id, 1));
+                        }
+                    }
+                }
+            }
+            let name = ["LOWER", "UPPER"][block as usize];
+            mesh.parts.push(Part {
+                name: name.into(),
+                elements,
+            });
+        }
+        let mut model = crate::FeModel::default();
+        for (name, young, part) in [("Steel", 210e9, "LOWER"), ("Aluminium", 70e9, "UPPER")] {
+            model.materials.push(crate::Material {
+                name: name.into(),
+                elastic: Some(crate::Elastic {
+                    young,
+                    poisson: 0.3,
+                }),
+                ..Default::default()
+            });
+            model.sections.push(crate::Section {
+                name: part.into(),
+                material: name.into(),
+                region: Region::Parts(vec![part.into()]),
+                thickness: 1.0,
+                kind: crate::SectionKind::Solid,
+            });
+        }
+        let [lower, upper] = faces;
+        (model, mesh, Region::Faces(lower), Region::Faces(upper))
+    }
+
+    #[test]
+    fn contact_stiffness_grows_with_the_softer_modulus_over_the_element_size() {
+        let (model, mesh, master, slave) = stacked_cubes(0.005);
+        let scale = ContactScale::of(&model, &mesh, &master, &slave).unwrap();
+        assert_eq!(scale.young, 70e9);
+        assert!((scale.edge_length - 0.005).abs() < 1e-12);
+        assert!((scale.normal_stiffness() / (10.0 * 70e9 / 0.005) - 1.0).abs() < 1e-12);
+        // The same model in mm and MPa has the same stiffness, in N/mm^3 = 1e9 N/m^3.
+        let (mut model_mm, mesh_mm, ..) = stacked_cubes(5.0);
+        for material in &mut model_mm.materials {
+            material.elastic.as_mut().unwrap().young /= 1e6;
+        }
+        let k_mm = ContactScale::of(&model_mm, &mesh_mm, &master, &slave)
+            .unwrap()
+            .normal_stiffness();
+        assert!((k_mm * 1e9 / scale.normal_stiffness() - 1.0).abs() < 1e-9);
+        // Without faces or materials there is nothing to scale with.
+        let nodes = Region::Nodes(vec![1]);
+        assert!(ContactScale::of(&model, &mesh, &nodes, &nodes).is_none());
+        assert!(ContactScale::of(&crate::FeModel::default(), &mesh, &master, &slave).is_none());
+        // A slave of nodes takes the edge length of the master faces.
+        assert!(ContactScale::of(&model, &mesh, &master, &nodes).is_some());
+    }
+
+    #[test]
+    fn a_tied_contact_sticks_with_the_whole_normal_stiffness() {
+        assert_eq!(default_stick_slope(1e12, true), 1e12);
+        assert_eq!(default_stick_slope(1e12, false), 1e10);
+        let tied = SurfaceInteraction {
+            name: "Tied".into(),
+            properties: vec![
+                InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tied { k: 5e15 }),
+                InteractionProperty::Friction(Friction::default()),
+            ],
+        };
+        assert_eq!(tied.own_normal_stiffness(), Some(5e15));
+        let hard = SurfaceInteraction {
+            name: "Hard".into(),
+            properties: vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)],
+        };
+        assert_eq!(hard.own_normal_stiffness(), None);
+    }
 
     #[test]
     fn constraints_saved_before_hiding_are_visible() {
