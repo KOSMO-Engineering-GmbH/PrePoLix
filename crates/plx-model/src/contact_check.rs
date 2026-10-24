@@ -158,6 +158,15 @@ struct Master {
     pieces: Vec<Piece>,
     cell: f64,
     grid: HashMap<[i64; 3], Vec<usize>>,
+    /// The box around all pieces.
+    min: Point,
+    max: Point,
+}
+
+/// Distance of `p` to the box from `min` to `max`, 0 inside.
+fn box_distance(p: Point, min: Point, max: Point) -> f64 {
+    let d = [0, 1, 2].map(|k| (min[k] - p[k]).max(p[k] - max[k]).max(0.0));
+    length(d)
 }
 
 impl Master {
@@ -225,11 +234,22 @@ impl Master {
                 });
             }
         }
+        // At least the reach, so that a search looks into the few cells around its point.
         let cell = (size / pieces.len().max(1) as f64).max(reach).max(1e-12);
+        let mut min = [f64::INFINITY; 3];
+        let mut max = [f64::NEG_INFINITY; 3];
+        for piece in &pieces {
+            for d in 0..3 {
+                min[d] = min[d].min(piece.min[d]);
+                max[d] = max[d].max(piece.max[d]);
+            }
+        }
         let mut master = Self {
             pieces,
             cell,
             grid: HashMap::new(),
+            min,
+            max,
         };
         for (i, piece) in master.pieces.iter().enumerate() {
             let (lo, hi) = (master.key(piece.min), master.key(piece.max));
@@ -250,21 +270,25 @@ impl Master {
 
     /// The signed distance of `p` to the nearest piece within `radius`, if any.
     fn distance(&self, p: Point, radius: f64) -> Option<f64> {
+        if box_distance(p, self.min, self.max) > radius {
+            return None;
+        }
         let (lo, hi) = (
             self.key(p.map(|v| v - radius)),
             self.key(p.map(|v| v + radius)),
         );
         let mut best: Option<f64> = None;
-        let mut seen = Vec::new();
         for x in lo[0]..=hi[0] {
             for y in lo[1]..=hi[1] {
                 for z in lo[2]..=hi[2] {
+                    // A piece in several cells is met again, but its box is no nearer then.
                     for &i in self.grid.get(&[x, y, z]).into_iter().flatten() {
-                        if seen.contains(&i) {
+                        let piece = &self.pieces[i];
+                        let bound = best.map_or(radius, |b| b.abs());
+                        if box_distance(p, piece.min, piece.max) > bound {
                             continue;
                         }
-                        seen.push(i);
-                        let d = self.pieces[i].distance(p);
+                        let d = piece.distance(p);
                         if d.abs() <= radius && best.is_none_or(|b| d.abs() < b.abs()) {
                             best = Some(d);
                         }
@@ -316,8 +340,8 @@ fn check(mesh: &FeMesh, master: &Region, slave: &Region, tolerance: f64) -> Opti
     if faces.is_empty() || nodes.is_empty() || tolerance <= 0.0 {
         return None;
     }
-    let master = Master::new(mesh, &faces, tolerance);
     let radius = NEAR * tolerance;
+    let master = Master::new(mesh, &faces, radius);
     let mut check = ContactCheck {
         status: ContactStatus::FarOpen,
         slave_nodes: nodes.len(),

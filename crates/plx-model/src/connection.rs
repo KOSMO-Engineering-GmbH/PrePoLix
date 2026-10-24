@@ -85,6 +85,17 @@ impl ContactRegion {
         )
     }
 
+    /// Changes the type of the region; a name that starts with the type, as names made from
+    /// the definition do (`Bonded - A to B`), follows it.
+    pub fn set_behavior(&mut self, behavior: ContactBehavior) {
+        if behavior.name() != self.behavior.name()
+            && let Some(rest) = (self.name).strip_prefix(&format!("{} - ", self.behavior.name()))
+        {
+            self.name = format!("{} - {rest}", behavior.name());
+        }
+        self.behavior = behavior;
+    }
+
     /// Swaps side A and side B, together with a master side chosen by hand.
     pub fn flip(&mut self) {
         std::mem::swap(&mut self.side_a, &mut self.side_b);

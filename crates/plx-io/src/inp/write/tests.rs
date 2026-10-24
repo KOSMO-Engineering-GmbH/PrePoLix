@@ -7758,3 +7758,68 @@ fn switched_bonded_regions_become_tied_contacts() {
     model.contact_regions[0].behavior = ContactBehavior::NoSeparation;
     assert!(ignored(&model));
 }
+
+/// CalculiX reads names of at most 80 characters: the sets of a region with a long name are
+/// shortened, and the `.dat` file read beside the input file shows the full name again.
+#[test]
+fn long_set_names_are_shortened_and_restored_in_the_history_output() {
+    let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Frictionless);
+    let long = "Bonded - SPUR_GEAR__20_TEETH, SPUR_GEAR__60_TEETH-2 to SPUR_GEAR__20_TEETH-2";
+    model.contact_regions[0].name = long.to_string();
+    let mut output = HistoryOutput::contact("CH_Output-1", long);
+    output.variables = ["CF".to_string()].to_vec();
+    model.steps[0].history_outputs.push(output);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in text.lines().filter(|l| !l.starts_with("**")) {
+        for part in line.split(',') {
+            let value = part.split_once('=').map_or(part, |(_, v)| v).trim();
+            assert!(value.len() <= 80, "{line}");
+        }
+    }
+    assert!(text.contains(super::SHORTENED_NAME), "{text}");
+    for behavior in [
+        plx_model::ContactBehavior::Bonded,
+        plx_model::ContactBehavior::Frictional { mu: 0.2 },
+    ] {
+        let mut model = model.clone();
+        model.contact_regions[0].behavior = behavior;
+        model.steps[0].history_outputs.clear();
+        let text = write_inp(&mesh, &model, "").unwrap();
+        for line in text.lines().filter(|l| !l.starts_with("**")) {
+            for part in line.split(',') {
+                let value = part.split_once('=').map_or(part, |(_, v)| v).trim();
+                assert!(value.len() <= 80, "{behavior:?}: {line}");
+            }
+        }
+    }
+    let Some(dat) = run_ccx_dat("lange-namen", &text) else {
+        return;
+    };
+    let import = crate::dat::parse_dat(&crate::dat::restore_shortened_names(&dat, &text));
+    let names: Vec<&String> = import.sets.iter().map(|s| &s.name).collect();
+    let expected = "BONDED_-_SPUR_GEAR__20_TEETH__SPUR_GEAR__60_TEETH-2_TO_SPUR_GEAR__20_TEETH-2";
+    assert!(names.iter().any(|n| *n == expected), "{names:?}");
+}
+
+/// A name made from the definition follows the type of the region; a name of the user
+/// stays.
+#[test]
+fn a_name_from_the_definition_follows_the_type() {
+    let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Bonded);
+    let region = &mut model.contact_regions[0];
+    let custom = region.name.clone();
+    region.set_behavior(plx_model::ContactBehavior::Frictionless);
+    assert_eq!(region.name, custom);
+    region.name = region.name_from_definition(&mesh);
+    assert!(
+        region.name.starts_with("Frictionless - "),
+        "{}",
+        region.name
+    );
+    let rest = region.name["Frictionless".len()..].to_string();
+    region.set_behavior(plx_model::ContactBehavior::Frictional { mu: 0.2 });
+    assert_eq!(region.name, format!("Frictional{rest}"));
+    // Another coefficient is the same type.
+    region.set_behavior(plx_model::ContactBehavior::Frictional { mu: 0.3 });
+    assert_eq!(region.name, format!("Frictional{rest}"));
+}
