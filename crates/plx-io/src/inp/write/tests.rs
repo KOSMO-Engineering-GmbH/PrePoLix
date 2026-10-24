@@ -6,7 +6,7 @@ use plx_model::{
     BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, DefinedField,
     DefinedFieldKind, Displacement, DynamicStep, Elastic, EquationSolver, Hardening, Load,
     Material, ModalDamping, ModalDynamicsStep, NodeTie, Plastic, PlasticPoint, ReferencePoint,
-    RigidBody, Section, SectionKind, SteadyStateDynamicsStep,
+    RigidBody, Section, SectionKind, SteadyStateDynamicsStep, UnitSystem,
 };
 
 use super::*;
@@ -2887,7 +2887,7 @@ fn calculix_carries_the_load_across_a_contact() {
 
 /// A tied contact carries shear too. Its stiffness along the surfaces is the stick slope of
 /// the friction; without one CalculiX 2.23 does not take its default (half Young's modulus of
-/// the first material) and gives up, so the writer puts the default in.
+/// the first material) and gives up, so the writer puts in the stiffness of the tie.
 #[test]
 fn calculix_carries_shear_across_a_tied_contact_without_stick_slope() {
     let (mesh, lower, upper) = two_blocks(0.0);
@@ -2914,7 +2914,7 @@ fn calculix_carries_shear_across_a_tied_contact_without_stick_slope() {
     pair.slave = Region::Faces(upper);
     model.contact_pairs.push(pair);
     let text = write_inp(&mesh, &model, "").unwrap();
-    assert!(text.contains("*Friction\n0.1, 105000\n"), "{text}");
+    assert!(text.contains("*Friction\n0.1, 10000000\n"), "{text}");
     let Some(frd) = run_ccx("kontakt-tied", &text) else {
         return;
     };
@@ -2926,6 +2926,160 @@ fn calculix_carries_shear_across_a_tied_contact_without_stick_slope() {
         (shear + pushed).abs() < 1e-3 * pushed.abs(),
         "{shear} {pushed}"
     );
+}
+
+/// The stacked blocks with a contact pair of the upper block's bottom on the lower block's top,
+/// its surface interaction made of `properties`.
+fn blocks_in_contact(
+    properties: Vec<InteractionProperty>,
+    method: ContactMethod,
+) -> (FeMesh, FeModel) {
+    let (mesh, lower, upper) = two_blocks(0.0);
+    let mut model = stacked_blocks(&mesh);
+    model.surface_interactions.push(SurfaceInteraction {
+        name: "Surface_Interaction-1".into(),
+        properties,
+    });
+    let mut pair = ContactPair::new("Contact_Pair-1", "Surface_Interaction-1");
+    pair.master = Region::Faces(lower);
+    pair.slave = Region::Faces(upper);
+    pair.method = method;
+    model.contact_pairs.push(pair);
+    (mesh, model)
+}
+
+/// CalculiX makes a hard contact linear with K = 50 E and takes E/2 as stick slope, both not
+/// stiffnesses per length: in SI units they are 1000 times softer than in mm. The writer puts
+/// in K = 10 E/h (h the mean edge length of the slave faces, 5 here) and K/100.
+#[test]
+fn hard_contact_and_stick_slope_are_written_per_element_size() {
+    let hard = InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard);
+    let friction = InteractionProperty::Friction(plx_model::Friction::default());
+    let (mesh, model) = blocks_in_contact(
+        vec![hard.clone(), friction.clone()],
+        ContactMethod::SurfaceToSurface,
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let expected = "*Surface interaction, Name=Surface_Interaction-1\n\
+                    ** Hard contact as linear, K = 10 E/h, E = 210000, h = 5\n\
+                    *Surface behavior, Pressure-overclosure=Linear\n420000, 3\n\
+                    *Friction\n0.1, 4200\n";
+    assert!(text.contains(expected), "{text}");
+    // A linear behavior's own K sets the stick slope; the user's stick slope stays.
+    let linear = InteractionProperty::SurfaceBehavior(SurfaceBehavior::Linear {
+        k: 1e6,
+        sigma_inf: 2.86,
+        c0: None,
+    });
+    let (mesh, model) = blocks_in_contact(
+        vec![linear, friction.clone()],
+        ContactMethod::SurfaceToSurface,
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Friction\n0.1, 10000\n"), "{text}");
+    // Mortar contact is truly hard without a surface behavior.
+    let (mesh, model) = blocks_in_contact(vec![hard.clone()], ContactMethod::Mortar);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Surface behavior"), "{text}");
+    // Without contact pairs nothing scales the stiffness: CalculiX's defaults.
+    let (mesh, mut model) = blocks_in_contact(vec![hard, friction], ContactMethod::Massless);
+    model.contact_pairs.clear();
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Surface behavior, Pressure-overclosure=Hard\n*Friction\n0.1, 105000\n"),
+        "{text}"
+    );
+}
+
+/// The same model in mm and in SI units (as PrePoLix writes) gives the same contact
+/// penetration and the same slip of a tied contact.
+#[test]
+fn calculix_gives_the_same_contact_in_mm_and_in_m() {
+    let hard = vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)];
+    let tied = vec![
+        InteractionProperty::SurfaceBehavior(SurfaceBehavior::Tied { k: 1e7 }),
+        InteractionProperty::Friction(plx_model::Friction::default()),
+    ];
+    // Middle node of the lower block's top and of the upper block's bottom.
+    let (below, above) = (14, 105);
+    for (name, properties) in [("hard", hard), ("tied", tied)] {
+        let (mesh, mut model) = blocks_in_contact(properties, ContactMethod::SurfaceToSurface);
+        // 100 MPa shear on the top of the upper block, 10 kN on 10 x 10 mm.
+        model.steps[0].loads.push(Load {
+            name: "Shear-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes((110..=118).collect()),
+            kind: LoadKind::force([1e4, 0.0, 0.0]),
+            amplitude: None,
+            factor_amplitude: None,
+        });
+        if name == "hard" {
+            // Held sideways at its top, the upper block rests on the lower one by contact.
+            model.steps[0].loads.pop();
+            model.steps[0].boundary_conditions.push(BoundaryCondition {
+                name: "Side-1".into(),
+                active: true,
+                visible: true,
+                region: Region::Nodes((110..=118).collect()),
+                kind: each_node([Some(0.0), Some(0.0), None, None, None, None]),
+                amplitude: None,
+            });
+        }
+        model.properties.units = UnitSystem::MmTonSC;
+        let mut model_m = model.clone();
+        let mut mesh_m = mesh.clone();
+        model_m.convert_units(UnitSystem::MKgSC);
+        mesh_m.scale(1e-3);
+        let mut gaps = Vec::new();
+        for (unit, mesh, model) in [("mm", &mesh, &model), ("m", &mesh_m, &model_m)] {
+            let text = write_inp(mesh, model, "").unwrap();
+            let Some(frd) = run_ccx(&format!("kontakt-{name}-{unit}"), &text) else {
+                return;
+            };
+            let component = if name == "hard" { "U3" } else { "U1" };
+            let gap = node_value(&frd, "DISP", component, above)
+                - node_value(&frd, "DISP", component, below);
+            let elastic = node_value(&frd, "DISP", component, below);
+            let to_mm = if unit == "m" { 1e3 } else { 1.0 };
+            gaps.push((gap * to_mm, elastic * to_mm));
+        }
+        let [(mm, elastic), (m, _)] = gaps[..] else {
+            unreachable!()
+        };
+        assert!(
+            (m - mm).abs() < 1e-3 * mm.abs(),
+            "{name}: {mm} mm != {m} mm"
+        );
+        // Penetration and slip are small against the deformation of the lower block.
+        assert!(
+            mm.abs() < 0.2 * elastic.abs(),
+            "{name}: {mm} against {elastic}"
+        );
+        eprintln!("{name}: gap {mm} mm, lower block {elastic} mm");
+    }
+}
+
+/// Mortar contact without a surface behavior is truly hard.
+#[test]
+fn calculix_carries_the_load_across_a_true_hard_mortar_contact() {
+    let hard = vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)];
+    let (mesh, mut model) = blocks_in_contact(hard, ContactMethod::Mortar);
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Side-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes((110..=118).collect()),
+        kind: each_node([Some(0.0), Some(0.0), None, None, None, None]),
+        amplitude: None,
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let Some(frd) = run_ccx("kontakt-mortar", &text) else {
+        return;
+    };
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((reaction - 1000.0).abs() < 10.0, "{reaction}");
 }
 
 /// Plane strain: a strip of 4 x 1 resting on another of the same size only by contact on

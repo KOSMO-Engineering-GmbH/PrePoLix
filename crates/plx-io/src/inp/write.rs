@@ -11,13 +11,13 @@ use std::fmt::Write as _;
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
     Amplitude, AmplitudeTime, BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint,
-    ContactMethod, ContactPair, DefinedFieldKind, DynamicStep, FeModel, FieldOutput, Formulation,
-    FrequencyStep, GapConductance, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
-    InitialConditionKind, InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep,
-    ModelSpace, MovingFrame, NodeTie, OutputDimension, OutputKind, Region, RemoteBehavior,
-    RemoteDof, Section, SectionKind, SensitivityStep, StaticStep, SteadyStateDynamicsStep, Step,
-    StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals, ViscoStep, line_tangent,
-    symmetry_dofs, symmetry_plane,
+    ContactMethod, ContactPair, ContactScale, DefinedFieldKind, DynamicStep, FeModel, FieldOutput,
+    Formulation, FrequencyStep, GapConductance, HeatTransferStep, HistoryKind, HistoryOutput,
+    Incrementation, InitialConditionKind, InteractionProperty, LoadKind, ModalDamping,
+    ModalDynamicsStep, ModelSpace, MovingFrame, NodeTie, OutputDimension, OutputKind, Region,
+    RemoteBehavior, RemoteDof, Section, SectionKind, SensitivityStep, StaticStep,
+    SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals,
+    ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -293,13 +293,13 @@ pub fn model_keywords(
     sections.extend(generated.sections);
     let mut materials = materials;
     materials.extend(generated.material);
-    // CalculiX 2.23 no longer fills in its default stick slope, half the first elastic
-    // constant of the first material, and a friction without one sticks with no stiffness.
-    let stick_slope = (model.materials.first())
-        .and_then(|m| m.elastic)
-        .map(|e| e.young / 2.0);
+    let young = if model.surface_interactions.is_empty() {
+        Default::default()
+    } else {
+        ContactScale::element_young(model, mesh)
+    };
     let interactions = (model.surface_interactions.iter())
-        .map(|i| interaction(i, stick_slope))
+        .map(|i| interaction(i, &InteractionDefaults::of(i, mesh, model, &young)))
         .collect();
     let (mut contact_pairs, pair_surfaces) = contact_pairs(&mut sets, model)?;
     contact_pairs.extend(node_ties(&mut sets, model, &lines)?);
@@ -1583,14 +1583,106 @@ fn node_tie(sets: &mut Sets, tie: &NodeTie, lines: &LineElements) -> Result<Keyw
     Ok(Keyword::generated(out))
 }
 
+/// The values the writer puts in where a surface interaction leaves them to CalculiX: its
+/// defaults for the contact stiffness are multiples of Young's modulus, not stiffnesses per
+/// length, and so about 1000 times too soft in SI units.
+struct InteractionDefaults {
+    /// Hard behavior of penalty contact pairs as a linear one: normal stiffness K and the
+    /// tension at large clearances, and how K came about.
+    hard_as_linear: Option<(f64, f64, String)>,
+    /// Hard behavior used by mortar contact pairs only: true hard contact, which mortar
+    /// contact gives without a surface behavior.
+    true_hard: bool,
+    /// Stick slope of a friction without one.
+    stick_slope: Option<f64>,
+}
+
+impl InteractionDefaults {
+    /// For the active contact pairs that use the interaction. Pairs of different stiffness
+    /// share the softest, which converges for all of them.
+    fn of(
+        interaction: &SurfaceInteraction,
+        mesh: &FeMesh,
+        model: &FeModel,
+        young: &plx_model::ElementYoung,
+    ) -> Self {
+        let pairs: Vec<&ContactPair> = (model.contact_pairs.iter())
+            .filter(|p| p.active && p.interaction == interaction.name)
+            .collect();
+        let softest = |penalty_only: bool| {
+            (pairs.iter())
+                .filter(|p| {
+                    !penalty_only
+                        || matches!(
+                            p.method,
+                            ContactMethod::NodeToSurface | ContactMethod::SurfaceToSurface
+                        )
+                })
+                .filter_map(|p| ContactScale::with(young, mesh, &p.master, &p.slave))
+                .min_by(|a, b| a.normal_stiffness().total_cmp(&b.normal_stiffness()))
+        };
+        let hard = (interaction.properties.iter()).any(|p| {
+            matches!(
+                p,
+                InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)
+            )
+        });
+        let true_hard =
+            hard && !pairs.is_empty() && (pairs.iter()).all(|p| p.method == ContactMethod::Mortar);
+        let hard_as_linear = (softest(true)).filter(|_| hard).map(|scale| {
+            let note = format!(
+                "** Hard contact as linear, K = {} E/h, E = {}, h = {}",
+                number(plx_model::NORMAL_STIFFNESS_FACTOR),
+                number(scale.young),
+                number(scale.edge_length)
+            );
+            // CalculiX's default tension, E / 70000: a stress, so free of the units.
+            (scale.normal_stiffness(), scale.young / 70_000.0, note)
+        });
+        let normal = (interaction.own_normal_stiffness())
+            .or_else(|| softest(false).map(ContactScale::normal_stiffness));
+        // Without contact pairs to scale with, CalculiX's default: half the first elastic
+        // constant of the first material. CalculiX 2.23 no longer fills it in itself, and a
+        // friction without one sticks with no stiffness.
+        let stick_slope = match normal {
+            Some(k) => Some(plx_model::default_stick_slope(k, interaction.is_tied())),
+            None => (model.materials.first())
+                .and_then(|m| m.elastic)
+                .map(|e| e.young / 2.0),
+        };
+        Self {
+            hard_as_linear,
+            true_hard,
+            stick_slope,
+        }
+    }
+}
+
 /// A surface interaction with its models as children, like PrePoMax's
-/// `CalSurfaceInteraction`.
-/// `stick_slope` is written for a friction without one.
-fn interaction(interaction: &SurfaceInteraction, stick_slope: Option<f64>) -> Keyword {
+/// `CalSurfaceInteraction`, with the defaults filled in.
+fn interaction(interaction: &SurfaceInteraction, defaults: &InteractionDefaults) -> Keyword {
     let properties = (interaction.properties.iter())
+        .filter(|property| {
+            !(defaults.true_hard
+                && matches!(
+                    property,
+                    InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)
+                ))
+        })
         .map(|property| {
             let mut out = String::new();
             match property {
+                InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)
+                    if defaults.hard_as_linear.is_some() =>
+                {
+                    let (k, sigma_inf, note) = defaults.hard_as_linear.as_ref().unwrap();
+                    let _ = writeln!(
+                        out,
+                        "{note}\n*Surface behavior, Pressure-overclosure=Linear\n{}, {}",
+                        number(*k),
+                        number(*sigma_inf)
+                    );
+                }
                 InteractionProperty::SurfaceBehavior(behavior) => {
                     let kind = behavior.keyword();
                     let _ = writeln!(out, "*Surface behavior, Pressure-overclosure={kind}");
@@ -1623,7 +1715,7 @@ fn interaction(interaction: &SurfaceInteraction, stick_slope: Option<f64>) -> Ke
                 }
                 InteractionProperty::Friction(friction) => {
                     let _ = write!(out, "*Friction\n{}", number(friction.coefficient));
-                    if let Some(slope) = friction.stick_slope.or(stick_slope) {
+                    if let Some(slope) = friction.stick_slope.or(defaults.stick_slope) {
                         let _ = write!(out, ", {}", number(slope));
                     }
                     out.push('\n');

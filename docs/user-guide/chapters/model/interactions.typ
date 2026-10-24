@@ -89,15 +89,15 @@ pairs refer to. Move the models you need from #ui("Available") to #ui("Selected"
 
 #fields(
   [Surface Behavior], [Pressure-overclosure relation, the contact pressure over the overclosure
-    (penetration) of the surfaces. #ui("Hard") is the usual rigid contact. The others are soft
+    (penetration) of the surfaces. #ui("Hard") is the usual rigid contact (see below). The others are soft
     contacts: #ui("Linear") (stiffness K, about 5 to 50 times Young's modulus per length, and
     tension at large clearance σ#sub[∞]), #ui("Exponential") (pressure p#sub[0] at zero gap,
     dropping to 1 % at gap c#sub[0]; helps convergence from open contact), #ui("Tabular") (your
     own curve) or #ui("Tied") (the surfaces stay connected with stiffness K, see below).],
   [Friction], [Coulomb friction: the tangential force is limited to #ui("Friction coefficient")
     times the contact pressure. The optional #ui("Stick slope") is the stiffness while sticking;
-    if empty, PrePoLix writes CalculiX's default, half the Young's modulus of the first
-    material. Friction makes the analysis more nonlinear, so start with
+    if empty, PrePoLix writes 1/100 of the normal contact stiffness (see below). Friction makes
+    the analysis more nonlinear, so start with
     small coefficients and enough increments.],
   [Gap Conductance], [Heat transfer across the contact, constant or as a table over pressure
     and temperature, for thermal and coupled steps. Without it the contact is thermally
@@ -106,13 +106,35 @@ pairs refer to. Move the models you need from #ui("Available") to #ui("Selected"
 
 A #ui("Tied") surface behavior glues the surfaces together, like a Tie, but as a penalty contact.
 CalculiX needs #ui("Friction") with it in the same surface interaction: the #ui("Stick slope")
-is the stiffness of the tie along the surfaces (half the Young's modulus of the first material if
-empty), the friction coefficient is irrelevant. Without friction the run
+is the stiffness of the tie along the surfaces (the tie's own #ui("K") if empty), the friction
+coefficient is irrelevant. Without friction the run
 aborts. So choosing #ui("Tied") adds #ui("Friction") to the selected models at once, and the
 dialog does not accept a tied interaction without it. Tied contact works only with the method
 #ui("Surface to surface"). The model check reports contact pairs that use it otherwise.
 
 #screenshot("surface-interaction-tied.png", [Choosing Tied adds Friction])
+
+==== Contact stiffness
+
+With the methods #ui("Node to surface") and #ui("Surface to surface") CalculiX enforces a
+#ui("Hard") contact with a stiff spring (penalty contact), so the surfaces penetrate a little.
+CalculiX's own default stiffness, 50 times Young's modulus, ignores the element size and
+therefore depends on the unit system: PrePoLix writes the input file in SI units, where it would
+be about 1000 times softer than in mm. PrePoLix therefore writes the spring itself, the same in
+every unit system:
+
+- Normal stiffness K = 10 E / h, with E the smaller Young's modulus of the two sides and h the
+  mean edge length of the slave faces. Under 100 MPa a steel contact with 1 mm elements
+  penetrates about 0.05 µm. If several contact pairs share a surface interaction, they all get
+  the softest of their stiffnesses.
+- An empty #ui("Stick slope") is K / 100, as the CalculiX manual recommends. For a #ui("Linear")
+  behavior K is its own #ui("K"), and for #ui("Tied") the stick slope is the whole #ui("K"), so
+  the tied surfaces do not slide.
+- With #ui("Mortar") a #ui("Hard") contact is truly hard: PrePoLix leaves the surface behavior
+  out, which is how CalculiX's mortar contact enforces it without penetration.
+
+For a #ui("Hard") contact the input file names E and h in a comment. A #ui("Linear") or
+#ui("Tied") behavior and an entered #ui("Stick slope") are written as you entered them.
 
 === Contact pairs
 
