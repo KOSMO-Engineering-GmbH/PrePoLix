@@ -38,6 +38,8 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         contact_pairs,
         ties,
         node_ties,
+        contact_regions,
+        contact_defaults,
         amplitudes,
         initial_conditions,
         steps,
@@ -71,6 +73,10 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
     hash.add_debug(contact_pairs);
     hash.add_debug(ties);
     hash.add_debug(node_ties);
+    if !contact_regions.is_empty() {
+        hash.add_debug(contact_regions);
+        hash.add_debug(contact_defaults);
+    }
     hash.add_debug(amplitudes);
     hash.add_debug(initial_conditions);
     // Temperatures read from results files count by their folder and file name too.
