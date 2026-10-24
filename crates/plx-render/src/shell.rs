@@ -11,7 +11,7 @@ use crate::contour::NO_VALUE;
 use crate::fe::{
     EDGE_COLOR, FEATURE_EDGE_OPACITY, STRAIGHT_TOLERANCE, face_triangles, smooth_vertex_normals,
 };
-use crate::mesh::{RenderMesh, Vertex};
+use crate::mesh::{NodeBlend, RenderMesh, Vertex};
 
 /// Thickness of a shell and the offset of its nodes from the mid-surface, as a fraction of the
 /// thickness, as CalculiX's `*SHELL SECTION` and `*MEMBRANE SECTION` take them: offset 0.5
@@ -37,7 +37,10 @@ impl ShellThickness {
 /// a fold or with other thicknesses. The mesh edges of the faces are drawn on both sides.
 ///
 /// Node normals are averaged over the faces of a surface patch like the shading normals of
-/// [`crate::part_render_mesh`], so the solid of a curved surface has no gaps.
+/// [`crate::part_render_mesh`], so the solid of a curved surface has no gaps. `scalars` holds
+/// a normalized contour value per node, as there; the solid takes the value of its node
+/// across the thickness.
+#[allow(clippy::too_many_arguments)]
 pub fn thick_shell_mesh(
     coords: &[[f64; 3]],
     skin: &PartSkin,
@@ -46,7 +49,9 @@ pub fn thick_shell_mesh(
     face_color: impl Fn(usize) -> Option<[f32; 3]>,
     shell: impl Fn(usize) -> Option<ShellThickness>,
     smooth_angle_deg: f64,
+    scalars: Option<&[f32]>,
 ) -> RenderMesh {
+    let scalar = |node: usize| scalars.map_or(NO_VALUE, |s| s[node]);
     let mut render = RenderMesh::default();
     let shells: Vec<Option<ShellThickness>> = (0..skin.faces.len())
         .map(|index| shell(index).filter(|s| s.thickness > 0.0 && s.thickness.is_finite()))
@@ -90,14 +95,16 @@ pub fn thick_shell_mesh(
         for side in 0..2 {
             let base = render.vertices.len() as u32;
             first_vertex[index][side] = base;
-            for (k, position) in positions[index].iter().enumerate() {
+            let nodes = face.corners.iter().chain(&face.mids);
+            for (k, (position, &node)) in positions[index].iter().zip(nodes).enumerate() {
                 let n = normals[first_normal[index] + k];
                 render.vertices.push(Vertex {
                     position: render_position(position[side]),
                     normal: if side == 0 { n } else { n.map(|c| -c) },
                     color,
-                    scalar: NO_VALUE,
+                    scalar: scalar(node),
                 });
+                render.origins.push(NodeBlend::at(node));
             }
             let triangles = face_triangles(face);
             if side == 0 {
@@ -157,6 +164,17 @@ pub fn thick_shell_mesh(
             chain.push(positions[index][(k + 1) % n]);
             chain
         };
+        // The nodes of the chain on a face.
+        let chain_nodes = |&(index, k): &(usize, usize)| -> Vec<usize> {
+            let face = &skin.faces[index];
+            let n = face.corners.len();
+            let mut nodes = vec![face.corners[k]];
+            if !face.mids.is_empty() {
+                nodes.push(face.mids[k]);
+            }
+            nodes.push(face.corners[(k + 1) % n]);
+            nodes
+        };
         let chains: Vec<Vec<[DVec3; 2]>> = sides.iter().map(chain).collect();
         // Two faces whose solids meet without a step share the edge. Usually the other
         // face runs along it the other way; with its normal flipped, its top is this face's
@@ -202,9 +220,10 @@ pub fn thick_shell_mesh(
             continue;
         }
         // The solid ends at this edge: a wall across the thickness of each face.
-        for (&(index, _), chain) in sides.iter().zip(&chains) {
-            let color = face_color(index).unwrap_or(color);
-            for pair in chain.windows(2) {
+        for (side, chain) in sides.iter().zip(&chains) {
+            let color = face_color(side.0).unwrap_or(color);
+            let nodes = chain_nodes(side);
+            for (pair, ends) in chain.windows(2).zip(nodes.windows(2)) {
                 let [[top_a, bottom_a], [top_b, bottom_b]] = [pair[0], pair[1]];
                 let normal = (top_b - top_a)
                     .cross(top_a - bottom_a)
@@ -213,13 +232,17 @@ pub fn thick_shell_mesh(
                     .as_vec3()
                     .to_array();
                 let base = render.vertices.len() as u32;
-                for p in [top_a, top_b, bottom_b, bottom_a] {
+                for (p, node) in [top_a, top_b, bottom_b, bottom_a]
+                    .into_iter()
+                    .zip([0, 1, 1, 0])
+                {
                     render.vertices.push(Vertex {
                         position: render_position(p),
                         normal,
                         color,
-                        scalar: NO_VALUE,
+                        scalar: scalar(ends[node]),
                     });
+                    render.origins.push(NodeBlend::at(ends[node]));
                 }
                 render
                     .triangles
@@ -284,6 +307,7 @@ mod tests {
             |_| None,
             |_| shell,
             60.0,
+            None,
         )
     }
 

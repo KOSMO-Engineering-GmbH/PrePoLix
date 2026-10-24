@@ -13,6 +13,7 @@ use crate::model::{Highlight, Hit, Model};
 use crate::numeric;
 use crate::selection::{Operation, Picker, Target};
 use crate::setup::{NODE_SOURCES, RegionDraft, Source};
+use crate::table_export;
 use crate::viewport::{BoxSelect, Preview};
 
 pub struct HotSpotDialog {
@@ -332,15 +333,18 @@ impl HotSpotDialog {
             if ui.button("Copy to Clipboard").clicked() {
                 ui.ctx().copy_text(plot.to_csv('\t'));
             }
-            if ui.button("Save as CSV…").clicked()
-                && let Some(file) = rfd::FileDialog::new()
-                    .add_filter("CSV", &["csv"])
-                    .set_file_name(format!("{}.csv", self.hot_spot.name.trim()))
-                    .save_file()
-            {
-                self.error = std::fs::write(&file, plot.to_csv(';'))
-                    .err()
-                    .map(|e| format!("{}: {e}", file.display()));
+            for (label, format) in [
+                ("Save as CSV…", table_export::Format::Csv),
+                ("Save as JSON…", table_export::Format::Json),
+            ] {
+                if ui.button(label).clicked()
+                    && let Some(file) =
+                        table_export::save_dialog(label, &self.hot_spot.name, format)
+                {
+                    self.error = table_export::write(&file, &plot.to_csv(';'), ';', format)
+                        .err()
+                        .map(|e| format!("{}: {e}", file.display()));
+                }
             }
         });
         for warning in &plot.warnings {

@@ -292,16 +292,10 @@ impl Viewer {
                 else {
                     return;
                 };
-                if row.linked_from.is_some() {
-                    ui.disable();
-                }
                 let before = value;
                 let kind = kind.unwrap_or(ValueKind::Factor);
-                ui.add_sized(
-                    field.size(),
-                    crate::parameter_set::field(&mut value, kind, block.units),
-                )
-                .on_hover_text(tip);
+                let drag = crate::parameter_set::field(&mut value, kind, block.units);
+                number_field(ui, field, row, drag, tip);
                 if value != before {
                     self.actions.push(Action::SetNumberInput(id, key, value));
                 }

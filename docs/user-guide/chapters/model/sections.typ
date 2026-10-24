@@ -40,4 +40,29 @@ check reports "Truss structure is a mechanism".]
 Beams are written as `*BEAM SECTION` with `B31` or `B32` elements. Pipe and box sections need
 quadratic lines and are written as `B32R`, as CalculiX requires.
 
+==== Beam profiles in the FE model and the results <beam-profiles>
+
+The FE model draws beams as their profile swept along the line, as CalculiX expands them: the
+1-direction is the #ui("Normal") turned perpendicular to the beam, the 2-direction the beam axis
+crossed with it, and the offsets move the profile off the nodes (0.5 puts the nodes on the
+positive face). Pipes and boxes show their hollow walls. Where two elements of a line meet
+the profile runs on and its outline marks the element border; at the ends of a line, at kinks
+of more than 45 degrees and at branches each element ends with a face. Trusses are drawn as round
+bars of their cross-section area.
+
+#screenshot("beam-profiles.png", [A frame with a rectangular beam (left), a pipe frame (right),
+truss bracing and a roof of shells, drawn with their sections.])
+
+In the Results workspace CalculiX usually hands the beams back as the solids it expanded them
+to. A model with shells makes it report them as lines, though (`OUTPUT=2D`), and trusses are
+always lines; PrePoLix then sweeps the profiles of the input file CalculiX ran along the
+deformed lines, coloured by the shown result. The profile is moved with its nodes, not turned
+by their rotations.
+
+#screenshot("beam-profiles-results.png", [The same frame solved: shells, beams and trusses
+drawn with their sections in the results.])
+
+Turn the profiles off with #menu("View", "Beam Profiles") or in the #link(<settings>)[settings]
+under #ui("Graphics") to see the lines only. Picking still selects the lines.
+
 #limitation[Line elements can only be used in 3D models.]

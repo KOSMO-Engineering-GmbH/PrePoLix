@@ -102,6 +102,7 @@ saves the same table as a CSV file, with a Save As dialog: one row per speed wit
 rad/s and rpm, the frequency in Hz and the whirl (F, B or empty) of every curve, the other roots
 CalculiX found at that speed (unmatched and unstable, separated by spaces), and the frequency of
 every order line. Numbers use a decimal point and the cells are separated by commas.
+#ui("Export JSON ...") saves the same table as JSON (@table-json).
 
 #note[CalculiX solves the Coriolis modes in the rotating frame of reference. The frequencies of
 the diagram are therefore those an observer rotating with the shaft would see, and a pair of

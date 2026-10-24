@@ -246,6 +246,17 @@ fn read_dat_beside(frd: &Path) -> Option<plx_io::dat::DatImport> {
     plx_io::dat::read_dat(&frd.with_extension("dat")).ok()
 }
 
+/// The kind of number the value is, for value links from the block to Math blocks and
+/// parameters.
+pub fn value_kind(kind: &MeasureKind) -> Option<plx_model::ValueKind> {
+    match kind.field() {
+        ("FREQ", _) => Some(plx_model::ValueKind::Quantity(
+            plx_model::Quantity::Frequency,
+        )),
+        (field, component) => crate::results::field_value_kind(field, component),
+    }
+}
+
 /// The value as the block shows it: in `units`, with its unit.
 pub fn shown(kind: &MeasureKind, value: f64, units: UnitSystem) -> String {
     let (field, component) = kind.field();

@@ -1270,6 +1270,16 @@ pub fn field_unit(field: &str, component: &str, units: UnitSystem) -> Option<Str
     }
 }
 
+/// The kind of number a component of a field is, for a value link: a factor for values
+/// without a unit; `None` for a unit that is no quantity of a parameter, such as W/m².
+pub fn field_value_kind(field: &str, component: &str) -> Option<plx_model::ValueKind> {
+    match field_measure(field, component) {
+        Some(Measure::Of(quantity)) => Some(plx_model::ValueKind::Quantity(quantity)),
+        Some(Measure::Per(..)) => None,
+        None => Some(plx_model::ValueKind::Factor),
+    }
+}
+
 /// A value of a component of a field CalculiX wrote, in the stored SI units, in `units`;
 /// unchanged for values without a unit.
 pub fn shown_field_value(value: f64, field: &str, component: &str, units: UnitSystem) -> f64 {

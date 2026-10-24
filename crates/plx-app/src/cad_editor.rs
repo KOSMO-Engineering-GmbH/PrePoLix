@@ -1,5 +1,6 @@
 //! The editor of a CAD Operation block of the project schematic: the geometry linked to the
-//! block in its own 3D view, where the edges or faces the operation acts on are picked, with the
+//! block in its own 3D view, where the edges, faces or corners the operation acts on are
+//! picked, with the
 //! kind of operation, its length and a preview of the result.
 
 use std::collections::BTreeSet;
@@ -33,6 +34,8 @@ pub struct CadOperationEditor {
     input: Geometry,
     /// The input as shown, where edges or faces are picked; `None` when it cannot be shown.
     view: Option<Model>,
+    /// The input has faces but no solids: fillets and chamfers act on corners.
+    flat: bool,
     /// The result of the last preview and the operation it was made for.
     result: Option<(Model, Geometry, CadOperation)>,
     shown: Shown,
@@ -66,9 +69,20 @@ impl CadOperationEditor {
         } else {
             input
         };
-        let (view, message) = match plx_mesher::tessellate(&input) {
-            Ok(display) => (Some(Model::geometry_view(Path::new(name), display)), None),
-            Err(error) => (None, Some(format!("The geometry cannot be shown: {error}"))),
+        let (view, flat, message) = match plx_mesher::tessellate(&input) {
+            Ok(display) => {
+                let flat = display.solids == 0 && display.faces > 0;
+                (
+                    Some(Model::geometry_view(Path::new(name), display)),
+                    flat,
+                    None,
+                )
+            }
+            Err(error) => (
+                None,
+                false,
+                Some(format!("The geometry cannot be shown: {error}")),
+            ),
         };
         let picks = (operation.resolve(&input).unwrap_or_default().into_iter())
             .filter(|&e| operation.kind.picks(e))
@@ -78,6 +92,7 @@ impl CadOperationEditor {
             name: name.to_owned(),
             input,
             view,
+            flat,
             result: None,
             shown: Shown::Input,
             kind: operation.kind,
@@ -123,6 +138,40 @@ impl CadOperationEditor {
         self.scene_due = true;
     }
 
+    /// What is picked for the operation, one and many: corners of flat faces for a fillet
+    /// or a chamfer of flat geometry.
+    fn nouns(&self) -> (&'static str, &'static str) {
+        if self.flat && self.kind != CadOperationKind::PushPull {
+            ("corner", "corners")
+        } else {
+            (self.kind.picked_one(), self.kind.picked_noun())
+        }
+    }
+
+    /// Where a picked vertex is drawn.
+    fn vertex_position(&self, vertex: CadEntity) -> Option<glam::Vec3> {
+        let view = self.view.as_ref()?;
+        let signature = self.input.signatures.iter().find(|s| s.entity == vertex)?;
+        Some(view.to_render(signature.centroid))
+    }
+
+    /// The corner a click points at: the vertex nearest to the click ray, within a few times
+    /// the pick tolerance.
+    fn corner_at(&self, click: &Click) -> Option<CadEntity> {
+        let direction = click.direction.normalize_or_zero();
+        (self.input.signatures.iter())
+            .filter(|s| matches!(s.entity, CadEntity::Vertex(_)))
+            .filter_map(|s| {
+                let point = self.vertex_position(s.entity)?;
+                let offset = point - click.origin;
+                let foot = click.origin + direction * offset.dot(direction);
+                let off_ray = (point - foot).length();
+                (off_ray <= 2.0 * click.precision_at(foot)).then_some((s.entity, off_ray))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(vertex, _)| vertex)
+    }
+
     /// The view as shown now.
     fn shown_model(&self) -> Option<&Model> {
         match self.shown {
@@ -134,6 +183,9 @@ impl CadOperationEditor {
     /// What a click points at for the operation: the CAD edge near it, else the edge of
     /// the face under it nearest to it; or the planar face under it.
     fn entity_at(&self, click: &Click) -> Option<CadEntity> {
+        if self.flat && self.kind != CadOperationKind::PushPull {
+            return self.corner_at(click);
+        }
         let view = self.view.as_ref()?;
         let hit = view.pick_click(click)?;
         if self.kind.picks(CadEntity::Face(0)) {
@@ -241,6 +293,10 @@ impl CadOperationEditor {
                 ui.label("Operation");
                 ui.horizontal(|ui| {
                     for kind in CadOperationKind::ALL {
+                        // Moving a face out of its plane would make a solid of it.
+                        if self.flat && kind == CadOperationKind::PushPull {
+                            continue;
+                        }
                         if ui
                             .selectable_value(&mut self.kind, kind, kind.label())
                             .changed()
@@ -266,7 +322,7 @@ impl CadOperationEditor {
                     }
                 });
                 ui.end_row();
-                let (one, many) = (self.kind.picked_one(), self.kind.picked_noun());
+                let (one, many) = self.nouns();
                 ui.label(capitalised(many));
                 ui.horizontal(|ui| {
                     ui.label(match self.picks.len() {
@@ -325,6 +381,11 @@ impl CadOperationEditor {
                         normal, outwards for a positive offset; a click on a picked face removes \
                         it. Neighbours at right angles follow, sloped ones get a step."
                         .to_owned(),
+                    kind if self.flat => format!(
+                        "Click the corners of the faces to {}; a click on a picked corner \
+                         removes it.",
+                        kind.label().to_lowercase()
+                    ),
                     kind => format!(
                         "Click the edges to {}; a click on a picked edge removes it.",
                         kind.label().to_lowercase()
@@ -334,7 +395,7 @@ impl CadOperationEditor {
             None => {
                 ui.weak(format!(
                     "The result of the operation; show the input to pick {}.",
-                    self.kind.picked_noun()
+                    self.nouns().1
                 ));
             }
         }
@@ -357,8 +418,17 @@ impl CadOperationEditor {
                     .collect(),
                 _ => Vec::new(),
             };
+            // The picked corners, drawn as points.
+            let nodes = match self.shown {
+                Shown::Input => (self.picks.iter())
+                    .filter(|e| matches!(e, CadEntity::Vertex(_)))
+                    .filter_map(|&e| self.vertex_position(e))
+                    .collect(),
+                Shown::Result => Vec::new(),
+            };
             viewport.overlay = crate::overlay::Overlay {
                 edges,
+                nodes,
                 show_view_triad: true,
                 ..Default::default()
             };
@@ -367,6 +437,17 @@ impl CadOperationEditor {
             && let Some(bounds) = self.shown_model().and_then(Model::visible_bounds)
         {
             self.fit_due = false;
+            // Flat geometry is seen straight onto its plane, which is normal to its thinnest
+            // extent.
+            if self.flat {
+                let size = bounds.1 - bounds.0;
+                let axis = match size.min_element() {
+                    thinnest if thinnest == size.x => crate::viewport::Axis::X,
+                    thinnest if thinnest == size.y => crate::viewport::Axis::Y,
+                    _ => crate::viewport::Axis::Z,
+                };
+                viewport.apply(ViewCommand::AxisView(axis), Some(bounds));
+            }
             viewport.apply(ViewCommand::Fit, Some(bounds));
         }
         let picking = self.shown == Shown::Input;
@@ -395,8 +476,12 @@ impl CadOperationEditor {
         if let Some(hover) = response.hover {
             viewport.preview = (hover.and_then(|click| self.entity_at(&click)))
                 .zip(self.view.as_ref())
-                .map(|(entity, view)| {
-                    crate::meshing::entities_preview(view, &BTreeSet::from([entity]))
+                .map(|(entity, view)| match entity {
+                    CadEntity::Vertex(_) => crate::viewport::Preview {
+                        points: self.vertex_position(entity).into_iter().collect(),
+                        ..Default::default()
+                    },
+                    _ => crate::meshing::entities_preview(view, &BTreeSet::from([entity])),
                 })
                 .unwrap_or_default();
             ui.ctx().request_repaint();

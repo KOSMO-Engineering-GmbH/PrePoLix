@@ -894,6 +894,11 @@ impl AnalysisWindow {
                 )
                 .on_hover_text(settings::SHELL_THICKNESS_TIP);
                 ui.checkbox(
+                    &mut self.workbench.settings.graphics.beam_profiles,
+                    "Beam Profiles",
+                )
+                .on_hover_text(settings::BEAM_PROFILES_TIP);
+                ui.checkbox(
                     &mut self.workbench.settings.graphics.show_linked,
                     settings::SHOW_LINKED_LABEL,
                 )
@@ -1307,8 +1312,8 @@ fn read_meshes_in_background(paths: Vec<PathBuf>, sender: Sender<LoadEvent>, ctx
     ctx.request_repaint();
 }
 
-/// The selected tree item and the parts selected along with it.
-type TreeSelection = (Option<(TreeView, TreeItem)>, BTreeSet<usize>);
+/// The selected tree item and the parts and items selected along with it.
+type TreeSelection = (Option<(TreeView, TreeItem)>, BTreeSet<usize>, Vec<TreeItem>);
 
 /// The output line after deleting parts.
 fn deleted_message(names: &[String]) -> String {
@@ -1625,7 +1630,13 @@ impl AnalysisWindow {
 
         if let Some(command) = self.workbench.view_command.take() {
             let bounds = self.workbench.shown().and_then(Model::visible_bounds);
-            self.workbench.viewport.apply(command, bounds);
+            if matches!(command, ViewCommand::Fit) && bounds.is_none() {
+                // Nothing to fit yet, e.g. on the empty Geometry tab of an analysis opened
+                // from its mesh: the FE Model tab, which shares the camera, fits instead.
+                self.workbench.view_command = Some(command);
+            } else {
+                self.workbench.viewport.apply(command, bounds);
+            }
         }
         // Last, after everything the user changed in this frame.
         if let Some(model) = &mut self.workbench.model {
@@ -1735,6 +1746,9 @@ impl Workbench {
                 let mut rebuild = false;
                 // The camera of bound results as saved, replacing the fit to the model.
                 let mut camera = None;
+                // Results opened while another workspace stays shown, e.g. an analysis opened
+                // from a Setup row of its block.
+                let mut results_hidden = false;
                 if let Some(view) = &mut model.results {
                     let post = &self.settings.post;
                     let levels = view.color_scale.levels;
@@ -1829,11 +1843,13 @@ impl Workbench {
                     ));
                     let shown = results_workspace(&mut self.pinned_view);
                     self.set_tree_view(shown);
+                    results_hidden = self.tree_view != TreeView::Results;
                     // Results of a 2D model are flat in z and seen from the front.
-                    if model
-                        .mesh
-                        .bounds()
-                        .is_some_and(|(min, max)| (max[2] - min[2]).abs() < 1e-9)
+                    if !results_hidden
+                        && model
+                            .mesh
+                            .bounds()
+                            .is_some_and(|(min, max)| (max[2] - min[2]).abs() < 1e-9)
                     {
                         self.viewport
                             .apply(ViewCommand::View(StandardView::Front), None);
@@ -1976,6 +1992,7 @@ impl Workbench {
                     }
                     self.model = Some(model);
                     self.symbols_shown = None;
+                    self.tree.acting_for = None;
                     self.geometry = geometry_view;
                     // Results bound to the project open with it.
                     if self
@@ -1985,6 +2002,14 @@ impl Workbench {
                     {
                         self.open_bound_results();
                     }
+                }
+                if results_hidden {
+                    // The view keeps the workspace shown and its camera; the results take
+                    // theirs, in their own units, when the Results tab is chosen, or a fit
+                    // without a saved one.
+                    self.parked_camera = camera;
+                    self.results_changed = true;
+                    return;
                 }
                 self.frame_cache.clear();
                 self.viewport.set_parts(&render_meshes);
@@ -2087,6 +2112,9 @@ impl Workbench {
             )
             .on_hover_text(settings::SHOW_LINKED_TIP);
             ui.separator();
+        }
+        if view == TreeView::FeModel {
+            self.update_acting();
         }
         let shown = match view {
             TreeView::Results => self.results.get_mut(self.current_result),
@@ -2344,12 +2372,14 @@ impl Workbench {
             self.create(kind);
         }
         if let Some(item) = response.delete {
-            // A part among several selected ones deletes them all.
+            // A part or item among several selected ones deletes them all.
             let parts = self.tree.selected_parts(view);
+            let selected = self.tree.selected_items(view);
             let items = match item {
                 TreeItem::Part(index) if parts.contains(&index) => {
                     parts.into_iter().map(TreeItem::Part).collect()
                 }
+                item if selected.contains(&item) => selected,
                 item => vec![item],
             };
             self.confirm_delete = Some((view, items));
@@ -2363,18 +2393,40 @@ impl Workbench {
             }
         }
         if let (Some(item), Some(model)) = (response.toggle_active, self.model.as_mut()) {
-            crate::setup::toggle_active(&mut model.fe, &item);
+            // Several selected items all take the state the clicked one changes to.
+            let selected = self.tree.selected_items(view);
+            match crate::setup::is_active(&mut model.fe, &item) {
+                Some(active) if selected.len() > 1 && selected.contains(&item) => {
+                    for item in &selected {
+                        crate::setup::set_active(&mut model.fe, item, !active);
+                    }
+                }
+                _ => {
+                    crate::setup::toggle_active(&mut model.fe, &item);
+                }
+            }
         }
         if let Some(model) = self.model.as_mut() {
             for (item, visible) in &response.symbol_visibility {
                 crate::setup::set_visible(&mut model.fe, item, *visible);
             }
         }
-        if let (Some(item), Some(model)) = (response.swap_master_slave, self.model.as_mut())
-            && crate::setup::swap_master_slave(&mut model.fe, &item)
-        {
-            // The selection stays, but master and slave colours change places.
-            self.highlighted = None;
+        if let (Some(item), Some(model)) = (response.swap_master_slave, self.model.as_mut()) {
+            // Several selected items are all swapped.
+            let selected = self.tree.selected_items(view);
+            let items = if selected.contains(&item) {
+                selected
+            } else {
+                vec![item]
+            };
+            let mut swapped = false;
+            for item in &items {
+                swapped |= crate::setup::swap_master_slave(&mut model.fe, item);
+            }
+            if swapped {
+                // The selection stays, but master and slave colours change places.
+                self.highlighted = None;
+            }
         }
         if response.material_library {
             self.open_material_library();
@@ -4141,11 +4193,32 @@ impl Workbench {
         );
     }
 
-    /// Selects a part clicked in the 3D view in the tree shown.
+    /// Selects a part clicked in the 3D view in the tree shown. In the FE Model tree the
+    /// tree stays where it is and opens what acts on the part instead, which it marks.
     fn select_part(&mut self, index: usize) {
         let view = self.tree_view;
         self.tree.select_part(view, index);
-        self.tree.reveal = true;
+        if view == TreeView::FeModel {
+            self.tree.reveal_acting = true;
+        } else {
+            self.tree.reveal = true;
+        }
+    }
+
+    /// Finds what acts on the parts selected in the FE Model tree, once for each selection
+    /// and change of the model.
+    fn update_acting(&mut self) {
+        let parts = self.tree.selected_parts(TreeView::FeModel);
+        let Some(model) = self.model.as_ref().filter(|_| !parts.is_empty()) else {
+            self.tree.acting.clear();
+            self.tree.acting_for = None;
+            return;
+        };
+        let key = (parts, model.revision);
+        if self.tree.acting_for.as_ref() != Some(&key) {
+            self.tree.acting = crate::setup::acting_on_parts(model, &key.0);
+            self.tree.acting_for = Some(key);
+        }
     }
 
     /// The context menu of the 3D view: on a part it starts with the part's menu from the
@@ -4628,6 +4701,7 @@ impl Workbench {
             })
             .collect();
         let question = match parts.as_slice() {
+            [] if items.len() > 1 => format!("Delete the {} selected items?", items.len()),
             [] => "Delete the selected item?".into(),
             [name] => format!("Delete the selected part?\n{name}"),
             names => format!("Delete the selected parts?\n{}", names.join(", ")),
@@ -4663,8 +4737,16 @@ impl Workbench {
                         _ => None,
                     })
                     .collect();
+                let selected_items = self.tree.selected_items(view);
                 if !parts.is_empty() && parts.iter().all(|p| selected.contains(p)) {
                     self.delete_parts(view, &parts);
+                } else if items.len() > 1 && items.iter().all(|i| selected_items.contains(i)) {
+                    // From the back, so that the indices of the others stay valid.
+                    let mut items = items;
+                    items.sort();
+                    for item in items.into_iter().rev() {
+                        self.delete_item(view, item);
+                    }
                 } else if let [item] = items.as_slice()
                     && self.tree.selected.as_ref() == Some(&(view, item.clone()))
                 {
@@ -5203,14 +5285,22 @@ impl Workbench {
             editor.highlight(model)
         } else {
             let parts = self.tree.selected_parts(TreeView::FeModel);
-            let selection = (self.tree.selected.clone(), parts.clone());
+            let items = self.tree.selected_items(TreeView::FeModel);
+            let selection = (self.tree.selected.clone(), parts.clone(), items.clone());
             if self.highlighted.as_ref() == Some(&selection) {
                 return;
             }
             self.highlighted = Some(selection);
             match &self.tree.selected {
                 Some((TreeView::FeModel, TreeItem::Part(_))) => Highlight::parts(parts),
-                Some((TreeView::FeModel, item)) => crate::setup::item_highlight(model, item),
+                // Several selected items, such as contact pairs, show together.
+                Some((TreeView::FeModel, _)) => {
+                    let mut highlight = Highlight::default();
+                    for item in &items {
+                        highlight.extend(crate::setup::item_highlight(model, item));
+                    }
+                    highlight
+                }
                 _ => Default::default(),
             }
         };
@@ -6337,25 +6427,34 @@ impl Workbench {
         }
     }
 
-    /// Draws the shells of the shown FE model thick or thin as the setting asks, again after
-    /// their sections changed.
+    /// Draws the shells and beams of the shown FE model or results as solids or as surfaces
+    /// and lines, as the settings ask, again after their sections changed.
     fn update_thick_shells(&mut self) {
-        if self.tree_view != TreeView::FeModel {
-            return;
-        }
-        let Some(model) = self.model.as_mut() else {
+        let model = match self.tree_view {
+            TreeView::FeModel => self.model.as_mut(),
+            TreeView::Results => self.results.get_mut(self.current_result),
+            TreeView::Geometry => None,
+        };
+        let Some(model) = model else {
             return;
         };
-        let wanted = self.settings.graphics.shell_thickness;
-        let current = &model.thick_shells;
-        if wanted && model.shell_sections().eq(current) || !wanted && current.is_empty() {
-            return;
-        }
-        model.thick_shells = if wanted {
-            model.shell_sections().cloned().collect()
+        let graphics = &self.settings.graphics;
+        let (shells, lines) = (graphics.shell_thickness, graphics.beam_profiles);
+        let shells_current = if shells {
+            model.shell_sections().eq(&model.thick_shells)
         } else {
-            Vec::new()
+            model.thick_shells.is_empty()
         };
+        let lines_current = if lines {
+            model.line_sections().eq(&model.thick_lines)
+        } else {
+            model.thick_lines.is_empty()
+        };
+        if shells_current && lines_current {
+            return;
+        }
+        model.thick_shells = (model.shell_sections().filter(|_| shells).cloned()).collect();
+        model.thick_lines = (model.line_sections().filter(|_| lines).cloned()).collect();
         self.results_changed = true;
     }
 

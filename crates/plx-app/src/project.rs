@@ -3242,6 +3242,12 @@ impl ProjectApp {
                 .then(|| number.result(switch))
                 .flatten();
         }
+        if let Some(measure) = node.as_measure() {
+            let fresh = self.measure_state(id) == CellState::UpToDate;
+            return (cell == links::VALUE && name == RESULT && fresh)
+                .then_some(measure.value)
+                .flatten();
+        }
         if cell == links::LOOP {
             let study = node.as_study()?;
             let column = study.table.input(name)?;
@@ -3995,9 +4001,16 @@ impl ProjectApp {
             return;
         };
         if analysis.window.is_some() {
-            // Brought to the front.
+            // Brought to the front, also when minimized (Windows focuses only a window that
+            // is not). Wayland lets no program take the focus: there the taskbar marks it.
             let viewport = analysis_viewport(id);
-            ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
+            for command in [
+                egui::ViewportCommand::Minimized(false),
+                egui::ViewportCommand::Focus,
+                egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Informational),
+            ] {
+                ctx.send_viewport_cmd_to(viewport, command);
+            }
             if let (Some(view), Some(window)) = (view, &mut analysis.window) {
                 window.show_workspace(view.clone());
             }
@@ -4523,7 +4536,10 @@ impl ProjectApp {
         let path = self.model_path();
         let mut work_dir = self.settings.solver.work_dir();
         work_dir.push(crate::analysis::job_name(&self.project_name()));
-        let settings = self.settings.solver.clone();
+        // The analyses solved at the same time share the cores.
+        let parallel = self.settings.solver.parallel_runs.max(1) as usize;
+        let concurrent = (self.updating.len() + self.update_queue.len() + 1).min(parallel);
+        let settings = self.settings.solver.shared_by(concurrent);
         let force = self.forced.remove(&id);
         let Some(node) = self.nodes.iter_mut().find(|n| n.id == id) else {
             return Start::Refused;
@@ -5274,7 +5290,7 @@ impl ProjectApp {
                 .filter(|l| links::is_feedback(l))
                 .map(|l| (l.source, l.item.clone(), l.target, l.slot.clone()))
                 .collect(),
-            bottom: f32::MIN,
+            rects: Vec::new(),
             busy: self.busy(),
             frames: self.frames.clone(),
             sizes: std::mem::take(&mut self.block_sizes),
@@ -5296,7 +5312,7 @@ impl ProjectApp {
             .filter_map(|g| self.graph.get_node(g).copied())
             .collect();
         let clip = viewer.to_global.inverse() * ui.clip_rect();
-        draw_feedback(ui.ctx(), &viewer.feedback, viewer.bottom, clip);
+        draw_feedback(ui.ctx(), &viewer.feedback, &viewer.rects, clip);
         self.pin_rects = ui.ctx().data_mut(|d| {
             d.remove_temp::<Vec<(PinKey, egui::Rect)>>(egui::Id::new(PIN_RECTS))
                 .unwrap_or_default()
@@ -8484,6 +8500,16 @@ fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
     if node.as_number().is_some() {
         return node.number_kind(path).flatten();
     }
+    if let Some(measure) = node.as_measure() {
+        return match path {
+            [cell, key] if cell == links::PARAMETERS => (measure.kind.point().is_some()
+                && POINT_AXES.contains(&key.as_str()))
+            .then_some(ValueKind::LENGTH),
+            _ => (path == [links::VALUE, RESULT])
+                .then(|| crate::measure::value_kind(&measure.kind))
+                .flatten(),
+        };
+    }
     match path {
         [cell, name] if cell == links::VALUE => (node.as_parameters()?.parameters.iter())
             .find(|p| &p.name == name)
@@ -8496,10 +8522,6 @@ fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
             table.inputs[table.input(name)?].kind
         }
         [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => Some(ValueKind::Factor),
-        [cell, key] if cell == links::PARAMETERS && node.as_measure().is_some() => {
-            (node.as_measure()?.kind.point().is_some() && POINT_AXES.contains(&key.as_str()))
-                .then_some(ValueKind::LENGTH)
-        }
         [cell, key]
             if cell == links::PARAMETERS && key == CAD_LENGTH && node.as_cad().is_some() =>
         {
@@ -9434,8 +9456,8 @@ struct Viewer {
     look_at: Option<(egui::Rect, egui::Pos2)>,
     /// The feedback wires of parameter studies: study, item, target and slot.
     feedback: Vec<(u64, Vec<String>, u64, Vec<String>)>,
-    /// The lowest edge of the blocks, which feedback wires go around below.
-    bottom: f32,
+    /// Where the blocks were drawn in this pass, which feedback wires go around below.
+    rects: Vec<egui::Rect>,
     /// The pin a wire is being dragged from.
     drag: Option<PinKey>,
     /// Why the wire being dragged cannot end at each pin of the other side; `None` for the
@@ -9536,7 +9558,6 @@ impl Viewer {
             RowWidget::Exposed(_) => egui::Sense::click(),
             _ => egui::Sense::hover(),
         };
-        let (rect, label) = ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), sense);
         let link_color = wire_color(&[links::VALUE.to_owned()]);
         // The fields of a Math or Switch block leave room for the label of its operation.
         let width = match widget {
@@ -9546,6 +9567,10 @@ impl Viewer {
             | RowWidget::Choices => 112.0,
             _ => 118.0,
         };
+        // The label senses the pointer left of the field only, so that the field shows its
+        // own tooltip, with its full value, also while it is read-only.
+        let (label_id, rect) = ui.allocate_space(egui::vec2(ROW_WIDTH, ROW_HEIGHT));
+        let label = ui.interact(rect.with_max_x(rect.right() - 4.0 - width), label_id, sense);
         // A long label, such as the name of an exposed parameter, ends in an ellipsis before
         // the field; the tooltip has it in full.
         let mut job = egui::text::LayoutJob::simple_singleline(
@@ -9583,7 +9608,11 @@ impl Viewer {
         let label = label.on_hover_text(&tip);
         if let RowWidget::Exposed(key) = widget {
             let name = (exposed.iter().find(|e| e.key == key)).map_or("", |e| e.name.as_str());
-            let mut text = name.to_owned();
+            // The name being typed is kept from frame to frame until the field lets go of the
+            // keyboard, and then becomes the parameter's.
+            let draft = egui::Id::new(("exposed name draft", id, key));
+            let mut text =
+                (ui.data(|d| d.get_temp::<String>(draft))).unwrap_or_else(|| name.to_owned());
             let studies: Vec<(u64, String)> = (self.nodes.iter())
                 .filter(|n| n.kind == Kind::Study)
                 .map(|n| (n.id, n.name.clone()))
@@ -9592,9 +9621,15 @@ impl Viewer {
             label.context_menu(|ui| {
                 ui.label("Name");
                 let edit = ui.text_edit_singleline(&mut text);
-                if edit.lost_focus() && !text.trim().is_empty() && text.trim() != name {
-                    (self.actions).push(Action::RenameExposed(id, key, text.trim().to_owned()));
-                    ui.close();
+                if edit.has_focus() {
+                    ui.data_mut(|d| d.insert_temp(draft, text.clone()));
+                }
+                if edit.lost_focus() {
+                    ui.data_mut(|d| d.remove::<String>(draft));
+                    if !text.trim().is_empty() && text.trim() != name {
+                        (self.actions).push(Action::RenameExposed(id, key, text.trim().to_owned()));
+                        ui.close();
+                    }
                 }
                 ui.separator();
                 let add = |ui: &mut egui::Ui| {
@@ -9657,15 +9692,9 @@ impl Viewer {
                     ui.weak("gone");
                     return;
                 };
-                if row.linked_from.is_some() {
-                    ui.disable();
-                }
                 let before = value;
-                let response = ui.add_sized(
-                    field.size(),
-                    crate::parameter_set::field(&mut value, kind, units),
-                );
-                response.on_hover_text(&tip);
+                let drag = crate::parameter_set::field(&mut value, kind, units);
+                number_field(&mut ui, field, row, drag, &tip);
                 if value != before {
                     self.actions.push(Action::SetExposed(id, key, value));
                 }
@@ -9675,15 +9704,9 @@ impl Viewer {
                 let Some(mut parameter) = parameters.get(index).cloned() else {
                     return;
                 };
-                if row.linked_from.is_some() {
-                    ui.disable();
-                }
                 let before = parameter.value;
-                let response = ui.add_sized(
-                    field.size(),
-                    crate::parameter_set::field(&mut parameter.value, parameter.kind, units),
-                );
-                response.on_hover_text(&tip);
+                let drag = crate::parameter_set::field(&mut parameter.value, parameter.kind, units);
+                number_field(&mut ui, field, row, drag, &tip);
                 if parameter.value != before {
                     self.actions
                         .push(Action::SetParameter(id, index, parameter.value));
@@ -9692,14 +9715,8 @@ impl Viewer {
             }
             RowWidget::CadLength => {
                 let mut value = cad_length;
-                if row.linked_from.is_some() {
-                    ui.disable();
-                }
-                let response = ui.add_sized(
-                    field.size(),
-                    crate::numeric::quantity(&mut value, units, Quantity::Length),
-                );
-                response.on_hover_text(&tip);
+                let drag = crate::numeric::quantity(&mut value, units, Quantity::Length);
+                number_field(&mut ui, field, row, drag, &tip);
                 if value != cad_length {
                     self.actions.push(Action::SetCadLength(id, value));
                 }
@@ -9710,14 +9727,8 @@ impl Viewer {
                     return;
                 };
                 let mut value = point[axis];
-                if row.linked_from.is_some() {
-                    ui.disable();
-                }
-                let response = ui.add_sized(
-                    field.size(),
-                    crate::numeric::quantity(&mut value, units, Quantity::Length),
-                );
-                response.on_hover_text(&tip);
+                let drag = crate::numeric::quantity(&mut value, units, Quantity::Length);
+                number_field(&mut ui, field, row, drag, &tip);
                 if value != point[axis] {
                     (self.actions).push(Action::SetMeasurePoint(id, POINT_AXES[axis], value));
                 }
@@ -9725,18 +9736,10 @@ impl Viewer {
             }
             RowWidget::Refinement => {
                 let mut value = refinement;
-                if row.linked_from.is_some() {
-                    ui.disable();
-                }
-                let response = ui.add_sized(
-                    field.size(),
-                    egui::DragValue::new(&mut value)
-                        .custom_parser(crate::numeric::evaluate)
-                        .range(0.05..=20.0)
-                        .speed(0.01)
-                        .max_decimals(3),
-                );
-                response.on_hover_text(&tip);
+                let drag = crate::numeric::drag_value(&mut value)
+                    .range(0.05..=20.0)
+                    .speed(0.01);
+                number_field(&mut ui, field, row, drag, &tip);
                 if value != refinement {
                     self.actions.push(Action::SetRefinement(id, value));
                 }
@@ -9754,14 +9757,16 @@ impl Viewer {
         let response = match widget {
             RowWidget::ExportPath => return,
             RowWidget::Param(param) => match primitive.slot(param.key) {
-                Some(ParamSlot::Length(value)) => ui.add_sized(
-                    field.size(),
-                    crate::numeric::quantity(value, units, Quantity::Length),
-                ),
-                Some(ParamSlot::Count(value)) => ui.add_sized(
-                    field.size(),
-                    crate::numeric::count(value).range(1..=10_000).speed(0.1),
-                ),
+                Some(ParamSlot::Length(value)) => {
+                    let drag = crate::numeric::quantity(value, units, Quantity::Length);
+                    number_field(&mut ui, field, row, drag, &tip);
+                    return self.set_primitive(id, primitive, before);
+                }
+                Some(ParamSlot::Count(value)) => {
+                    let drag = crate::numeric::count(value).range(1..=10_000).speed(0.1);
+                    number_field(&mut ui, field, row, drag, &tip);
+                    return self.set_primitive(id, primitive, before);
+                }
                 None => return,
             },
             RowWidget::Element => match &mut primitive {
@@ -9817,6 +9822,11 @@ impl Viewer {
             | RowWidget::Choices => return,
         };
         response.on_hover_text(&tip);
+        self.set_primitive(id, primitive, before);
+    }
+
+    /// Sets the edited mesh primitive of a block, if it changed.
+    fn set_primitive(&mut self, id: u64, primitive: MeshPrimitive, before: MeshPrimitive) {
         if primitive != before {
             self.actions.push(Action::SetPrimitive(id, primitive));
         }
@@ -9831,6 +9841,22 @@ impl Viewer {
 /// Width of the rows of a block.
 const ROW_WIDTH: f32 = 210.0;
 const ROW_HEIGHT: f32 = 20.0;
+
+/// The field of a number in a row of a block, the one every number of every block shows:
+/// as many digits as fit before its unit ([`crate::numeric::fitted`]), the full value in
+/// the tooltip; read-only while a value link gives it.
+fn number_field(
+    ui: &mut egui::Ui,
+    field: egui::Rect,
+    row: &Row,
+    drag: egui::DragValue<'_>,
+    tip: &str,
+) -> egui::Response {
+    if row.linked_from.is_some() {
+        ui.disable();
+    }
+    crate::numeric::fitted(ui, field.size(), drag, tip)
+}
 
 impl SnarlViewer<u64> for Viewer {
     fn title(&mut self, node: &u64) -> String {
@@ -10284,7 +10310,7 @@ impl SnarlViewer<u64> for Viewer {
         _ui: &mut egui::Ui,
         snarl: &mut Snarl<u64>,
     ) {
-        self.bottom = self.bottom.max(rect.bottom());
+        self.rects.push(rect);
         if let Some(id) = snarl.get_node(node) {
             self.drawn.insert(*id, rect.size());
         }
@@ -10699,12 +10725,12 @@ fn feedback_end(target: u64, slot: &[String]) -> egui::Id {
 }
 
 /// Draws the feedback wires of loops dashed, between the pins drawn in this pass: from the
-/// input of the study out to the right, below the blocks back to the left and into the
-/// parameter, so that the loop reads as one.
+/// input of the study out to the right, below the blocks in its way back to the left and into
+/// the parameter, so that the loop reads as one.
 fn draw_feedback(
     ctx: &egui::Context,
     feedback: &[(u64, Vec<String>, u64, Vec<String>)],
-    bottom: f32,
+    rects: &[egui::Rect],
     clip: egui::Rect,
 ) {
     let pass = ctx.cumulative_pass_nr();
@@ -10721,8 +10747,14 @@ fn draw_feedback(
             continue;
         };
         // Several loops run below one another.
-        let below = bottom.max(from.y).max(to.y) + 30.0 + 14.0 * index as f32;
+        let gap = 30.0 + 14.0 * index as f32;
         let (out, back) = (from.x + 24.0, to.x - 24.0);
+        let below = feedback_level(
+            from.y.max(to.y) + gap,
+            back.min(out)..=back.max(out),
+            gap,
+            rects,
+        );
         let corners = [
             from,
             egui::pos2(out, from.y),
@@ -10741,6 +10773,27 @@ fn draw_feedback(
             5.0,
         ));
     }
+}
+
+/// The height at which a feedback wire runs back between `x` from `start`: below the blocks
+/// it would cross there, and only those, so that blocks elsewhere do not move it.
+fn feedback_level(
+    start: f32,
+    x: std::ops::RangeInclusive<f32>,
+    gap: f32,
+    rects: &[egui::Rect],
+) -> f32 {
+    let mut level = start;
+    // Going below one block can run into the next one under it.
+    while let Some(bottom) = (rects.iter())
+        .filter(|r| r.right() >= *x.start() && r.left() <= *x.end())
+        .filter(|r| r.top() - gap * 0.5 <= level && level < r.bottom() + gap)
+        .map(|r| r.bottom())
+        .reduce(f32::max)
+    {
+        level = bottom + gap;
+    }
+    level
 }
 
 /// A path through `corners` with each inner corner rounded by up to `radius`.
@@ -11035,6 +11088,25 @@ fn timestamped(message: String) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn feedback_wires_go_below_only_the_blocks_in_their_way() {
+        use super::feedback_level;
+        let block =
+            |x: f32, y: f32| egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(100.0, 80.0));
+        // The study and the analysis it varies, side by side.
+        let mut rects = vec![block(0.0, 0.0), block(200.0, 0.0)];
+        assert_eq!(feedback_level(70.0, -24.0..=324.0, 30.0, &rects), 110.0);
+        // A block far below, or off to the side, leaves the wire where it is.
+        rects.push(block(100.0, 600.0));
+        rects.push(block(600.0, 0.0));
+        rects.push(block(-400.0, 200.0));
+        assert_eq!(feedback_level(70.0, -24.0..=324.0, 30.0, &rects), 110.0);
+        // A block in its way, and one right under that, take it further down.
+        rects.push(block(100.0, 100.0));
+        rects.push(block(150.0, 200.0));
+        assert_eq!(feedback_level(70.0, -24.0..=324.0, 30.0, &rects), 310.0);
+    }
+
     #[test]
     fn rows_open_the_analysis_in_their_workspace() {
         use super::{Show, TreeView, workspace_of};
@@ -11798,6 +11870,47 @@ mod tests {
             measure_rows(&extreme[0], &[], CellState::Missing, false).len(),
             3
         );
+    }
+
+    #[test]
+    fn a_math_block_takes_the_value_of_a_measure_block() {
+        let measure = |id, kind| {
+            Node::read(ProjectNode::Measure(file::MeasureBlock {
+                id,
+                name: format!("Measure-{id}"),
+                kind,
+                value: Some(0.25),
+                ..Default::default()
+            }))
+        };
+        let stress = MeasureKind::default();
+        let frequency = MeasureKind::Eigenfrequency { mode: 1 };
+        let math = Node::read(ProjectNode::Math(file::MathBlock {
+            id: 3,
+            name: "Math".into(),
+            operation: MathOp::Multiply,
+            values: vec![0.0, 2.0],
+            ..Default::default()
+        }));
+        let mut nodes = vec![measure(1, stress), measure(2, frequency), math];
+        let value = vec![links::VALUE.to_owned(), RESULT.to_owned()];
+        let input = vec![links::PARAMETERS.to_owned(), "a".to_owned()];
+        assert_eq!(
+            value_kind(&nodes, 1, &value),
+            Some(ValueKind::Quantity(Quantity::Pressure))
+        );
+        assert_eq!(
+            value_kind(&nodes, 2, &value),
+            Some(ValueKind::Quantity(Quantity::Frequency))
+        );
+        // A Math block without a kind takes the value, and then only values of its kind.
+        assert_eq!(refusal(&nodes, &[], 1, &value, 3, &input), None);
+        let kind = value_kind(&nodes, 1, &value);
+        if let Some((number, _)) = nodes[2].as_number_mut() {
+            number.kind = kind;
+        }
+        assert_eq!(refusal(&nodes, &[], 1, &value, 3, &input), None);
+        assert!(refusal(&nodes, &[], 2, &value, 3, &input).is_some());
     }
 
     #[test]

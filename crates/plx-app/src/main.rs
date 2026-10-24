@@ -61,6 +61,7 @@ mod status;
 mod study;
 mod style;
 mod symbols;
+mod table_export;
 mod transformation_dialog;
 mod tree;
 mod tree_icons;

@@ -20,8 +20,10 @@ portable Windows version in the folder `Settings` next to `prepolix.exe` (@porta
   [Global axes at the origin], [Draws a coordinate triad at the global origin (default on).],
   [Coordinate triad in the corner], [The clickable triad in the lower right (default on).],
   [Scale bar], [Shows a scale bar (default on).],
-  [Shell thickness], [Draws shell and membrane elements of the FE model as solids of their
-    section's thickness, placed by its offset (default on), see @shell-section.],
+  [Shell thickness], [Draws shell and membrane elements of the FE model and the results as
+    solids of their section's thickness, placed by its offset (default on), see @shell-section.],
+  [Beam profiles], [Draws beams with their profile and trusses as round bars of their area in
+    the FE model and the results (default on), see @beam-profiles.],
 )
 
 #screenshot("dark-theme.png", [The dark theme with the results of a cantilever])
@@ -46,7 +48,9 @@ portable Windows version in the folder `Settings` next to `prepolix.exe` (@porta
   [Executable], [Path to `ccx`. Empty means the CalculiX shipped with PrePoLix (shown greyed
     in the field), or `ccx` on the system path if PrePoLix was built without it. A bare name
     such as `ccx` is looked up on the system path.],
-  [Threads], [Number of threads CalculiX uses (`OMP_NUM_THREADS`), default 1.],
+  [Threads], [Number of threads CalculiX uses (`OMP_NUM_THREADS`). #ui("Automatic") (the
+    default) uses all processor cores; analyses or Campbell speeds solved at the same time
+    share them equally. Clear it to set a fixed number per run.],
   [Work directory], [Where input and result files of a run are written. Empty means a `Temp`
     folder next to the PrePoLix program, or `<system temp>/prepolix` if that folder is not
     writable.],
@@ -56,7 +60,8 @@ portable Windows version in the folder `Settings` next to `prepolix.exe` (@porta
   [Restart files per project], [Beyond this size (default 4096 MB) the oldest restart files
     of the project are removed; an analysis without them is solved from the beginning.],
   [Parallel analyses], [How many independent analyses #ui("Update Project") solves at the same
-    time (default 2), each with the threads above (@update-project).],
+    time (default 2), each with the threads above (@update-project). With automatic threads
+    they share the cores.],
   [Equation solvers], [The direct solvers found in the CalculiX executable, for example
     PARDISO. Steps with the solver #ui("Default") use Pardiso when it is available, otherwise
     PaStiX, otherwise CalculiX's own choice.],

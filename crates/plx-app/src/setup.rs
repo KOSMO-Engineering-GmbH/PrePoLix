@@ -3559,7 +3559,22 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
 /// Activates a deactivated step, boundary condition or load, or deactivates an active one,
 /// like PrePoMax's Activate and Deactivate; returns false for other items.
 pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
-    let active = match *item {
+    active_mut(fe, item).map(|a| *a = !*a).is_some()
+}
+
+/// Activates or deactivates an item; returns false for items that cannot be.
+pub fn set_active(fe: &mut FeModel, item: &TreeItem, active: bool) -> bool {
+    active_mut(fe, item).map(|a| *a = active).is_some()
+}
+
+/// Whether a step, boundary condition, load and the like is active; `None` for items that
+/// cannot be deactivated.
+pub fn is_active(fe: &mut FeModel, item: &TreeItem) -> Option<bool> {
+    active_mut(fe, item).map(|a| *a)
+}
+
+fn active_mut<'a>(fe: &'a mut FeModel, item: &TreeItem) -> Option<&'a mut bool> {
+    match *item {
         TreeItem::Step(s) => fe.steps.get_mut(s).map(|st| &mut st.active),
         TreeItem::BoundaryCondition(s, i) => (fe.steps.get_mut(s))
             .and_then(|st| st.boundary_conditions.get_mut(i))
@@ -3582,8 +3597,7 @@ pub fn toggle_active(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::NodeTie(i) => fe.node_ties.get_mut(i).map(|t| &mut t.active),
         TreeItem::InitialCondition(i) => fe.initial_conditions.get_mut(i).map(|c| &mut c.active),
         _ => None,
-    };
-    active.map(|a| *a = !*a).is_some()
+    }
 }
 
 /// Shows or hides the symbol of a constraint, boundary condition or load in the 3D view;
@@ -3700,6 +3714,78 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
     item_region(fe, item)
         .map(|region| region_highlight(model, region))
         .unwrap_or_default()
+}
+
+/// The contact pairs, ties, constraints, boundary conditions and loads that act on any of
+/// `parts`: those with a region on them. A click on a part in the 3D view marks them in the
+/// tree.
+pub fn acting_on_parts(model: &Model, parts: &BTreeSet<usize>) -> BTreeSet<TreeItem> {
+    let mesh = &model.mesh;
+    let names: HashSet<&str> = (parts.iter())
+        .filter_map(|&p| mesh.parts.get(p))
+        .map(|p| p.name.as_str())
+        .collect();
+    let elements: HashSet<ElementId> = (parts.iter())
+        .filter_map(|&p| mesh.parts.get(p))
+        .flat_map(|p| p.elements.iter().copied())
+        .collect();
+    let fe = &model.fe;
+    let on_parts = |region: &Region| match region {
+        Region::Parts(regions) => regions.iter().any(|n| names.contains(n.as_str())),
+        Region::RemotePoint(_) => false,
+        _ => {
+            let mut ids = region.elements(mesh);
+            ids.extend(region.faces(mesh).into_iter().map(|(e, _)| e));
+            if ids.is_empty() {
+                (region.nodes(mesh).into_iter())
+                    .any(|n| model.node_part(n).is_some_and(|p| parts.contains(&p)))
+            } else {
+                ids.iter().any(|e| elements.contains(e))
+            }
+        }
+    };
+    // A load on a reference point acts on the rigid bodies the point drives.
+    let driven = |region: &Region| match region.reference_point() {
+        Some(point) => fe.constraints.iter().any(|c| match c {
+            Constraint::RigidBody(body) => body.reference_point == point && on_parts(&body.region),
+            _ => false,
+        }),
+        None => on_parts(region),
+    };
+    let mut acting = BTreeSet::new();
+    for (i, c) in fe.constraints.iter().enumerate() {
+        if c.regions().into_iter().any(on_parts) {
+            acting.insert(TreeItem::Constraint(i));
+        }
+    }
+    for (i, c) in fe.contact_pairs.iter().enumerate() {
+        if on_parts(&c.master) || on_parts(&c.slave) {
+            acting.insert(TreeItem::ContactPair(i));
+        }
+    }
+    for (i, t) in fe.ties.iter().enumerate() {
+        if on_parts(&t.master) || on_parts(&t.slave) {
+            acting.insert(TreeItem::Tie(i));
+        }
+    }
+    for (i, t) in fe.node_ties.iter().enumerate() {
+        if on_parts(&t.region) {
+            acting.insert(TreeItem::NodeTie(i));
+        }
+    }
+    for (s, step) in fe.steps.iter().enumerate() {
+        for (i, b) in step.boundary_conditions.iter().enumerate() {
+            if driven(&b.region) {
+                acting.insert(TreeItem::BoundaryCondition(s, i));
+            }
+        }
+        for (i, l) in step.loads.iter().enumerate() {
+            if driven(&l.region) {
+                acting.insert(TreeItem::Load(s, i));
+            }
+        }
+    }
+    acting
 }
 
 /// Region of an item, for highlighting it when it is selected in the tree.
@@ -5636,6 +5722,54 @@ mod tests {
         assert_eq!(fe.steps[0].loads[0].factor_amplitude, None);
         assert!(delete(&mut fe, &TreeItem::Amplitude(0)));
         assert!(fe.amplitudes.is_empty());
+    }
+
+    #[test]
+    fn a_part_shows_what_acts_on_it() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../testdata/platte_mit_stuetzen.inp");
+        let mesh = plx_io::inp::read_inp(&path).unwrap().mesh;
+        let mut model = Model::new(&path, mesh);
+        let part = |name: &str| {
+            (model.mesh.parts.iter())
+                .position(|p| p.name == name)
+                .unwrap()
+        };
+        let (plate, columns) = (part("PLATTE"), part("STUETZEN"));
+        let mut step = Step::new_static("Step-1");
+        step.boundary_conditions.push(BoundaryCondition {
+            name: "Feet".into(),
+            active: true,
+            visible: true,
+            region: Region::NodeSet("FUESSE".into()),
+            kind: BoundaryKind::displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        step.loads.push(Load {
+            name: "Pressure".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(vec![(1, 1), (2, 1)]),
+            kind: LoadKind::Pressure(1.0),
+            amplitude: None,
+            factor_amplitude: None,
+        });
+        model.fe.steps.push(step);
+        let mut pair = ContactPair::new("Contact_Pair-1", "Interaction-1");
+        pair.master = Region::Parts(vec!["PLATTE".into()]);
+        pair.slave = Region::Parts(vec!["STUETZEN".into()]);
+        model.fe.contact_pairs.push(pair);
+
+        let acting = |parts: &[usize]| acting_on_parts(&model, &parts.iter().copied().collect());
+        assert_eq!(
+            acting(&[plate]),
+            [TreeItem::ContactPair(0), TreeItem::Load(0, 0)].into()
+        );
+        assert_eq!(
+            acting(&[columns]),
+            [TreeItem::ContactPair(0), TreeItem::BoundaryCondition(0, 0)].into()
+        );
+        assert_eq!(acting(&[plate, columns]).len(), 3);
     }
 
     #[test]

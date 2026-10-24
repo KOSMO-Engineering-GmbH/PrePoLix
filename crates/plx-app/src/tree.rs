@@ -33,7 +33,7 @@ impl TreeView {
 }
 
 /// A node of a tree; placeholders and group nodes are identified by their name.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TreeItem {
     Group(&'static str),
     Model,
@@ -135,12 +135,26 @@ pub struct TreeState {
     more_parts: BTreeSet<usize>,
     /// Where the range of a Shift click starts: the part last clicked without Shift.
     anchor: Option<usize>,
+    /// Items selected along with the selected item, by Ctrl or Shift click: siblings in one
+    /// container, such as many contact pairs to delete at once. They count only while the
+    /// item they were selected with, the first, stays selected.
+    more_items: Option<(TreeItem, Vec<TreeItem>)>,
+    /// Where the range of a Shift click on items starts.
+    item_anchor: Option<TreeItem>,
     /// Items another analysis of the project owns, with its name: they are marked and
     /// cannot be changed here.
     pub linked: HashMap<TreeItem, String>,
     /// Leave the linked items out of the FE Model tree; categories stay, so that items of
     /// the analysis itself can be added to them.
     pub hide_linked: bool,
+    /// What acts on the parts selected in the FE Model tree, such as their contact pairs and
+    /// loads: marked in the tree. Kept up to date by the app for the parts and the model
+    /// revision in `acting_for`.
+    pub acting: BTreeSet<TreeItem>,
+    pub acting_for: Option<(BTreeSet<usize>, u64)>,
+    /// The parts were clicked in the 3D view: open the branches of what acts on them in
+    /// the next frame, while the tree stays where it is.
+    pub reveal_acting: bool,
 }
 
 impl TreeState {
@@ -155,6 +169,83 @@ impl TreeState {
             }
             _ => BTreeSet::new(),
         }
+    }
+
+    /// The items selected in `view`: the selected one first, then those selected along
+    /// with it. Parts are in [`Self::selected_parts`].
+    pub fn selected_items(&self, view: TreeView) -> Vec<TreeItem> {
+        let Some((selected, lead)) = &self.selected else {
+            return Vec::new();
+        };
+        if *selected != view {
+            return Vec::new();
+        }
+        let mut items = vec![lead.clone()];
+        if let Some((owner, more)) = &self.more_items
+            && owner == lead
+        {
+            items.extend(more.iter().cloned());
+        }
+        items
+    }
+
+    /// Selects one item alone, by a plain click.
+    fn select_item(&mut self, view: TreeView, item: TreeItem) {
+        self.selected = Some((view, item.clone()));
+        self.more_items = None;
+        self.item_anchor = Some(item);
+    }
+
+    /// Ctrl click (adds or takes out `item`) or Shift click (the items from the last one
+    /// clicked to `item`, added with Ctrl) on an item of a container listing `siblings`.
+    pub fn select_sibling(
+        &mut self,
+        view: TreeView,
+        item: TreeItem,
+        siblings: &[TreeItem],
+        ctrl: bool,
+        shift: bool,
+    ) {
+        let current: Vec<TreeItem> = (self.selected_items(view).into_iter())
+            .filter(|i| siblings.contains(i))
+            .collect();
+        let mut chosen = if shift {
+            let anchor = (self.item_anchor.clone())
+                .filter(|a| siblings.contains(a) && !current.is_empty())
+                .unwrap_or_else(|| item.clone());
+            let position = |i: &TreeItem| siblings.iter().position(|s| s == i).unwrap_or(0);
+            let (a, b) = (position(&anchor), position(&item));
+            let mut chosen = if ctrl { current } else { Vec::new() };
+            for sibling in &siblings[a.min(b)..=a.max(b)] {
+                if !chosen.contains(sibling) {
+                    chosen.push(sibling.clone());
+                }
+            }
+            self.item_anchor = Some(anchor);
+            chosen
+        } else {
+            let mut chosen = current;
+            match chosen.iter().position(|i| *i == item) {
+                Some(index) => {
+                    chosen.remove(index);
+                }
+                None => chosen.push(item.clone()),
+            }
+            self.item_anchor = Some(item.clone());
+            chosen
+        };
+        let lead = if chosen.contains(&item) {
+            item
+        } else if let Some(last) = chosen.last() {
+            last.clone()
+        } else {
+            self.selected = None;
+            self.more_items = None;
+            return;
+        };
+        chosen.retain(|i| *i != lead);
+        self.selected = Some((view, lead.clone()));
+        self.more_items = Some((lead, chosen));
     }
 
     /// Selects one part alone, by a plain click.
@@ -269,6 +360,20 @@ pub struct TreeResponse {
 
 /// Tree label with a fixed size: highlight and hover frame are painted over the same area, so
 /// that hovering never moves the rows below (egui's selectable label grows by its frame).
+/// The tinted frame behind the label of an item that acts on the selected part.
+fn acting_mark(rect: Rect) -> Shape {
+    let color = crate::style::highlight();
+    let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 48);
+    let stroke = egui::Stroke::new(1.0, color);
+    Shape::Rect(egui::epaint::RectShape::new(
+        rect,
+        0.0,
+        fill,
+        stroke,
+        egui::StrokeKind::Inside,
+    ))
+}
+
 pub(crate) fn row_label(
     ui: &mut Ui,
     selected: bool,
@@ -617,6 +722,9 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
         ),
         Group("Surface Interactions") => matches!(item, SurfaceInteraction(_)),
         Group("Contact Pairs") => matches!(item, ContactPair(_) | Tie(_) | NodeTie(_)),
+        Group("Steps") => matches!(item, BoundaryCondition(..) | Load(..)),
+        Step(s) | StepGroup(s, "BCs") if matches!(item, BoundaryCondition(t, _) if t == s) => true,
+        Step(s) | StepGroup(s, "Loads") if matches!(item, Load(t, _) if t == s) => true,
         _ => false,
     }
 }
@@ -779,14 +887,15 @@ struct Tree<'a> {
     part_indices: Vec<usize>,
     /// The type of every step, which gives it its icon and tooltip.
     step_types: Vec<StepGlyph>,
+    /// The items of the container being drawn, which Ctrl and Shift select together.
+    siblings: Vec<TreeItem>,
 }
 
 impl Tree<'_> {
     fn is_selected(&self, item: &TreeItem) -> bool {
         match item {
             TreeItem::Part(index) => self.state.selected_parts(self.view).contains(index),
-            _ => (self.state.selected.as_ref())
-                .is_some_and(|(view, selected)| *view == self.view && selected == item),
+            _ => self.state.selected_items(self.view).contains(item),
         }
     }
 
@@ -808,7 +917,14 @@ impl Tree<'_> {
         } else {
             inactive.then_some(INACTIVE)
         };
-        let mut response = row_label(ui, self.is_selected(&item), color, text);
+        let selected = self.is_selected(&item);
+        // Drawn under the label once its size is known.
+        let mark = ui.painter().add(Shape::Noop);
+        let mut response = row_label(ui, selected, color, text);
+        if !selected && self.view == TreeView::FeModel && self.state.acting.contains(&item) {
+            ui.painter().set(mark, acting_mark(response.rect));
+            response = response.on_hover_text("Acts on the selected part");
+        }
         if let Some(source) = self.state.linked.get(&item) {
             let tip = format!(
                 "Linked from {source}: it changes there. Double-click to open {source} or \
@@ -852,7 +968,14 @@ impl Tree<'_> {
                     self.state.toggle_part(self.view, index);
                 }
                 TreeItem::Part(index) => self.state.select_part(self.view, index),
-                _ => self.state.selected = Some((self.view, item.clone())),
+                // Siblings in a container likewise, e.g. contact pairs; a right click on
+                // one of them keeps them for its menu.
+                _ if response.secondary_clicked() && self.is_selected(&item) => {}
+                _ if response.clicked() && (ctrl || shift) && self.siblings.contains(&item) => {
+                    let siblings = self.siblings.clone();
+                    (self.state).select_sibling(self.view, item.clone(), &siblings, ctrl, shift);
+                }
+                _ => self.state.select_item(self.view, item.clone()),
             }
         }
         let lead =
@@ -903,6 +1026,8 @@ impl Tree<'_> {
                     | TreeItem::HotSpot(_)
                     | TreeItem::MeshItem(_)
             );
+        // The menu of one of several selected items acts on all of them.
+        let several = self.is_selected(&item) && self.state.selected_items(self.view).len() > 1;
         if creates.is_some() || editable {
             response.context_menu(|ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
@@ -979,7 +1104,12 @@ impl Tree<'_> {
                     }
                     if can_deactivate(&item) {
                         ui.separator();
-                        let label = if inactive { "Activate" } else { "Deactivate" };
+                        let label = match (inactive, several) {
+                            (true, false) => "Activate",
+                            (false, false) => "Deactivate",
+                            (true, true) => "Activate Selected",
+                            (false, true) => "Deactivate Selected",
+                        };
                         if ui.button(label).clicked() {
                             self.response.toggle_active = Some(item.clone());
                         }
@@ -1001,12 +1131,18 @@ impl Tree<'_> {
                         ui.separator();
                     }
                     if self.master_slave.contains(&item) {
-                        if ui.button("Swap Master/Slave").clicked() {
+                        let label = if several {
+                            "Swap Master/Slave of Selected"
+                        } else {
+                            "Swap Master/Slave"
+                        };
+                        if ui.button(label).clicked() {
                             self.response.swap_master_slave = Some(item.clone());
                         }
                         ui.separator();
                     }
-                    if deletable(self.view, &item) && ui.button("Delete").clicked() {
+                    let label = if several { "Delete Selected" } else { "Delete" };
+                    if deletable(self.view, &item) && ui.button(label).clicked() {
                         self.response.delete = Some(item.clone());
                     }
                 }
@@ -1180,6 +1316,16 @@ impl Tree<'_> {
         {
             state.set_open(true);
         }
+        if self.state.reveal_acting
+            && self.view == TreeView::FeModel
+            && self
+                .state
+                .acting
+                .iter()
+                .any(|acting| contains(&item, acting))
+        {
+            state.set_open(true);
+        }
         if let Some(open) = self.forced_open {
             // While a branch closes, egui still draws its body for the animation, so the
             // descendants are collapsed as well.
@@ -1338,9 +1484,11 @@ impl Tree<'_> {
         }
         let text = counted(name, items.len());
         self.branch(ui, TreeItem::Group(name), text, true, |tree, ui| {
+            tree.siblings = items.iter().map(|(item, _)| item.clone()).collect();
             for (item, label) in items {
                 tree.leaf(ui, item, label);
             }
+            tree.siblings.clear();
         });
     }
 
@@ -1359,9 +1507,11 @@ impl Tree<'_> {
         }
         let text = counted(name, items.len());
         self.branch(ui, group, text, true, |tree, ui| {
+            tree.siblings = items.iter().map(|(item, _)| item.clone()).collect();
             for (item, label) in items {
                 tree.leaf(ui, item, label);
             }
+            tree.siblings.clear();
         });
     }
 
@@ -1418,6 +1568,7 @@ pub fn show(
         step_count: 0,
         part_indices: Vec::new(),
         step_types: Vec::new(),
+        siblings: Vec::new(),
     };
     let expanding = tree.state.expand.clone();
     egui::ScrollArea::both()
@@ -1455,6 +1606,7 @@ pub fn show(
         tree.state.expand = None;
     }
     tree.state.reveal = false;
+    tree.state.reveal_acting = false;
     // Like PrePoMax, the space bar switches the selected item on or off; here only while the
     // pointer is over the tree, so that typing elsewhere never does.
     if let Some((selected_view, item)) = &tree.state.selected
@@ -1847,6 +1999,51 @@ mod tests {
         state.toggle_part(view, 3);
         assert_eq!(state.selected, None);
         assert!(parts(&state, view).is_empty());
+    }
+
+    #[test]
+    fn ctrl_and_shift_select_several_contact_pairs() {
+        let view = TreeView::FeModel;
+        let siblings = [
+            TreeItem::ContactPair(0),
+            TreeItem::ContactPair(1),
+            TreeItem::Tie(0),
+            TreeItem::Tie(1),
+            TreeItem::NodeTie(0),
+        ];
+        let mut state = TreeState::default();
+        state.select_item(view, siblings[1].clone());
+        // Shift selects from the item last clicked; the clicked one leads.
+        state.select_sibling(view, siblings[3].clone(), &siblings, false, true);
+        assert_eq!(
+            state.selected_items(view),
+            [
+                siblings[3].clone(),
+                siblings[1].clone(),
+                siblings[2].clone()
+            ]
+        );
+        // Ctrl adds one and takes one out.
+        state.select_sibling(view, siblings[4].clone(), &siblings, true, false);
+        state.select_sibling(view, siblings[2].clone(), &siblings, true, false);
+        let mut items = state.selected_items(view);
+        items.sort();
+        assert_eq!(
+            items,
+            [
+                siblings[1].clone(),
+                siblings[3].clone(),
+                siblings[4].clone()
+            ]
+        );
+        assert!(state.selected_items(TreeView::Geometry).is_empty());
+        // Another selection drops them; a plain click selects one alone.
+        state.selected = Some((view, TreeItem::Material(0)));
+        assert_eq!(state.selected_items(view), [TreeItem::Material(0)]);
+        state.select_sibling(view, siblings[0].clone(), &siblings, true, false);
+        assert_eq!(state.selected_items(view), [siblings[0].clone()]);
+        state.select_sibling(view, siblings[0].clone(), &siblings, true, false);
+        assert_eq!(state.selected, None);
     }
 
     #[test]

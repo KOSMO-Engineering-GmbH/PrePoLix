@@ -23,6 +23,7 @@ pub use plx_model::campbell::{Mode, Setup, SpeedPoint, Whirl};
 use plx_model::{EquationSolver, FeModel, LoadKind, StepKind};
 
 use crate::numeric;
+use crate::table_export;
 use crate::xy_plot;
 
 /// Speeds of the coarse grid the sweep starts with.
@@ -884,7 +885,10 @@ impl CampbellWindow {
         if min_speed >= max_speed {
             return Err("The lowest speed must be below the highest.".into());
         }
-        let job_solver = solver.job_solver();
+        // The speeds solved at the same time share the cores.
+        let job_solver = solver
+            .shared_by(solver.parallel_runs.max(1) as usize)
+            .job_solver();
         if let Some(message) = crate::settings::missing_executable(&job_solver.executable) {
             return Err(format!("CalculiX not started: {message}"));
         }
@@ -1124,11 +1128,14 @@ impl CampbellWindow {
                         ui.ctx()
                             .copy_text(table_text(&self.points, &self.shown_orders(), '\t'));
                     }
-                    if ui
-                        .add_enabled(!self.points.is_empty(), egui::Button::new("Export CSV ..."))
-                        .clicked()
-                    {
-                        self.export_csv();
+                    for (label, format) in [
+                        ("Export CSV ...", table_export::Format::Csv),
+                        ("Export JSON ...", table_export::Format::Json),
+                    ] {
+                        let button = egui::Button::new(label);
+                        if ui.add_enabled(!self.points.is_empty(), button).clicked() {
+                            self.export(format);
+                        }
                     }
                 });
                 ui.separator();
@@ -1248,26 +1255,18 @@ impl CampbellWindow {
         }
     }
 
-    /// Saves the sweep as a CSV file, to a path from a Save As dialog.
-    fn export_csv(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Export Campbell Diagram")
-            .add_filter("CSV file", &["csv"])
-            .set_file_name("campbell.csv")
-            .save_file()
+    /// Saves the sweep as a CSV or JSON file, to a path from a Save As dialog.
+    fn export(&mut self, format: table_export::Format) {
+        let Some(path) = table_export::save_dialog("Export Campbell Diagram", "campbell", format)
         else {
             return;
         };
-        let path = if path.extension().is_none() {
-            path.with_extension("csv")
-        } else {
-            path
-        };
         let text = table_text(&self.points, &self.shown_orders(), ',');
-        self.log.push(match std::fs::write(&path, text) {
-            Ok(()) => format!("Exported: {}", path.display()),
-            Err(err) => format!("Export failed ({}): {err}", path.display()),
-        });
+        self.log
+            .push(match table_export::write(&path, &text, ',', format) {
+                Ok(()) => format!("Exported: {}", path.display()),
+                Err(err) => format!("Export failed ({}): {err}", path.display()),
+            });
     }
 
     fn diagram_and_table(&mut self, ui: &mut Ui) {

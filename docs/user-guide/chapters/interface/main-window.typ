@@ -79,7 +79,10 @@ has no mesh yet opens on the #ui("Geometry") tab, opening a result file switches
 - Selecting an item highlights its region in the 3D view. Master and slave regions of contacts and
   ties get different colours.
 - Parts can be selected together: #key("Ctrl")+click toggles a part, #key("Shift")+click
-  selects a range.
+  selects a range. The same works for the items of one container, for example many contact
+  pairs: the 3D view highlights them all, and #ui("Delete Selected"), #ui("Activate Selected") /
+  #ui("Deactivate Selected") (or #key("Del") and #key("Space")) and #ui("Swap Master/Slave of
+  Selected") in the context menu act on all of them.
 
 === Context menus
 
@@ -110,6 +113,17 @@ Tree items are renamed in the #ui("Name") field of their dialog. Mesh parts are 
 digits, `_` and `-`, up to 80 characters. Items that refer to a renamed part, material or
 amplitude follow the new name. Geometry parts cannot be renamed, because the mesh setup refers to
 them by name.
+
+=== What acts on a part <acting>
+
+A click on a part in the 3D view selects it in the #ui("FE Model") tree, where the tree stays
+where it is. Instead it marks with a blue frame the contact pairs and ties, constraints,
+boundary conditions and loads whose region lies on the part, and opens their branches. A load
+on a reference point counts for the parts of the rigid body the point drives. With several
+parts selected the tree marks what acts on any of them.
+
+#screenshot("part-acting.png", [BLOCK4 clicked in the 3D view: its two ties and the force on it
+  are marked])
 
 === Properties dialogs
 

@@ -150,10 +150,8 @@ impl ParameterSetEditor {
                                 ui.selectable_value(&mut parameter.kind, kind, kind.label());
                             }
                         });
-                    ui.add_sized(
-                        [110.0, 18.0],
-                        field(&mut parameter.value, parameter.kind, units),
-                    );
+                    let drag = field(&mut parameter.value, parameter.kind, units);
+                    crate::numeric::fitted(ui, egui::vec2(110.0, 18.0), drag, "");
                     if ui.small_button("Remove").clicked() {
                         remove = Some(i);
                     }
@@ -175,9 +173,6 @@ pub fn field(value: &mut f64, kind: ValueKind, units: UnitSystem) -> egui::DragV
             .range(1.0..=1e6)
             .speed(0.1)
             .fixed_decimals(0),
-        None => egui::DragValue::new(value)
-            .custom_parser(crate::numeric::evaluate)
-            .speed(0.01)
-            .max_decimals(4),
+        None => crate::numeric::drag_value(value).speed(0.01),
     }
 }

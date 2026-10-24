@@ -70,6 +70,101 @@ pub fn physical(value: &mut f64, units: UnitSystem, of: Quantity) -> egui::DragV
     quantity(value, units, of).speed(0.0)
 }
 
+/// A number field of a fixed size, such as in a block of the project schematic, where
+/// [`format_physical`] may not fit with the unit: shown with as many significant digits as
+/// fit, the unit always whole, and the full value in the tooltip, before `tip`. Only the
+/// display is shortened: typing starts from the full value, so a value that is not edited
+/// keeps all its digits. A disabled field, e.g. one a value link gives, shows the tooltip as
+/// well.
+pub fn fitted(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    field: egui::DragValue<'_>,
+    tip: &str,
+) -> egui::Response {
+    let layout = egui::Layout::centered_and_justified(ui.layout().main_dir());
+    ui.allocate_ui_with_layout(size, layout, |ui| {
+        // The id the DragValue takes: while it has the focus it is typed in, in full.
+        let editing = ui.memory(|m| m.has_focus(ui.next_auto_id()));
+        let affix = field
+            .atoms()
+            .text()
+            .map(|t| t.into_owned())
+            .unwrap_or_default();
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let ctx = ui.ctx().clone();
+        let width = move |text: &str| {
+            let galley = ctx.fonts_mut(|f| {
+                f.layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+            });
+            galley.size().x
+        };
+        let room = size.x - 2.0 * ui.spacing().button_padding.x - width(&affix) - 2.0;
+        let shown = std::rc::Rc::new(std::cell::Cell::new(None));
+        let field = if editing {
+            field
+        } else {
+            let shown = shown.clone();
+            field.custom_formatter(move |value, _| {
+                let text = fit(value, |text| width(text) <= room);
+                shown.set(Some((value, text.clone())));
+                text
+            })
+        };
+        let response = ui.add(field);
+        let tip = match shown.take() {
+            Some((value, text)) if text != format_physical(value) => {
+                format!("{}{affix} (shown rounded)\n{tip}", format_physical(value))
+            }
+            _ => tip.to_owned(),
+        };
+        let tip = tip.trim_end();
+        if response.enabled() {
+            response.on_hover_text(tip)
+        } else {
+            read_only_tooltip(&response, tip);
+            response
+        }
+    })
+    .inner
+}
+
+/// The tooltip of a disabled field. egui's own one looks for the pointer in the layer of the
+/// field, which misses fields in a sublayer, such as in the zoomed project schematic.
+fn read_only_tooltip(response: &egui::Response, tip: &str) {
+    let ctx = &response.ctx;
+    let rect = (ctx.layer_transform_to_global(response.layer_id))
+        .map_or(response.rect, |to_global| to_global * response.rect);
+    let (pointer, still) =
+        ctx.input(|i| (i.pointer.hover_pos(), i.pointer.time_since_last_movement()));
+    if tip.is_empty() || !pointer.is_some_and(|p| rect.contains(p)) {
+        return;
+    }
+    let delay = ctx.global_style().interaction.tooltip_delay;
+    if still < delay {
+        ctx.request_repaint_after_secs(delay - still);
+    } else {
+        response.show_tooltip_text(tip);
+    }
+}
+
+/// `value` with all its digits ([`format_physical`]) if `fits` them, else with as many
+/// significant digits as fit, at least two.
+pub fn fit(value: f64, fits: impl Fn(&str) -> bool) -> String {
+    let full = format_physical(value);
+    if fits(&full) {
+        return full;
+    }
+    for digits in (2..15).rev() {
+        let rounded: f64 = format!("{value:.*e}", digits - 1).parse().unwrap_or(value);
+        let text = format_physical(rounded);
+        if text.len() < full.len() && fits(&text) {
+            return text;
+        }
+    }
+    format!("{value:.1e}")
+}
+
 /// A value with all its digits, never rounded to fewer: very small or large numbers in
 /// e-notation, others as they are. Only the noise of a unit conversion beyond 15
 /// significant digits, such as 30.000000000000004, is dropped.
@@ -84,7 +179,7 @@ pub fn format_physical(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_physical, parse_count, parse_number};
+    use super::{fit, format_physical, parse_count, parse_number};
     use plx_model::{Quantity, UnitSystem};
 
     #[test]
@@ -144,5 +239,18 @@ mod tests {
         assert_eq!(parse_count("2*(3+4)"), Some(14.0));
         assert_eq!(parse_count("10/4"), None);
         assert_eq!(parse_count("x"), None);
+    }
+
+    #[test]
+    fn fitted_numbers_keep_as_many_digits_as_fit() {
+        let value = 0.091_000_273_437_5;
+        assert_eq!(fit(value, |_| true), "0.0910002734375");
+        assert_eq!(fit(value, |t| t.len() <= 9), "0.0910003");
+        assert_eq!(fit(value, |t| t.len() <= 5), "0.091");
+        assert_eq!(fit(2.0 / 3.0, |t| t.len() <= 6), "0.6667");
+        assert_eq!(fit(123_456.789, |t| t.len() <= 6), "123457");
+        assert_eq!(fit(1.234_567e-9, |t| t.len() <= 8), "1.235e-9");
+        // Nothing fits: two significant digits.
+        assert_eq!(fit(2.0 / 3.0, |_| false), "6.7e-1");
     }
 }

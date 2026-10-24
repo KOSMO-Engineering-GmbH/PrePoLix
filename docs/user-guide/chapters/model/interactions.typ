@@ -228,6 +228,13 @@ survive remeshing.
 #screenshot("contact-search-shell-edge.png", [A tie found by the search between the bottom of a
   block (master, red) and the top edge of a shell standing under it (slave, violet)])
 
+The search can make hundreds of pairs. To delete, deactivate or swap many of them at once, select
+them in the tree with #key("Shift")+click (a range) and #key("Ctrl")+click (one more or one less)
+and use the context menu of one of them (@model-tree).
+
+#screenshot("contact-pairs-selected.png", [Four of five ties selected and deactivated together;
+  the context menu acts on all of them])
+
 CalculiX ties the edge faces of membranes to nothing (the solver stops with a singular stiffness
 matrix), so PrePoLix writes the slave side of a tie on membrane edges as a node surface of the
 edge's nodes; a membrane has no rotations that would need more.

@@ -27,6 +27,7 @@ use crate::overlay::FeatureMark;
 use crate::results::format_value;
 use crate::selection::{Items, Operation, Picker, PickerAction, Target};
 use crate::setup::{FACE_SOURCES, RegionDraft, face_target};
+use crate::table_export;
 use crate::viewport::{BoxSelect, Preview};
 
 /// Kinds of features the trees create.
@@ -675,15 +676,12 @@ impl FeatureDialog {
             if ui.button("Copy to Clipboard").clicked() {
                 ui.ctx().copy_text(cut_csv(cut, &header, '\t'));
             }
-            if ui.button("Save as CSV…").clicked() {
-                let name = format!("{}.csv", result.name);
-                if let Some(file) = rfd::FileDialog::new()
-                    .add_filter("CSV", &["csv"])
-                    .set_file_name(name)
-                    .save_file()
+            for (label, format) in SAVE_AS {
+                if ui.button(label).clicked()
+                    && let Some(file) = table_export::save_dialog(label, &result.name, format)
                 {
                     let csv = cut_csv(cut, &header, ';');
-                    self.error = std::fs::write(&file, csv)
+                    self.error = table_export::write(&file, &csv, ';', format)
                         .err()
                         .map(|e| format!("{}: {e}", file.display()));
                 }
@@ -785,15 +783,12 @@ impl FeatureDialog {
                 ui.ctx()
                     .copy_text(path::to_csv(points, &values, &header, '\t'));
             }
-            if ui.button("Save as CSV…").clicked() {
-                let name = format!("{}.csv", located.path.name);
-                if let Some(file) = rfd::FileDialog::new()
-                    .add_filter("CSV", &["csv"])
-                    .set_file_name(name)
-                    .save_file()
+            for (label, format) in SAVE_AS {
+                if ui.button(label).clicked()
+                    && let Some(file) = table_export::save_dialog(label, &located.path.name, format)
                 {
                     let csv = path::to_csv(points, &values, &header, ';');
-                    self.error = std::fs::write(&file, csv)
+                    self.error = table_export::write(&file, &csv, ';', format)
                         .err()
                         .map(|e| format!("{}: {e}", file.display()));
                 }
@@ -1038,6 +1033,12 @@ fn plane_mark(model: &Model, plane: &Plane, selected: bool) -> Option<FeatureMar
         selected,
     })
 }
+
+/// The buttons that save a table, with their file format.
+const SAVE_AS: [(&str, table_export::Format); 2] = [
+    ("Save as CSV…", table_export::Format::Csv),
+    ("Save as JSON…", table_export::Format::Json),
+];
 
 /// The points where a plane cuts the model with their values, as a table.
 fn cut_csv(cut: &SectionValues, header: &str, separator: char) -> String {

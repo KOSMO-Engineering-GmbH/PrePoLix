@@ -100,15 +100,10 @@ impl CadBlock {
         match Self::apply(input, &self.operation) {
             Ok(geometry) => {
                 self.take_result(geometry, wanted);
-                let (kind, count) = (self.operation.kind, self.operation.entities.len());
                 Ok(format!(
-                    "{} of {count} {} made",
-                    kind.label().to_lowercase(),
-                    if count == 1 {
-                        kind.picked_one()
-                    } else {
-                        kind.picked_noun()
-                    }
+                    "{} of {} made",
+                    self.operation.kind.label().to_lowercase(),
+                    self.operation.describe_picks()
                 ))
             }
             Err(why) => {
@@ -204,10 +199,9 @@ pub(super) fn cad_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<R
                    analysis for the changed geometry."
         .to_owned();
     match state {
-        CellState::Missing if block.input.is_some() => tip.push_str(&format!(
-            "\nNo {} picked yet: double-click the block to pick them on the geometry.",
-            block.operation.kind.picked_noun()
-        )),
+        CellState::Missing if block.input.is_some() => {
+            tip.push_str("\nNothing picked yet: double-click the block to pick what it acts on.")
+        }
         CellState::Missing => {}
         CellState::OutOfDate => tip.push_str(
             "\nOut of date: Update Project makes it again, or Update Geometry in the context menu.",
@@ -222,7 +216,6 @@ pub(super) fn cad_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<R
         _ => tip.push_str(&format!("\n{}", state.text())),
     }
     let operation = &block.operation;
-    let picked = operation.entities.len();
     let path = vec![links::GEOMETRY.to_owned()];
     let length = vec![links::PARAMETERS.to_owned(), CAD_LENGTH.to_owned()];
     vec![
@@ -242,15 +235,7 @@ pub(super) fn cad_rows(node: &Node, incoming: &[(Vec<String>, String)]) -> Vec<R
             path,
         },
         Row {
-            text: format!(
-                "{}: {picked} {}",
-                operation.kind.label(),
-                if picked == 1 {
-                    operation.kind.picked_one()
-                } else {
-                    operation.kind.picked_noun()
-                }
-            ),
+            text: format!("{}: {}", operation.kind.label(), operation.describe_picks()),
             depth: 0,
             icon: NodeIcon::CadOperation,
             state: None,

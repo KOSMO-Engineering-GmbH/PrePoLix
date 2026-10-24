@@ -52,7 +52,7 @@ columns and the table of the design points:
     (@study-plot).],
   [Fill ..., Import ...], [Add many points at once (@study-fill).],
   [Copy Table], [Copies the table with tabs, for a spreadsheet.],
-  [Export CSV ...], [Saves the table as a CSV file.],
+  [Export CSV ..., Export JSON ...], [Save the table as a CSV or JSON file (@table-json).],
   [Add Point], [Adds a point with the inputs of the current one.],
   [Run], [Solves the points that are not up to date, one after the other.],
   [Reset], [Forgets the outputs of all points; the inputs stay.],
