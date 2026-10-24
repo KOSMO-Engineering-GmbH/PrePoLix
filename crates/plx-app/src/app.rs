@@ -157,6 +157,8 @@ struct Workbench {
     confirm_delete: Option<(TreeView, Vec<TreeItem>)>,
     /// Open search for contact pairs.
     contact_search: Option<ContactSearchDialog>,
+    /// The table of all contact regions is open.
+    contact_worksheet: bool,
     /// Open mesh tool: transform parts, merge nodes or renumber.
     mesh_tool: Option<MeshToolDialog>,
     /// PrePoMax's Query tool, while its window is open.
@@ -299,6 +301,7 @@ impl AnalysisWindow {
                 editor: None,
                 confirm_delete: None,
                 contact_search: None,
+                contact_worksheet: false,
                 mesh_tool: None,
                 query: None,
                 material_library: None,
@@ -1589,6 +1592,7 @@ impl AnalysisWindow {
         self.workbench.update_motion_preview(&ctx);
         self.workbench.confirm_delete_window(&ctx);
         self.workbench.contact_search_window(&ctx);
+        self.workbench.contact_worksheet_window(&ctx);
         self.workbench.mesh_tool_window(&ctx);
         self.workbench.query_window(&ctx);
         self.workbench.section_window(&ctx);
@@ -2458,6 +2462,9 @@ impl Workbench {
         if response.search_contacts {
             self.open_contact_search();
         }
+        if response.contact_worksheet {
+            self.contact_worksheet = true;
+        }
         if let Some(index) = response.transform_part {
             // A part among several selected ones transforms them all.
             let parts = self.tree.selected_parts(view);
@@ -3305,22 +3312,38 @@ impl Workbench {
             return;
         }
         let mut kind = None;
-        for (item, label) in [
-            (NewItem::Constraint, "Create Constraint …"),
-            (NewItem::SurfaceInteraction, "Create Surface Interaction …"),
-            (NewItem::ContactPair, "Create Contact Pair …"),
-            (NewItem::Tie, "Create Tie …"),
-        ] {
-            if ui.button(label).clicked() {
-                kind = Some(item);
-            }
+        if ui.button("Create Contact Region …").clicked() {
+            kind = Some(NewItem::ContactRegion);
         }
-        if let Some(kind) = kind {
-            self.create(kind);
+        if ui.button("Contact Worksheet …").clicked() {
+            self.contact_worksheet = true;
+        }
+        if ui.button("Connection Settings …").clicked()
+            && let Some(model) = self.setup_model()
+        {
+            self.editor = Editor::edit(&TreeItem::Group("Contacts"), &model.fe, &model.mesh);
         }
         ui.separator();
-        if ui.button("Search Contact Pairs …").clicked() {
-            self.open_contact_search();
+        if ui.button("Create Constraint …").clicked() {
+            kind = Some(NewItem::Constraint);
+        }
+        ui.menu_button("Advanced", |ui| {
+            for (item, label) in [
+                (NewItem::SurfaceInteraction, "Create Surface Interaction …"),
+                (NewItem::ContactPair, "Create Contact Pair …"),
+                (NewItem::Tie, "Create Tie …"),
+            ] {
+                if ui.button(label).clicked() {
+                    kind = Some(item);
+                }
+            }
+            ui.separator();
+            if ui.button("Search Contact Pairs …").clicked() {
+                self.open_contact_search();
+            }
+        });
+        if let Some(kind) = kind {
+            self.create(kind);
         }
     }
 
@@ -4642,6 +4665,21 @@ impl Workbench {
             self.editor = None;
             self.set_tree_view(TreeView::FeModel);
         }
+    }
+
+    /// The table of all contact regions, Ansys' worksheet: rows select the regions in the
+    /// tree, and the type, friction, sides and state of all selected ones change at once.
+    fn contact_worksheet_window(&mut self, ctx: &egui::Context) {
+        if !self.contact_worksheet {
+            return;
+        }
+        let Some(model) = &mut self.model else {
+            self.contact_worksheet = false;
+            return;
+        };
+        let mut open = true;
+        crate::connections::worksheet(ctx, &mut open, model, &mut self.tree);
+        self.contact_worksheet = open;
     }
 
     fn contact_search_window(&mut self, ctx: &egui::Context) {
@@ -7165,9 +7203,11 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
         | NewItem::HistoryOutput(s)
         | NewItem::DefinedField(s) => TreeItem::Step(*s),
         NewItem::Constraint => TreeItem::Group("Constraints"),
-        NewItem::SurfaceInteraction | NewItem::ContactPair | NewItem::Tie | NewItem::NodeTie => {
-            TreeItem::Group("Contacts")
-        }
+        NewItem::SurfaceInteraction
+        | NewItem::ContactRegion
+        | NewItem::ContactPair
+        | NewItem::Tie
+        | NewItem::NodeTie => TreeItem::Group("Contacts"),
         NewItem::Amplitude => TreeItem::Group("Amplitudes"),
         NewItem::MeshSetupItem => TreeItem::Group("Mesh Setup"),
         _ => return None,

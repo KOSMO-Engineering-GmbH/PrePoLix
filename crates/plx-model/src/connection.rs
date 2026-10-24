@@ -56,6 +56,31 @@ impl ContactRegion {
         [&mut self.side_a, &mut self.side_b]
     }
 
+    /// The name from the definition, Ansys' "Rename Based on Definition": the type and the
+    /// parts of both sides, e.g. "Bonded - Housing to Cover".
+    pub fn name_from_definition(&self, mesh: &FeMesh) -> String {
+        let parts = |region: &Region| -> String {
+            let elements: BTreeSet<ElementId> = (region.elements(mesh).into_iter())
+                .chain(region.faces(mesh).into_iter().map(|(e, _)| e))
+                .collect();
+            let names: Vec<&str> = (mesh.parts.iter())
+                .filter(|p| p.elements.iter().any(|e| elements.contains(e)))
+                .map(|p| p.name.as_str())
+                .collect();
+            match names.len() {
+                0 => "?".into(),
+                1..=2 => names.join(", "),
+                n => format!("{} and {} more", names[0], n - 1),
+            }
+        };
+        format!(
+            "{} - {} to {}",
+            self.behavior.name(),
+            parts(&self.side_a),
+            parts(&self.side_b)
+        )
+    }
+
     /// Swaps side A and side B, together with a master side chosen by hand.
     pub fn flip(&mut self) {
         std::mem::swap(&mut self.side_a, &mut self.side_b);
@@ -297,6 +322,42 @@ pub enum ResolvedKind {
     },
 }
 
+impl Resolved {
+    /// The normal stiffness of a contact pair; `None` for a tie and hard contact.
+    pub fn normal_stiffness(&self) -> Option<f64> {
+        match &self.kind {
+            ResolvedKind::Pair {
+                behavior: SurfaceBehavior::Linear { k, .. } | SurfaceBehavior::Tied { k },
+                ..
+            } => Some(*k),
+            _ => None,
+        }
+    }
+
+    pub fn tangential_stiffness(&self) -> Option<f64> {
+        match &self.kind {
+            ResolvedKind::Pair { friction, .. } => friction.as_ref()?.stick_slope,
+            ResolvedKind::Tie { .. } => None,
+        }
+    }
+
+    /// The tie tolerance or the adjustment distance.
+    pub fn tolerance(&self) -> Option<f64> {
+        match &self.kind {
+            ResolvedKind::Tie { tolerance, .. } => *tolerance,
+            ResolvedKind::Pair { adjust, .. } => *adjust,
+        }
+    }
+
+    /// Whether slave nodes are moved onto the master at the start.
+    pub fn adjusts(&self) -> bool {
+        match &self.kind {
+            ResolvedKind::Tie { adjust, .. } => *adjust,
+            ResolvedKind::Pair { adjust, .. } => adjust.is_some(),
+        }
+    }
+}
+
 impl ResolvedKind {
     /// One line for the dialog on what is written, without keywords.
     pub fn describe(&self) -> String {
@@ -429,6 +490,18 @@ fn face_size(corners: &[[f64; 3]]) -> (f64, f64) {
 }
 
 impl FeModel {
+    /// The names contact history outputs can refer to: of the contact pairs and of the
+    /// contact regions written as contact pairs.
+    pub fn contact_pair_names(&self) -> Vec<&str> {
+        let pairs = self.contact_pairs.iter().map(|p| p.name.as_str());
+        let regions = (self.contact_regions.iter())
+            .filter(|r| {
+                r.behavior.separates() || r.settings.bonded_method == Some(BondedMethod::Contact)
+            })
+            .map(|r| r.name.as_str());
+        pairs.chain(regions).collect()
+    }
+
     /// Young's modulus of each element with a section whose material has one.
     fn young_of_elements(&self, mesh: &FeMesh) -> HashMap<ElementId, f64> {
         let mut young = HashMap::new();
@@ -473,19 +546,33 @@ impl FeModel {
     pub fn resolve_contacts(&self, mesh: &FeMesh) -> ResolvedContacts {
         let (formulation, formulation_reason) = self.contact_formulation();
         let young_of = self.young_of_elements(mesh);
-        let nlgeom = (self.steps.iter()).any(|s| s.active && s.kind.nlgeom());
         let items = (self.contact_regions.iter())
-            .map(|region| {
-                let a = Side::new(&region.side_a, mesh, &young_of);
-                let b = Side::new(&region.side_b, mesh, &young_of);
-                resolve(region, &a, &b, formulation, &self.contact_defaults, nlgeom)
-            })
+            .map(|region| self.resolve_with(region, mesh, &young_of, formulation))
             .collect();
         ResolvedContacts {
             formulation,
             formulation_reason,
             items,
         }
+    }
+
+    /// What a contact region, of the model or not yet, becomes in the input file and why.
+    pub fn resolve_contact(&self, region: &ContactRegion, mesh: &FeMesh) -> Resolved {
+        let young_of = self.young_of_elements(mesh);
+        self.resolve_with(region, mesh, &young_of, self.contact_formulation().0)
+    }
+
+    fn resolve_with(
+        &self,
+        region: &ContactRegion,
+        mesh: &FeMesh,
+        young_of: &HashMap<ElementId, f64>,
+        formulation: ContactMethod,
+    ) -> Resolved {
+        let nlgeom = (self.steps.iter()).any(|s| s.active && s.kind.nlgeom());
+        let a = Side::new(&region.side_a, mesh, young_of);
+        let b = Side::new(&region.side_b, mesh, young_of);
+        resolve(region, &a, &b, formulation, &self.contact_defaults, nlgeom)
     }
 
     /// The model with its contact regions replaced by the ties, surface interactions and
@@ -713,15 +800,8 @@ fn resolve(
         None => region.behavior == ContactBehavior::Bonded,
     };
     let kind = if bonded_method == Some(BondedMethod::Constraint) {
-        if let Some(t) = tolerance {
-            why.push(format!(
-                "Tolerance {}",
-                if settings.tolerance.is_some() {
-                    format!("{t:.4e} as chosen")
-                } else {
-                    format!("{t:.4e} ({TOLERANCE_FACTOR} x mesh size)")
-                }
-            ));
+        if settings.tolerance.is_none() && tolerance.is_some() {
+            why.push(format!("Tolerance: {TOLERANCE_FACTOR} x mesh size"));
         }
         ResolvedKind::Tie {
             tolerance,
@@ -736,13 +816,10 @@ fn resolve(
             defaults.stiffness_factor
         };
         let k = stiffness(settings.normal_stiffness, factor);
-        if let Some(k) = k {
-            let source = match settings.normal_stiffness {
-                Some(Stiffness::Value(_)) => "as chosen".to_string(),
-                Some(Stiffness::Factor(f)) => format!("{f} x E/h"),
-                None => format!("{factor} x E/h"),
-            };
-            why.push(format!("Normal stiffness {k:.4e} ({source})"));
+        match (k, settings.normal_stiffness) {
+            (Some(_), None) => why.push(format!("Normal stiffness: {factor} x E/h")),
+            (None, _) => why.push("Normal stiffness: hard (no Young's modulus known)".into()),
+            _ => {}
         }
         let behavior = match (tied, k) {
             (true, k) => SurfaceBehavior::Tied {
@@ -775,8 +852,12 @@ fn resolve(
                 Some(Stiffness::Factor(f)) => young.zip(mesh_size).map(|(e, h)| f * e / h),
                 None => k.map(|k| ratio * k),
             };
-            if let Some(slope) = stick_slope {
-                why.push(format!("Tangential stiffness {slope:.4e}"));
+            if settings.tangential_stiffness.is_none() && stick_slope.is_some() {
+                why.push(if ratio == 1.0 {
+                    "Tangential stiffness: equal to the normal stiffness, no sliding".into()
+                } else {
+                    "Tangential stiffness: normal stiffness / 100".into()
+                });
             }
             Friction {
                 coefficient,

@@ -80,10 +80,85 @@ constraint out of the input file.
 
 == Contacts <contacts>
 
+Contacts and glued joints between parts are listed under #ui("Connections") in the tree of the FE
+model. The usual way is a contact region: you say which two regions touch and how they behave,
+and PrePoLix works out how CalculiX should model it. The manual objects of CalculiX (surface
+interactions, contact pairs, ties) are still there under #ui("Connections") #sym.arrow.r
+#ui("Advanced") and in #menu("Interaction", "Advanced").
+
+=== Contact regions <contact-regions>
+
+#menu("Interaction", "Create Contact Region ...") or #ui("Create Contact Region ...") in the
+context menu of #ui("Connections") connects two regions, #ui("Side A") and #ui("Side B"). Which
+side is A does not matter: PrePoLix chooses the master side itself.
+
+#screenshot("contact-region-dialog.png", [A frictional contact region with its advanced settings.
+  Side A is red in the 3D view, side B blue; #ui("Exported as") shows what PrePoLix writes for
+  CalculiX and why])
+
+#fields(
+  [Type], [#ui("Bonded"): the sides are glued together, no gap and no sliding.
+    #ui("Frictionless"): the sides may separate and slide freely, but not penetrate.
+    #ui("Frictional"): like frictionless, but the sides stick until the shear exceeds the
+    #ui("Friction coefficient") times the pressure. #ui("Rough"): the sides may separate but
+    never slide. The grey text below the type says what it means for the analysis.],
+  [Side A / Side B], [The two regions, picked like the master and slave of a contact pair. A
+    region usually is the touching faces of one part.],
+  [From definition], [Names the region by its type and parts, e.g.
+    #ui("Frictional - Block to Cap").],
+  [Exported as], [What PrePoLix writes for CalculiX, with the derived stiffness and the reasons
+    below in grey.],
+)
+
+#ui("Advanced settings") shows what PrePoLix derived. Every setting starts at #ui("Auto"), which
+shows the derived value in brackets; choosing something else overrides it for this region only.
+
+#fields(
+  [Master], [The master side. Auto takes the side with the coarser mesh, then the stiffer
+    material, then the larger area.],
+  [Bonded as], [For #ui("Bonded"): #ui("Constraint (tie)") ties the slave nodes to the master
+    faces (`*TIE`), linear and exact. #ui("Contact (tied contact)") glues them with a stiff
+    tied penalty contact. Auto uses a tie.],
+  [Normal stiffness], [The penalty stiffness of a contact. Auto is 10 #sym.times E / h, E the
+    Young's modulus of the softer side and h the mesh size of the slave side, 100 #sym.times E / h
+    for a tied contact. As a factor of E / h or as a value (pressure per length).],
+  [Tangential stiffness], [The stiffness while the sides stick (stick slope). Auto is the normal
+    stiffness / 100 for a frictional contact and the normal stiffness for rough and tied
+    contacts.],
+  [Initial gap], [#ui("Adjust to touch") moves the slave nodes onto the master side at the start,
+    so that small gaps from meshing are closed. #ui("As is") keeps the mesh. Auto adjusts.],
+  [Tolerance], [Distance within which the sides count as touching: tied by a tie, closed by the
+    adjustment. Auto is a quarter of the slave mesh size.],
+  [Small sliding], [Only for the node to surface formulation, see below.],
+)
+
+The stiffness is derived from E / h, so a model gives the same penetration whether its units are
+millimetres or metres. Bonded regions whose slave sides share nodes are written as one tie.
+
+==== Connection settings
+
+#menu("Interaction", "Connection Settings ...") or the context menu of #ui("Connections") sets what
+all contact regions share. CalculiX allows only one contact #ui("Formulation") per model (see
+"Which method?" below). Auto takes surface to surface, or the method of your manual contact
+pairs if you have any. The #ui("Stiffness factor") replaces the 10 of the normal stiffness.
+The model check reports a manual contact pair whose method differs from the formulation, and
+mortar contact in a step other than static.
+
+==== Contact worksheet
+
+#menu("Interaction", "Contact Worksheet ...") or #ui("Contact Worksheet ...") in the context menu
+of #ui("Connections") lists all contact regions in a table: type, sides, master and what each
+is exported as. A click on a row selects the region in the tree, #key("Ctrl")+click and
+#key("Shift")+click select more. The buttons change all selected regions at once: set the type
+or the friction coefficient, flip the sides, activate or deactivate, name them from their
+definition, or delete them.
+
+#screenshot("contact-worksheet.png", [The contact worksheet with a bonded and a frictional region])
+
 === Surface interactions
 
-#menu("Interaction", "Create Surface Interaction ...") defines the contact behaviour that contact
-pairs refer to. Move the models you need from #ui("Available") to #ui("Selected").
+#menu("Interaction", "Advanced", "Create Surface Interaction ...") defines the contact behaviour
+that contact pairs refer to. Move the models you need from #ui("Available") to #ui("Selected").
 
 #screenshot("surface-interaction.png", [Surface interaction with surface behaviour])
 
@@ -116,7 +191,7 @@ dialog does not accept a tied interaction without it. Tied contact works only wi
 
 === Contact pairs
 
-#menu("Interaction", "Create Contact Pair ...") creates a contact between a master and a slave
+#menu("Interaction", "Advanced", "Create Contact Pair ...") creates a contact between a master and a slave
 surface.
 
 #screenshot("contact-pair.png", [Create Contact Pair; the grey text below #ui("Method") explains
@@ -171,7 +246,7 @@ the same texts.
 
 === Ties <ties>
 
-#menu("Interaction", "Create Tie ...") or #ui("Create Tie ...") in the context menu of
+#menu("Interaction", "Advanced", "Create Tie ...") or #ui("Create Tie ...") in the context menu of
 #ui("Contact Pairs") glues a slave surface to a master surface (`*TIE`). Ties are listed under
 #ui("Contact Pairs"), with the contact pairs and node ties; projects that kept them under
 #ui("Constraints") open with them moved there.
@@ -196,7 +271,7 @@ by a hinge.
 
 === Searching contact pairs
 
-#menu("Interaction", "Search Contact Pairs ...") finds surfaces of different parts that touch and
+#menu("Interaction", "Advanced", "Search Contact Pairs ...") finds surfaces of different parts that touch and
 creates ties or contact pairs for them.
 
 #screenshot("contact-search.png", [Search Contact Pairs])
