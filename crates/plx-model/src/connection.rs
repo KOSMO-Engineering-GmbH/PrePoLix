@@ -14,8 +14,8 @@ use plx_mesh::{ElementId, FeMesh, NodeId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ContactMethod, ContactPair, FeModel, Friction, InteractionProperty, Region, StepKind,
-    SurfaceBehavior, SurfaceInteraction, Tie,
+    ContactMethod, ContactPair, FeModel, Friction, InteractionProperty, Region, STICK_SLOPE_RATIO,
+    StepKind, SurfaceBehavior, SurfaceInteraction, Tie,
 };
 
 /// Two surfaces of the model and how they behave towards each other. Which side becomes the
@@ -317,9 +317,6 @@ impl Default for ContactDefaults {
 pub const STIFFNESS_FACTOR: f64 = 10.0;
 /// The factor of a bonded region modeled as a tied contact, which should not give way.
 pub const TIED_STIFFNESS_FACTOR: f64 = 100.0;
-/// Tangential over normal stiffness of friction, CalculiX's recommendation for the stick
-/// slope ("about 100 times smaller than the spring constant").
-pub const STICK_SLOPE_RATIO: f64 = 0.01;
 /// Tie tolerance in units of the slave side's mesh size.
 pub const TOLERANCE_FACTOR: f64 = 0.25;
 /// Heat conductance across a closed contact in units of k / h, k the thermal conductivity
