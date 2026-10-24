@@ -7204,3 +7204,71 @@ fn calculix_carries_the_load_across_detected_contacts() {
     let reaction = node_sum(&frd, "FORC", "F3", &bottom);
     assert!((reaction - 1000.0).abs() < 1.0, "{reaction}");
 }
+
+#[test]
+fn the_contact_check_tells_closed_and_open_regions_apart() {
+    use plx_model::ContactStatus::*;
+    // The tolerance of a bonded region of 5 x 5 faces is 1.25.
+    for (gap, status) in [
+        (0.0, Closed),
+        (1.0, Closed),
+        (-0.2, Closed),
+        (3.0, NearOpen),
+        (20.0, FarOpen),
+    ] {
+        let (mesh, model) = blocks_in_contact(gap, plx_model::ContactBehavior::Bonded);
+        let check = model.check_contacts(&mesh)[0].clone().unwrap();
+        assert_eq!(check.status, status, "{gap}");
+        assert_eq!(check.slave_nodes, 9);
+        assert!((check.tolerance - 1.25).abs() < 1e-9);
+        match status {
+            Closed if gap < 0.0 => {
+                assert!(
+                    (check.max_penetration.unwrap() - 0.2).abs() < 1e-9,
+                    "{check:?}"
+                );
+            }
+            Closed => assert!((check.max_gap.unwrap() - gap).abs() < 1e-9, "{check:?}"),
+            NearOpen => assert!((check.min_gap.unwrap() - gap).abs() < 1e-9, "{check:?}"),
+            _ => assert_eq!(check.touching, 0),
+        }
+        let open = (model.check(
+            &mesh,
+            &plx_model::MeshCheck::new(&mesh, model.properties.space),
+        ))
+        .into_iter()
+        .any(|f| f.problem == plx_model::Problem::ContactRegionOpen);
+        assert_eq!(open, matches!(status, NearOpen | FarOpen), "{gap}");
+    }
+    // Half the upper block beside the lower one: partly closed.
+    let (mut mesh, model) = blocks_in_contact(0.0, plx_model::ContactBehavior::Frictionless);
+    for (&id, c) in mesh.clone().node_ids().iter().zip(mesh.clone().coords()) {
+        if id > 100 {
+            mesh.set_node(id, [c[0] + 5.0, c[1], c[2]]);
+        }
+    }
+    let check = model.check_contacts(&mesh)[0].clone().unwrap();
+    assert_eq!(check.status, PartlyClosed, "{check:?}");
+    assert_eq!(check.touching, 6);
+}
+
+/// Contact regions written as contact pairs bring contact results for the check after
+/// solving; ties have none.
+#[test]
+fn contact_regions_write_contact_results() {
+    let (mesh, model) = blocks_in_contact(0.0, plx_model::ContactBehavior::Frictionless);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Contact file\nCDIS, CSTR\n"), "{text}");
+    let (mesh_tie, tie) = blocks_in_contact(0.0, plx_model::ContactBehavior::Bonded);
+    assert!(
+        !write_inp(&mesh_tie, &tie, "")
+            .unwrap()
+            .contains("*Contact file")
+    );
+    let Some(frd) = run_ccx("region-contact-results", &text) else {
+        return;
+    };
+    // 10 MPa on the upper block, carried by contact pressure at its bottom.
+    let pressure = node_value(&frd, "CONTACT", "CPRESS", 105);
+    assert!(pressure > 5.0 && pressure < 20.0, "{pressure}");
+}

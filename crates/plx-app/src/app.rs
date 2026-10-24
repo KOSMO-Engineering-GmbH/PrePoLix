@@ -4707,7 +4707,8 @@ impl Workbench {
             return;
         };
         let mut open = true;
-        crate::connections::worksheet(ctx, &mut open, model, &mut self.tree);
+        let results = self.results.get(self.current_result);
+        crate::connections::worksheet(ctx, &mut open, model, results, &mut self.tree);
         self.contact_worksheet = open;
     }
 

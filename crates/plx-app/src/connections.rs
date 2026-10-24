@@ -5,9 +5,10 @@
 
 use egui::{RichText, Ui};
 use plx_model::{
-    BondedMethod, ContactBehavior, ContactDefaults, ContactDetection, ContactMethod, ContactRegion,
-    DetectionGrouping, FeModel, InterfaceTreatment, Quantity, Resolved, ResolvedContacts,
-    ResolvedKind, STORED, SideRoles, Stiffness, UnitSystem, auto_detection_tolerance,
+    BondedMethod, ContactBehavior, ContactCheck, ContactDefaults, ContactDetection, ContactMethod,
+    ContactRegion, ContactStatus, DetectionGrouping, FeModel, InterfaceTreatment, Quantity,
+    Resolved, ResolvedContacts, ResolvedKind, STORED, SideRoles, Stiffness, UnitSystem,
+    auto_detection_tolerance,
 };
 
 use crate::contacts::MasterSlave;
@@ -22,6 +23,8 @@ pub struct RegionView {
     advanced: bool,
     /// Boxed, as the dialog holds it by value.
     resolved: Option<Box<(ContactRegion, ContactDefaults, Resolved)>>,
+    /// The contact check of the region as last edited.
+    check: Option<Box<(ContactRegion, ContactDefaults, Option<ContactCheck>)>>,
 }
 
 impl RegionView {
@@ -34,6 +37,17 @@ impl RegionView {
             self.resolved = Some(Box::new((region.clone(), defaults.clone(), resolved)));
         }
         &self.resolved.as_ref().expect("resolved above").2
+    }
+
+    fn check(&mut self, model: &Model, region: &ContactRegion) -> Option<&ContactCheck> {
+        let defaults = &model.fe.contact_defaults;
+        let stale =
+            !matches!(self.check.as_deref(), Some((r, d, _)) if r == region && d == defaults);
+        if stale {
+            let check = model.fe.check_contact(region, &model.mesh);
+            self.check = Some(Box::new((region.clone(), defaults.clone(), check)));
+        }
+        self.check.as_ref().expect("checked above").2.as_ref()
     }
 }
 
@@ -87,6 +101,18 @@ pub fn region_form(
         ui.label("");
         let text = resolved.why.join("\n");
         ui.add(egui::Label::new(RichText::new(text).weak()).wrap());
+        ui.end_row();
+    }
+    if let Some(check) = view.check(model, region) {
+        ui.label("Contact check").on_hover_text(
+            "How the sides lie to each other in the mesh before the analysis: closed where \
+             the slave nodes are within the tolerance of the master side.",
+        );
+        ui.vertical(|ui| {
+            ui.label(status_text(check));
+            let text = check_summary(check, model.fe.properties.units);
+            ui.add(egui::Label::new(RichText::new(text).weak()).wrap());
+        });
         ui.end_row();
     }
 }
@@ -610,6 +636,193 @@ fn resolved_contacts(ctx: &egui::Context, model: &Model) -> std::sync::Arc<Resol
     resolved
 }
 
+/// The contact check of all regions, computed again when the model or the mesh changes.
+fn contact_checks(ctx: &egui::Context, model: &Model) -> std::sync::Arc<Vec<Option<ContactCheck>>> {
+    type Key = (FeModel, usize, usize);
+    type Cache = std::sync::Arc<(Key, std::sync::Arc<Vec<Option<ContactCheck>>>)>;
+    let id = egui::Id::new("contact worksheet checks");
+    let key = (
+        model.fe.clone(),
+        model.mesh.coords().len(),
+        model.mesh.elements().len(),
+    );
+    let cached: Option<Cache> = ctx.data(|d| d.get_temp(id));
+    if let Some(cache) = cached
+        && cache.0 == key
+    {
+        return cache.1.clone();
+    }
+    let checks = std::sync::Arc::new(model.fe.check_contacts(&model.mesh));
+    let cache: Cache = std::sync::Arc::new((key, checks.clone()));
+    ctx.data_mut(|d| d.insert_temp(id, cache));
+    checks
+}
+
+/// The status of a contact check in its colour: green closed, yellow partly closed or near
+/// open, red far open.
+pub fn status_text(check: &ContactCheck) -> RichText {
+    let color = match check.status {
+        ContactStatus::Closed => egui::Color32::from_rgb(0, 150, 60),
+        ContactStatus::PartlyClosed | ContactStatus::NearOpen => {
+            egui::Color32::from_rgb(200, 140, 0)
+        }
+        ContactStatus::FarOpen => crate::style::error(),
+    };
+    RichText::new(check.status.name()).color(color)
+}
+
+/// Gap and overlap of a contact check in a few words, e.g. "gap 0.01 mm".
+pub fn gap_text(check: &ContactCheck, units: UnitSystem) -> String {
+    let length = |v: f64| with_unit(v, units, Quantity::Length);
+    // Below a thousandth of the tolerance is rounding of the coordinates.
+    let noise = 1e-3 * check.tolerance;
+    let mut parts = Vec::new();
+    if let Some(p) = check.max_penetration.filter(|&p| p > noise) {
+        parts.push(format!("overlap {}", length(p)));
+    }
+    match (check.max_gap, check.min_gap) {
+        (Some(g), _) if g > noise => parts.push(format!("gap up to {}", length(g))),
+        (_, Some(g)) if check.touching == 0 => parts.push(format!("gap {}", length(g))),
+        _ => {}
+    }
+    parts.join(", ")
+}
+
+/// The contact check in a sentence for the region dialog and the worksheet's tooltip.
+pub fn check_summary(check: &ContactCheck, units: UnitSystem) -> String {
+    let mut text = format!(
+        "{} of {} slave nodes within {} of the master side",
+        check.touching,
+        check.slave_nodes,
+        with_unit(check.tolerance, units, Quantity::Length)
+    );
+    let gap = gap_text(check, units);
+    if !gap.is_empty() {
+        text += &format!("; {gap}");
+    }
+    if check.status == ContactStatus::FarOpen {
+        text += "; nothing within ten times that";
+    }
+    text
+}
+
+/// What CalculiX found in a contact region, from the contact results (`CONTACT`) of the
+/// last increment that has them, at the slave nodes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SolvedContact {
+    pub slave_nodes: usize,
+    /// Slave nodes with contact pressure, and of those the ones that slide: whose shear
+    /// reaches the friction coefficient times the pressure.
+    pub in_contact: usize,
+    pub sliding: usize,
+    /// Largest contact pressure and largest opening, in the units of the results.
+    pub max_pressure: f32,
+    pub max_open: f32,
+}
+
+impl SolvedContact {
+    /// "Sticking", "Sliding", "Sticking and sliding" or "Open".
+    pub fn status(&self) -> &'static str {
+        match (self.in_contact, self.sliding) {
+            (0, _) => "Open",
+            (_, 0) => "Sticking",
+            (n, s) if s == n => "Sliding",
+            _ => "Sticking and sliding",
+        }
+    }
+
+    pub fn summary(&self, units: UnitSystem) -> String {
+        let unit = crate::results::field_unit("CONTACT", "CPRESS", units).unwrap_or_default();
+        let length = crate::results::field_unit("CONTACT", "COPEN", units).unwrap_or_default();
+        let mut text = format!(
+            "{}: {} of {} slave nodes in contact",
+            self.status(),
+            self.in_contact,
+            self.slave_nodes
+        );
+        if self.sliding > 0 {
+            text += &format!(", {} sliding", self.sliding);
+        }
+        if self.in_contact > 0 {
+            text += &format!(
+                ", max pressure {} {unit}",
+                crate::results::format_value(self.max_pressure)
+            );
+        }
+        if self.max_open > 0.0 {
+            text += &format!(
+                ", max opening {} {length}",
+                crate::results::format_value(self.max_open)
+            );
+        }
+        text
+    }
+}
+
+/// The contact results of every region of `fe` in `results`; `None` for a region written
+/// as a tie, which has none, or where the results hold no contact field.
+pub fn solved_contacts(
+    fe: &FeModel,
+    mesh: &plx_mesh::FeMesh,
+    resolved: &ResolvedContacts,
+    results: &Model,
+) -> Vec<Option<SolvedContact>> {
+    let field = (results.results.as_ref()).and_then(|view| {
+        view.increments
+            .iter()
+            .rev()
+            .find_map(|i| i.field("CONTACT"))
+    });
+    let component = |name: &str| field.and_then(|f| f.component(name)).map(|c| &c.values);
+    let (pressure, open) = (component("CPRESS"), component("COPEN"));
+    let shear = [component("CSHEAR1"), component("CSHEAR2")];
+    (fe.contact_regions.iter().zip(&resolved.items))
+        .map(|(region, resolved)| {
+            let ResolvedKind::Pair { friction, .. } = &resolved.kind else {
+                return None;
+            };
+            let pressure = pressure?;
+            let slave = if resolved.a_is_master {
+                &region.side_b
+            } else {
+                &region.side_a
+            };
+            let mu = friction.as_ref().map(|f| f.coefficient as f32);
+            let mut solved = SolvedContact {
+                slave_nodes: 0,
+                in_contact: 0,
+                sliding: 0,
+                max_pressure: 0.0,
+                max_open: 0.0,
+            };
+            for id in slave.nodes(mesh) {
+                let Some(index) = results.mesh.node_index(id) else {
+                    continue;
+                };
+                solved.slave_nodes += 1;
+                let value = |values: Option<&Vec<f32>>| {
+                    values
+                        .and_then(|v| v.get(index).copied())
+                        .filter(|v| v.is_finite())
+                        .unwrap_or(0.0)
+                };
+                let p = value(Some(pressure));
+                if p > 0.0 {
+                    solved.in_contact += 1;
+                    solved.max_pressure = solved.max_pressure.max(p);
+                    let tau = value(shear[0]).hypot(value(shear[1]));
+                    if mu.is_some_and(|mu| tau >= 0.98 * mu * p) {
+                        solved.sliding += 1;
+                    }
+                } else {
+                    solved.max_open = solved.max_open.max(value(open));
+                }
+            }
+            Some(solved)
+        })
+        .collect()
+}
+
 /// What the worksheet does to the selected regions.
 enum Change {
     Behavior(ContactBehavior),
@@ -623,7 +836,13 @@ enum Change {
 /// Ansys' contact worksheet: a row per contact region with its type, sides and what it is
 /// exported as. Clicking rows selects the regions in the tree (Ctrl and Shift for several),
 /// which shows them in the 3D view; the buttons change all selected regions at once.
-pub fn worksheet(ctx: &egui::Context, open: &mut bool, model: &mut Model, tree: &mut TreeState) {
+pub fn worksheet(
+    ctx: &egui::Context,
+    open: &mut bool,
+    model: &mut Model,
+    results: Option<&Model>,
+    tree: &mut TreeState,
+) {
     let view = TreeView::FeModel;
     let rows: Vec<TreeItem> = (0..model.fe.contact_regions.len())
         .map(TreeItem::ContactRegion)
@@ -635,6 +854,8 @@ pub fn worksheet(ctx: &egui::Context, open: &mut bool, model: &mut Model, tree: 
         })
         .collect();
     let resolved = resolved_contacts(ctx, model);
+    let checks = contact_checks(ctx, model);
+    let solved = results.map(|r| solved_contacts(&model.fe, &model.mesh, &resolved, r));
     let units = model.fe.properties.units;
     let mut change = None;
     let mu_id = egui::Id::new("contact worksheet mu");
@@ -704,9 +925,10 @@ pub fn worksheet(ctx: &egui::Context, open: &mut bool, model: &mut Model, tree: 
                 .show(ui, |ui| {
                     egui::Grid::new("contact worksheet grid")
                         .striped(true)
-                        .num_columns(8)
+                        .num_columns(if solved.is_some() { 12 } else { 11 })
                         .spacing([14.0, 4.0])
                         .show(ui, |ui| {
+                            let after = solved.as_ref().map(|_| "After solving");
                             for title in [
                                 "Name",
                                 "Detection",
@@ -714,9 +936,15 @@ pub fn worksheet(ctx: &egui::Context, open: &mut bool, model: &mut Model, tree: 
                                 "Side A",
                                 "Side B",
                                 "Master",
+                                "Initial status",
+                                "Touching",
+                                "Gap",
                                 "Exported as",
                                 "Active",
-                            ] {
+                            ]
+                            .into_iter()
+                            .chain(after)
+                            {
                                 ui.strong(title);
                             }
                             ui.end_row();
@@ -763,18 +991,53 @@ pub fn worksheet(ctx: &egui::Context, open: &mut bool, model: &mut Model, tree: 
                                 ui.label(behavior);
                                 ui.label(region.side_a.describe());
                                 ui.label(region.side_b.describe());
+                                let master = resolved.items.get(i).map(|r| r.a_is_master);
+                                ui.label(match master {
+                                    Some(true) => "A",
+                                    Some(false) => "B",
+                                    None => "",
+                                });
+                                match checks.get(i).and_then(Option::as_ref) {
+                                    Some(check) => {
+                                        let summary = check_summary(check, units);
+                                        ui.label(status_text(check)).on_hover_text(&summary);
+                                        ui.label(format!(
+                                            "{} %",
+                                            (100.0 * check.touching_share()).round()
+                                        ))
+                                        .on_hover_text(&summary);
+                                        ui.label(gap_text(check, units));
+                                    }
+                                    None => {
+                                        ui.weak("-")
+                                            .on_hover_text("The sides have no element faces.");
+                                        ui.label("");
+                                        ui.label("");
+                                    }
+                                }
                                 match resolved.items.get(i) {
                                     Some(r) => {
-                                        ui.label(if r.a_is_master { "A" } else { "B" });
                                         ui.label(r.kind.describe())
                                             .on_hover_text(exported_hover(r, units));
                                     }
                                     None => {
                                         ui.label("");
-                                        ui.label("");
                                     }
                                 }
                                 ui.label(if region.active { "Yes" } else { "No" });
+                                if let Some(solved) = &solved {
+                                    match solved.get(i).and_then(Option::as_ref) {
+                                        Some(s) => {
+                                            ui.label(s.status()).on_hover_text(s.summary(units));
+                                        }
+                                        None => {
+                                            ui.weak("-").on_hover_text(
+                                                "A tie, or no contact results in the results \
+                                                 file.",
+                                            );
+                                        }
+                                    }
+                                }
                                 ui.end_row();
                             }
                         });

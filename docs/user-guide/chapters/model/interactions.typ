@@ -191,8 +191,38 @@ is exported as, and which detection found it. A click on a row selects the regio
 or the friction coefficient, flip the sides, activate or deactivate, name them from their
 definition, or delete them.
 
-#screenshot("contact-worksheet.png", [The contact worksheet with two detected regions, the
-  frictional one changed after the detection])
+#screenshot("contact-worksheet.png", [The contact worksheet after a run: the bonded region
+  is closed, the frictional one partly closed, and after solving it sticks and slides])
+
+==== Contact check <contact-check>
+
+PrePoLix checks every contact region before you solve: for each node of the slave side it
+measures the distance to the master side, along the outward normal of solid faces (negative
+means the sides overlap). A node counts as touching when it lies within the tolerance of the
+region: its tie tolerance or adjustment distance, or else a quarter of the mesh size. The
+region then is
+
+- #ui("Closed") when all slave nodes touch,
+- #ui("Partly closed") when some do,
+- #ui("Near open") when none does, but the gap is less than ten times the tolerance,
+- #ui("Far open") when the sides are further apart.
+
+The worksheet shows the status in #ui("Initial status"), the share of touching slave nodes in
+#ui("Touching") and the smallest and largest gap in #ui("Gap"); the dialog of a region shows
+the same in its #ui("Contact check") row. An open region carries no load until the parts move
+onto each other, so the model check warns about every active region that is near or far open:
+a bonded region that is open ties nothing, and a frictional one leaves the parts free to fly
+apart unless supports hold them.
+
+#screenshot("contact-check-dialog.png", [The contact check in the dialog of a frictional
+  region: the larger block top is the slave side, so only part of it touches the cap])
+
+Every region exported as a contact pair also writes contact results (#ui("CDIS") and
+#ui("CSTR")) in static, visco and dynamic steps that do not ask for them already. After a run
+the worksheet adds the column #ui("After solving"): whether the region stays open, sticks,
+slides or does both, and on hover how many slave nodes are in contact, how many slide, the
+largest pressure and the largest opening. A node slides when its shear stress reaches the
+friction coefficient times its pressure.
 
 === Surface interactions
 

@@ -118,6 +118,9 @@ pub enum Problem {
     /// Mortar contact in a step that is not static: CalculiX takes mortar in static steps
     /// only.
     MortarNotSupported,
+    /// A contact region whose sides do not touch in the mesh: a bonded one ties nothing,
+    /// another one lets its parts move freely until they meet.
+    ContactRegionOpen,
     /// A wheel of a moving load that is off the selected surface at some positions.
     WheelOffSurface,
     /// Found in the solver output only.
@@ -153,6 +156,7 @@ impl Problem {
             | Problem::ContactIgnored
             | Problem::ContactWithCoriolis
             | Problem::WheelOffSurface
+            | Problem::ContactRegionOpen
             | Problem::DesignRegionIgnored
             | Problem::RigidBeamNodes
             | Problem::NoCreep => Severity::Warning,
@@ -207,6 +211,7 @@ impl Problem {
             Problem::InvalidTiedContact => "Tied contact not possible like this",
             Problem::ContactFormulationsDiffer => "Contact formulations differ",
             Problem::MortarNotSupported => "Mortar contact not possible in this step",
+            Problem::ContactRegionOpen => "Contact region open",
             Problem::WheelOffSurface => "Wheel off the surface",
             Problem::NoConvergence => "No convergence",
             Problem::MpcAndSpc => "Degree of freedom bound twice",
@@ -468,6 +473,12 @@ impl Problem {
                  buckling, dynamic and thermal steps the run aborts or the contact is left \
                  out."
             }
+            Problem::ContactRegionOpen => {
+                "No node of the slave side lies within the tolerance of the master side in \
+                 the mesh. A bonded region then ties nothing, and the parts are not \
+                 connected. A contact that starts open holds nothing until the parts meet, \
+                 so a part held only by it can move freely and the solution fails."
+            }
             Problem::InvalidTiedContact => {
                 "CalculiX offers the Tied surface behavior only for Surface to surface \
                  contact pairs, and it needs a Friction model in the same surface \
@@ -698,6 +709,11 @@ impl Problem {
                 "Set the formulation at the Connections to Auto or Surface to surface, or \
                  deactivate the step."
             }
+            Problem::ContactRegionOpen => {
+                "Check the sides of the region in the 3D view and the gap in the Contact \
+                 Worksheet. Pick faces that touch, raise the Tolerance in the region's \
+                 advanced settings, or close the gap in the geometry."
+            }
             Problem::InvalidTiedContact => {
                 "Edit the surface interaction and add Friction, and set the method of the \
                  contact pairs to Surface to surface. To bond parts, a Tie (Interaction > \
@@ -908,13 +924,33 @@ impl FeModel {
                 finding.item = ModelItem::ContactRegion(region);
             }
         }
-        self.check_contact_regions(&lowered, &mut findings);
+        self.check_contact_regions(mesh, &lowered, &mut findings);
         findings
     }
 
-    /// Contact pairs whose formulation differs from that of the others, and the mortar
-    /// formulation where CalculiX does not take it.
-    fn check_contact_regions(&self, lowered: &FeModel, findings: &mut Vec<Finding>) {
+    /// Contact regions whose sides do not touch, contact pairs whose formulation differs
+    /// from that of the others, and the mortar formulation where CalculiX does not take it.
+    fn check_contact_regions(&self, mesh: &FeMesh, lowered: &FeModel, findings: &mut Vec<Finding>) {
+        for (i, check) in self.check_contacts(mesh).into_iter().enumerate() {
+            let region = &self.contact_regions[i];
+            let Some(check) = check.filter(|_| region.active) else {
+                continue;
+            };
+            if matches!(
+                check.status,
+                crate::ContactStatus::NearOpen | crate::ContactStatus::FarOpen
+            ) {
+                findings.push(Finding::new(
+                    ModelItem::ContactRegion(i),
+                    Problem::ContactRegionOpen,
+                    format!(
+                        "{}: no slave node within the tolerance of the master side ({})",
+                        region.name,
+                        check.status.name().to_lowercase()
+                    ),
+                ));
+            }
+        }
         let (formulation, _) = self.contact_formulation();
         for (i, pair) in self.contact_pairs.iter().enumerate() {
             if pair.active && pair.method != formulation {

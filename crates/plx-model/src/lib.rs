@@ -13,6 +13,7 @@ pub mod color_scale;
 mod connection;
 mod constraint;
 mod contact;
+mod contact_check;
 pub mod convert;
 mod detection;
 mod element_type;
@@ -54,6 +55,7 @@ pub use contact::{
     Constraint, ContactMethod, ContactPair, CyclicSymmetry, DEFAULT_SURFACE_COLOR, Friction,
     GapConductance, InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
 };
+pub use contact_check::{ContactCheck, ContactStatus};
 pub use detection::{
     ContactDetection, DetectionFilter, DetectionGrouping, DetectionReport, auto_detection_tolerance,
 };
