@@ -617,7 +617,8 @@ pub fn entries(fe: &FeModel, category: &str) -> Vec<String> {
         "Sections" => names(&mut fe.sections.iter().map(|s| s.name.as_str())),
         "Constraints" => names(&mut fe.constraints.iter().map(|c| c.name())),
         "Contacts" => names(
-            &mut (fe.surface_interactions.iter().map(|s| s.name.as_str()))
+            &mut (fe.contact_regions.iter().map(|r| r.name.as_str()))
+                .chain(fe.surface_interactions.iter().map(|s| s.name.as_str()))
                 .chain(fe.contact_pairs.iter().map(|c| c.name.as_str()))
                 .chain(fe.ties.iter().map(|t| t.name.as_str()))
                 .chain(fe.node_ties.iter().map(|t| t.name.as_str())),
@@ -763,6 +764,10 @@ fn category_fingerprint(hash: &mut Fnv, fe: &FeModel, category: &str, name: Opti
         "Sections" => add(hash, &fe.sections, |s| &s.name, name),
         "Constraints" => add(hash, &fe.constraints, |c| c.name(), name),
         "Contacts" => {
+            add(hash, &fe.contact_regions, |r| &r.name, name);
+            if name.is_none() {
+                hash.add_debug(&fe.contact_defaults);
+            }
             add(hash, &fe.surface_interactions, |s| &s.name, name);
             add(hash, &fe.contact_pairs, |c| &c.name, name);
             add(hash, &fe.ties, |t| &t.name, name);
@@ -882,6 +887,16 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
             name,
         ),
         "Contacts" => {
+            copy(
+                &mut target.contact_regions,
+                &source.contact_regions,
+                |r| &r.name,
+                name,
+            );
+            // The settings shared by all regions come with the whole category.
+            if matches!(name, Mode::All | Mode::Bundle { .. }) {
+                target.contact_defaults = source.contact_defaults.clone();
+            }
             copy(
                 &mut target.surface_interactions,
                 &source.surface_interactions,
@@ -1143,6 +1158,8 @@ fn category_groups(category: &str) -> Vec<TreeItem> {
     match category {
         "Contacts" => vec![
             TreeItem::Group("Contacts"),
+            TreeItem::Group(crate::tree::CONTACT_REGIONS),
+            TreeItem::Group(crate::tree::ADVANCED_CONTACTS),
             TreeItem::Group("Surface Interactions"),
             TreeItem::Group("Contact Pairs"),
         ],
@@ -1191,6 +1208,11 @@ fn category_items(fe: &FeModel, category: &str, name: Option<&str>) -> Vec<TreeI
                 .map(|(i, _)| TreeItem::Constraint(i)),
         ),
         "Contacts" => {
+            items.extend(
+                (fe.contact_regions.iter().enumerate())
+                    .filter(|(_, r)| wanted(&r.name))
+                    .map(|(i, _)| TreeItem::ContactRegion(i)),
+            );
             items.extend(
                 (fe.surface_interactions.iter().enumerate())
                     .filter(|(_, s)| wanted(&s.name))
@@ -1269,6 +1291,7 @@ pub fn path_of(fe: &FeModel, item: &TreeItem) -> Option<Vec<String>> {
             entry("Contacts", &fe.surface_interactions.get(*i)?.name)
         }
         TreeItem::ContactPair(i) => entry("Contacts", &fe.contact_pairs.get(*i)?.name),
+        TreeItem::ContactRegion(i) => entry("Contacts", &fe.contact_regions.get(*i)?.name),
         TreeItem::Tie(i) => entry("Contacts", &fe.ties.get(*i)?.name),
         TreeItem::NodeTie(i) => entry("Contacts", &fe.node_ties.get(*i)?.name),
         TreeItem::Amplitude(i) => entry("Amplitudes", &fe.amplitudes.get(*i)?.name),
@@ -1285,9 +1308,13 @@ pub fn path_of(fe: &FeModel, item: &TreeItem) -> Option<Vec<String>> {
         | TreeItem::FieldOutput(s, _)
         | TreeItem::HistoryOutput(s, _)
         | TreeItem::DefinedField(s, _) => entry("Steps", &fe.steps.get(*s)?.name),
-        TreeItem::Group("Surface Interactions" | "Contact Pairs" | "Contacts") => {
-            category("Contacts")
-        }
+        TreeItem::Group(
+            "Surface Interactions"
+            | "Contact Pairs"
+            | "Contacts"
+            | crate::tree::CONTACT_REGIONS
+            | crate::tree::ADVANCED_CONTACTS,
+        ) => category("Contacts"),
         TreeItem::Group(name) if CATEGORIES.contains(name) => category(name),
         _ => None,
     }

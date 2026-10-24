@@ -10,6 +10,7 @@ mod cad_editor;
 mod cad_selection;
 mod campbell;
 mod color_scale_dialog;
+mod connections;
 mod constraint_dialog;
 mod contact_search;
 mod contacts;

@@ -192,7 +192,7 @@ impl FeModel {
             for (i, output) in step.history_outputs.iter().enumerate() {
                 let reason = match &output.kind {
                     crate::HistoryKind::Contact { pair } => {
-                        (!self.contact_pairs.iter().any(|c| c.name == *pair))
+                        (!self.contact_pair_names().contains(&pair.as_str()))
                             .then(|| format!("Contact Pair {pair} does not exist"))
                     }
                     kind => kind.region().and_then(|r| {
