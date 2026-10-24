@@ -171,7 +171,7 @@ touch and adds a contact region for every pair it finds, listed under the detect
     bolts and the plates they hold.],
   [Tolerance], [Surfaces closer than this touch. Auto is 0.5 % of the size of the parts
     searched, but at least half their element size, so that two meshes on a curved face still
-    meet. The regions found get it as their tolerance, so that a tie catches every node the
+    meet (on the geometry, see @contact-detection-geometry, just the 0.5 %). The regions found get it as their tolerance, so that a tie catches every node the
     detection saw touching.],
   [Angle], [Largest angle between the surfaces facing each other (default 35°).],
   [Surfaces], [What is searched in 3D: outer faces of #ui("Solid") parts, the top and bottom of
@@ -193,6 +193,28 @@ under #ui("Contact Regions").
 
 #screenshot("contact-detection-tree.png", [The regions found by the detection #ui("Contacts");
   the frictional one was changed after the detection and stays when detecting again])
+
+==== Contact detection on the geometry <contact-detection-geometry>
+
+A model made from CAD geometry is searched on the geometry itself, meshed or not, as in Ansys:
+you can detect the contacts right after the import, before meshing. A region found this way
+takes the whole CAD faces that touch, or the whole CAD edges for the free edges of shells and
+in 2D models, also where only part of a face is in contact, e.g. the top of a plate a small
+block stands on. The regions keep these faces when the parts are meshed again, finer or with
+other settings, and #ui("Detect Again") finds the same regions. The dialog says so below the
+type.
+
+#screenshot("contact-detection-geometry.png", [A detection of a model that is not meshed yet:
+  it searches the CAD geometry])
+
+On the geometry, #ui("Auto") for the tolerance is 0.5 % of the size of the parts searched;
+the triangles that show the faces say nothing about the mesh to come. The regions found leave
+their own tolerance to the mesh (a quarter of the slave side's element size, see
+@contact-regions) unless the detection sets one. A model with parts that do not come from the
+geometry, such as an imported mesh, is searched on its mesh as before.
+
+#screenshot("contact-detection-geometry-region.png", [The region found before meshing, shown
+  on the mesh: the whole top face of the plate (side A) against the bottom of the block])
 
 ==== Connection settings
 

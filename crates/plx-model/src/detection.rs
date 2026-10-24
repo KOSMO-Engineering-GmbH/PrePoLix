@@ -3,12 +3,18 @@
 //! changed. Each pair of touching surfaces found becomes a [`ContactRegion`] of the
 //! detection's type. Detecting again replaces the regions found before, except those the
 //! user changed since.
+//!
+//! A detection runs on the display of the CAD geometry when the model has one, Ansys'
+//! detection on the geometry: the regions take the whole CAD faces that touch, so they exist
+//! before the parts are meshed and stay the same when they are meshed again.
 
 use std::collections::{BTreeSet, HashSet};
 
+use std::collections::BTreeMap;
+
 use plx_mesh::{
-    FeMesh, GeometryFilter, GroupBy, PartSkin, SearchParameters, SurfaceId, find_contact_pairs,
-    surface_faces,
+    CadEntity, FeMesh, GeometryFilter, GroupBy, PartSkin, SearchParameters, SurfaceId, SurfaceKind,
+    display_cad_map, find_contact_pairs, surface_faces,
 };
 use serde::{Deserialize, Serialize};
 
@@ -139,6 +145,21 @@ impl DetectionReport {
 /// least half their mean element size, so that the faces of different meshes on a curved
 /// surface still count as touching.
 pub fn auto_detection_tolerance(mesh: &FeMesh, skins: &[PartSkin], searched: &[bool]) -> f64 {
+    tolerance_of(mesh, skins, searched, true)
+}
+
+/// Default tolerance of a detection on the display of the CAD geometry: 0.5 % of the
+/// diagonal of the parts searched. Its triangles say nothing about the mesh to come, and
+/// the long thin ones along curved faces would make the tolerance far too large.
+pub fn auto_geometry_detection_tolerance(
+    display: &FeMesh,
+    skins: &[PartSkin],
+    searched: &[bool],
+) -> f64 {
+    tolerance_of(display, skins, searched, false)
+}
+
+fn tolerance_of(mesh: &FeMesh, skins: &[PartSkin], searched: &[bool], by_elements: bool) -> f64 {
     let coords = mesh.coords();
     let (mut min, mut max) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
     let (mut length, mut edges) = (0.0, 0usize);
@@ -162,7 +183,24 @@ pub fn auto_detection_tolerance(mesh: &FeMesh, skins: &[PartSkin], searched: &[b
         .map(|d| (max[d] - min[d]).powi(2))
         .sum::<f64>()
         .sqrt();
-    (0.005 * diagonal).max(0.5 * length / edges as f64)
+    if by_elements {
+        (0.005 * diagonal).max(0.5 * length / edges as f64)
+    } else {
+        0.005 * diagonal
+    }
+}
+
+/// The display of CAD geometry a detection runs on, see [`FeModel::detect_contacts_on_geometry`].
+pub struct DetectionGeometry<'a> {
+    /// The display mesh: triangles on the CAD faces, lines along the CAD edges.
+    pub mesh: &'a FeMesh,
+    pub skins: &'a [PartSkin],
+    /// The CAD face or edge each element shows; element ids count from 1.
+    pub entities: &'a [CadEntity],
+    /// The CAD edges bounding each CAD face.
+    pub face_edges: &'a BTreeMap<i32, Vec<i32>>,
+    /// Of each part, the dimension of its CAD shape: 3 a solid, 2 faces, 1 edges.
+    pub part_dimensions: &'a [u8],
 }
 
 impl FeModel {
@@ -176,6 +214,35 @@ impl FeModel {
         skins: &[PartSkin],
         visible: &[bool],
     ) -> Option<DetectionReport> {
+        self.detect(index, mesh, skins, visible, None)
+    }
+
+    /// [`Self::detect_contacts`] on the display of the CAD geometry: the sides of the
+    /// regions are the CAD faces, or the CAD edges of shells, that touch anywhere, so that
+    /// the regions are found before the parts are meshed and keep to the geometry when they
+    /// are meshed again. The tie tolerance is left to the mesh unless the detection sets one.
+    pub fn detect_contacts_on_geometry(
+        &mut self,
+        index: usize,
+        geometry: &DetectionGeometry,
+        visible: &[bool],
+    ) -> Option<DetectionReport> {
+        let mut mesh = geometry.mesh.clone();
+        mesh.cad = display_cad_map(&mesh, geometry.entities, geometry.face_edges);
+        let skins = geometry.skins;
+        self.detect(index, &mesh, skins, visible, Some(geometry.part_dimensions))
+    }
+
+    /// The detection on a mesh, or on a display of CAD geometry with the dimensions of its
+    /// parts.
+    fn detect(
+        &mut self,
+        index: usize,
+        mesh: &FeMesh,
+        skins: &[PartSkin],
+        visible: &[bool],
+        display: Option<&[u8]>,
+    ) -> Option<DetectionReport> {
         let detection = self.contact_detections.get(index)?.clone();
         let searched: Vec<bool> = (mesh.parts.iter().enumerate())
             .map(|(i, part)| {
@@ -187,7 +254,7 @@ impl FeModel {
             })
             .collect();
         let tolerance = (detection.tolerance)
-            .unwrap_or_else(|| auto_detection_tolerance(mesh, skins, &searched));
+            .unwrap_or_else(|| tolerance_of(mesh, skins, &searched, display.is_none()));
         let young_of = self.young_of_elements(mesh);
         let stiffness = (mesh.parts.iter())
             .map(|part| {
@@ -201,6 +268,13 @@ impl FeModel {
                 solid: false,
                 shell: false,
                 shell_edge: true,
+            }
+        } else if display.is_some() {
+            // The display shows the faces of solids as triangles, searched like shells.
+            GeometryFilter {
+                solid: false,
+                shell: detection.filter.solid || detection.filter.shell,
+                shell_edge: detection.filter.shell_edge,
             }
         } else {
             GeometryFilter {
@@ -220,10 +294,33 @@ impl FeModel {
             stiffness,
             filter,
         };
-        let items = find_contact_pairs(mesh, skins, &searched, &parameters);
-        // Surfaces of whole CAD faces are kept by geometry, so that they survive remeshing.
+        let mut items = find_contact_pairs(mesh, skins, &searched, &parameters);
+        if let Some(dimensions) = display {
+            // Of solids only their faces count, which the filter asks for as solid faces;
+            // the borders of their faces are no edges of shells.
+            let wanted = |id: &SurfaceId| match (dimensions.get(id.0), id.1) {
+                (Some(3), SurfaceKind::ShellEdge) => false,
+                (Some(3), _) => detection.filter.solid,
+                (_, SurfaceKind::ShellEdge) => true,
+                _ => detection.filter.shell || self.properties.space.is_2d(),
+            };
+            for item in &mut items {
+                item.master.retain(wanted);
+                item.slave.retain(wanted);
+            }
+        }
+        // Surfaces of whole CAD faces are kept by geometry, so that they survive remeshing;
+        // on the geometry every face touched is taken whole.
         let region = |surfaces: &BTreeSet<SurfaceId>| {
             let faces = surface_faces(mesh, skins, surfaces);
+            if display.is_some() {
+                let entities = mesh.cad_entities_touched(&faces);
+                return if entities.is_empty() {
+                    Region::Faces(Vec::new())
+                } else {
+                    Region::Geometry(entities)
+                };
+            }
             match mesh.whole_cad_faces(&faces) {
                 Some(entities) => Region::Geometry(entities),
                 None => Region::Faces(faces),
@@ -260,8 +357,12 @@ impl FeModel {
                 continue;
             }
             // The side found as master is side A; its tolerance is the one it was found
-            // with, so that a tie catches every node the detection saw touching.
-            found.settings.tolerance = Some(tolerance);
+            // with, so that a tie catches every node the detection saw touching. Found on
+            // the geometry, the mesh to come sets it unless the detection does.
+            found.settings.tolerance = match display {
+                Some(_) => detection.tolerance,
+                None => Some(tolerance),
+            };
             found.detected_by = Some(detection.name.clone());
             let name = found.name_from_definition(mesh);
             let taken = self.contact_pair_names();

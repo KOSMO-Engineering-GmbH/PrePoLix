@@ -4675,17 +4675,17 @@ impl Workbench {
 
     /// Runs the contact detection `index` on the parts of the model and reports what it
     /// found.
+    /// Runs the contact detection `index`: on the CAD geometry when every part comes from
+    /// it, see [`crate::connections::detection_display`], else on the mesh.
     fn detect_contacts(&mut self, index: usize) {
         let Some(model) = &mut self.model else {
             return;
         };
-        let visible: Vec<bool> = model.parts.iter().map(|p| p.visible).collect();
-        let mut fe = model.fe.clone();
-        let Some(report) = fe.detect_contacts(index, &model.mesh, model.skins(), &visible) else {
+        let report = crate::connections::detect(model, self.geometry.as_ref(), index);
+        let Some(report) = report else {
             return;
         };
-        let name = fe.contact_detections[index].name.clone();
-        model.fe = fe;
+        let name = model.fe.contact_detections[index].name.clone();
         let units = model.fe.properties.units;
         self.output.push(format!(
             "{} (tolerance {})",
@@ -5247,6 +5247,17 @@ impl Workbench {
             return;
         };
         editor.set_linked(crate::links::linked_parameters(&self.incoming.paths));
+        // A contact detection searches the geometry, if there is one to search; its derived
+        // tolerance is worked out again only when the parts searched change.
+        let scope = (editor.detection_parts()).and_then(|parts| {
+            let display = crate::connections::detection_display(model, self.geometry.as_ref())?;
+            let current = editor.detection_scope();
+            Some(match current {
+                Some(scope) if scope.auto.0 == parts => scope.clone(),
+                _ => crate::connections::DetectionScope::new(model, display, parts),
+            })
+        });
+        editor.set_detection_scope(scope);
         match editor.show(ctx, model) {
             EditorResult::Open => {}
             EditorResult::Ok => {

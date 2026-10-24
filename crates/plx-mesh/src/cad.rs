@@ -173,6 +173,101 @@ impl CadMap {
     }
 }
 
+/// The [`CadMap`] of a display of CAD geometry, whose elements each show the CAD face or
+/// edge `entities` gives (element ids count from 1): the triangles of a face lie on it, and
+/// the sides of the triangles along the border of a face on the nearest of the CAD edges
+/// `face_edges` gives for it, so that what a search finds on the display names its CAD
+/// faces and edges. The display's line elements of the edges keep nodes of their own.
+pub fn display_cad_map(
+    mesh: &FeMesh,
+    entities: &[CadEntity],
+    face_edges: &BTreeMap<i32, Vec<i32>>,
+) -> CadMap {
+    let sorted = |[a, b]: [NodeId; 2]| [a.min(b), a.max(b)];
+    let entity = |id: ElementId| {
+        let index = usize::try_from(id).ok()?.checked_sub(1)?;
+        entities.get(index).copied()
+    };
+    let mut map = CadMap::default();
+    let mut lines: BTreeMap<i32, Vec<[[f64; 3]; 2]>> = BTreeMap::new();
+    // How often each side of a triangle is used on its face: once along the border.
+    let mut sides: BTreeMap<i32, BTreeMap<[NodeId; 2], usize>> = BTreeMap::new();
+    for element in mesh.elements() {
+        match entity(element.id) {
+            Some(CadEntity::Face(tag)) if element.is_shell() => {
+                map.faces.entry(tag).or_default().push((element.id, 1));
+                let nodes = map.nodes.entry(CadEntity::Face(tag)).or_default();
+                nodes.extend(&element.nodes);
+                let on_face = sides.entry(tag).or_default();
+                for edge in element.shape.edges() {
+                    let (Some(&a), Some(&b)) = (
+                        edge.corners.first().and_then(|&i| element.nodes.get(i)),
+                        edge.corners.get(1).and_then(|&i| element.nodes.get(i)),
+                    ) else {
+                        continue;
+                    };
+                    *on_face.entry(sorted([a, b])).or_default() += 1;
+                }
+            }
+            Some(CadEntity::Edge(tag)) => {
+                if let (Some(a), Some(b)) = (
+                    element.nodes.first().and_then(|&n| mesh.node(n)),
+                    element.nodes.last().and_then(|&n| mesh.node(n)),
+                ) {
+                    lines.entry(tag).or_default().push([a, b]);
+                }
+            }
+            _ => {}
+        }
+    }
+    let all: Vec<i32> = lines.keys().copied().collect();
+    for (face, on_face) in sides {
+        let candidates = face_edges.get(&face).map_or(&all[..], Vec::as_slice);
+        for (side, _) in on_face.into_iter().filter(|&(_, uses)| uses == 1) {
+            let (Some(a), Some(b)) = (mesh.node(side[0]), mesh.node(side[1])) else {
+                continue;
+            };
+            let middle = [0, 1, 2].map(|k| 0.5 * (a[k] + b[k]));
+            let nearest = (candidates.iter())
+                .filter_map(|tag| {
+                    let distance = (lines.get(tag)?.iter())
+                        .map(|&[p, q]| segment_distance(middle, p, q))
+                        .reduce(f64::min)?;
+                    Some((distance, *tag))
+                })
+                .min_by(|x, y| x.0.total_cmp(&y.0));
+            if let Some((_, edge)) = nearest {
+                map.segments.entry(edge).or_default().push(side);
+                map.nodes
+                    .entry(CadEntity::Edge(edge))
+                    .or_default()
+                    .extend(side);
+            }
+        }
+    }
+    for nodes in map.nodes.values_mut() {
+        nodes.sort_unstable();
+        nodes.dedup();
+    }
+    map
+}
+
+/// Distance of a point from the segment p-q.
+fn segment_distance(point: [f64; 3], p: [f64; 3], q: [f64; 3]) -> f64 {
+    let d = [0, 1, 2].map(|k| q[k] - p[k]);
+    let v = [0, 1, 2].map(|k| point[k] - p[k]);
+    let length = d.iter().map(|x| x * x).sum::<f64>();
+    let t = if length > 0.0 {
+        ((0..3).map(|k| v[k] * d[k]).sum::<f64>() / length).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (0..3)
+        .map(|k| (v[k] - t * d[k]).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
 impl FeMesh {
     /// The CAD faces that element faces make up, if they are whole CAD faces and nothing
     /// else, so that a region of them can be kept by geometry. The faces of 2D elements and
@@ -223,6 +318,46 @@ impl FeMesh {
             .flat_map(|t| self.cad.segments[t].iter().map(|&s| sorted(s)))
             .collect();
         (covered == given).then(|| tags.into_iter().map(CadEntity::Edge).collect())
+    }
+
+    /// The CAD faces and edges that element faces lie on, each once: the entities a region
+    /// touches anywhere, unlike [`Self::whole_cad_faces`]. Faces off the geometry are left out.
+    pub fn cad_entities_touched(&self, faces: &[(ElementId, u8)]) -> Vec<CadEntity> {
+        let sorted = |[a, b]: [NodeId; 2]| [a.min(b), a.max(b)];
+        let face_of = self.cad.face_of();
+        let edge_of: BTreeMap<[NodeId; 2], i32> = (self.cad.segments.iter())
+            .flat_map(|(&tag, segments)| segments.iter().map(move |&s| (sorted(s), tag)))
+            .collect();
+        let mut touched = BTreeSet::new();
+        for &(id, face) in faces {
+            let Some(element) = self.element(id) else {
+                continue;
+            };
+            if element.is_plane() || (element.is_shell() && face >= 3) {
+                let Some(edge) = usize::from(face)
+                    .checked_sub(1)
+                    .and_then(|i| element.faces().get(i))
+                else {
+                    continue;
+                };
+                let ends = (edge.corners.first().zip(edge.corners.get(1)))
+                    .and_then(|(&a, &b)| Some([*element.nodes.get(a)?, *element.nodes.get(b)?]));
+                if let Some(tag) = ends.and_then(|ends| edge_of.get(&sorted(ends))) {
+                    touched.insert(CadEntity::Edge(*tag));
+                }
+            } else {
+                // A shell is on its CAD face with face 1, whichever side is meant.
+                let key = if element.is_shell() {
+                    (id, 1)
+                } else {
+                    (id, face)
+                };
+                if let Some(&tag) = face_of.get(&key) {
+                    touched.insert(CadEntity::Face(tag));
+                }
+            }
+        }
+        touched.into_iter().collect()
     }
 
     /// Nodes of CAD entities, in ascending order.

@@ -855,6 +855,26 @@ impl Model {
         }
     }
 
+    /// The CAD face or edge each element of the geometry display shows; element ids count
+    /// from 1.
+    pub fn cad_entities(&self) -> &[CadEntity] {
+        &self.cad_entities
+    }
+
+    /// The CAD edges bounding each CAD face of the geometry display.
+    pub fn face_edges(&self) -> &BTreeMap<i32, Vec<i32>> {
+        &self.geometry_topology.face_edges
+    }
+
+    /// Of each part of the geometry display, the dimension of its CAD shape: 3 a solid, 2
+    /// faces, 1 edges.
+    pub fn part_dimensions(&self) -> Vec<u8> {
+        self.parts
+            .iter()
+            .map(|p| p.dimension.unwrap_or(3))
+            .collect()
+    }
+
     /// The CAD face or edge an element of the geometry display shows.
     pub fn cad_entity(&self, element: ElementId) -> Option<CadEntity> {
         let index = usize::try_from(element).ok()?.checked_sub(1)?;

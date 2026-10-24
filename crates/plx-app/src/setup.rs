@@ -1131,6 +1131,8 @@ pub struct Editor {
     expose: Option<expose::Scope>,
     /// The blocks value links give exposed parameters of the model from, by key.
     linked: Vec<(u32, String)>,
+    /// The CAD geometry a contact detection searches before the parts are meshed.
+    detection_scope: Option<connections::DetectionScope>,
 }
 
 pub enum EditorResult {
@@ -1883,6 +1885,7 @@ impl Editor {
             motion: None,
             expose: None,
             linked: Vec::new(),
+            detection_scope: None,
         })
     }
 
@@ -1903,6 +1906,7 @@ impl Editor {
             motion: None,
             expose: None,
             linked: Vec::new(),
+            detection_scope: None,
         }
     }
 
@@ -1938,6 +1942,7 @@ impl Editor {
             motion: None,
             expose: None,
             linked: Vec::new(),
+            detection_scope: None,
         })
     }
 
@@ -2064,6 +2069,7 @@ impl Editor {
             motion: None,
             expose: None,
             linked: Vec::new(),
+            detection_scope: None,
         })
     }
 
@@ -2189,6 +2195,23 @@ impl Editor {
 
     /// Tells the dialog which exposed parameters of the model value links give, by key, and
     /// from which block.
+    /// The parts a contact detection being edited searches; empty for all visible ones.
+    pub fn detection_parts(&self) -> Option<&[String]> {
+        match &self.draft {
+            Draft::ContactDetection(detection) => Some(&detection.parts),
+            _ => None,
+        }
+    }
+
+    pub fn detection_scope(&self) -> Option<&connections::DetectionScope> {
+        self.detection_scope.as_ref()
+    }
+
+    /// Sets the CAD geometry a contact detection being edited searches, `None` for the mesh.
+    pub fn set_detection_scope(&mut self, scope: Option<connections::DetectionScope>) {
+        self.detection_scope = scope;
+    }
+
     pub fn set_linked(&mut self, linked: Vec<(u32, String)>) {
         if self.linked != linked {
             self.linked = linked;
@@ -3113,7 +3136,7 @@ impl Editor {
             }
             Draft::ContactDetection(detection) => {
                 name_row(ui, &mut detection.name);
-                connections::detection_form(ui, model, detection);
+                connections::detection_form(ui, model, detection, self.detection_scope.as_ref());
             }
             Draft::Connections(defaults) => connections::connections_form(ui, &model.fe, defaults),
             Draft::Tie(tie, regions) => {
@@ -5981,6 +6004,7 @@ mod tests {
             motion: None,
             expose: None,
             linked: Vec::new(),
+            detection_scope: None,
         }
         .apply(&mut fe);
         assert_eq!(fe.steps[0].loads[0].factor_amplitude, None);

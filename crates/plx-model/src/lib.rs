@@ -59,7 +59,8 @@ pub use contact::{
 pub use contact_check::{ContactCheck, ContactStatus};
 pub use contact_steps::{ContactChange, ContactState};
 pub use detection::{
-    ContactDetection, DetectionFilter, DetectionGrouping, DetectionReport, auto_detection_tolerance,
+    ContactDetection, DetectionFilter, DetectionGeometry, DetectionGrouping, DetectionReport,
+    auto_detection_tolerance, auto_geometry_detection_tolerance,
 };
 pub use element_type::{PartElementType, element_type_options};
 pub use exposed::{Exposed, Field, ItemRef, ValuePath};

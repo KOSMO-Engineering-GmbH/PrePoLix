@@ -8,7 +8,7 @@ use plx_model::{
     BondedMethod, ContactBehavior, ContactCheck, ContactDefaults, ContactDetection, ContactMethod,
     ContactRegion, ContactStatus, DetectionGrouping, FeModel, InterfaceTreatment, Quantity,
     Resolved, ResolvedContacts, ResolvedKind, STORED, SideRoles, Stiffness, UnitSystem,
-    auto_detection_tolerance, conducts_across_contacts,
+    auto_detection_tolerance, auto_geometry_detection_tolerance, conducts_across_contacts,
 };
 
 use crate::contacts::MasterSlave;
@@ -143,10 +143,111 @@ fn behavior_rows(ui: &mut Ui, id: &str, label: &str, behavior: &mut ContactBehav
     ui.end_row();
 }
 
+/// The CAD geometry a contact detection searches, for its dialog.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DetectionScope {
+    /// The parts of the geometry and whether each is shown.
+    pub parts: Vec<(String, bool)>,
+    /// The parts searched, as the detection names them, and the derived tolerance for them.
+    pub auto: (Vec<String>, f64),
+}
+
+impl DetectionScope {
+    /// The scope of a detection of `parts` on the geometry display `geometry`.
+    pub fn new(model: &Model, geometry: &Model, parts: &[String]) -> Self {
+        let visible = detection_visibility(model, geometry);
+        let searched: Vec<bool> = (geometry.mesh.parts.iter().zip(&visible))
+            .map(|(part, &shown)| {
+                if parts.is_empty() {
+                    shown
+                } else {
+                    parts.contains(&part.name)
+                }
+            })
+            .collect();
+        let tolerance =
+            auto_geometry_detection_tolerance(&geometry.mesh, geometry.skins(), &searched);
+        Self {
+            parts: (geometry.mesh.parts.iter().zip(visible))
+                .map(|(part, shown)| (part.name.clone(), shown))
+                .collect(),
+            auto: (parts.to_vec(), tolerance),
+        }
+    }
+}
+
+/// The geometry display a contact detection searches instead of the mesh: the model's
+/// geometry, if every meshed part comes from it. Detecting on the geometry finds the
+/// regions before the parts are meshed and keeps them to whole CAD faces.
+pub fn detection_display<'a>(model: &Model, geometry: Option<&'a Model>) -> Option<&'a Model> {
+    let geometry = geometry.filter(|g| g.is_geometry() && !g.mesh.parts.is_empty())?;
+    let from_geometry =
+        |name: &str| (geometry.mesh.parts.iter()).any(|p| p.name.eq_ignore_ascii_case(name));
+    (model.mesh.parts.iter())
+        .all(|p| from_geometry(&p.name))
+        .then_some(geometry)
+}
+
+/// Runs the contact detection `index` of the model: on the CAD geometry when every part
+/// comes from it, see [`detection_display`], else on the mesh.
+pub fn detect(
+    model: &mut Model,
+    geometry: Option<&Model>,
+    index: usize,
+) -> Option<plx_model::DetectionReport> {
+    match detection_display(model, geometry) {
+        Some(display) => {
+            let visible = detection_visibility(model, display);
+            let dimensions = display.part_dimensions();
+            let geometry = plx_model::DetectionGeometry {
+                mesh: &display.mesh,
+                skins: display.skins(),
+                entities: display.cad_entities(),
+                face_edges: display.face_edges(),
+                part_dimensions: &dimensions,
+            };
+            model
+                .fe
+                .detect_contacts_on_geometry(index, &geometry, &visible)
+        }
+        None => {
+            let visible: Vec<bool> = model.parts.iter().map(|p| p.visible).collect();
+            let mut fe = std::mem::take(&mut model.fe);
+            let report = fe.detect_contacts(index, &model.mesh, model.skins(), &visible);
+            model.fe = fe;
+            report
+        }
+    }
+}
+
+/// Whether each part of the geometry display is shown: as in the FE model once it is
+/// meshed, else as in the Geometry tab.
+pub fn detection_visibility(model: &Model, geometry: &Model) -> Vec<bool> {
+    (geometry.mesh.parts.iter().zip(&geometry.parts))
+        .map(|(part, shown)| {
+            (model.mesh.parts.iter().zip(&model.parts))
+                .find(|(p, _)| p.name.eq_ignore_ascii_case(&part.name))
+                .map_or(shown.visible, |(_, s)| s.visible)
+        })
+        .collect()
+}
+
 /// The contact detection dialog below the name: which parts it searches, how close and
-/// how parallel surfaces must be to touch, and the type of the regions it finds.
-pub fn detection_form(ui: &mut Ui, model: &Model, detection: &mut ContactDetection) {
+/// how parallel surfaces must be to touch, and the type of the regions it finds. With a
+/// `scope` it searches the CAD geometry.
+pub fn detection_form(
+    ui: &mut Ui,
+    model: &Model,
+    detection: &mut ContactDetection,
+    scope: Option<&DetectionScope>,
+) {
     let units = model.fe.properties.units;
+    let parts: Vec<(String, bool)> = match scope {
+        Some(scope) => scope.parts.clone(),
+        None => (model.mesh.parts.iter().zip(&model.parts))
+            .map(|(part, shown)| (part.name.clone(), shown.visible))
+            .collect(),
+    };
     ui.label("Parts");
     ui.vertical(|ui| {
         let mut all = detection.parts.is_empty();
@@ -158,9 +259,9 @@ pub fn detection_form(ui: &mut Ui, model: &Model, detection: &mut ContactDetecti
             detection.parts = if all {
                 Vec::new()
             } else {
-                (model.parts.iter())
-                    .filter(|p| p.visible)
-                    .map(|p| p.name.clone())
+                (parts.iter())
+                    .filter(|(_, shown)| *shown)
+                    .map(|(name, _)| name.clone())
                     .collect()
             };
         }
@@ -169,13 +270,13 @@ pub fn detection_form(ui: &mut Ui, model: &Model, detection: &mut ContactDetecti
                 .max_height(160.0)
                 .id_salt("detection parts")
                 .show(ui, |ui| {
-                    for part in &model.mesh.parts {
-                        let mut on = detection.parts.contains(&part.name);
-                        if ui.checkbox(&mut on, &part.name).changed() {
+                    for (name, _) in &parts {
+                        let mut on = detection.parts.contains(name);
+                        if ui.checkbox(&mut on, name).changed() {
                             if on {
-                                detection.parts.push(part.name.clone());
+                                detection.parts.push(name.clone());
                             } else {
-                                detection.parts.retain(|p| *p != part.name);
+                                detection.parts.retain(|p| p != name);
                             }
                         }
                     }
@@ -183,12 +284,18 @@ pub fn detection_form(ui: &mut Ui, model: &Model, detection: &mut ContactDetecti
         }
     });
     ui.end_row();
-    ui.label("Tolerance").on_hover_text(
+    ui.label("Tolerance").on_hover_text(if scope.is_some() {
         "Largest gap between surfaces that touch. Auto: 0.5 % of the size of the parts \
-         searched, at least half their element size.",
-    );
+         searched."
+    } else {
+        "Largest gap between surfaces that touch. Auto: 0.5 % of the size of the parts \
+         searched, at least half their element size."
+    });
     ui.horizontal(|ui| {
-        let auto = auto_tolerance(ui, model, &detection.parts);
+        let auto = match scope {
+            Some(scope) => scope.auto.1,
+            None => auto_tolerance(ui, model, &detection.parts),
+        };
         let mut set = detection.tolerance.is_some();
         ui.checkbox(&mut set, "").on_hover_text(format!(
             "Untick for Auto ({})",
@@ -256,16 +363,15 @@ pub fn detection_form(ui: &mut Ui, model: &Model, detection: &mut ContactDetecti
     ui.end_row();
     behavior_rows(ui, "detection type", "Type", &mut detection.behavior);
     ui.label("");
-    ui.add(
-        egui::Label::new(
-            RichText::new(
-                "OK searches the parts and replaces the regions found before, except those \
-                 you changed since.",
-            )
-            .weak(),
-        )
-        .wrap(),
-    );
+    let searches = if scope.is_some() {
+        "OK searches the CAD geometry of the parts, meshed or not: a region takes the whole \
+         faces that touch and keeps them when the parts are meshed again. It replaces the \
+         regions found before, except those you changed since."
+    } else {
+        "OK searches the parts and replaces the regions found before, except those you \
+         changed since."
+    };
+    ui.add(egui::Label::new(RichText::new(searches).weak()).wrap());
     ui.end_row();
 }
 
@@ -1295,4 +1401,335 @@ pub fn step_contacts(ui: &mut Ui, fe: &FeModel, step: &mut plx_model::Step, inde
             });
     });
     ui.end_row();
+}
+
+#[cfg(test)]
+mod tests {
+    use plx_io::frd::read_frd;
+    use plx_mesh::CadEntity;
+    use plx_model::{
+        BoundaryCondition, BoundaryKind, Elastic, Load, LoadKind, Material, Region, Section,
+        SectionKind, Step, UnitSystem,
+    };
+
+    use super::*;
+
+    fn gmsh_available() -> bool {
+        match plx_mesher::self_test() {
+            Ok(_) => true,
+            Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
+                eprintln!("Gmsh not available, test skipped: {error}");
+                false
+            }
+            Err(error) => panic!("Gmsh is required: {error}"),
+        }
+    }
+
+    /// The CAD faces of a part of the geometry display whose corners all satisfy `on`.
+    fn faces_where(view: &Model, part: usize, on: impl Fn([f64; 3]) -> bool) -> Vec<CadEntity> {
+        let mut faces: Vec<CadEntity> = Vec::new();
+        let mut off = std::collections::BTreeSet::new();
+        for &id in &view.mesh.parts[part].elements {
+            let Some(CadEntity::Face(tag)) = view.cad_entity(id) else {
+                continue;
+            };
+            let element = view.mesh.element(id).unwrap();
+            if element
+                .nodes
+                .iter()
+                .all(|&n| on(view.mesh.node(n).unwrap()))
+            {
+                faces.push(CadEntity::Face(tag));
+            } else {
+                off.insert(tag);
+            }
+        }
+        faces.retain(|f| !matches!(f, CadEntity::Face(t) if off.contains(t)));
+        faces.sort_unstable();
+        faces.dedup();
+        faces
+    }
+
+    /// The largest displacement against `component` CalculiX computes, if ccx is installed.
+    fn settlement(model: &Model, component: &str) -> Option<f32> {
+        std::process::Command::new("ccx").arg("-v").output().ok()?;
+        let inp = plx_io::inp::write_inp(&model.mesh, &model.fe, "Block").unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "prepolix-geometry-detection-{}-{}",
+            std::process::id(),
+            model.mesh.element_count()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("block.inp"), &inp).unwrap();
+        let status = std::process::Command::new("ccx")
+            .args(["-i", "block"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "ccx: {status:?}");
+        let results = read_frd(&dir.join("block.frd")).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let disp = results.increments.last().unwrap().field("DISP").unwrap();
+        let values = &disp.component(component).unwrap().values;
+        Some(-values.iter().copied().fold(f32::MAX, f32::min))
+    }
+
+    /// A block 10 x 10 x 10 standing on a plate 40 x 40 x 5, two solids that only touch.
+    /// The detection on the geometry finds them bonded before anything is meshed: one
+    /// region of the block's bottom and the plate's top, whole CAD faces, although the block
+    /// covers only part of the plate. Meshed, and meshed again finer, the region finds its
+    /// faces on each mesh, and CalculiX holds the pressed block on the fixed plate.
+    #[test]
+    fn contacts_detected_on_the_geometry_hold_on_every_mesh() {
+        if !gmsh_available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("prepolix-block-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("block.brep");
+        plx_mesher::gmsh::with_gmsh(|gmsh| {
+            gmsh.add_box([0.0; 3], [40.0, 40.0, 5.0])?;
+            gmsh.add_box([10.0, 10.0, 5.0], [10.0; 3])?;
+            gmsh.write(&file)
+        })
+        .unwrap();
+        let loaded = crate::model::load_geometry(&[file], UnitSystem::Unitless).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let (mut model, view) = (loaded.model, loaded.geometry_view.unwrap());
+        let names: Vec<String> = view.mesh.parts.iter().map(|p| p.name.clone()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        let plate_top = faces_where(&view, 0, |p| (p[2] - 5.0).abs() < 1e-6);
+        let block_bottom = faces_where(&view, 1, |p| (p[2] - 5.0).abs() < 1e-6);
+        assert_eq!((plate_top.len(), block_bottom.len()), (1, 1));
+
+        model.fe.materials.push(Material {
+            name: "Steel".into(),
+            density: None,
+            elastic: Some(Elastic {
+                young: 210000.0,
+                poisson: 0.3,
+            }),
+            conductivity: None,
+            specific_heat: None,
+            expansion: None,
+            plastic: None,
+            creep: None,
+        });
+        model.fe.sections.push(Section {
+            name: "Section-1".into(),
+            material: "Steel".into(),
+            region: Region::Parts(names.clone()),
+            thickness: 1.0,
+            kind: SectionKind::Solid,
+        });
+        let mut step = Step::new_static("Step-1");
+        step.boundary_conditions.push(BoundaryCondition {
+            name: "Fix".into(),
+            active: true,
+            visible: true,
+            region: Region::Geometry(faces_where(&view, 0, |p| p[2].abs() < 1e-6)),
+            kind: BoundaryKind::displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        step.loads.push(Load {
+            name: "Press".into(),
+            active: true,
+            visible: true,
+            region: Region::Geometry(faces_where(&view, 1, |p| (p[2] - 15.0).abs() < 1e-6)),
+            kind: LoadKind::Pressure(100.0),
+            amplitude: None,
+            factor_amplitude: None,
+        });
+        model.fe.steps.push(step);
+        model
+            .fe
+            .contact_detections
+            .push(ContactDetection::new("Detection-1"));
+
+        // Nothing is meshed yet: the detection runs on the geometry.
+        assert!(detection_display(&model, Some(&view)).is_some());
+        let report = detect(&mut model, Some(&view), 0).unwrap();
+        assert_eq!(report.added, 1, "{report:?}");
+        let region = &model.fe.contact_regions[0];
+        let mut sides = [region.side_a.clone(), region.side_b.clone()];
+        sides.sort_by_key(|r| format!("{r:?}"));
+        let mut expected = [
+            Region::Geometry(plate_top.clone()),
+            Region::Geometry(block_bottom.clone()),
+        ];
+        expected.sort_by_key(|r| format!("{r:?}"));
+        assert_eq!(sides, expected);
+        assert_eq!(region.settings.tolerance, None, "left to the mesh");
+        // 0.5 % of the diagonal of the parts, not of their triangles.
+        let diagonal = (40.0f64.powi(2) * 2.0 + 15.0f64.powi(2)).sqrt();
+        assert!(
+            (report.tolerance - 0.005 * diagonal).abs() < 1e-9,
+            "{report:?}"
+        );
+        let found = model.fe.contact_regions.clone();
+
+        let mut geometry = model.geometry.clone().unwrap();
+        geometry.meshing.max_size = 5.0;
+        model.set_mesh(plx_mesher::generate_mesh(&geometry).unwrap().mesh);
+        // Meshed from the geometry, detecting again finds the same region.
+        assert!(detection_display(&model, Some(&view)).is_some());
+        detect(&mut model, Some(&view), 0).unwrap();
+        assert_eq!(model.fe.contact_regions, found);
+        let region = &model.fe.contact_regions[0];
+        let coarse =
+            region.side_a.faces(&model.mesh).len() + region.side_b.faces(&model.mesh).len();
+        assert!(coarse > 0);
+        let coarse_settlement = settlement(&model, "U3");
+
+        geometry.meshing.max_size = 2.5;
+        model.set_mesh(plx_mesher::generate_mesh(&geometry).unwrap().mesh);
+        let region = &model.fe.contact_regions[0];
+        let fine = region.side_a.faces(&model.mesh).len() + region.side_b.faces(&model.mesh).len();
+        assert!(fine > 2 * coarse, "{coarse} -> {fine}");
+        let fine_settlement = settlement(&model, "U3");
+
+        if let (Some(coarse), Some(fine)) = (coarse_settlement, fine_settlement) {
+            // 100 MPa on the block compress it by 0.0048 mm; the plate gives a little more.
+            let block = 100.0 / 210000.0 * 10.0;
+            for value in [coarse, fine] {
+                assert!(value > block && value < 3.0 * block, "{value} vs. {block}");
+            }
+            assert!((fine - coarse).abs() < 0.05 * fine, "{coarse} -> {fine}");
+        }
+    }
+
+    /// The CAD edges of a part of the geometry display whose points all satisfy `on`.
+    fn edges_where(view: &Model, part: usize, on: impl Fn([f64; 3]) -> bool) -> Vec<CadEntity> {
+        let mut edges: Vec<CadEntity> = Vec::new();
+        let mut off = std::collections::BTreeSet::new();
+        for &id in &view.mesh.parts[part].elements {
+            let Some(CadEntity::Edge(tag)) = view.cad_entity(id) else {
+                continue;
+            };
+            let element = view.mesh.element(id).unwrap();
+            if element
+                .nodes
+                .iter()
+                .all(|&n| on(view.mesh.node(n).unwrap()))
+            {
+                edges.push(CadEntity::Edge(tag));
+            } else {
+                off.insert(tag);
+            }
+        }
+        edges.retain(|e| !matches!(e, CadEntity::Edge(t) if off.contains(t)));
+        edges.sort_unstable();
+        edges.dedup();
+        edges
+    }
+
+    /// A beam 40 x 5 lying on a block 10 x 10 in a plane stress model, two faces that only
+    /// touch along y = 0: the detection on the geometry ties the block's top edge to the
+    /// beam's bottom edge, whole CAD edges, before anything is meshed, and CalculiX holds
+    /// the pressed beam on the fixed block.
+    #[test]
+    fn edges_detected_on_the_geometry_of_a_2d_model_hold() {
+        if !gmsh_available() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("prepolix-beam-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("beam.brep");
+        plx_mesher::gmsh::with_gmsh(|gmsh| {
+            gmsh.add_rectangle([0.0; 3], [40.0, 5.0], 0.0)?;
+            gmsh.add_rectangle([15.0, -10.0, 0.0], [10.0, 10.0], 0.0)?;
+            gmsh.write(&file)
+        })
+        .unwrap();
+        let loaded = crate::model::load_geometry(&[file], UnitSystem::Unitless).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let (mut model, view) = (loaded.model, loaded.geometry_view.unwrap());
+        model.fe.properties.space = plx_model::ModelSpace::PlaneStress;
+        let names: Vec<String> = view.mesh.parts.iter().map(|p| p.name.clone()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        let beam_bottom = edges_where(&view, 0, |p| p[1].abs() < 1e-6);
+        let block_top = edges_where(&view, 1, |p| p[1].abs() < 1e-6);
+        assert_eq!((beam_bottom.len(), block_top.len()), (1, 1));
+
+        model.fe.materials.push(Material {
+            name: "Steel".into(),
+            density: None,
+            elastic: Some(Elastic {
+                young: 210000.0,
+                poisson: 0.3,
+            }),
+            conductivity: None,
+            specific_heat: None,
+            expansion: None,
+            plastic: None,
+            creep: None,
+        });
+        model.fe.sections.push(Section {
+            name: "Section-1".into(),
+            material: "Steel".into(),
+            region: Region::Parts(names.clone()),
+            thickness: 1.0,
+            kind: SectionKind::Solid,
+        });
+        let mut step = Step::new_static("Step-1");
+        step.boundary_conditions.push(BoundaryCondition {
+            name: "Fix".into(),
+            active: true,
+            visible: true,
+            region: Region::Geometry(edges_where(&view, 1, |p| (p[1] + 10.0).abs() < 1e-6)),
+            kind: BoundaryKind::displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        step.loads.push(Load {
+            name: "Press".into(),
+            active: true,
+            visible: true,
+            region: Region::Geometry(edges_where(&view, 0, |p| (p[1] - 5.0).abs() < 1e-6)),
+            kind: LoadKind::Pressure(10.0),
+            amplitude: None,
+            factor_amplitude: None,
+        });
+        model.fe.steps.push(step);
+        model
+            .fe
+            .contact_detections
+            .push(ContactDetection::new("Detection-1"));
+
+        let report = detect(&mut model, Some(&view), 0).unwrap();
+        assert_eq!(report.added, 1, "{report:?}");
+        let region = &model.fe.contact_regions[0];
+        let mut sides = [region.side_a.clone(), region.side_b.clone()];
+        sides.sort_by_key(|r| format!("{r:?}"));
+        let mut expected = [
+            Region::Geometry(beam_bottom.clone()),
+            Region::Geometry(block_top.clone()),
+        ];
+        expected.sort_by_key(|r| format!("{r:?}"));
+        assert_eq!(sides, expected);
+
+        let mut geometry = model.geometry.clone().unwrap();
+        geometry.meshing.max_size = 2.5;
+        let mut mesh = plx_mesher::generate_mesh(&geometry).unwrap().mesh;
+        (model.fe.properties.space)
+            .prepare_generated_mesh(&mut mesh)
+            .unwrap();
+        model.set_mesh(mesh);
+        let region = &model.fe.contact_regions[0];
+        for side in [&region.side_a, &region.side_b] {
+            let faces = side.faces(&model.mesh);
+            assert!(!faces.is_empty(), "{side:?}");
+            let nodes = Region::Faces(faces).nodes(&model.mesh);
+            assert!(
+                nodes
+                    .iter()
+                    .all(|&n| model.mesh.node(n).unwrap()[1].abs() < 1e-6)
+            );
+        }
+        if let Some(value) = settlement(&model, "U2") {
+            // The ends of the beam, 15 mm beyond the block, bend down by q L^4 / 8 E I =
+            // 0.029 mm as cantilevers; shear and the block add some. Untied, the beam would
+            // float and CalculiX fail.
+            assert!(value > 0.029 && value < 0.1, "{value}");
+        }
+    }
 }

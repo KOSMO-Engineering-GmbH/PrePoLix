@@ -11,7 +11,7 @@ mod skin;
 pub mod structured;
 mod transform;
 
-pub use cad::{CadEntity, CadMap};
+pub use cad::{CadEntity, CadMap, display_cad_map};
 pub use contact_search::{
     GeometryFilter, GroupBy, MasterSlaveItem, SearchParameters, SurfaceId, SurfaceKind,
     find_contact_pairs, surface_faces,
