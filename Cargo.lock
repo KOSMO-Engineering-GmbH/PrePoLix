@@ -2831,6 +2831,7 @@ version = "0.3.12"
 dependencies = [
  "base64 0.22.1",
  "flate2",
+ "glam",
  "plx-mesh",
  "plx-model",
  "plx-results",

@@ -27,7 +27,7 @@ the #ui("FE Model") tab and pick it in the #ui("Element type") box (@element-typ
 )
 
 Written as `*MEMBRANE SECTION, ELSET=..., MATERIAL=...` with the thickness on the next line.
-The field outputs are written with `OUTPUT=2D`, as for shells.
+CalculiX reports membranes on the solids it expands them to, as shells.
 
 Membranes have to be linear: CalculiX 2.23 computes the quadratic membranes `M3D6` and `M3D8`
 wrongly (in a simple tension test `M3D8` is 1.7 times too soft and gets softer with a thicker

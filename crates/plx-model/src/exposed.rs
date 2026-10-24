@@ -135,6 +135,10 @@ pub enum Field {
     LocationZ,
     /// The pinball radius of a remote displacement.
     Pinball,
+    /// The direction of the axis of a centrifugal load or an angular velocity.
+    AxisX,
+    AxisY,
+    AxisZ,
 }
 
 impl Field {
@@ -170,13 +174,17 @@ impl Field {
             Self::LocationY => "Location Y",
             Self::LocationZ => "Location Z",
             Self::Pinball => "Pinball",
+            Self::AxisX => "Axis X",
+            Self::AxisY => "Axis Y",
+            Self::AxisZ => "Axis Z",
         }
     }
 
     pub const VECTOR: [Self; 3] = [Self::X, Self::Y, Self::Z];
     pub const ROTATION: [Self; 3] = [Self::RotationX, Self::RotationY, Self::RotationZ];
     pub const LOCATION: [Self; 3] = [Self::LocationX, Self::LocationY, Self::LocationZ];
-    pub const ALL: [Self; 29] = [
+    pub const AXIS: [Self; 3] = [Self::AxisX, Self::AxisY, Self::AxisZ];
+    pub const ALL: [Self; 32] = [
         Self::Value,
         Self::X,
         Self::Y,
@@ -206,6 +214,9 @@ impl Field {
         Self::LocationY,
         Self::LocationZ,
         Self::Pinball,
+        Self::AxisX,
+        Self::AxisY,
+        Self::AxisZ,
     ];
 
     /// The component of a vector it names.
@@ -382,8 +393,8 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                 (InitialConditionKind::Velocity(v), field) => {
                     real(&mut v[field.axis()?], Quantity::Velocity)
                 }
-                (InitialConditionKind::AngularVelocity { speed, .. }, Field::Speed) => {
-                    real(speed, Quantity::RotationalSpeed)
+                (InitialConditionKind::AngularVelocity { point, axis, speed }, field) => {
+                    rotation_slot(point, axis, speed, field)
                 }
                 _ => None,
             }
@@ -404,6 +415,24 @@ fn dof_slot(values: &mut [Option<f64>; 6], field: Field) -> Option<(Slot<'_>, Va
         Slot::Real(values[index].as_mut()?),
         ValueKind::Quantity(quantity),
     ))
+}
+
+/// The numbers of a rotation about an axis: the speed, a point on the axis, its direction.
+fn rotation_slot<'a>(
+    point: &'a mut [f64; 3],
+    axis: &'a mut [f64; 3],
+    speed: &'a mut f64,
+    field: Field,
+) -> Option<(Slot<'a>, ValueKind)> {
+    let slot = |value: &'a mut f64, kind| Some((Slot::Real(value), kind));
+    if field == Field::Speed {
+        return slot(speed, ValueKind::Quantity(Quantity::RotationalSpeed));
+    }
+    if let Some(i) = Field::LOCATION.iter().position(|f| *f == field) {
+        return slot(&mut point[i], ValueKind::Quantity(Quantity::Length));
+    }
+    let i = Field::AXIS.iter().position(|f| *f == field)?;
+    slot(&mut axis[i], ValueKind::Factor)
 }
 
 fn load_slot(kind: &mut LoadKind, field: Field) -> Option<(Slot<'_>, ValueKind)> {
@@ -430,8 +459,8 @@ fn load_slot(kind: &mut LoadKind, field: Field) -> Option<(Slot<'_>, ValueKind)>
             };
             real(value, quantity)
         }
-        (LoadKind::Centrifugal { speed, .. }, Field::Speed) => {
-            real(speed, Quantity::RotationalSpeed)
+        (LoadKind::Centrifugal { point, axis, speed }, field) => {
+            rotation_slot(point, axis, speed, field)?
         }
         (LoadKind::ConcentratedFlux(q), Field::Value) => real(q, Quantity::Power),
         (LoadKind::SurfaceFlux(q), Field::Value) => real(q, Quantity::HeatFlux),
@@ -618,6 +647,44 @@ mod tests {
         assert!(!fe.set_value(&young, 2e11));
         let missing = ValuePath::new(ItemRef::Material("Copper".into()), Field::Density);
         assert_eq!(fe.value_at(&missing), None);
+    }
+
+    #[test]
+    fn rotations_expose_point_and_axis() {
+        let mut fe = model();
+        fe.steps[0].loads[0].kind = LoadKind::Centrifugal {
+            point: [1.0, 2.0, 3.0],
+            axis: [0.0, 0.0, 1.0],
+            speed: 5.0,
+        };
+        fe.initial_conditions.push(crate::InitialCondition {
+            name: "Spin".into(),
+            active: true,
+            region: Region::Nodes(vec![1]),
+            kind: InitialConditionKind::AngularVelocity {
+                point: [0.0; 3],
+                axis: [1.0, 0.0, 0.0],
+                speed: 1.0,
+            },
+        });
+        let load = ItemRef::Load {
+            step: "Step-1".into(),
+            name: "Force-1".into(),
+        };
+        let spin = ItemRef::InitialCondition("Spin".into());
+        for item in [&load, &spin] {
+            let exposable = fe.exposable(item);
+            for field in [Field::Speed, Field::LocationY, Field::AxisZ] {
+                assert!(exposable.contains(&field), "{field:?}");
+            }
+            assert!(!exposable.contains(&Field::X));
+        }
+        let path = ValuePath::new(load, Field::AxisZ);
+        assert_eq!(fe.value_at(&path), Some(1.0));
+        assert!(fe.set_value(&path, 0.5));
+        assert_eq!(fe.value_kind(&path), Some(ValueKind::Factor));
+        let path = ValuePath::new(spin, Field::LocationX);
+        assert!(fe.set_value(&path, 4.0));
     }
 
     #[test]

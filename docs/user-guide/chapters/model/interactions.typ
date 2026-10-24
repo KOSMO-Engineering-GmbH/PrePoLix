@@ -312,6 +312,32 @@ friction a step changes gets a surface interaction of its own. A bonded region c
 tie, a region of no separation and a region deactivated as a whole cannot change in steps;
 the model check reports them.
 
+==== Contact outputs <contact-outputs>
+
+Right-click a contact region or a contact pair in the tree to create its outputs directly:
+#ui("Create Contact History Output") and #ui("Create Contact Field Output"). With one step the
+entry opens the dialog right away, with several steps a submenu asks for the step.
+
+#screenshot("contact-output-menu.png", [Contact outputs in the context menu of a contact region])
+
+The history output dialog opens prefilled: type #ui("Contact Output"), the variables `CDIS`,
+`CSTR` and `CF` and the contact as its pair. After the run the `.dat` file holds the relative
+displacements and stresses of the contact and, with `CF`, the total contact force and moment
+in every increment (@history-outputs). Like every history output it stays in effect in the
+following steps (see History outputs in the step chapter).
+
+#screenshot("contact-output-dialog.png", [Prefilled contact history output of a bonded region])
+
+The contact field output (`*CONTACT FILE`) writes the pressure, slip and gap of all contacts into
+the `.frd` file; CalculiX knows no field output for one contact only. A step that writes contact
+field outputs already opens its output instead of creating a second one (@step-field-outputs).
+
+Only contact pairs have contact values. A bonded region with a contact history output is
+therefore written as a tied contact instead of a tie when its formulation allows it. A bonded
+region chosen as a tie, a region of no separation and a region deactivated as a whole have no
+contact elements; the model check warns that their history output prints nothing, and the
+export leaves it out.
+
 === Surface interactions
 
 #menu("Interaction", "Advanced", "Create Surface Interaction ...") defines the contact behaviour

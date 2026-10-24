@@ -601,8 +601,13 @@ impl FeModel {
     pub fn contact_pair_names(&self) -> Vec<&str> {
         let pairs = self.contact_pairs.iter().map(|p| p.name.as_str());
         let regions = (self.contact_regions.iter())
-            .filter(|r| {
-                r.behavior.separates() || r.settings.bonded_method == Some(BondedMethod::Contact)
+            .filter(|r| match r.behavior {
+                // A bonded region left to Auto becomes a tied contact when its contact values
+                // are printed.
+                ContactBehavior::Bonded => {
+                    r.settings.bonded_method != Some(BondedMethod::Constraint)
+                }
+                behavior => behavior.separates(),
             })
             .map(|r| r.name.as_str());
         pairs.chain(regions).collect()
@@ -849,8 +854,21 @@ impl FeModel {
         let pairs: BTreeSet<String> = (lowered.contact_pairs.iter())
             .map(|p| p.name.clone())
             .collect();
+        // Contact values are printed for contact pairs only; of a region written as a tie
+        // or as equations there are none (see the model check).
+        let regions: BTreeSet<&str> = self
+            .contact_regions
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
         for step in &mut lowered.steps {
             step.contact_changes.retain(|c| pairs.contains(&c.region));
+            step.history_outputs.retain(|o| match &o.kind {
+                crate::HistoryKind::Contact { pair } => {
+                    pairs.contains(pair) || !regions.contains(pair.as_str())
+                }
+                _ => true,
+            });
         }
         // Contact results for the contact check after solving, where none are asked for.
         if (lowered.contact_pairs.iter().skip(origin.first_pair)).any(|p| p.active) {
@@ -970,6 +988,16 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
         {
             why.push(
                 "Bonded as a tied contact: a step switches it off or on, which a tie cannot do"
+                    .into(),
+            );
+            Some(BondedMethod::Contact)
+        }
+        (ContactBehavior::Bonded, None)
+            if region.prints_contact(steps) && formulation == ContactMethod::SurfaceToSurface =>
+        {
+            why.push(
+                "Bonded as a tied contact: a history output prints its contact values, which \
+                 a tie has none of"
                     .into(),
             );
             Some(BondedMethod::Contact)

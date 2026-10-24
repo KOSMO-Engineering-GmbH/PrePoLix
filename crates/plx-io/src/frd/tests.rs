@@ -211,3 +211,103 @@ fn gap_sections_of_the_same_name_make_one_part() {
         .collect();
     assert_eq!(parts, [("STEEL", 1), ("GAP", 4)]);
 }
+
+/// Each node of a curved quadratic shell and of a beam is found again in the solids CalculiX
+/// expands them to: the expanded nodes lie around it.
+#[test]
+fn expanded_nodes_surround_the_nodes_they_come_from() {
+    if std::process::Command::new("ccx")
+        .arg("-v")
+        .output()
+        .is_err()
+    {
+        eprintln!("ccx not found, test skipped");
+        return;
+    }
+    // A strip of S8R bent into a quarter cylinder of radius 5, 1 thick, and a B32 beam.
+    let mut text = String::from("*Node\n");
+    let (nx, ny) = (4, 1);
+    let id = |i: usize, j: usize| j * (2 * nx + 1) + i + 1;
+    for j in 0..=2 * ny {
+        for i in 0..=2 * nx {
+            let angle = std::f64::consts::FRAC_PI_2 * i as f64 / (2 * nx) as f64;
+            let (x, z) = (5.0 * angle.cos(), 5.0 * angle.sin());
+            text.push_str(&format!("{}, {x}, {}, {z}\n", id(i, j), 2.0 * j as f64));
+        }
+    }
+    text.push_str("100, 0, 10, 0\n101, 2, 10, 0\n102, 4, 10, 0\n");
+    text.push_str("*Element, Type=S8R, Elset=Shell\n");
+    for e in 0..nx {
+        let (a, b) = (2 * e, 0);
+        let nodes = [
+            id(a, b),
+            id(a + 2, b),
+            id(a + 2, b + 2),
+            id(a, b + 2),
+            id(a + 1, b),
+            id(a + 2, b + 1),
+            id(a + 1, b + 2),
+            id(a, b + 1),
+        ];
+        let list: Vec<String> = nodes.iter().map(ToString::to_string).collect();
+        text.push_str(&format!("{}, {}\n", e + 1, list.join(", ")));
+    }
+    text.push_str(
+        "*Element, Type=B32, Elset=Beam\n10, 100, 101, 102\n\
+         *Material, Name=S\n*Elastic\n210000, 0.3\n\
+         *Shell section, Elset=Shell, Material=S, Offset=0.3\n1\n\
+         *Beam section, Elset=Beam, Material=S, Section=RECT\n0.5, 0.3\n0, 0, 1\n\
+         *Step\n*Static\n*Boundary\n1, 1, 6\n10, 1, 6\n19, 1, 6\n100, 1, 6\n\
+         *Node file\nU\n*El file\nS\n*End step\n",
+    );
+    let dir = std::env::temp_dir().join(format!("plx-expanded-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("strip.inp"), &text).unwrap();
+    let output = std::process::Command::new("ccx")
+        .args(["-i", "strip"])
+        .current_dir(&dir)
+        .env("OMP_NUM_THREADS", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let frd = read_frd(&dir.join("strip.frd")).unwrap();
+    let input = crate::inp::read_inp(&dir.join("strip.inp")).unwrap().mesh;
+    let _ = std::fs::remove_dir_all(&dir);
+    let expanded = expanded_nodes(&input, &frd.mesh);
+    // Every expanded node belongs to exactly one original node.
+    let all: Vec<NodeId> = expanded.values().flatten().copied().collect();
+    let unique: std::collections::BTreeSet<NodeId> = all.iter().copied().collect();
+    assert_eq!(all.len(), unique.len());
+    assert_eq!(unique.len(), frd.mesh.node_count());
+    // The nodes in the middle of the elements' rows belong to none.
+    let used: std::collections::BTreeSet<NodeId> = (input.elements().iter())
+        .flat_map(|e| e.nodes.iter().copied())
+        .collect();
+    assert_eq!(
+        expanded.keys().copied().collect::<Vec<_>>(),
+        used.iter().copied().collect::<Vec<_>>()
+    );
+    for original in &used {
+        let nodes = &expanded[original];
+        let q = DVec3::from(input.node(*original).unwrap());
+        // Corners of the shell have three nodes through the thickness, mid nodes two; beam
+        // nodes eight or four around them.
+        assert!(nodes.len() >= 2, "{original}: {nodes:?}");
+        let centre = (nodes.iter())
+            .map(|&id| DVec3::from(frd.mesh.node(id).unwrap()))
+            .sum::<DVec3>()
+            / nodes.len() as f64;
+        if *original >= 100 {
+            assert!((centre - q).length() < 1e-4, "{original}: {centre} vs {q}");
+        } else {
+            // The elements' normals point to the axis; an offset of 0.3 puts the mid-surface
+            // 0.3 off the nodes against the normal, outside the radius of 5.
+            let radial = DVec3::new(q.x, 0.0, q.z).normalize();
+            let expected = q + radial * 0.3;
+            assert!(
+                (centre - expected).length() < 1e-3,
+                "{original}: {centre} vs {expected}"
+            );
+        }
+    }
+}
