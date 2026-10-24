@@ -6286,12 +6286,16 @@ impl Workbench {
 
     /// Plays the animation and shows its window; marks the scene for rebuilding.
     fn animate(&mut self, ctx: &egui::Context) {
-        if let Some((file, encoder)) = &self.animation_encoding
-            && let Some(result) = encoder.poll()
-        {
-            self.output
-                .push(result.unwrap_or_else(|err| format!("{file}: {err}")));
-            self.animation_encoding = None;
+        if let Some((file, encoder)) = &self.animation_encoding {
+            match encoder.poll() {
+                Some(result) => {
+                    self.output
+                        .push(result.unwrap_or_else(|err| format!("{file}: {err}")));
+                    self.animation_encoding = None;
+                }
+                // Looked at again soon: nothing else may draw a frame meanwhile.
+                None => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+            }
         }
         let model = match self.tree_view {
             TreeView::Results => self.results.get_mut(self.current_result),
