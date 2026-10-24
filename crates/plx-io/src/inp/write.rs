@@ -15,7 +15,7 @@ use plx_model::{
     Formulation, FrequencyStep, GapConductance, HeatTransferStep, HistoryKind, HistoryOutput,
     Incrementation, InitialConditionKind, InteractionProperty, LoadKind, ModalDamping,
     ModalDynamicsStep, ModelSpace, MovingFrame, NodeTie, OutputDimension, OutputKind, Region,
-    RemoteBehavior, RemoteDof, Section, SectionKind, SensitivityStep, StaticStep,
+    RemoteBehavior, RemoteDof, Section, SectionKind, SectorDisplay, SensitivityStep, StaticStep,
     SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals,
     ViscoStep, line_tangent, symmetry_dofs, symmetry_plane,
 };
@@ -40,6 +40,8 @@ pub enum WriteError {
     /// A section that does not fit its elements, see [`Section::kind_problem`].
     #[error("{item}: {reason}")]
     InvalidSection { item: String, reason: String },
+    #[error("{item}: {reason}")]
+    InvalidCyclicSymmetry { item: String, reason: String },
     /// A defined field reads a result file whose name CalculiX cannot take.
     #[error("{item}: the result file {file} has no valid name")]
     InvalidResultFile { item: String, file: String },
@@ -1428,18 +1430,20 @@ fn tie(sets: &mut Sets, tie: &Tie) -> Result<Keyword, WriteError> {
     }
     let _ = writeln!(out, "\n{slave}, {master}");
     if let Some(cyclic) = &tie.cyclic {
+        let sectors = (tie.cyclic_sectors(sets.mesh))
+            .unwrap_or_else(|| Err("not a cyclic symmetry".into()))
+            .map_err(|reason| WriteError::InvalidCyclicSymmetry {
+                item: tie.name.clone(),
+                reason,
+            })?;
         // As PrePoMax's CalCyclicSymmetry: the axis by a point and a second point on it.
         let _ = write!(
             out,
-            "*Cyclic symmetry model, N={}, Tie={}",
-            cyclic.sectors,
+            "*Cyclic symmetry model, N={sectors}, Tie={}",
             name(&tie.name)
         );
-        if cyclic.graph_sectors != 1 {
-            let _ = write!(out, ", Ngraph={}", cyclic.graph_sectors);
-        }
-        if !cyclic.check_angle {
-            out.push_str(", Check=No");
+        if cyclic.display == SectorDisplay::All {
+            let _ = write!(out, ", Ngraph={sectors}");
         }
         let [x, y, z] = cyclic.axis_point;
         let [dx, dy, dz] = cyclic.axis_direction;

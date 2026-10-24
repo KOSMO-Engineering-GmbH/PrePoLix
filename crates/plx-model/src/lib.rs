@@ -55,7 +55,8 @@ pub use constraint::{CompressionOnly, NodeTie, RigidBody, Spring};
 pub use contact::{
     Constraint, ContactMethod, ContactPair, ContactScale, CyclicSymmetry, DEFAULT_SURFACE_COLOR,
     ElementYoung, Friction, GapConductance, InteractionProperty, NORMAL_STIFFNESS_FACTOR,
-    STICK_SLOPE_RATIO, SurfaceBehavior, SurfaceInteraction, Tie, default_stick_slope,
+    STICK_SLOPE_RATIO, SectorDisplay, SurfaceBehavior, SurfaceInteraction, Tie,
+    default_stick_slope,
 };
 pub use contact_check::{ContactCheck, ContactStatus};
 pub use contact_steps::{ContactChange, ContactState};
@@ -186,10 +187,10 @@ pub struct FeModel {
 }
 
 impl FeModel {
-    /// The cyclic symmetry of the first active tie that has one; Frequency steps then
-    /// compute the modes by nodal diameter.
-    pub fn cyclic_symmetry(&self) -> Option<&CyclicSymmetry> {
-        (self.ties.iter().filter(|t| t.active)).find_map(|t| t.cyclic.as_ref())
+    /// The first active tie with a cyclic symmetry; Frequency steps then compute the modes
+    /// by nodal diameter.
+    pub fn cyclic_tie(&self) -> Option<&Tie> {
+        (self.ties.iter()).find(|t| t.active && t.cyclic.is_some())
     }
 
     /// Replaces [`EquationSolver::Default`] in all steps by `solver`, the solver the
