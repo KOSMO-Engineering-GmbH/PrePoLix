@@ -253,6 +253,10 @@ pub struct ContactPair {
     pub adjust: bool,
     /// Distance within which slave nodes are moved; `None` moves only penetrating nodes.
     pub adjustment_size: Option<f64>,
+    /// Distance between the sides that replaces the geometric one (`*CLEARANCE`), surface to
+    /// surface contact only; negative for an interference fit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clearance: Option<f64>,
     pub master: Region,
     pub slave: Region,
     pub master_color: [u8; 3],
@@ -284,6 +288,7 @@ impl ContactPair {
             small_sliding: false,
             adjust: false,
             adjustment_size: None,
+            clearance: None,
             master: Region::Faces(Vec::new()),
             slave: Region::Faces(Vec::new()),
             master_color: DEFAULT_SURFACE_COLOR,

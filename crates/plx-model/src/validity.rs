@@ -14,6 +14,7 @@ pub enum ModelItem {
     ContactPair(usize),
     Tie(usize),
     NodeTie(usize),
+    ContactRegion(usize),
     /// Boundary condition by step and index.
     BoundaryCondition(usize, usize),
     /// Load by step and index.
@@ -110,6 +111,19 @@ impl FeModel {
                 });
             }
         }
+        for (i, region) in self.contact_regions.iter().enumerate() {
+            let reason = (region.side_a.missing_reference(mesh))
+                .map(|r| format!("Side A: {r}"))
+                .or_else(|| {
+                    (region.side_b.missing_reference(mesh)).map(|r| format!("Side B: {r}"))
+                });
+            if let Some(reason) = reason {
+                invalid.push(Invalid {
+                    item: ModelItem::ContactRegion(i),
+                    reason,
+                });
+            }
+        }
         for (s, step) in self.steps.iter().enumerate() {
             for (i, bc) in step.boundary_conditions.iter().enumerate() {
                 let reason = (bc.region.missing_reference(mesh))
@@ -178,7 +192,7 @@ impl FeModel {
             for (i, output) in step.history_outputs.iter().enumerate() {
                 let reason = match &output.kind {
                     crate::HistoryKind::Contact { pair } => {
-                        (!self.contact_pairs.iter().any(|c| c.name == *pair))
+                        (!self.contact_pair_names().contains(&pair.as_str()))
                             .then(|| format!("Contact Pair {pair} does not exist"))
                     }
                     kind => kind.region().and_then(|r| {

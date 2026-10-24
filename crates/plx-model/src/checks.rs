@@ -113,6 +113,20 @@ pub enum Problem {
     /// A contact pair with tied surface behavior that CalculiX rejects: without friction in
     /// its surface interaction or with another method than surface to surface.
     InvalidTiedContact,
+    /// Contact pairs of different formulations: CalculiX takes one for all of them.
+    ContactFormulationsDiffer,
+    /// Mortar contact in a step that is not static: CalculiX takes mortar in static steps
+    /// only.
+    MortarNotSupported,
+    /// A contact region whose sides do not touch in the mesh: a bonded one ties nothing,
+    /// another one lets its parts move freely until they meet.
+    ContactRegionOpen,
+    /// A region of no separation in a step with large deformations: its equations hold for
+    /// small displacements only.
+    NoSeparationLargeDeformation,
+    /// A step switches a contact region off or on that CalculiX cannot switch: a tie, the
+    /// equations of no separation, or a region deactivated as a whole.
+    ContactChangeIgnored,
     /// A wheel of a moving load that is off the selected surface at some positions.
     WheelOffSurface,
     /// Found in the solver output only.
@@ -148,6 +162,9 @@ impl Problem {
             | Problem::ContactIgnored
             | Problem::ContactWithCoriolis
             | Problem::WheelOffSurface
+            | Problem::ContactRegionOpen
+            | Problem::NoSeparationLargeDeformation
+            | Problem::ContactChangeIgnored
             | Problem::DesignRegionIgnored
             | Problem::RigidBeamNodes
             | Problem::NoCreep => Severity::Warning,
@@ -200,6 +217,11 @@ impl Problem {
             Problem::ContactIgnored => "Contact ignored",
             Problem::ContactWithCoriolis => "Contact with Coriolis",
             Problem::InvalidTiedContact => "Tied contact not possible like this",
+            Problem::ContactFormulationsDiffer => "Contact formulations differ",
+            Problem::MortarNotSupported => "Mortar contact not possible in this step",
+            Problem::ContactRegionOpen => "Contact region open",
+            Problem::NoSeparationLargeDeformation => "No separation with large deformations",
+            Problem::ContactChangeIgnored => "Contact cannot change in steps",
             Problem::WheelOffSurface => "Wheel off the surface",
             Problem::NoConvergence => "No convergence",
             Problem::MpcAndSpc => "Degree of freedom bound twice",
@@ -450,6 +472,35 @@ impl Problem {
                  pairs, tied ones included, are left out without a message: parts held only \
                  by them float and give eigenfrequencies near zero or on weak springs."
             }
+            Problem::ContactFormulationsDiffer => {
+                "CalculiX takes one formulation (node to surface, surface to surface, mortar \
+                 or massless) for all contact pairs of a model. A contact pair defined by hand \
+                 has another one than the contact regions, which use the formulation of the \
+                 Connections."
+            }
+            Problem::MortarNotSupported => {
+                "CalculiX takes mortar contact in static steps only. In frequency, \
+                 buckling, dynamic and thermal steps the run aborts or the contact is left \
+                 out."
+            }
+            Problem::ContactRegionOpen => {
+                "No node of the slave side lies within the tolerance of the master side in \
+                 the mesh. A bonded region then ties nothing, and the parts are not \
+                 connected. A contact that starts open holds nothing until the parts meet, \
+                 so a part held only by it can move freely and the solution fails."
+            }
+            Problem::NoSeparationLargeDeformation => {
+                "No separation is written as linear equations between each slave node and \
+                 the master side, along the normal of the undeformed surfaces. With large \
+                 deformations the sides slide and turn, and the equations no longer keep \
+                 them together: gaps open or the sides press into each other."
+            }
+            Problem::ContactChangeIgnored => {
+                "CalculiX switches contact pairs off and on within the steps, but not ties \
+                 and constraint equations: a bonded region written as a tie and a region of \
+                 no separation hold in every step. A region deactivated as a whole is not \
+                 written at all, so no step can switch it on."
+            }
             Problem::InvalidTiedContact => {
                 "CalculiX offers the Tied surface behavior only for Surface to surface \
                  contact pairs, and it needs a Friction model in the same surface \
@@ -672,6 +723,29 @@ impl Problem {
                 "Tick Perturbation in the Frequency step (after a static step), or join \
                  bonded parts with a Tie constraint instead of a tied contact pair (Interaction > Create Tie)."
             }
+            Problem::ContactFormulationsDiffer => {
+                "Set the contact pair to the formulation of the contact regions, or choose \
+                 the pair's formulation for all contacts at the Connections."
+            }
+            Problem::MortarNotSupported => {
+                "Set the formulation at the Connections to Auto or Surface to surface, or \
+                 deactivate the step."
+            }
+            Problem::ContactRegionOpen => {
+                "Check the sides of the region in the 3D view and the gap in the Contact \
+                 Worksheet. Pick faces that touch, raise the Tolerance in the region's \
+                 advanced settings, or close the gap in the geometry."
+            }
+            Problem::NoSeparationLargeDeformation => {
+                "Switch off large deformations in the step if the displacements are small, \
+                 or make the region Frictionless with Adjust to touch: a contact that may \
+                 open, but follows the sides."
+            }
+            Problem::ContactChangeIgnored => {
+                "Set Bonded as to Auto or Contact (tied contact) with the Surface to surface \
+                 formulation, so that the region becomes a contact pair, or activate the \
+                 region and switch it off in the steps where it should not hold."
+            }
             Problem::InvalidTiedContact => {
                 "Edit the surface interaction and add Friction, and set the method of the \
                  contact pairs to Surface to surface. To bond parts, a Tie (Interaction > \
@@ -870,6 +944,104 @@ impl FeModel {
     }
 
     pub fn check(&self, mesh: &FeMesh, mesh_check: &MeshCheck) -> Vec<Finding> {
+        if self.contact_regions.is_empty() {
+            return self.check_explicit(mesh, mesh_check);
+        }
+        // Contact regions are checked as the ties and contact pairs they become; what is
+        // found on those belongs to the region.
+        let (lowered, origin) = self.lower_contacts(mesh);
+        let mut findings = lowered.check_explicit(mesh, mesh_check);
+        for finding in &mut findings {
+            if let Some(region) = origin.region_of(finding.item) {
+                finding.item = ModelItem::ContactRegion(region);
+            }
+        }
+        self.check_contact_regions(mesh, &lowered, &mut findings);
+        findings
+    }
+
+    /// Contact regions whose sides do not touch, contact pairs whose formulation differs
+    /// from that of the others, and the mortar formulation where CalculiX does not take it.
+    fn check_contact_regions(&self, mesh: &FeMesh, lowered: &FeModel, findings: &mut Vec<Finding>) {
+        for (i, check) in self.check_contacts(mesh).into_iter().enumerate() {
+            let region = &self.contact_regions[i];
+            let Some(check) = check.filter(|_| region.active) else {
+                continue;
+            };
+            if matches!(
+                check.status,
+                crate::ContactStatus::NearOpen | crate::ContactStatus::FarOpen
+            ) {
+                findings.push(Finding::new(
+                    ModelItem::ContactRegion(i),
+                    Problem::ContactRegionOpen,
+                    format!(
+                        "{}: no slave node within the tolerance of the master side ({})",
+                        region.name,
+                        check.status.name().to_lowercase()
+                    ),
+                ));
+            }
+        }
+        let resolved = self.resolve_contacts(mesh);
+        for (i, (region, item)) in self.contact_regions.iter().zip(&resolved.items).enumerate() {
+            if !region.switched(&self.steps) {
+                continue;
+            }
+            let reason = match item.kind {
+                _ if !region.active => "it is deactivated as a whole",
+                crate::ResolvedKind::Tie { .. } => "it is written as a tie",
+                crate::ResolvedKind::NoSeparation { .. } => "no separation is written as equations",
+                crate::ResolvedKind::Pair { .. } => continue,
+            };
+            findings.push(Finding::new(
+                ModelItem::ContactRegion(i),
+                Problem::ContactChangeIgnored,
+                format!("{}: a step switches it, but {reason}", region.name),
+            ));
+        }
+        let nlgeom = (self.steps.iter()).find(|s| s.active && s.kind.nlgeom());
+        for (i, region) in self.contact_regions.iter().enumerate() {
+            if let Some(step) = nlgeom.filter(|_| {
+                region.active && region.behavior == crate::ContactBehavior::NoSeparation
+            }) {
+                findings.push(Finding::new(
+                    ModelItem::ContactRegion(i),
+                    Problem::NoSeparationLargeDeformation,
+                    format!("{}: {} has large deformations", region.name, step.name),
+                ));
+            }
+        }
+        let (formulation, _) = self.contact_formulation();
+        for (i, pair) in self.contact_pairs.iter().enumerate() {
+            if pair.active && pair.method != formulation {
+                findings.push(Finding::new(
+                    ModelItem::ContactPair(i),
+                    Problem::ContactFormulationsDiffer,
+                    format!(
+                        "{}: {}, the contact regions use {}",
+                        pair.name,
+                        pair.method.name(),
+                        formulation.name()
+                    ),
+                ));
+            }
+        }
+        if formulation != ContactMethod::Mortar || !lowered.contact_pairs.iter().any(|p| p.active) {
+            return;
+        }
+        for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
+            if !crate::mortar_supports(&step.kind) {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::MortarNotSupported,
+                    format!("{}: mortar contact in a step that is not static", step.name),
+                ));
+            }
+        }
+    }
+
+    fn check_explicit(&self, mesh: &FeMesh, mesh_check: &MeshCheck) -> Vec<Finding> {
         let constants =
             self.properties.absolute_zero.is_some() && self.properties.stefan_boltzmann.is_some();
         let mut findings: Vec<Finding> = (self.invalid_items(mesh).into_iter())
@@ -1942,6 +2114,15 @@ impl FeModel {
                 join(&mut ties, &a, &b);
             }
             join(&mut contacts, &a, &b);
+        }
+        // Regions of no separation, left in the lowered model, hold normal to the surfaces
+        // only: like a contact.
+        for region in self.contact_regions.iter().filter(|r| r.active) {
+            join(
+                &mut contacts,
+                &pieces(&region.side_a),
+                &pieces(&region.side_b),
+            );
         }
         let sum = |union: &mut UnionFind| {
             let mut sums: HashMap<usize, [[f64; 6]; 6]> = HashMap::new();

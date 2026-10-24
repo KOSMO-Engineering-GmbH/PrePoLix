@@ -10,9 +10,13 @@ mod cad_operation;
 pub mod campbell;
 mod checks;
 pub mod color_scale;
+mod connection;
 mod constraint;
 mod contact;
+mod contact_check;
+mod contact_steps;
 pub mod convert;
+mod detection;
 mod element_type;
 mod exposed;
 mod features;
@@ -41,11 +45,23 @@ pub use amplitude::{Amplitude, AmplitudeTime};
 pub use cad_operation::{CadOperation, CadOperationKind};
 pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
 pub use color_scale::{ColorScale, ColorSpectrum};
+pub use connection::{
+    BondedMethod, CONDUCTANCE_FACTOR, ContactBehavior, ContactDefaults, ContactRegion,
+    ContactSettings, InterfaceTreatment, Lowered, ROUGH_FRICTION, Resolved, ResolvedContacts,
+    ResolvedKind, STICK_SLOPE_RATIO, STIFFNESS_FACTOR, SideRoles, Stiffness, TIED_STIFFNESS_FACTOR,
+    TOLERANCE_FACTOR, conducts_across_contacts, mortar_supports,
+};
 pub use constraint::{CompressionOnly, NodeTie, RigidBody, Spring};
 pub use contact::{
     Constraint, ContactMethod, ContactPair, ContactScale, CyclicSymmetry, DEFAULT_SURFACE_COLOR,
     ElementYoung, Friction, GapConductance, InteractionProperty, NORMAL_STIFFNESS_FACTOR,
     STICK_SLOPE_RATIO, SurfaceBehavior, SurfaceInteraction, Tie, default_stick_slope,
+};
+pub use contact_check::{ContactCheck, ContactStatus};
+pub use contact_steps::{ContactChange, ContactState};
+pub use detection::{
+    ContactDetection, DetectionFilter, DetectionGeometry, DetectionGrouping, DetectionReport,
+    auto_detection_tolerance, auto_geometry_detection_tolerance,
 };
 pub use element_type::{PartElementType, element_type_options};
 pub use exposed::{Exposed, Field, ItemRef, ValuePath};
@@ -127,6 +143,16 @@ pub struct FeModel {
     /// Ends of beams and trusses tied node to node, shown among the contact pairs.
     #[serde(default)]
     pub node_ties: Vec<NodeTie>,
+    /// Surfaces in contact by the behavior the user wants, written as the ties and contact
+    /// pairs they stand for ([`FeModel::lower_contacts`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contact_regions: Vec<ContactRegion>,
+    /// Searches that found contact regions, kept to run them again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contact_detections: Vec<ContactDetection>,
+    /// Settings shared by the contact regions.
+    #[serde(default)]
+    pub contact_defaults: ContactDefaults,
     /// Time curves boundary conditions and loads refer to by name.
     #[serde(default)]
     pub amplitudes: Vec<Amplitude>,
@@ -186,6 +212,7 @@ impl FeModel {
             .chain((self.contact_pairs.iter()).flat_map(|c| [&c.master, &c.slave]))
             .chain((self.ties.iter()).flat_map(|t| [&t.master, &t.slave]))
             .chain(self.node_ties.iter().map(|t| &t.region))
+            .chain(self.contact_regions.iter().flat_map(ContactRegion::regions))
             .chain(self.mesh_sets.iter().map(|s| &s.region))
             .chain(self.steps.iter().flat_map(|step| {
                 (step.boundary_conditions.iter().map(|b| &b.region))
@@ -314,6 +341,7 @@ impl FeModel {
             .chain((self.contact_pairs.iter_mut()).flat_map(|c| [&mut c.master, &mut c.slave]))
             .chain((self.ties.iter_mut()).flat_map(|t| [&mut t.master, &mut t.slave]))
             .chain(self.node_ties.iter_mut().map(|t| &mut t.region))
+            .chain((self.contact_regions.iter_mut()).flat_map(ContactRegion::regions_mut))
             .chain(self.mesh_sets.iter_mut().map(|s| &mut s.region))
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
@@ -365,6 +393,11 @@ impl FeModel {
                 *pair = new.to_string();
             }
         }
+        for change in self.steps.iter_mut().flat_map(|s| &mut s.contact_changes) {
+            if change.region == old {
+                change.region = new.to_string();
+            }
+        }
     }
 
     /// Whether an active step that takes it has an active submodel boundary condition, so
@@ -395,6 +428,7 @@ impl FeModel {
                     .flat_map(Constraint::regions_mut),
             )
             .chain((self.contact_pairs.iter_mut()).flat_map(|c| [&mut c.master, &mut c.slave]))
+            .chain((self.contact_regions.iter_mut()).flat_map(ContactRegion::regions_mut))
             .chain(self.initial_conditions.iter_mut().map(|i| &mut i.region))
             .chain(self.mesh_sets.iter_mut().map(|s| &mut s.region))
             .chain(self.steps.iter_mut().flat_map(|step| {
@@ -603,6 +637,10 @@ pub struct Step {
     /// they existed have none.
     #[serde(default)]
     pub defined_fields: Vec<DefinedField>,
+    /// Contact regions and pairs switched on or off, or given another friction, from this
+    /// step on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contact_changes: Vec<ContactChange>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1345,6 +1383,7 @@ impl Step {
             history_outputs: Vec::new(),
             field_outputs: FieldOutput::complex_frequency_defaults(),
             defined_fields: Vec::new(),
+            contact_changes: Vec::new(),
         }
     }
 
@@ -1366,6 +1405,7 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
+            contact_changes: Vec::new(),
             field_outputs: FieldOutput::defaults(),
         }
     }
@@ -1380,6 +1420,7 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
+            contact_changes: Vec::new(),
             field_outputs: FieldOutput::frequency_defaults(),
         }
     }
@@ -1394,6 +1435,7 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
+            contact_changes: Vec::new(),
             field_outputs: FieldOutput::defaults(),
         }
     }
@@ -1408,6 +1450,7 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
+            contact_changes: Vec::new(),
             field_outputs: FieldOutput::heat_transfer_defaults(),
         }
     }
@@ -1423,6 +1466,7 @@ impl Step {
             history_outputs: Vec::new(),
             field_outputs: FieldOutput::dynamic_defaults(),
             defined_fields: Vec::new(),
+            contact_changes: Vec::new(),
         }
     }
 
@@ -1453,6 +1497,7 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
+            contact_changes: Vec::new(),
             field_outputs: FieldOutput::coupled_defaults(),
         }
     }

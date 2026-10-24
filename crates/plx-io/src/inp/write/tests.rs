@@ -6997,3 +6997,763 @@ fn stiffness_is_spread_with_positive_shares_on_quadratic_faces() {
     let sum: f64 = lumped.values().sum();
     assert!((sum - area).abs() < 1e-9 * area && lumped_area == area);
 }
+
+/// The stacked blocks joined by a contact region of the behavior between the top of the
+/// lower block (side A) and the bottom of the upper one (side B).
+fn blocks_in_contact(gap: f64, behavior: plx_model::ContactBehavior) -> (FeMesh, FeModel) {
+    let (mesh, lower, upper) = two_blocks(gap);
+    let mut model = stacked_blocks(&mesh);
+    let mut region = plx_model::ContactRegion::new("Region-1", behavior);
+    region.side_a = Region::Faces(lower);
+    region.side_b = Region::Faces(upper);
+    model.contact_regions.push(region);
+    (mesh, model)
+}
+
+/// The nodes of the top of the upper block, pushed sideways by `shift` along x.
+fn push_top(model: &mut FeModel, shift: f64) -> Vec<NodeId> {
+    let top: Vec<NodeId> = (110..=118).collect();
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Shift-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(top.clone()),
+        kind: BoundaryKind::displacement([Some(shift), None, None, None, None, None]),
+        amplitude: None,
+    });
+    top
+}
+
+#[test]
+fn a_bonded_region_is_a_tie_with_a_tolerance_of_the_mesh_size() {
+    let (mesh, model) = blocks_in_contact(0.0, plx_model::ContactBehavior::Bonded);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // Faces of 5 x 5 mm: a quarter of it.
+    assert!(
+        text.contains(
+            "*Tie, Name=Region-1, Position tolerance=1.25\n\
+             Internal_Selection-1_Region-1_Slave, Internal_Selection-1_Region-1_Master\n"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("*Contact pair"));
+    // Equal meshes and materials: the larger area is master, else side A.
+    let resolved = model.resolve_contacts(&mesh);
+    assert!(resolved.items[0].a_is_master);
+}
+
+#[test]
+fn bonded_regions_sharing_slave_nodes_become_one_tie() {
+    let (mesh, lower, upper) = two_blocks(0.0);
+    let mut model = stacked_blocks(&mesh);
+    for (i, half) in [[0, 1], [2, 3]].into_iter().enumerate() {
+        let mut region = plx_model::ContactRegion::new(
+            format!("Region-{}", i + 1),
+            plx_model::ContactBehavior::Bonded,
+        );
+        region.side_a = Region::Faces(half.iter().map(|&k| lower[k]).collect());
+        region.side_b = Region::Faces(half.iter().map(|&k| upper[k]).collect());
+        region.settings.sides = Some(plx_model::SideRoles::AIsMaster);
+        model.contact_regions.push(region);
+    }
+    let (lowered, origin) = model.lower_contacts(&mesh);
+    assert_eq!(lowered.ties.len(), 1);
+    assert_eq!(origin.tie_regions, [vec![0, 1]]);
+    assert_eq!(lowered.ties[0].slave.faces(&mesh).len(), 4);
+}
+
+#[test]
+fn calculix_carries_the_load_across_a_bonded_region() {
+    // A small gap within the tolerance; the adjustment closes it.
+    let (mesh, model) = blocks_in_contact(0.01, plx_model::ContactBehavior::Bonded);
+    let Some(frd) = run_ccx("region-bonded", &write_inp(&mesh, &model, "").unwrap()) else {
+        return;
+    };
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((reaction - 1000.0).abs() < 1.0, "{reaction}");
+    let (below, above) = (
+        node_value(&frd, "DISP", "U3", 14),
+        node_value(&frd, "DISP", "U3", 105),
+    );
+    assert!(
+        (below - above).abs() < 1e-3 * below.abs(),
+        "{below} {above}"
+    );
+}
+
+/// Penetration of the middle node of the upper block's bottom into the lower block, from
+/// the results of the stacked blocks.
+fn penetration(frd: &FrdImport) -> f64 {
+    node_value(frd, "DISP", "U3", 14) - node_value(frd, "DISP", "U3", 105)
+}
+
+/// A frictionless region carries the pressure; the penetration is the pressure over the
+/// stiffness 10 E / h, the same fraction of the elastic compression in millimetres and in
+/// metres.
+#[test]
+fn calculix_carries_the_load_across_a_frictionless_region_in_any_units() {
+    let mut fractions = Vec::new();
+    for (name, scale) in [("mm", 1.0), ("m", 1e-3)] {
+        let (mut mesh, mut model) =
+            blocks_in_contact(0.0, plx_model::ContactBehavior::Frictionless);
+        for (&id, c) in mesh.clone().node_ids().iter().zip(mesh.clone().coords()) {
+            mesh.set_node(id, c.map(|v| v * scale));
+        }
+        // Stresses in Pa instead of MPa with lengths in m.
+        let stress = 1.0 / (scale * scale);
+        model.materials[0].elastic.as_mut().unwrap().young *= stress;
+        model.steps[0].loads[0].kind = LoadKind::Pressure(10.0 * stress);
+        // Held sideways at its top, the upper block rests on the lower one only by contact.
+        model.steps[0].boundary_conditions.push(BoundaryCondition {
+            name: "Side-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes((110..=118).collect()),
+            kind: each_node([Some(0.0), Some(0.0), None, None, None, None]),
+            amplitude: None,
+        });
+        let text = write_inp(&mesh, &model, "").unwrap();
+        assert!(text.contains("*Surface behavior, Pressure-overclosure=Linear\n"));
+        assert!(!text.contains("*Friction"));
+        let Some(frd) = run_ccx(&format!("region-frictionless-{name}"), &text) else {
+            return;
+        };
+        let bottom: Vec<NodeId> = (1..=9).collect();
+        let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+        let force = 1000.0 * stress * scale * scale;
+        assert!(
+            (reaction - force).abs() < 1e-2 * force,
+            "{name}: {reaction}"
+        );
+        let pressure = 10.0 * stress;
+        let young = 210_000.0 * stress;
+        let k = 10.0 * young / (5.0 * scale);
+        let expected = pressure / k;
+        // The middle node carries more than the mean pressure.
+        let penetration = penetration(&frd);
+        assert!(
+            (penetration - expected).abs() < 0.5 * expected,
+            "{name}: {penetration} {expected}"
+        );
+        // Elastic compression of the upper block, 10 thick.
+        fractions.push(penetration / (pressure * 10.0 * scale / young));
+    }
+    if let [mm, m] = fractions[..] {
+        assert!((mm - m).abs() < 1e-3 * mm, "{mm} {m}");
+    }
+}
+
+/// Pushed sideways under the pressure, a frictional region carries mu times the normal force,
+/// a rough one and a bonded one the whole shear.
+#[test]
+fn calculix_slides_frictional_regions_and_holds_rough_and_bonded_ones() {
+    use plx_model::{BondedMethod, ContactBehavior};
+    let cases = [
+        ("frictional", ContactBehavior::Frictional { mu: 0.15 }, None),
+        ("rough", ContactBehavior::Rough, None),
+        ("tied", ContactBehavior::Bonded, Some(BondedMethod::Contact)),
+        ("tie", ContactBehavior::Bonded, None),
+    ];
+    let mut shears = Vec::new();
+    for (name, behavior, method) in cases {
+        let (mesh, mut model) = blocks_in_contact(0.0, behavior);
+        model.contact_regions[0].settings.bonded_method = method;
+        // Pressure and push grow together, so does the friction limit.
+        let top = push_top(&mut model, 0.004);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        let Some(frd) = run_ccx(&format!("region-{name}"), &text) else {
+            return;
+        };
+        let pushed = node_sum(&frd, "FORC", "F1", &top);
+        shears.push((name, pushed));
+    }
+    let shear = |wanted: &str| shears.iter().find(|(n, _)| *n == wanted).unwrap().1;
+    // 10 MPa on 10 x 10 mm.
+    let frictional = shear("frictional");
+    assert!((frictional - 150.0).abs() < 0.05 * 150.0, "{shears:?}");
+    // Without sliding, the push of 4 um shears the blocks elastically, more than mu N.
+    for name in ["rough", "tied", "tie"] {
+        assert!(shear(name) > 1.5 * 150.0, "{shears:?}");
+    }
+    // The tied contact gives way little compared with the tie. The rough contact is softer:
+    // the push bends the stack enough to lift an edge of the interface.
+    assert!(
+        (shear("tied") - shear("tie")).abs() < 0.01 * shear("tie"),
+        "{shears:?}"
+    );
+}
+
+#[test]
+fn calculix_takes_mortar_contact_regions() {
+    let (mesh, mut model) = blocks_in_contact(0.0, plx_model::ContactBehavior::Frictionless);
+    model.contact_defaults.formulation = Some(ContactMethod::Mortar);
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Side-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes((110..=118).collect()),
+        kind: each_node([Some(0.0), Some(0.0), None, None, None, None]),
+        amplitude: None,
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Surface behavior, Pressure-overclosure=Hard\n"));
+    assert!(text.contains("Type=Mortar"));
+    let Some(frd) = run_ccx("region-mortar", &text) else {
+        return;
+    };
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((reaction - 1000.0).abs() < 10.0, "{reaction}");
+}
+
+#[test]
+fn contact_regions_take_the_formulation_of_the_pairs_defined_by_hand() {
+    use plx_model::{BondedMethod, ContactBehavior, MeshCheck, ModelItem, Problem, ResolvedKind};
+    let (mesh, mut model) = blocks_in_contact(0.0, ContactBehavior::Bonded);
+    model.contact_regions[0].settings.bonded_method = Some(BondedMethod::Contact);
+    let resolved = model.resolve_contacts(&mesh);
+    assert_eq!(resolved.formulation, ContactMethod::SurfaceToSurface);
+    assert!(matches!(
+        resolved.items[0].kind,
+        ResolvedKind::Pair {
+            behavior: SurfaceBehavior::Tied { .. },
+            ..
+        }
+    ));
+    // A pair defined by hand sets the formulation; a tied contact needs surface to surface,
+    // so the region falls back to a tie and says why.
+    let mut pair = ContactPair::new("Manual", "Hard");
+    pair.method = ContactMethod::NodeToSurface;
+    model.surface_interactions.push(SurfaceInteraction {
+        name: "Hard".into(),
+        properties: vec![InteractionProperty::SurfaceBehavior(SurfaceBehavior::Hard)],
+    });
+    model.contact_pairs.push(pair);
+    let resolved = model.resolve_contacts(&mesh);
+    assert_eq!(resolved.formulation, ContactMethod::NodeToSurface);
+    assert!(matches!(resolved.items[0].kind, ResolvedKind::Tie { .. }));
+    assert!(
+        resolved.items[0]
+            .why
+            .iter()
+            .any(|w| w.contains("needs Surface to surface")),
+        "{:?}",
+        resolved.items[0].why
+    );
+    // Another formulation chosen for the regions: the pair defined by hand differs.
+    model.contact_regions[0].behavior = ContactBehavior::Frictionless;
+    model.contact_defaults.formulation = Some(ContactMethod::SurfaceToSurface);
+    let check = MeshCheck::new(&mesh, model.properties.space);
+    let differ: Vec<ModelItem> = (model.check(&mesh, &check).into_iter())
+        .filter(|f| f.problem == Problem::ContactFormulationsDiffer)
+        .map(|f| f.item)
+        .collect();
+    assert_eq!(differ, [ModelItem::ContactPair(0)]);
+}
+
+#[test]
+fn findings_on_what_a_region_becomes_belong_to_the_region() {
+    use plx_model::{ContactBehavior, MeshCheck, ModelItem, Problem};
+    let (mesh, mut model) = blocks_in_contact(0.0, ContactBehavior::Bonded);
+    model.contact_regions[0].side_b = Region::Parts(vec!["GONE".into()]);
+    let check = MeshCheck::new(&mesh, model.properties.space);
+    let missing: Vec<ModelItem> = (model.check(&mesh, &check).into_iter())
+        .filter(|f| f.problem == Problem::MissingReference)
+        .map(|f| f.item)
+        .collect();
+    assert_eq!(missing, [ModelItem::ContactRegion(0)]);
+    // Mortar contact in a frequency step.
+    let (mesh, mut model) = blocks_in_contact(0.0, ContactBehavior::Frictionless);
+    model.contact_defaults.formulation = Some(ContactMethod::Mortar);
+    let mut frequency = Step::new_static("Step-2");
+    frequency.kind = StepKind::Frequency(Default::default());
+    model.steps.push(frequency);
+    let mortar: Vec<ModelItem> = (model.check(&mesh, &check).into_iter())
+        .filter(|f| f.problem == Problem::MortarNotSupported)
+        .map(|f| f.item)
+        .collect();
+    assert_eq!(mortar, [ModelItem::Step(1)]);
+}
+
+/// The stacked blocks with a detection of all parts, and their skins.
+fn detected_blocks(gap: f64) -> (FeMesh, FeModel, Vec<plx_mesh::PartSkin>) {
+    let (mesh, _, _) = two_blocks(gap);
+    let mut model = stacked_blocks(&mesh);
+    model
+        .contact_detections
+        .push(plx_model::ContactDetection::new("Contacts"));
+    let skins = (mesh.parts.iter())
+        .map(|p| plx_mesh::extract_part_skin(&mesh, p, 30.0))
+        .collect();
+    (mesh, model, skins)
+}
+
+#[test]
+fn a_detection_finds_the_touching_blocks_and_keeps_regions_the_user_changed() {
+    let (mesh, mut model, skins) = detected_blocks(0.01);
+    // 0.5 % of the diagonal (about 0.11) is less than half the element size of 5 to 10.
+    let auto = plx_model::auto_detection_tolerance(&mesh, &skins, &[true, true]);
+    assert!(auto > 2.0 && auto < 5.0, "{auto}");
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!((report.added, report.replaced), (1, 0));
+    let region = &model.contact_regions[0];
+    assert_eq!(region.name, "Bonded - LOWER to UPPER");
+    assert_eq!(region.behavior, plx_model::ContactBehavior::Bonded);
+    assert_eq!(region.detected_by.as_deref(), Some("Contacts"));
+    assert_eq!(region.side_a.faces(&mesh).len(), 4);
+    assert_eq!(region.side_b.faces(&mesh).len(), 4);
+    assert_eq!(region.settings.tolerance, Some(auto));
+    // Detecting again replaces what it found.
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!((report.added, report.replaced), (1, 1));
+    assert_eq!(model.contact_regions.len(), 1);
+    // A region changed by the user stays, and nothing is added for its parts.
+    model.contact_regions[0].behavior = plx_model::ContactBehavior::Frictionless;
+    model.contact_regions[0].edited = true;
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!((report.added, report.replaced), (0, 0));
+    assert_eq!(report.kept, ["Bonded - LOWER to UPPER"]);
+    assert_eq!(model.contact_regions.len(), 1);
+    // Apart beyond the tolerance it is no longer found, but kept.
+    let (far, _, _) = two_blocks(1.0);
+    let far_skins: Vec<_> = (far.parts.iter())
+        .map(|p| plx_mesh::extract_part_skin(&far, p, 30.0))
+        .collect();
+    model.contact_detections[0].tolerance = Some(0.5);
+    let report = model
+        .detect_contacts(0, &far, &far_skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.added, 0);
+    assert_eq!(report.lost, ["Bonded - LOWER to UPPER"]);
+    // Parts left out of the detection are not searched.
+    model.contact_regions.clear();
+    model.contact_detections[0].tolerance = None;
+    model.contact_detections[0].parts = vec!["LOWER".into()];
+    let report = model
+        .detect_contacts(0, &mesh, &skins, &[true, true])
+        .unwrap();
+    assert_eq!(report.added, 0);
+}
+
+#[test]
+fn calculix_carries_the_load_across_detected_contacts() {
+    let (mesh, mut model, skins) = detected_blocks(0.01);
+    model.detect_contacts(0, &mesh, &skins, &[true, true]);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Tie, Name=Bonded_-_LOWER_to_UPPER"),
+        "{text}"
+    );
+    let Some(frd) = run_ccx("detected-bonded", &text) else {
+        return;
+    };
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((reaction - 1000.0).abs() < 1.0, "{reaction}");
+}
+
+#[test]
+fn the_contact_check_tells_closed_and_open_regions_apart() {
+    use plx_model::ContactStatus::*;
+    // The tolerance of a bonded region of 5 x 5 faces is 1.25.
+    for (gap, status) in [
+        (0.0, Closed),
+        (1.0, Closed),
+        (-0.2, Closed),
+        (3.0, NearOpen),
+        (20.0, FarOpen),
+    ] {
+        let (mesh, model) = blocks_in_contact(gap, plx_model::ContactBehavior::Bonded);
+        let check = model.check_contacts(&mesh)[0].clone().unwrap();
+        assert_eq!(check.status, status, "{gap}");
+        assert_eq!(check.slave_nodes, 9);
+        assert!((check.tolerance - 1.25).abs() < 1e-9);
+        match status {
+            Closed if gap < 0.0 => {
+                assert!(
+                    (check.max_penetration.unwrap() - 0.2).abs() < 1e-9,
+                    "{check:?}"
+                );
+            }
+            Closed => assert!((check.max_gap.unwrap() - gap).abs() < 1e-9, "{check:?}"),
+            NearOpen => assert!((check.min_gap.unwrap() - gap).abs() < 1e-9, "{check:?}"),
+            _ => assert_eq!(check.touching, 0),
+        }
+        let open = (model.check(
+            &mesh,
+            &plx_model::MeshCheck::new(&mesh, model.properties.space),
+        ))
+        .into_iter()
+        .any(|f| f.problem == plx_model::Problem::ContactRegionOpen);
+        assert_eq!(open, matches!(status, NearOpen | FarOpen), "{gap}");
+    }
+    // Half the upper block beside the lower one: partly closed.
+    let (mut mesh, model) = blocks_in_contact(0.0, plx_model::ContactBehavior::Frictionless);
+    for (&id, c) in mesh.clone().node_ids().iter().zip(mesh.clone().coords()) {
+        if id > 100 {
+            mesh.set_node(id, [c[0] + 5.0, c[1], c[2]]);
+        }
+    }
+    let check = model.check_contacts(&mesh)[0].clone().unwrap();
+    assert_eq!(check.status, PartlyClosed, "{check:?}");
+    assert_eq!(check.touching, 6);
+}
+
+/// Contact regions written as contact pairs bring contact results for the check after
+/// solving; ties have none.
+#[test]
+fn contact_regions_write_contact_results() {
+    let (mesh, model) = blocks_in_contact(0.0, plx_model::ContactBehavior::Frictionless);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Contact file\nCDIS, CSTR\n"), "{text}");
+    let (mesh_tie, tie) = blocks_in_contact(0.0, plx_model::ContactBehavior::Bonded);
+    assert!(
+        !write_inp(&mesh_tie, &tie, "")
+            .unwrap()
+            .contains("*Contact file")
+    );
+    let Some(frd) = run_ccx("region-contact-results", &text) else {
+        return;
+    };
+    // 10 MPa on the upper block, carried by contact pressure at its bottom.
+    let pressure = node_value(&frd, "CONTACT", "CPRESS", 105);
+    assert!(pressure > 5.0 && pressure < 20.0, "{pressure}");
+}
+
+/// No separation holds the upper block to the lower one normal to the surfaces, one
+/// equation per slave node, while it slides freely along them: pulled up and pushed
+/// sideways at its top, the lower block takes the pull but no shear.
+#[test]
+fn calculix_holds_a_region_of_no_separation_together_and_lets_it_slide() {
+    let (mesh, mut model) = blocks_in_contact(0.0, plx_model::ContactBehavior::NoSeparation);
+    model.contact_regions[0].settings.sides = Some(plx_model::SideRoles::AIsMaster);
+    model.steps[0].loads[0].kind = LoadKind::Pressure(-10.0);
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Side-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes((110..=118).collect()),
+        kind: each_node([Some(0.01), Some(0.0), None, None, None, None]),
+        amplitude: None,
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Contact pair") && !text.contains("*Tie"));
+    // The nine nodes of the upper block's bottom, each on a node of the lower block's top.
+    assert_eq!(text.matches("*Equation\n2\n").count(), 9, "{text}");
+    assert!(
+        text.contains("*Equation\n2\n105, 3, -1, 14, 3, 1\n"),
+        "{text}"
+    );
+    let Some(frd) = run_ccx("region-no-separation", &text) else {
+        return;
+    };
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let pull = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((pull + 1000.0).abs() < 1.0, "{pull}");
+    let shear = node_sum(&frd, "FORC", "F1", &bottom);
+    assert!(shear.abs() < 1.0, "{shear}");
+    assert!(
+        (node_value(&frd, "DISP", "U3", 14) - node_value(&frd, "DISP", "U3", 105)).abs() < 1e-9
+    );
+    let slide = node_value(&frd, "DISP", "U1", 105) - node_value(&frd, "DISP", "U1", 14);
+    assert!((slide - 0.01).abs() < 1e-3, "{slide}");
+}
+
+/// An offset replaces the geometric gap: a negative one presses blocks that just touch
+/// apart like an interference fit, the pressure from the overlap over the compliance of
+/// both blocks and the contact.
+#[test]
+fn calculix_presses_regions_apart_by_a_negative_offset() {
+    let (mesh, mut model) = blocks_in_contact(0.0, plx_model::ContactBehavior::Frictionless);
+    model.contact_regions[0].settings.interface =
+        Some(plx_model::InterfaceTreatment::Offset(-0.01));
+    model.steps[0].loads.clear();
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        name: "Top-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes((110..=118).collect()),
+        kind: BoundaryKind::displacement([Some(0.0); 6]),
+        amplitude: None,
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "*Clearance, Master=Internal_Selection-1_Region-1_Master, \
+             Slave=Internal_Selection-1_Region-1_Slave, Value=-0.01\n"
+        ),
+        "{text}"
+    );
+    assert!(!text.contains("Adjust="));
+    let Some(frd) = run_ccx("region-offset", &text) else {
+        return;
+    };
+    // 0.01 = p (10/E + 10/E + h/(10 E)) without the lateral restraint, about 100 MPa.
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let force = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!(force > 5000.0 && force < 20_000.0, "{force}");
+    assert!(node_value(&frd, "DISP", "U3", 14) < 0.0);
+    assert!(node_value(&frd, "DISP", "U3", 105) > 0.0);
+}
+
+/// A tie or another formulation leaves the offset out and says why.
+#[test]
+fn an_offset_needs_a_surface_to_surface_contact() {
+    let (mesh, mut model) = blocks_in_contact(0.0, plx_model::ContactBehavior::Bonded);
+    model.contact_regions[0].settings.interface = Some(plx_model::InterfaceTreatment::Offset(0.1));
+    let resolved = model.resolve_contacts(&mesh);
+    assert!(
+        resolved.items[0]
+            .why
+            .iter()
+            .any(|w| w.contains("No offset"))
+    );
+    model.contact_regions[0].behavior = plx_model::ContactBehavior::Frictionless;
+    model.contact_defaults.formulation = Some(plx_model::ContactMethod::NodeToSurface);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Clearance"));
+}
+
+/// In a coupled step heat flows across a contact region: its contact pair conducts 100 k / h,
+/// so that the temperature hardly jumps at the contact. Hot at the bottom and cold at the
+/// top, the blocks meet at about the mean.
+#[test]
+fn calculix_conducts_heat_across_contact_regions_in_coupled_steps() {
+    let (mesh, mut model) = blocks_in_contact(0.0, plx_model::ContactBehavior::Frictionless);
+    let material = &mut model.materials[0];
+    material.conductivity = Some(CONDUCTIVITY);
+    material.specific_heat = Some(SPECIFIC_HEAT);
+    let step = &mut model.steps[0];
+    step.kind = StepKind::CoupledTempDisp(HeatTransferStep::default());
+    step.field_outputs = FieldOutput::coupled_defaults();
+    step.boundary_conditions.extend([
+        temperature("Hot", Region::Nodes((1..=9).collect()), 100.0),
+        temperature("Cold", Region::Nodes((110..=118).collect()), 0.0),
+    ]);
+    step.boundary_conditions.push(BoundaryCondition {
+        name: "Side-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes((110..=118).collect()),
+        kind: each_node([Some(0.0), Some(0.0), None, None, None, None]),
+        amplitude: None,
+    });
+    model.initial_conditions.push(plx_model::InitialCondition {
+        name: "Initial-1".into(),
+        active: true,
+        region: Region::Parts(vec!["LOWER".into(), "UPPER".into()]),
+        kind: plx_model::InitialConditionKind::Temperature(50.0),
+    });
+    let resolved = model.resolve_contacts(&mesh);
+    let plx_model::ResolvedKind::Pair { conductance, .. } = resolved.items[0].kind else {
+        panic!("{:?}", resolved.items[0].kind);
+    };
+    assert_eq!(conductance, Some(100.0 * CONDUCTIVITY / 5.0));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Gap conductance\n1000\n"), "{text}");
+    let Some(frd) = run_ccx("region-conductance", &text) else {
+        return;
+    };
+    let (below, above) = (
+        node_value(&frd, "NDTEMP", "T", 14),
+        node_value(&frd, "NDTEMP", "T", 105),
+    );
+    assert!((below - 50.0).abs() < 5.0, "{below}");
+    assert!((below - above).abs() < 2.0, "{below} {above}");
+}
+
+/// The equations of no separation hold for small displacements only; with large
+/// deformations the model check warns.
+#[test]
+fn no_separation_with_large_deformations_is_a_warning() {
+    use plx_model::{MeshCheck, ModelItem, Problem};
+    let (mesh, mut model) = blocks_in_contact(0.0, plx_model::ContactBehavior::NoSeparation);
+    let check = MeshCheck::new(&mesh, model.properties.space);
+    let warned = |model: &FeModel| {
+        (model.check(&mesh, &check).iter()).any(|f| {
+            f.problem == Problem::NoSeparationLargeDeformation
+                && f.item == ModelItem::ContactRegion(0)
+        })
+    };
+    assert!(!warned(&model));
+    if let StepKind::Static(s) = &mut model.steps[0].kind {
+        s.nlgeom = true;
+    }
+    assert!(warned(&model));
+    let resolved = model.resolve_contacts(&mesh);
+    assert!(
+        resolved.items[0]
+            .why
+            .iter()
+            .any(|w| w.contains("small displacements"))
+    );
+}
+
+/// A step after `model`'s first, its loads left out and its boundary conditions those of the
+/// first and `extra`.
+fn next_step(model: &FeModel, name: &str, extra: Vec<BoundaryCondition>) -> Step {
+    let mut step = model.steps[0].clone();
+    step.name = name.into();
+    step.loads.clear();
+    step.boundary_conditions.extend(extra);
+    step
+}
+
+/// A step switches a contact region off: pressed on before, the upper block held at its top
+/// no longer loads the lower one. The next step switches it on again and the pressure gets
+/// through.
+#[test]
+fn calculix_switches_contact_regions_off_and_on_in_steps() {
+    use plx_model::{ContactBehavior, ContactState};
+    let (mesh, mut model) = blocks_in_contact(0.0, ContactBehavior::Frictionless);
+    let side = |values| BoundaryCondition {
+        name: "Side-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes((110..=118).collect()),
+        kind: each_node(values),
+        amplitude: None,
+    };
+    model.steps[0]
+        .boundary_conditions
+        .push(side([Some(0.0), Some(0.0), None, None, None, None]));
+    let on = ContactState {
+        active: true,
+        friction: None,
+    };
+    let off = ContactState {
+        active: false,
+        ..on
+    };
+    let mut free = next_step(&model, "Step-2", Vec::new());
+    free.boundary_conditions[1] = side([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
+    free.set_contact_state("Region-1", on, off);
+    assert_eq!(free.contact_changes.len(), 1);
+    let mut pressed = model.steps[0].clone();
+    pressed.name = "Step-3".into();
+    pressed.set_contact_state("Region-1", off, on);
+    model.steps.push(free);
+    let region = &model.contact_regions[0];
+    assert_eq!(region.state_after(&model.steps), off);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "** Name: Region-1\n*Model change, Type=Contact pair, Remove\n\
+             Internal_Selection-1_Region-1_Slave, Internal_Selection-1_Region-1_Master\n"
+        ),
+        "{text}"
+    );
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let Some(frd) = run_ccx("region-switched-off", &text) else {
+        return;
+    };
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!(reaction.abs() < 1.0, "{reaction}");
+    model.steps.push(pressed);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Model change, Type=Contact pair, Add\n"));
+    let Some(frd) = run_ccx("region-switched-on", &text) else {
+        return;
+    };
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((reaction - 1000.0).abs() < 10.0, "{reaction}");
+}
+
+/// A step raises the friction of a sliding region: pushed further, the block slides at the
+/// new coefficient times the normal force. The region gets an interaction of its own, as
+/// the change applies to the whole interaction.
+#[test]
+fn calculix_changes_the_friction_of_a_region_in_a_step() {
+    use plx_model::{ContactBehavior, ContactState};
+    let (mesh, mut model) = blocks_in_contact(0.0, ContactBehavior::Frictional { mu: 0.15 });
+    let mut other = model.contact_regions[0].clone();
+    other.name = "Region-2".into();
+    other.active = false;
+    model.contact_regions.push(other);
+    let top = push_top(&mut model, 0.004);
+    let mut step = model.steps[0].clone();
+    step.name = "Step-2".into();
+    if let BoundaryKind::Displacement(d) = &mut step.boundary_conditions[1].kind {
+        d.values[0] = Some(0.008);
+    }
+    let before = model.contact_regions[0].state_after(&model.steps);
+    step.set_contact_state(
+        "Region-1",
+        before,
+        ContactState {
+            friction: Some(0.3),
+            ..before
+        },
+    );
+    model.steps.push(step);
+    let (lowered, _) = model.lower_contacts(&mesh);
+    let interactions: Vec<&str> = (lowered.contact_pairs.iter())
+        .map(|p| p.interaction.as_str())
+        .collect();
+    assert_eq!(interactions, ["PLX_Frictional", "PLX_Frictional-2"]);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Change friction, Interaction=PLX_Frictional\n*Friction\n0.3, 4200\n"),
+        "{text}"
+    );
+    let Some(frd) = run_ccx("region-friction-change", &text) else {
+        return;
+    };
+    let pushed = node_sum(&frd, "FORC", "F1", &top);
+    assert!((pushed - 300.0).abs() < 0.05 * 300.0, "{pushed}");
+}
+
+/// A tie cannot be switched in a step: a bonded region switched becomes a tied contact,
+/// unless chosen as a tie, which the model check reports, as it reports no separation.
+#[test]
+fn switched_bonded_regions_become_tied_contacts() {
+    use plx_model::{
+        BondedMethod, ContactBehavior, ContactState, MeshCheck, ModelItem, Problem, ResolvedKind,
+    };
+    let (mesh, mut model) = blocks_in_contact(0.0, ContactBehavior::Bonded);
+    let mut step = next_step(&model, "Step-2", Vec::new());
+    let on = ContactState {
+        active: true,
+        friction: None,
+    };
+    step.set_contact_state(
+        "Region-1",
+        on,
+        ContactState {
+            active: false,
+            ..on
+        },
+    );
+    model.steps.push(step);
+    let resolved = model.resolve_contacts(&mesh);
+    assert!(matches!(
+        resolved.items[0].kind,
+        ResolvedKind::Pair {
+            behavior: SurfaceBehavior::Tied { .. },
+            ..
+        }
+    ));
+    let check = MeshCheck::new(&mesh, model.properties.space);
+    let ignored = |model: &FeModel| {
+        (model.check(&mesh, &check).iter()).any(|f| {
+            f.problem == Problem::ContactChangeIgnored && f.item == ModelItem::ContactRegion(0)
+        })
+    };
+    assert!(!ignored(&model));
+    model.contact_regions[0].settings.bonded_method = Some(BondedMethod::Constraint);
+    assert!(ignored(&model));
+    assert!(
+        !write_inp(&mesh, &model, "")
+            .unwrap()
+            .contains("*Model change")
+    );
+    model.contact_regions[0].behavior = ContactBehavior::NoSeparation;
+    assert!(ignored(&model));
+}

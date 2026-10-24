@@ -80,10 +80,215 @@ constraint out of the input file.
 
 == Contacts <contacts>
 
+Contacts and glued joints between parts are listed under #ui("Connections") in the tree of the FE
+model. The usual way is a contact region: you say which two regions touch and how they behave,
+and PrePoLix works out how CalculiX should model it. The manual objects of CalculiX (surface
+interactions, contact pairs, ties) are still there under #ui("Connections") #sym.arrow.r
+#ui("Advanced") and in #menu("Interaction", "Advanced").
+
+=== Contact regions <contact-regions>
+
+#menu("Interaction", "Create Contact Region ...") or #ui("Create Contact Region ...") in the
+context menu of #ui("Connections") connects two regions, #ui("Side A") and #ui("Side B"). Which
+side is A does not matter: PrePoLix chooses the master side itself.
+
+#screenshot("contact-region-dialog.png", [A frictional contact region with its advanced settings.
+  Side A is red in the 3D view, side B blue; #ui("Exported as") shows what PrePoLix writes for
+  CalculiX and why])
+
+#fields(
+  [Type], [#ui("Bonded"): the sides are glued together, no gap and no sliding.
+    #ui("No Separation"): no gap opens, but the sides slide freely along each other.
+    #ui("Frictionless"): the sides may separate and slide freely, but not penetrate.
+    #ui("Frictional"): like frictionless, but the sides stick until the shear exceeds the
+    #ui("Friction coefficient") times the pressure. #ui("Rough"): the sides may separate but
+    never slide. The grey text below the type says what it means for the analysis.],
+  [Side A / Side B], [The two regions, picked like the master and slave of a contact pair. A
+    region usually is the touching faces of one part.],
+  [From definition], [Names the region by its type and parts, e.g.
+    #ui("Frictional - Block to Cap").],
+  [Exported as], [What PrePoLix writes for CalculiX, with the derived stiffness and the reasons
+    below in grey.],
+)
+
+#ui("Advanced settings") shows what PrePoLix derived. Every setting starts at #ui("Auto"), which
+shows the derived value in brackets; choosing something else overrides it for this region only.
+
+#fields(
+  [Master], [The master side. Auto takes the side with the coarser mesh, then the stiffer
+    material, then the larger area.],
+  [Bonded as], [For #ui("Bonded"): #ui("Constraint (tie)") ties the slave nodes to the master
+    faces (`*TIE`), linear and exact. #ui("Contact (tied contact)") glues them with a stiff
+    tied penalty contact. Auto uses a tie.],
+  [Normal stiffness], [The penalty stiffness of a contact. Auto is 10 #sym.times E / h, E the
+    Young's modulus of the softer side and h the mesh size of the slave side, 100 #sym.times E / h
+    for a tied contact. As a factor of E / h or as a value (pressure per length).],
+  [Tangential stiffness], [The stiffness while the sides stick (stick slope). Auto is the normal
+    stiffness / 100 for a frictional contact and the normal stiffness for rough and tied
+    contacts.],
+  [Initial gap], [#ui("Adjust to touch") moves the slave nodes onto the master side at the start,
+    so that small gaps from meshing are closed. #ui("As is") keeps the mesh. #ui("Offset")
+    sets the distance of the sides wherever they face each other, whatever the mesh: negative
+    for an interference fit, such as a shaft pressed into a hub (`*CLEARANCE`, surface to
+    surface contacts only). Auto adjusts bonded regions and keeps the others as they are.],
+  [Tolerance], [Distance within which the sides count as touching: tied by a tie, held by no
+    separation, closed by the adjustment. Auto is a quarter of the slave mesh size.],
+  [Heat conductance], [Shown when a step solves temperatures and displacements together: the
+    heat flow across the closed contact per area and temperature difference. Auto is
+    100 #sym.times k / h, k the thermal conductivity of the less conducting side: so much that
+    the contact hardly shows in the temperatures. A bonded tie conducts heat anyway.],
+  [Small sliding], [Only for the node to surface formulation, see below.],
+)
+
+#screenshot("contact-offset-dialog.png", [The advanced settings of a frictional region with an
+  offset of -0.01 mm: the sides press into each other by 0.01 mm like an interference fit])
+
+#ui("No Separation") is written without contact iterations: one equation per slave node within
+the tolerance holds it to the master side normal to the surface, while it slides freely along
+it. The equations stay linear, so the region needs no contact pair and no stiffness, but they
+hold for small displacements only: the model check warns about a region of no separation in a
+step with large deformations. A part held only by no separation can still slide, so it needs
+other supports along the surface.
+
+#screenshot("contact-no-separation.png", [A region of no separation in the worksheet, written
+  as constraint equations])
+
+The stiffness is derived from E / h, so a model gives the same penetration whether its units are
+millimetres or metres. Bonded regions whose slave sides share nodes are written as one tie.
+
+==== Contact detection <contact-detection>
+
+Instead of picking every pair of sides by hand, let PrePoLix find them:
+#menu("Interaction", "Detect Contacts ...") or #ui("Detect Contacts ...") in the context menu of
+#ui("Connections") creates a contact detection. #ui("OK") searches the parts for surfaces that
+touch and adds a contact region for every pair it finds, listed under the detection in the tree.
+
+#screenshot("contact-detection-dialog.png", [A contact detection of all visible parts with the
+  derived tolerance])
+
+#fields(
+  [Parts], [#ui("All visible parts"), or untick it and choose the parts to search, e.g. only the
+    bolts and the plates they hold.],
+  [Tolerance], [Surfaces closer than this touch. Auto is 0.5 % of the size of the parts
+    searched, but at least half their element size, so that two meshes on a curved face still
+    meet (on the geometry, see @contact-detection-geometry, just the 0.5 %). The regions found get it as their tolerance, so that a tie catches every node the
+    detection saw touching.],
+  [Angle], [Largest angle between the surfaces facing each other (default 35°).],
+  [Surfaces], [What is searched in 3D: outer faces of #ui("Solid") parts, the top and bottom of
+    #ui("Shell") and membrane parts, and their free edges (#ui("Shell edge")).],
+  [Group by], [#ui("Parts") (default): one region per pair of touching parts. #ui("Faces"): one
+    per pair of touching faces. #ui("Graph"): touching faces sharing nodes are merged, so that
+    every node is on the slave side of one region only.],
+  [Type], [The type of the regions found, #ui("Bonded") by default.],
+)
+
+The regions found are named from their definition, e.g. #ui("Bonded - Base to Block"), and work
+like regions made by hand. #ui("Detect Again") in the context menu of the detection searches
+again, after the geometry or the mesh changed, and replaces the regions it found before. Regions
+you changed since (in their dialog or in the worksheet) stay as they are; the worksheet shows
+them as #ui("changed"), and the output window names those that are no longer found. Several
+detections can live side by side, e.g. one for bonded housings and one for frictional bolt
+heads. Deleting a detection deletes the regions it found, except changed ones, which stay
+under #ui("Contact Regions").
+
+#screenshot("contact-detection-tree.png", [The regions found by the detection #ui("Contacts");
+  the frictional one was changed after the detection and stays when detecting again])
+
+==== Contact detection on the geometry <contact-detection-geometry>
+
+A model made from CAD geometry is searched on the geometry itself, meshed or not, as in Ansys:
+you can detect the contacts right after the import, before meshing. A region found this way
+takes the whole CAD faces that touch, or the whole CAD edges for the free edges of shells and
+in 2D models, also where only part of a face is in contact, e.g. the top of a plate a small
+block stands on. The regions keep these faces when the parts are meshed again, finer or with
+other settings, and #ui("Detect Again") finds the same regions. The dialog says so below the
+type.
+
+#screenshot("contact-detection-geometry.png", [A detection of a model that is not meshed yet:
+  it searches the CAD geometry])
+
+On the geometry, #ui("Auto") for the tolerance is 0.5 % of the size of the parts searched;
+the triangles that show the faces say nothing about the mesh to come. The regions found leave
+their own tolerance to the mesh (a quarter of the slave side's element size, see
+@contact-regions) unless the detection sets one. A model with parts that do not come from the
+geometry, such as an imported mesh, is searched on its mesh as before.
+
+#screenshot("contact-detection-geometry-region.png", [The region found before meshing, shown
+  on the mesh: the whole top face of the plate (side A) against the bottom of the block])
+
+==== Connection settings
+
+#menu("Interaction", "Connection Settings ...") or the context menu of #ui("Connections") sets what
+all contact regions share. CalculiX allows only one contact #ui("Formulation") per model (see
+"Which method?" below). Auto takes surface to surface, or the method of your manual contact
+pairs if you have any. The #ui("Stiffness factor") replaces the 10 of the normal stiffness.
+The model check reports a manual contact pair whose method differs from the formulation, and
+mortar contact in a step other than static.
+
+==== Contact worksheet
+
+#menu("Interaction", "Contact Worksheet ...") or #ui("Contact Worksheet ...") in the context menu
+of #ui("Connections") lists all contact regions in a table: type, sides, master and what each
+is exported as, and which detection found it. A click on a row selects the region in the tree, #key("Ctrl")+click and
+#key("Shift")+click select more. The buttons change all selected regions at once: set the type
+or the friction coefficient, flip the sides, activate or deactivate, name them from their
+definition, or delete them.
+
+#screenshot("contact-worksheet.png", [The contact worksheet after a run: the bonded region
+  is closed, the frictional one partly closed, and after solving it sticks and slides])
+
+==== Contact check <contact-check>
+
+PrePoLix checks every contact region before you solve: for each node of the slave side it
+measures the distance to the master side, along the outward normal of solid faces (negative
+means the sides overlap). A node counts as touching when it lies within the tolerance of the
+region: its tie tolerance or adjustment distance, or else a quarter of the mesh size. The
+region then is
+
+- #ui("Closed") when all slave nodes touch,
+- #ui("Partly closed") when some do,
+- #ui("Near open") when none does, but the gap is less than ten times the tolerance,
+- #ui("Far open") when the sides are further apart.
+
+The worksheet shows the status in #ui("Initial status"), the share of touching slave nodes in
+#ui("Touching") and the smallest and largest gap in #ui("Gap"); the dialog of a region shows
+the same in its #ui("Contact check") row. An open region carries no load until the parts move
+onto each other, so the model check warns about every active region that is near or far open:
+a bonded region that is open ties nothing, and a frictional one leaves the parts free to fly
+apart unless supports hold them.
+
+#screenshot("contact-check-dialog.png", [The contact check in the dialog of a frictional
+  region: the larger block top is the slave side, so only part of it touches the cap])
+
+Every region exported as a contact pair also writes contact results (#ui("CDIS") and
+#ui("CSTR")) in static, visco and dynamic steps that do not ask for them already. After a run
+the worksheet adds the column #ui("After solving"): whether the region stays open, sticks,
+slides or does both, and on hover how many slave nodes are in contact, how many slide, the
+largest pressure and the largest opening. A node slides when its shear stress reaches the
+friction coefficient times its pressure.
+
+==== Contacts in steps <contact-steps>
+
+Contact regions belong to the model, but a step can switch one off or on, or give a frictional
+one another friction coefficient: #ui("Contacts in this step") in the dialog of a static,
+visco, dynamic or temperature-displacement step lists the active regions as they are in that
+step. A change holds from its step on, in the following steps too, until another step changes
+the region again; #ui("changed here") marks what the step changes. Renaming a region keeps its
+changes, deleting it removes them.
+
+#screenshot("contact-step-changes.png", [Step-2 switches the bonded region off and raises the
+  friction of the frictional one to 0.3])
+
+CalculiX switches contact pairs only (`*MODEL CHANGE`, `*CHANGE FRICTION`). A bonded region a
+step switches is therefore written as a tied contact instead of a tie, and a region whose
+friction a step changes gets a surface interaction of its own. A bonded region chosen as a
+tie, a region of no separation and a region deactivated as a whole cannot change in steps;
+the model check reports them.
+
 === Surface interactions
 
-#menu("Interaction", "Create Surface Interaction ...") defines the contact behaviour that contact
-pairs refer to. Move the models you need from #ui("Available") to #ui("Selected").
+#menu("Interaction", "Advanced", "Create Surface Interaction ...") defines the contact behaviour
+that contact pairs refer to. Move the models you need from #ui("Available") to #ui("Selected").
 
 #screenshot("surface-interaction.png", [Surface interaction with surface behaviour])
 
@@ -138,7 +343,7 @@ For a #ui("Hard") contact the input file names E and h in a comment. A #ui("Line
 
 === Contact pairs
 
-#menu("Interaction", "Create Contact Pair ...") creates a contact between a master and a slave
+#menu("Interaction", "Advanced", "Create Contact Pair ...") creates a contact between a master and a slave
 surface.
 
 #screenshot("contact-pair.png", [Create Contact Pair; the grey text below #ui("Method") explains
@@ -193,7 +398,7 @@ the same texts.
 
 === Ties <ties>
 
-#menu("Interaction", "Create Tie ...") or #ui("Create Tie ...") in the context menu of
+#menu("Interaction", "Advanced", "Create Tie ...") or #ui("Create Tie ...") in the context menu of
 #ui("Contact Pairs") glues a slave surface to a master surface (`*TIE`). Ties are listed under
 #ui("Contact Pairs"), with the contact pairs and node ties; projects that kept them under
 #ui("Constraints") open with them moved there.
@@ -218,8 +423,9 @@ by a hinge.
 
 === Searching contact pairs
 
-#menu("Interaction", "Search Contact Pairs ...") finds surfaces of different parts that touch and
-creates ties or contact pairs for them.
+#menu("Interaction", "Advanced", "Search Contact Pairs ...") finds surfaces of different parts that touch and
+creates ties or contact pairs for them. It is the manual counterpart of the contact detection
+(@contact-detection): what it creates is not found again when the model changes.
 
 #screenshot("contact-search.png", [Search Contact Pairs])
 
@@ -234,7 +440,7 @@ creates ties or contact pairs for them.
     2D the element edges. #ui("Line end") finds beam and truss ends at the same point;
     #ui("Ignore hidden parts") leaves out hidden parts.],
   [Type], [#ui("Tie") or #ui("Contact"), for contacts with #ui("Surface Interaction") and
-    #ui("Method").],
+    #ui("Method"): node to surface, surface to surface or mortar.],
   [Adjust mesh], [Writes the pairs with adjust.],
 )
 

@@ -254,6 +254,14 @@ pub fn model_keywords(
     } else {
         mesh
     };
+    // Contact regions become the ties and contact pairs they stand for.
+    let lowered;
+    let model = if model.contact_regions.is_empty() {
+        model
+    } else {
+        lowered = model.lower_contacts(mesh).0;
+        &lowered
+    };
     let lines = LineElements::new(mesh, model)?;
     // Node ties of beams, and of anything without rotations, are written as one shared node.
     let merged_nodes = node_merges(mesh, model, &lines);
@@ -1786,6 +1794,13 @@ fn contact_pair(pair: &ContactPair, master: &str, slave: &str) -> String {
         let _ = write!(out, ", Adjust={}", number(size));
     }
     let _ = writeln!(out, "\n{slave}, {master}");
+    if let Some(clearance) = pair.clearance {
+        let _ = writeln!(
+            out,
+            "*Clearance, Master={master}, Slave={slave}, Value={}",
+            number(clearance)
+        );
+    }
     out
 }
 
@@ -2474,7 +2489,7 @@ fn step_block<'f>(
         .filter_map(|output| field_output(output, shells))
         .collect();
     let end = Keyword::generated("*End step\n".into());
-    let contents = vec![
+    let mut contents = vec![
         Keyword::generated(procedure),
         Keyword::title("Controls", Vec::new()),
         Keyword::title("Output frequency", Vec::new()),
@@ -2485,7 +2500,57 @@ fn step_block<'f>(
         Keyword::title("Field outputs", field_outputs),
         Keyword::title("End step", vec![end]),
     ];
+    let changes = contact_changes(step, model, pair_surfaces);
+    if !changes.is_empty() {
+        contents.insert(3, Keyword::title("Contacts", changes));
+    }
     Ok(Keyword::parent(header, contents))
+}
+
+/// The contact pairs a step switches off or on (`*Model change, Type=Contact pair`) and
+/// whose friction it changes (`*Change friction`, with the stick slope of the interaction).
+/// Changes of pairs not written, deactivated or unknown, are left out.
+fn contact_changes(step: &Step, model: &FeModel, pair_surfaces: &PairSurfaces) -> Vec<Keyword> {
+    let mut keywords = Vec::new();
+    for change in &step.contact_changes {
+        let Some((master, slave)) = pair_surfaces.get(&change.region) else {
+            continue;
+        };
+        let mut out = format!("** Name: {}\n", change.region);
+        if let Some(active) = change.active {
+            let action = if active { "Add" } else { "Remove" };
+            let _ = writeln!(
+                out,
+                "*Model change, Type=Contact pair, {action}\n{slave}, {master}"
+            );
+        }
+        let pair = (model.contact_pairs.iter()).find(|p| p.name == change.region);
+        let friction = pair
+            .and_then(|p| (model.surface_interactions.iter()).find(|i| i.name == p.interaction))
+            .and_then(|i| {
+                i.properties.iter().find_map(|p| match p {
+                    InteractionProperty::Friction(f) => Some((i, f)),
+                    _ => None,
+                })
+            });
+        if let (Some(mu), Some((interaction, friction))) = (change.friction, friction) {
+            let _ = write!(
+                out,
+                "*Change friction, Interaction={}\n*Friction\n{}",
+                name(&interaction.name),
+                number(mu)
+            );
+            let default = (model.materials.first())
+                .and_then(|m| m.elastic)
+                .map(|e| e.young / 2.0);
+            if let Some(slope) = friction.stick_slope.or(default) {
+                let _ = write!(out, ", {}", number(slope));
+            }
+            out.push('\n');
+        }
+        keywords.push(Keyword::generated(out));
+    }
+    keywords
 }
 
 /// The defined temperatures of a step as PrePoMax's `CalDefinedTemperature` writes them:

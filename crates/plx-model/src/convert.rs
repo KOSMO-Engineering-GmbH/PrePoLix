@@ -102,6 +102,18 @@ impl FeModel {
         for tie in &mut self.ties {
             c.option(&mut tie.position_tolerance, Quantity::Length);
         }
+        for region in &mut self.contact_regions {
+            let settings = &mut region.settings;
+            c.option(&mut settings.tolerance, Quantity::Length);
+            for stiffness in [
+                &mut settings.normal_stiffness,
+                &mut settings.tangential_stiffness,
+            ] {
+                if let Some(crate::Stiffness::Value(k)) = stiffness {
+                    c.value(k, Quantity::ForcePerVolume);
+                }
+            }
+        }
         c.option(&mut self.properties.absolute_zero, Quantity::Temperature);
         c.option(
             &mut self.properties.stefan_boltzmann,

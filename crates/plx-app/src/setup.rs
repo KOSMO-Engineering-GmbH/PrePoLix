@@ -23,6 +23,7 @@ use plx_model::{
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
+use crate::connections::{self, RegionView};
 use crate::constraint_dialog::ConstraintDraft;
 use crate::contacts::{self, MasterSlave};
 use crate::expose;
@@ -52,6 +53,10 @@ pub enum NewItem {
     /// A spring, support or rigid body, chosen in the dialog.
     Constraint,
     SurfaceInteraction,
+    /// Two surfaces in contact by the behavior the user wants.
+    ContactRegion,
+    /// A search for contact regions, kept to run it again.
+    ContactDetection,
     ContactPair,
     /// Surfaces glued to each other; listed with the contact pairs.
     Tie,
@@ -1059,6 +1064,11 @@ enum Draft {
     DefinedField(usize, DefinedField, RegionDraft),
     Constraint(ConstraintDraft),
     SurfaceInteraction(SurfaceInteraction, contacts::InteractionView),
+    /// A contact region with side A as master and side B as slave of the drafts.
+    ContactRegion(plx_model::ContactRegion, MasterSlave, RegionView),
+    ContactDetection(plx_model::ContactDetection),
+    /// The settings the contact regions share.
+    Connections(plx_model::ContactDefaults),
     ContactPair(ContactPair, MasterSlave),
     Tie(Tie, MasterSlave),
     NodeTie(NodeTie, RegionDraft),
@@ -1077,7 +1087,9 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         | Draft::InitialCondition(_, r)
         | Draft::NodeTie(_, r)
         | Draft::MeshSet(_, r, _) => Some(r),
-        Draft::ContactPair(_, regions) | Draft::Tie(_, regions) => Some(regions.current()),
+        Draft::ContactPair(_, regions)
+        | Draft::Tie(_, regions)
+        | Draft::ContactRegion(_, regions, _) => Some(regions.current()),
         Draft::Constraint(c) => Some(c.region()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
@@ -1094,7 +1106,9 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         | Draft::InitialCondition(_, r)
         | Draft::NodeTie(_, r)
         | Draft::MeshSet(_, r, _) => Some(r),
-        Draft::ContactPair(_, regions) | Draft::Tie(_, regions) => Some(regions.current_mut()),
+        Draft::ContactPair(_, regions)
+        | Draft::Tie(_, regions)
+        | Draft::ContactRegion(_, regions, _) => Some(regions.current_mut()),
         Draft::Constraint(c) => Some(c.region_mut()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
@@ -1117,6 +1131,8 @@ pub struct Editor {
     expose: Option<expose::Scope>,
     /// The blocks value links give exposed parameters of the model from, by key.
     linked: Vec<(u32, String)>,
+    /// The CAD geometry a contact detection searches before the parts are meshed.
+    detection_scope: Option<connections::DetectionScope>,
 }
 
 pub enum EditorResult {
@@ -1810,6 +1826,23 @@ impl Editor {
                 let view = contacts::InteractionView::new(&interaction);
                 Draft::SurfaceInteraction(interaction, view)
             }
+            NewItem::ContactRegion => {
+                let name = next_name("Contact_Region", names(&fe.contact_regions, |r| &r.name));
+                Draft::ContactRegion(
+                    plx_model::ContactRegion::new(name, plx_model::ContactBehavior::Bonded),
+                    MasterSlave::new(contact_target(fe)),
+                    RegionView::default(),
+                )
+            }
+            NewItem::ContactDetection => {
+                let existing = names(&fe.contact_detections, |d| &d.name);
+                let name = if existing.is_empty() {
+                    "Contacts".to_owned()
+                } else {
+                    next_name("Contacts", existing)
+                };
+                Draft::ContactDetection(plx_model::ContactDetection::new(name))
+            }
             NewItem::ContactPair => {
                 let existing = names(&fe.contact_pairs, |c| &c.name);
                 let interaction = (fe.surface_interactions.first())
@@ -1852,6 +1885,7 @@ impl Editor {
             motion: None,
             expose: None,
             linked: Vec::new(),
+            detection_scope: None,
         })
     }
 
@@ -1872,6 +1906,7 @@ impl Editor {
             motion: None,
             expose: None,
             linked: Vec::new(),
+            detection_scope: None,
         }
     }
 
@@ -1907,6 +1942,7 @@ impl Editor {
             motion: None,
             expose: None,
             linked: Vec::new(),
+            detection_scope: None,
         })
     }
 
@@ -1989,6 +2025,24 @@ impl Editor {
                     MasterSlave::from_regions(&pair.master, &pair.slave, contact_target(fe), mesh);
                 (Draft::ContactPair(pair, regions), i)
             }
+            TreeItem::ContactRegion(i) => {
+                let region = fe.contact_regions.get(i)?.clone();
+                let sides = MasterSlave::from_regions(
+                    &region.side_a,
+                    &region.side_b,
+                    contact_target(fe),
+                    mesh,
+                );
+                (
+                    Draft::ContactRegion(region, sides, RegionView::default()),
+                    i,
+                )
+            }
+            TreeItem::ContactDetection(i) => (
+                Draft::ContactDetection(fe.contact_detections.get(i)?.clone()),
+                i,
+            ),
+            TreeItem::Group("Contacts") => (Draft::Connections(fe.contact_defaults.clone()), 0),
             TreeItem::Tie(i) => {
                 let tie = fe.ties.get(i)?.clone();
                 let regions =
@@ -2015,6 +2069,7 @@ impl Editor {
             motion: None,
             expose: None,
             linked: Vec::new(),
+            detection_scope: None,
         })
     }
 
@@ -2032,6 +2087,9 @@ impl Editor {
             Draft::Constraint(c) => ("Constraint", c.name()),
             Draft::SurfaceInteraction(s, _) => ("Surface Interaction", &s.name),
             Draft::ContactPair(c, _) => ("Contact Pair", &c.name),
+            Draft::ContactRegion(r, ..) => ("Contact Region", &r.name),
+            Draft::ContactDetection(d) => ("Contact Detection", &d.name),
+            Draft::Connections(_) => return "Connections".into(),
             Draft::Tie(t, _) => ("Tie", &t.name),
             Draft::NodeTie(t, _) => ("Node Tie", &t.name),
             Draft::Amplitude(a, _) => ("Amplitude", &a.name),
@@ -2125,7 +2183,9 @@ impl Editor {
     /// The region being edited, for the 3D view.
     pub fn highlight(&self, model: &Model) -> Highlight {
         match &self.draft {
-            Draft::ContactPair(_, regions) | Draft::Tie(_, regions) => regions.highlight(model),
+            Draft::ContactPair(_, regions)
+            | Draft::Tie(_, regions)
+            | Draft::ContactRegion(_, regions, _) => regions.highlight(model),
             Draft::Constraint(c) => c.highlight(model),
             _ => self
                 .region()
@@ -2135,6 +2195,23 @@ impl Editor {
 
     /// Tells the dialog which exposed parameters of the model value links give, by key, and
     /// from which block.
+    /// The parts a contact detection being edited searches; empty for all visible ones.
+    pub fn detection_parts(&self) -> Option<&[String]> {
+        match &self.draft {
+            Draft::ContactDetection(detection) => Some(&detection.parts),
+            _ => None,
+        }
+    }
+
+    pub fn detection_scope(&self) -> Option<&connections::DetectionScope> {
+        self.detection_scope.as_ref()
+    }
+
+    /// Sets the CAD geometry a contact detection being edited searches, `None` for the mesh.
+    pub fn set_detection_scope(&mut self, scope: Option<connections::DetectionScope>) {
+        self.detection_scope = scope;
+    }
+
     pub fn set_linked(&mut self, linked: Vec<(u32, String)>) {
         if self.linked != linked {
             self.linked = linked;
@@ -2433,6 +2510,7 @@ impl Editor {
             }
             Draft::Step(step, region) => {
                 step_form(ui, step, self.index.is_none(), &model.fe);
+                crate::connections::step_contacts(ui, &model.fe, step, self.index);
                 if step.kind.design_region().is_some() {
                     region.ui_labeled(ui, model, "Design region", "design region", true);
                     ui.label("");
@@ -3040,6 +3118,27 @@ impl Editor {
                 name_row(ui, &mut pair.name);
                 contacts::contact_pair_form(ui, model, pair, regions);
             }
+            Draft::ContactRegion(region, sides, view) => {
+                ui.label("Name");
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut region.name).desired_width(170.0));
+                    if ui
+                        .small_button("From definition")
+                        .on_hover_text("Name the region by its type and the parts of its sides.")
+                        .clicked()
+                    {
+                        (region.side_a, region.side_b) = sides.regions();
+                        region.name = region.name_from_definition(&model.mesh);
+                    }
+                });
+                ui.end_row();
+                connections::region_form(ui, model, region, sides, view);
+            }
+            Draft::ContactDetection(detection) => {
+                name_row(ui, &mut detection.name);
+                connections::detection_form(ui, model, detection, self.detection_scope.as_ref());
+            }
+            Draft::Connections(defaults) => connections::connections_form(ui, &model.fe, defaults),
             Draft::Tie(tie, regions) => {
                 name_row(ui, &mut tie.name);
                 contacts::tie_form(ui, model, tie, regions);
@@ -3068,6 +3167,9 @@ impl Editor {
             Draft::Constraint(_) => fe.constraints.iter().map(Constraint::name).collect(),
             Draft::SurfaceInteraction(..) => names(&fe.surface_interactions, |s| &s.name),
             Draft::ContactPair(..) => names(&fe.contact_pairs, |c| &c.name),
+            Draft::ContactRegion(..) => names(&fe.contact_regions, |r| &r.name),
+            Draft::ContactDetection(..) => names(&fe.contact_detections, |d| &d.name),
+            Draft::Connections(_) => Vec::new(),
             Draft::Tie(..) => names(&fe.ties, |t| &t.name),
             Draft::NodeTie(..) => names(&fe.node_ties, |t| &t.name),
             Draft::Amplitude(..) => names(&fe.amplitudes, |a| &a.name),
@@ -3094,6 +3196,9 @@ impl Editor {
             Draft::Constraint(c) => c.name(),
             Draft::SurfaceInteraction(s, _) => &s.name,
             Draft::ContactPair(c, _) => &c.name,
+            Draft::ContactRegion(r, ..) => &r.name,
+            Draft::ContactDetection(d) => &d.name,
+            Draft::Connections(_) => return Ok(()),
             Draft::Tie(t, _) => &t.name,
             Draft::NodeTie(t, _) => &t.name,
             Draft::Amplitude(a, _) => &a.name,
@@ -3165,6 +3270,8 @@ impl Editor {
                 contacts::validate_contact_pair(pair, fe)?;
                 regions.validate()?;
             }
+            Draft::ContactRegion(region, sides, _) => connections::validate_region(region, sides)?,
+            Draft::ContactDetection(detection) => connections::validate_detection(detection)?,
             Draft::Tie(tie, regions) => {
                 regions.validate()?;
                 if let Some(problem) = tie.cyclic.as_ref().and_then(CyclicSymmetry::problem) {
@@ -3280,7 +3387,14 @@ impl Editor {
         Ok(())
     }
 
-    /// Copies the draft into the model.
+    /// The index a contact detection of this dialog has once applied to `fe`, to run it.
+    pub fn detection(&self, fe: &FeModel) -> Option<usize> {
+        match self.draft {
+            Draft::ContactDetection(_) => Some(self.index.unwrap_or(fe.contact_detections.len())),
+            _ => None,
+        }
+    }
+
     /// The tree item a new constraint, surface interaction or contact pair gets once
     /// applied to `fe`, to show it in the tree.
     pub fn new_interaction_item(&self, fe: &FeModel) -> Option<TreeItem> {
@@ -3293,6 +3407,10 @@ impl Editor {
                 Some(TreeItem::SurfaceInteraction(fe.surface_interactions.len()))
             }
             Draft::ContactPair(..) => Some(TreeItem::ContactPair(fe.contact_pairs.len())),
+            Draft::ContactRegion(..) => Some(TreeItem::ContactRegion(fe.contact_regions.len())),
+            Draft::ContactDetection(..) => {
+                Some(TreeItem::ContactDetection(fe.contact_detections.len()))
+            }
             Draft::Tie(..) => Some(TreeItem::Tie(fe.ties.len())),
             Draft::NodeTie(..) => Some(TreeItem::NodeTie(fe.node_ties.len())),
             Draft::Amplitude(..) => Some(TreeItem::Amplitude(fe.amplitudes.len())),
@@ -3346,6 +3464,7 @@ impl Editor {
                     Some(existing) => {
                         existing.name = step.name;
                         existing.kind = step.kind;
+                        existing.contact_changes = step.contact_changes;
                     }
                     None => {
                         copy_items_of_last_step(fe, &mut step);
@@ -3414,6 +3533,29 @@ impl Editor {
                 }
                 put(list, index, field);
             }
+            Draft::ContactRegion(mut region, sides, _) => {
+                (region.side_a, region.side_b) = sides.regions();
+                if let Some(existing) = index.and_then(|i| fe.contact_regions.get(i)) {
+                    region.active = existing.active;
+                    // A detected region the user changed is kept when detecting again.
+                    region.edited |= region.detected_by.is_some() && region != *existing;
+                    let old = existing.name.clone();
+                    fe.rename_contact_pair(&old, &region.name);
+                }
+                put(&mut fe.contact_regions, index, region);
+            }
+            Draft::ContactDetection(detection) => {
+                if let Some(existing) = index.and_then(|i| fe.contact_detections.get(i)) {
+                    let old = existing.name.clone();
+                    for region in &mut fe.contact_regions {
+                        if region.detected_by.as_deref() == Some(old.as_str()) {
+                            region.detected_by = Some(detection.name.clone());
+                        }
+                    }
+                }
+                put(&mut fe.contact_detections, index, detection);
+            }
+            Draft::Connections(defaults) => fe.contact_defaults = defaults,
             Draft::Tie(mut tie, regions) => {
                 (tie.master, tie.slave) = regions.regions();
                 if let Some(existing) = index.and_then(|i| fe.ties.get(i)) {
@@ -3548,7 +3690,36 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::InitialCondition(i) => remove(&mut fe.initial_conditions, i),
         TreeItem::Constraint(i) => remove(&mut fe.constraints, i),
         TreeItem::SurfaceInteraction(i) => remove(&mut fe.surface_interactions, i),
-        TreeItem::ContactPair(i) => remove(&mut fe.contact_pairs, i),
+        TreeItem::ContactPair(i) | TreeItem::ContactRegion(i) => {
+            let name = match item {
+                TreeItem::ContactPair(_) => fe.contact_pairs.get(i).map(|p| p.name.clone()),
+                _ => fe.contact_regions.get(i).map(|r| r.name.clone()),
+            };
+            let Some(name) = name else {
+                return false;
+            };
+            fe.remove_contact_changes(&name);
+            match item {
+                TreeItem::ContactPair(_) => remove(&mut fe.contact_pairs, i),
+                _ => remove(&mut fe.contact_regions, i),
+            }
+        }
+        TreeItem::ContactDetection(i) => {
+            let Some(name) = fe.contact_detections.get(i).map(|d| d.name.clone()) else {
+                return false;
+            };
+            fe.contact_detections.remove(i);
+            // Its regions go with it, except those the user changed, which stay as regions
+            // of their own.
+            fe.contact_regions.retain_mut(|r| {
+                if r.detected_by.as_deref() != Some(name.as_str()) {
+                    return true;
+                }
+                r.detected_by = None;
+                std::mem::take(&mut r.edited)
+            });
+            true
+        }
         TreeItem::Tie(i) => remove(&mut fe.ties, i),
         TreeItem::NodeTie(i) => remove(&mut fe.node_ties, i),
         TreeItem::Amplitude(i) => remove(&mut fe.amplitudes, i),
@@ -3593,6 +3764,7 @@ fn active_mut<'a>(fe: &'a mut FeModel, item: &TreeItem) -> Option<&'a mut bool> 
             .map(|f| &mut f.active),
         TreeItem::Constraint(i) => fe.constraints.get_mut(i).map(Constraint::active_mut),
         TreeItem::ContactPair(i) => fe.contact_pairs.get_mut(i).map(|c| &mut c.active),
+        TreeItem::ContactRegion(i) => fe.contact_regions.get_mut(i).map(|r| &mut r.active),
         TreeItem::Tie(i) => fe.ties.get_mut(i).map(|t| &mut t.active),
         TreeItem::NodeTie(i) => fe.node_ties.get_mut(i).map(|t| &mut t.active),
         TreeItem::InitialCondition(i) => fe.initial_conditions.get_mut(i).map(|c| &mut c.active),
@@ -3667,6 +3839,7 @@ pub fn swap_master_slave(fe: &mut FeModel, item: &TreeItem) -> bool {
             fe.rename_contact_pair(&old, &new);
             true
         }
+        TreeItem::ContactRegion(i) => fe.contact_regions.get_mut(i).map(|r| r.flip()).is_some(),
         TreeItem::Tie(i) => {
             let Some(tie) = fe.ties.get_mut(i) else {
                 return false;
@@ -3694,12 +3867,18 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
         TreeItem::Constraint(i) => fe.constraints.get(i).and_then(Constraint::master_slave),
         TreeItem::ContactPair(i) => fe.contact_pairs.get(i).map(|c| [&c.master, &c.slave]),
         TreeItem::Tie(i) => fe.ties.get(i).map(|t| [&t.master, &t.slave]),
+        TreeItem::ContactRegion(i) => fe.contact_regions.get(i).map(|r| [&r.side_a, &r.side_b]),
         TreeItem::HistoryOutput(s, i) => {
             let output = fe.steps.get(s).and_then(|st| st.history_outputs.get(i));
             match output.map(|h| &h.kind) {
                 Some(HistoryKind::Contact { pair }) => (fe.contact_pairs.iter())
                     .find(|c| c.name == *pair)
-                    .map(|c| [&c.master, &c.slave]),
+                    .map(|c| [&c.master, &c.slave])
+                    .or_else(|| {
+                        (fe.contact_regions.iter())
+                            .find(|r| r.name == *pair)
+                            .map(|r| [&r.side_a, &r.side_b])
+                    }),
                 _ => None,
             }
         }
@@ -3766,6 +3945,11 @@ pub fn acting_on_parts(model: &Model, parts: &BTreeSet<usize>) -> BTreeSet<TreeI
     for (i, t) in fe.ties.iter().enumerate() {
         if on_parts(&t.master) || on_parts(&t.slave) {
             acting.insert(TreeItem::Tie(i));
+        }
+    }
+    for (i, r) in fe.contact_regions.iter().enumerate() {
+        if on_parts(&r.side_a) || on_parts(&r.side_b) {
+            acting.insert(TreeItem::ContactRegion(i));
         }
     }
     for (i, t) in fe.node_ties.iter().enumerate() {
@@ -3917,9 +4101,8 @@ fn history_output_form(
                 .selected_text(pair.as_str())
                 .width(200.0)
                 .show_ui(ui, |ui| {
-                    for contact in &model.fe.contact_pairs {
-                        let name = contact.name.clone();
-                        ui.selectable_value(pair, name, &contact.name);
+                    for name in model.fe.contact_pair_names() {
+                        ui.selectable_value(pair, name.to_owned(), name);
                     }
                 });
             ui.end_row();
@@ -4082,7 +4265,7 @@ fn validate_history_output(
     }
     match &output.kind {
         HistoryKind::Contact { pair } => {
-            if !fe.contact_pairs.iter().any(|c| c.name == *pair) {
+            if !fe.contact_pair_names().contains(&pair.as_str()) {
                 return Err(
                     "Please select a contact pair; create one under Contact Pairs first.".into(),
                 );
@@ -5215,6 +5398,110 @@ mod tests {
     use super::*;
 
     #[test]
+    fn contact_detections_rename_mark_and_release_their_regions() {
+        let mut fe = FeModel::default();
+        let editor = Editor::create(NewItem::ContactDetection, &fe).unwrap();
+        assert_eq!(editor.title(), "Create Contact Detection: Contacts");
+        assert_eq!(editor.detection(&fe), Some(0));
+        editor.apply(&mut fe);
+        let found = |name: &str, edited| plx_model::ContactRegion {
+            side_a: Region::Faces(vec![(1, 2)]),
+            side_b: Region::Faces(vec![(2, 1)]),
+            detected_by: Some("Contacts".into()),
+            edited,
+            ..plx_model::ContactRegion::new(name, plx_model::ContactBehavior::Bonded)
+        };
+        fe.contact_regions = vec![found("A", false), found("B", false)];
+        // Changing a region in its dialog marks it; applying it unchanged does not.
+        let mesh = FeMesh::default();
+        let unchanged = Editor::edit(&TreeItem::ContactRegion(1), &fe, &mesh).unwrap();
+        unchanged.apply(&mut fe);
+        assert!(!fe.contact_regions[1].edited);
+        let mut editor = Editor::edit(&TreeItem::ContactRegion(1), &fe, &mesh).unwrap();
+        if let Draft::ContactRegion(region, ..) = &mut editor.draft {
+            region.behavior = plx_model::ContactBehavior::Rough;
+        }
+        editor.apply(&mut fe);
+        assert!(fe.contact_regions[1].edited);
+        // Renaming the detection renames it in its regions.
+        let mut editor = Editor::edit(&TreeItem::ContactDetection(0), &fe, &mesh).unwrap();
+        if let Draft::ContactDetection(detection) = &mut editor.draft {
+            detection.name = "Bolts".into();
+        }
+        assert_eq!(editor.detection(&fe), Some(0));
+        editor.apply(&mut fe);
+        assert_eq!(fe.contact_regions[0].detected_by.as_deref(), Some("Bolts"));
+        // Deleting it deletes what it found; a region the user changed stays, as one of
+        // their own.
+        assert!(delete(&mut fe, &TreeItem::ContactDetection(0)));
+        assert!(fe.contact_detections.is_empty());
+        assert_eq!(fe.contact_regions.len(), 1);
+        assert_eq!(fe.contact_regions[0].name, "B");
+        assert_eq!(fe.contact_regions[0].detected_by, None);
+        assert!(!fe.contact_regions[0].edited);
+    }
+
+    #[test]
+    fn contact_regions_are_created_edited_flipped_and_deleted() {
+        let mut fe = FeModel::default();
+        let editor = Editor::create(NewItem::ContactRegion, &fe).unwrap();
+        assert_eq!(editor.title(), "Create Contact Region: Contact_Region-1");
+        // Both sides must be picked.
+        assert_eq!(
+            editor.validate(&fe),
+            Err("The Side A region is empty.".into())
+        );
+        let Draft::ContactRegion(mut region, mut sides, view) = editor.draft else {
+            unreachable!()
+        };
+        sides.master = RegionDraft::from_region(
+            &Region::Faces(vec![(1, 2)]),
+            FACE_SOURCES,
+            Target::Surfaces,
+            &FeMesh::default(),
+        );
+        sides.slave = RegionDraft::from_region(
+            &Region::Faces(vec![(2, 1)]),
+            FACE_SOURCES,
+            Target::Surfaces,
+            &FeMesh::default(),
+        );
+        region.behavior = plx_model::ContactBehavior::Frictional { mu: 0.2 };
+        let editor = Editor {
+            draft: Draft::ContactRegion(region, sides, view),
+            ..Editor::create(NewItem::ContactRegion, &fe).unwrap()
+        };
+        assert_eq!(editor.validate(&fe), Ok(()));
+        assert_eq!(
+            editor.new_interaction_item(&fe),
+            Some(TreeItem::ContactRegion(0))
+        );
+        editor.apply(&mut fe);
+        let region = &fe.contact_regions[0];
+        assert_eq!(region.side_a, Region::Faces(vec![(1, 2)]));
+        assert_eq!(region.side_b, Region::Faces(vec![(2, 1)]));
+        let item = TreeItem::ContactRegion(0);
+        assert!(swap_master_slave(&mut fe, &item));
+        assert_eq!(fe.contact_regions[0].side_a, Region::Faces(vec![(2, 1)]));
+        assert!(toggle_active(&mut fe, &item));
+        assert!(!fe.contact_regions[0].active);
+        // The connections edit the settings all regions share.
+        let mut editor =
+            Editor::edit(&TreeItem::Group("Contacts"), &fe, &FeMesh::default()).unwrap();
+        assert_eq!(editor.title(), "Connections");
+        if let Draft::Connections(defaults) = &mut editor.draft {
+            defaults.formulation = Some(plx_model::ContactMethod::Mortar);
+        }
+        editor.apply(&mut fe);
+        assert_eq!(
+            fe.contact_defaults.formulation,
+            Some(plx_model::ContactMethod::Mortar)
+        );
+        assert!(delete(&mut fe, &item));
+        assert!(fe.contact_regions.is_empty());
+    }
+
+    #[test]
     fn a_new_load_is_a_force() {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
@@ -5717,6 +6004,7 @@ mod tests {
             motion: None,
             expose: None,
             linked: Vec::new(),
+            detection_scope: None,
         }
         .apply(&mut fe);
         assert_eq!(fe.steps[0].loads[0].factor_amplitude, None);

@@ -70,11 +70,18 @@ impl MasterSlave {
     }
 
     pub fn ui(&mut self, ui: &mut Ui, model: &Model) {
+        self.ui_named(ui, model, ["Master", "Slave"]);
+    }
+
+    /// The two regions under other names, such as the sides A and B of a contact region,
+    /// whose master is derived.
+    pub fn ui_named(&mut self, ui: &mut Ui, model: &Model, [first, second]: [&str; 2]) {
         let master = self.side == Side::Master;
-        if (self.master).ui_labeled(ui, model, "Master region", "master", master) {
+        let label = |name: &str| format!("{name} region");
+        if (self.master).ui_labeled(ui, model, &label(first), "master", master) {
             self.side = Side::Master;
         }
-        if (self.slave).ui_labeled(ui, model, "Slave region", "slave", !master) {
+        if (self.slave).ui_labeled(ui, model, &label(second), "slave", !master) {
             self.side = Side::Slave;
         }
     }
@@ -85,11 +92,15 @@ impl MasterSlave {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_named(["master", "slave"])
+    }
+
+    pub fn validate_named(&self, [first, second]: [&str; 2]) -> Result<(), String> {
         if self.master.is_empty() {
-            return Err("The master region is empty.".into());
+            return Err(format!("The {first} region is empty."));
         }
         if self.slave.is_empty() {
-            return Err("The slave region is empty.".into());
+            return Err(format!("The {second} region is empty."));
         }
         Ok(())
     }

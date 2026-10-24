@@ -771,6 +771,197 @@ mod tests {
         }
     }
 
+    /// A block of hexahedra from `origin` with `size` in `n` elements per direction, as a part
+    /// of the mesh with node and element ids from `first`; returns its faces on the bottom (z
+    /// min, S1) and on the top (S2).
+    fn add_block(
+        mesh: &mut FeMesh,
+        name: &str,
+        first: u32,
+        origin: [f64; 3],
+        size: [f64; 3],
+        n: [u32; 3],
+    ) -> [Vec<(u32, u8)>; 2] {
+        let node = |i: u32, j: u32, k: u32| first + i + (n[0] + 1) * (j + (n[1] + 1) * k);
+        for k in 0..=n[2] {
+            for j in 0..=n[1] {
+                for i in 0..=n[0] {
+                    let at = [i, j, k].map(f64::from);
+                    let coords = [0, 1, 2].map(|d| origin[d] + size[d] * at[d] / f64::from(n[d]));
+                    mesh.set_node(node(i, j, k), coords);
+                }
+            }
+        }
+        let (mut elements, mut bottom, mut top) = (Vec::new(), Vec::new(), Vec::new());
+        for k in 0..n[2] {
+            for j in 0..n[1] {
+                for i in 0..n[0] {
+                    let id = first + i + n[0] * (j + n[1] * k);
+                    let mut nodes = Vec::new();
+                    for kk in [k, k + 1] {
+                        nodes.extend([
+                            node(i, j, kk),
+                            node(i + 1, j, kk),
+                            node(i + 1, j + 1, kk),
+                            node(i, j + 1, kk),
+                        ]);
+                    }
+                    mesh.add_element(plx_mesh::Element {
+                        id,
+                        type_name: "C3D8".into(),
+                        shape: plx_mesh::ElementShape::Hex8,
+                        nodes,
+                    })
+                    .unwrap();
+                    elements.push(id);
+                    if k == 0 {
+                        bottom.push((id, 1));
+                    }
+                    if k + 1 == n[2] {
+                        top.push((id, 2));
+                    }
+                }
+            }
+        }
+        mesh.parts.push(plx_mesh::Part {
+            name: name.into(),
+            elements,
+        });
+        [bottom, top]
+    }
+
+    /// Writes a project of a base plate, a block bonded onto it and a cap resting on the
+    /// block with friction, for the user guide's screenshots of contact regions:
+    /// `PLX_CONTACT_DEMO=path cargo test contact_demo -- --ignored`.
+    #[test]
+    #[ignore]
+    fn contact_demo_project() {
+        let Some(path) = std::env::var_os("PLX_CONTACT_DEMO") else {
+            return;
+        };
+        let mut mesh = FeMesh::default();
+        let mm = 1e-3;
+        let [base_bottom, base_top] = add_block(
+            &mut mesh,
+            "Base",
+            1,
+            [0.0, 0.0, 0.0],
+            [80.0 * mm, 80.0 * mm, 10.0 * mm],
+            [16, 16, 2],
+        );
+        let [block_bottom, block_top] = add_block(
+            &mut mesh,
+            "Block",
+            10_001,
+            [20.0 * mm, 20.0 * mm, 10.0 * mm],
+            [40.0 * mm, 40.0 * mm, 20.0 * mm],
+            [12, 12, 6],
+        );
+        let [cap_bottom, cap_top] = add_block(
+            &mut mesh,
+            "Cap",
+            20_001,
+            [25.0 * mm, 25.0 * mm, 30.0 * mm],
+            [30.0 * mm, 30.0 * mm, 8.0 * mm],
+            [6, 6, 2],
+        );
+        // Only where the block stands on the base.
+        let inside = |mesh: &FeMesh, face: &(u32, u8)| {
+            let element = mesh.element(face.0).unwrap();
+            let x: f64 = (element.nodes.iter())
+                .map(|&n| mesh.node(n).unwrap()[0])
+                .sum::<f64>()
+                / 8.0;
+            let y: f64 = (element.nodes.iter())
+                .map(|&n| mesh.node(n).unwrap()[1])
+                .sum::<f64>()
+                / 8.0;
+            (20.0 * mm..60.0 * mm).contains(&x) && (20.0 * mm..60.0 * mm).contains(&y)
+        };
+        let base_top: Vec<_> = base_top.into_iter().filter(|f| inside(&mesh, f)).collect();
+        let mut model = FeModel::default();
+        model.materials.push(Material {
+            name: "Steel".into(),
+            density: Some(7850.0),
+            elastic: Some(plx_model::Elastic {
+                young: 210e9,
+                poisson: 0.3,
+            }),
+            ..Default::default()
+        });
+        model.sections.push(plx_model::Section {
+            name: "Solid_Section-1".into(),
+            material: "Steel".into(),
+            region: Region::Parts(vec!["Base".into(), "Block".into(), "Cap".into()]),
+            thickness: 1.0,
+            kind: plx_model::SectionKind::Solid,
+        });
+        let mut bonded = plx_model::ContactRegion::new(
+            "Bonded - Base to Block",
+            plx_model::ContactBehavior::Bonded,
+        );
+        bonded.side_a = Region::Faces(base_top);
+        bonded.side_b = Region::Faces(block_bottom);
+        let mut frictional = plx_model::ContactRegion::new(
+            "Frictional - Block to Cap",
+            plx_model::ContactBehavior::Frictional { mu: 0.15 },
+        );
+        frictional.side_a = Region::Faces(block_top);
+        frictional.side_b = Region::Faces(cap_bottom.clone());
+        frictional.settings.interface = Some(plx_model::InterfaceTreatment::AdjustToTouch);
+        // Without regions, to show the contact detection.
+        if std::env::var_os("PLX_CONTACT_DEMO_DETECT").is_none() {
+            model.contact_regions = vec![bonded, frictional];
+        }
+        let mut step = plx_model::Step::new_static("Step-1");
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            name: "Fixed-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(base_bottom),
+            kind: plx_model::BoundaryKind::displacement([Some(0.0); 6]),
+            amplitude: None,
+        });
+        // The cap held sideways at its top, pressed down.
+        let cap_nodes = Region::Faces(cap_top.clone()).nodes(&mesh);
+        step.boundary_conditions.push(plx_model::BoundaryCondition {
+            name: "Guide-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Nodes(cap_nodes),
+            kind: plx_model::BoundaryKind::displacement([
+                Some(0.0),
+                Some(0.0),
+                None,
+                None,
+                None,
+                None,
+            ]),
+            amplitude: None,
+        });
+        step.loads.push(plx_model::Load {
+            name: "Pressure-1".into(),
+            active: true,
+            visible: true,
+            region: Region::Faces(cap_top),
+            kind: plx_model::LoadKind::Pressure(5e6),
+            amplitude: None,
+            factor_amplitude: None,
+        });
+        // A second step pressing harder, to show the contacts of a step.
+        if std::env::var_os("PLX_CONTACT_DEMO_STEPS").is_some() {
+            let mut second = step.clone();
+            second.name = "Step-2".into();
+            second.loads[0].kind = plx_model::LoadKind::Pressure(10e6);
+            model.steps.push(step);
+            model.steps.push(second);
+        } else {
+            model.steps.push(step);
+        }
+        let project = single(None, &mesh, &model, None);
+        save_project(std::path::Path::new(&path), &project).unwrap();
+    }
+
     #[test]
     fn the_format_is_read_from_the_start_of_the_file() {
         // Reading it as a Header instead took minutes for a project with a large mesh.
@@ -800,7 +991,17 @@ mod tests {
                 ..Default::default()
             }],
             sections: Vec::new(),
-            steps: vec![Step::new_static("Step-1"), Step::new_coupled("Step-2")],
+            steps: vec![
+                Step::new_static("Step-1"),
+                Step {
+                    contact_changes: vec![plx_model::ContactChange {
+                        region: "Region-1".into(),
+                        active: Some(false),
+                        friction: Some(0.3),
+                    }],
+                    ..Step::new_coupled("Step-2")
+                },
+            ],
             reference_points: vec![plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])],
             coordinate_systems: vec![plx_model::CoordinateSystem {
                 kind: plx_model::CoordinateSystemKind::Cylindrical,
@@ -864,9 +1065,37 @@ mod tests {
             }],
             contact_pairs: vec![ContactPair {
                 adjustment_size: Some(0.01),
+                clearance: None,
                 master_color: [255, 0, 0],
                 ..ContactPair::new("Contact_Pair-1", "Surface_Interaction-1")
             }],
+            contact_regions: vec![plx_model::ContactRegion {
+                side_a: Region::Parts(vec!["A".into()]),
+                side_b: Region::Faces(vec![(1, 2)]),
+                settings: plx_model::ContactSettings {
+                    normal_stiffness: Some(plx_model::Stiffness::Factor(20.0)),
+                    sides: Some(plx_model::SideRoles::BIsMaster),
+                    tolerance: Some(1e-4),
+                    ..Default::default()
+                },
+                detected_by: Some("Contacts".into()),
+                edited: true,
+                ..plx_model::ContactRegion::new(
+                    "Frictional - A to B",
+                    plx_model::ContactBehavior::Frictional { mu: 0.2 },
+                )
+            }],
+            contact_detections: vec![plx_model::ContactDetection {
+                parts: vec!["A".into()],
+                tolerance: Some(2e-4),
+                grouping: plx_model::DetectionGrouping::Graph,
+                behavior: plx_model::ContactBehavior::Rough,
+                ..plx_model::ContactDetection::new("Contacts")
+            }],
+            contact_defaults: plx_model::ContactDefaults {
+                formulation: Some(plx_model::ContactMethod::Mortar),
+                stiffness_factor: 5.0,
+            },
             amplitudes: vec![plx_model::Amplitude {
                 time_span: plx_model::AmplitudeTime::Total,
                 points: vec![[0.0, 0.0], [1.0, 2.5]],
