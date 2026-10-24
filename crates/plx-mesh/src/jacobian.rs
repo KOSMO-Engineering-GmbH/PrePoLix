@@ -95,7 +95,7 @@ fn derivatives(shape: ElementShape) -> &'static [Vec<[f64; 3]>] {
 /// dN/dxi of every node at the natural coordinates `p`, from central differences of the
 /// shape functions (polynomials of degree three at most, so the differences are exact to
 /// rounding).
-fn point_derivatives(shape: ElementShape, p: [f64; 3]) -> Vec<[f64; 3]> {
+pub(crate) fn point_derivatives(shape: ElementShape, p: [f64; 3]) -> Vec<[f64; 3]> {
     const H: f64 = 1e-5;
     let mut out = vec![[0.0; 3]; shape.node_count()];
     let mut plus = [0.0; 20];
@@ -207,7 +207,7 @@ const WEDGE_EDGES: [[usize; 2]; 9] = [
 ];
 
 /// Values of the shape functions at `p` written to `n`, node order as in CalculiX.
-fn shape_functions(shape: ElementShape, p: [f64; 3], n: &mut [f64; 20]) {
+pub(crate) fn shape_functions(shape: ElementShape, p: [f64; 3], n: &mut [f64; 20]) {
     let [r, s, t] = p;
     match shape {
         ElementShape::Tet4 | ElementShape::Tet10 => {

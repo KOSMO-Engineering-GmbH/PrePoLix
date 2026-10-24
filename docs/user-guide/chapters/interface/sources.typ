@@ -375,7 +375,8 @@ Exposing a number does not change the analysis: only a new value makes it out of
 === Measure <measure-block>
 
 A Measure block computes one key figure from the results of a step: the largest von Mises
-stress, the displacement of a node, a total force or an eigenfrequency. It is the number a
+stress, the displacement of a node or of any point of the model, a total force or an
+eigenfrequency. It is the number a
 parameter study reads, and a quick way to see the figure that matters without opening the results.
 Add it with #menu("Project", "Add Measure"); it starts with the largest von Mises stress.
 
@@ -404,7 +405,7 @@ A double-click on the block opens its editor:
 
 #fields(
   [Measure], [What it computes: #ui("Field extreme"), #ui("Value at a node"),
-    #ui("History output") or #ui("Eigenfrequency").],
+    #ui("Value at a point"), #ui("History output") or #ui("Eigenfrequency").],
   [Shown in], [The unit system of the value; it is stored in SI units.],
   [Field, Component], [The field and its component as the Results workspace names them:
     STRESS MISES, DISP ALL, NDTEMP T, TOTAL_FORCE RF3 for a history output. With results
@@ -419,10 +420,37 @@ A double-click on the block opens its editor:
     were solved on, so a region picked on geometry or on the sides of a mesh block follows
     every new mesh of a parameter study.],
   [Node], [For a value at a node: its number.],
+  [X, Y, Z], [For a value at a point: rows of the block itself, see below.],
   [Set], [For a history output: the set of the history output, as written to the `.dat` file;
     a list of the sets of the linked results.],
   [Mode], [For an eigenfrequency: the mode, counted from 1, of a frequency step.],
 )
+
+==== Value at a point <measure-point>
+
+#ui("Value at a point") reads a field where no node may be: at coordinates you give. The
+block gets three rows #ui("X"), #ui("Y") and #ui("Z") between what it measures and its value,
+each a length in the units of the block with an input pin like the inputs of a Math block.
+Type a coordinate in its field, or drag a number to its pin: a parameter of a Parameters
+block, the result of a Math block or an input of a parameter study. A linked coordinate is
+shown in the color of value links and follows its source, so a study that makes a part longer
+can move the point along with the end of the part.
+
+#screenshot("measure-point.png", [The tip deflection of a beam read at a point: the length of
+  the beam is a parameter that sets both the size of the mesh block and the X of the point])
+
+The point is located in the mesh the results were solved on, and the field is interpolated
+there with the shape functions of the element that contains it, the same functions the
+element computes with, so a curved quadratic element counts with its true shape. In a 2D
+model the point lies in the plane of the model (Z is 0). Where the point lies on a node or on
+the boundary between elements, every element gives the same value, as CalculiX writes nodal
+values averaged between elements.
+
+A point just outside the mesh, within 5 % of the size of the nearest element, takes the value
+of the nearest point of that element: a point on the round surface of a part lies a little
+outside a mesh of straight-edged elements. Farther out the block has no value, and the output
+pane says how far the point is from the nearest node of the mesh. Beams and trusses that
+CalculiX writes as lines are left out; those written as solids (the default) count.
 
 === Mesh Export <mesh-export>
 

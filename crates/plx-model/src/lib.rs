@@ -59,7 +59,7 @@ pub use geometry::{
 };
 pub use history::{HistoryKind, HistoryOutput, Totals};
 pub use library::MaterialLibrary;
-pub use measure::{Extreme, MeasureKind, MeasureRegion};
+pub use measure::{Extreme, MeasureKind, MeasureRegion, POINT_AXES};
 pub use mesh_set::{MeshSet, SetKind};
 pub use moving_load::{AXIS_LABELS, LoadStations, MovingFrame, MovingLoad, Wheel, load_stations};
 pub use number::{MathOp, switch};

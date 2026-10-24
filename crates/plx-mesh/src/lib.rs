@@ -6,6 +6,7 @@ mod element;
 mod fast_map;
 mod jacobian;
 mod line_joints;
+mod locate;
 mod mesh;
 mod skin;
 pub mod structured;
@@ -18,6 +19,7 @@ pub use contact_search::{
 };
 pub use element::{ElementFamily, ElementShape, FaceTopology};
 pub use line_joints::{LineJoint, find_line_joints};
+pub use locate::{PointLocation, SNAP};
 pub use mesh::{Element, ElementId, FeMesh, Fnv, MeshError, NodeId, Part, SurfaceDefinition};
 pub use skin::{PartSkin, SkinEdge, SkinFace, extract_part_skin, face_normal};
 pub use transform::{FaceRenumbering, MeshTransform};
