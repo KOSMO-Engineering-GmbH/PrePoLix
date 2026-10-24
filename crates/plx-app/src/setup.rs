@@ -35,6 +35,13 @@ use crate::selection::{History, Items, Operation, PartPicks, Picker, PickerActio
 use crate::tree::TreeItem;
 use crate::viewport::{BoxSelect, Preview};
 
+/// A contact region or a contact pair, by index, whose contact values an output gives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContactItem {
+    Region(usize),
+    Pair(usize),
+}
+
 /// Kinds of items the tree can create.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NewItem {
@@ -48,6 +55,12 @@ pub enum NewItem {
     FieldOutput(usize),
     /// A history output of a step, printed into the `.dat` file.
     HistoryOutput(usize),
+    /// A history output of a step printing the contact values of a contact region or pair,
+    /// created in the menu of the contact.
+    ContactHistoryOutput(usize, ContactItem),
+    /// A contact field output of a step, created in the menu of a contact; a step that has
+    /// one already opens it.
+    ContactFieldOutput(usize),
     /// A defined temperature of a step.
     DefinedField(usize),
     /// A spring, support or rigid body, chosen in the dialog.
@@ -1800,6 +1813,32 @@ impl Editor {
             NewItem::FieldOutput(step) => {
                 let target = fe.steps.get(step)?;
                 let kind = OutputKind::Node;
+                let output = FieldOutput::new(
+                    next_name(kind.prefix(), names(&target.field_outputs, |f| &f.name)),
+                    kind,
+                    kind.default_variables(),
+                );
+                Draft::FieldOutput(step, output)
+            }
+            NewItem::ContactHistoryOutput(step, contact) => {
+                let target = fe.steps.get(step)?;
+                let pair = match contact {
+                    ContactItem::Region(i) => &fe.contact_regions.get(i)?.name,
+                    ContactItem::Pair(i) => &fe.contact_pairs.get(i)?.name,
+                };
+                let mut output = HistoryOutput::contact(
+                    next_name("CH_Output", names(&target.history_outputs, |h| &h.name)),
+                    pair.clone(),
+                );
+                // The contact forces too, summed over the slave side.
+                output.variables.push("CF".into());
+                output.normalize_variables();
+                let region = history_region(&output.kind, fe, &FeMesh::default());
+                Draft::HistoryOutput(step, output, region)
+            }
+            NewItem::ContactFieldOutput(step) => {
+                let target = fe.steps.get(step)?;
+                let kind = OutputKind::Contact;
                 let output = FieldOutput::new(
                     next_name(kind.prefix(), names(&target.field_outputs, |f| &f.name)),
                     kind,

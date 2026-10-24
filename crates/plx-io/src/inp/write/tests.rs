@@ -7758,3 +7758,81 @@ fn switched_bonded_regions_become_tied_contacts() {
     model.contact_regions[0].behavior = ContactBehavior::NoSeparation;
     assert!(ignored(&model));
 }
+
+/// A bonded region whose contact values a history output prints becomes a tied contact,
+/// since a tie has none: CalculiX prints the 1000 N the pressure pushes through it.
+#[test]
+fn calculix_prints_the_contact_forces_of_a_bonded_region() {
+    let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Bonded);
+    let mut output = HistoryOutput::contact("CH_Output-1", "Region-1");
+    output.variables = ["CDIS", "CSTR", "CF"].map(String::from).to_vec();
+    model.steps[0].history_outputs.push(output);
+    let resolved = model.resolve_contacts(&mesh);
+    assert!(
+        matches!(resolved.items[0].kind, plx_model::ResolvedKind::Pair { .. }),
+        "{:?}",
+        resolved.items[0]
+    );
+    assert!(
+        (model
+            .check(
+                &mesh,
+                &plx_model::MeshCheck::new(&mesh, model.properties.space)
+            )
+            .iter())
+        .all(|f| f.problem != plx_model::Problem::ContactOutputIgnored)
+    );
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Tie"), "{text}");
+    assert!(text.contains("*Contact print, Master="), "{text}");
+    let Some(dat) = run_ccx_dat("region-kontaktkraft", &text) else {
+        return;
+    };
+    let import = crate::dat::parse_dat(&dat);
+    let region = (import.sets.iter())
+        .find(|s| s.name == "REGION-1")
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?}",
+                import.sets.iter().map(|s| &s.name).collect::<Vec<_>>()
+            )
+        });
+    let force = (region.field("TOTAL_SURFACE_FORCE").unwrap())
+        .component("FZ")
+        .unwrap();
+    let fz = *force.entries[0].values.last().unwrap();
+    // 10 MPa on 10 x 10 mm.
+    assert!((fz.abs() - 1000.0).abs() < 10.0, "{fz}");
+}
+
+/// Of a region written as a tie or as equations CalculiX has no contact values: the
+/// history output is left out with a warning instead of failing the input file.
+#[test]
+fn contact_outputs_of_regions_without_contact_elements_are_left_out() {
+    for (behavior, method) in [
+        (
+            plx_model::ContactBehavior::Bonded,
+            Some(plx_model::BondedMethod::Constraint),
+        ),
+        (plx_model::ContactBehavior::NoSeparation, None),
+    ] {
+        let (mesh, mut model) = blocks_joined_by_region(0.0, behavior);
+        model.contact_regions[0].settings.bonded_method = method;
+        let mut output = HistoryOutput::contact("CH_Output-1", "Region-1");
+        output.variables = ["CF".to_string()].to_vec();
+        model.steps[0].history_outputs.push(output);
+        let text = write_inp(&mesh, &model, "").unwrap();
+        assert!(!text.contains("*Contact print"), "{behavior:?}");
+        assert!(
+            (model
+                .check(
+                    &mesh,
+                    &plx_model::MeshCheck::new(&mesh, model.properties.space)
+                )
+                .iter())
+            .any(|f| f.problem == plx_model::Problem::ContactOutputIgnored
+                && f.item == plx_model::ModelItem::ContactRegion(0)),
+            "{behavior:?}"
+        );
+    }
+}
