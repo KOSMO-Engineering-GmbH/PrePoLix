@@ -7,7 +7,7 @@ use std::sync::mpsc::Receiver;
 
 use plx_io::frd::FrdImport;
 use plx_io::project::BoundResults;
-use plx_mesh::NodeId;
+use plx_mesh::{NodeId, PointLocation};
 use plx_model::{Extreme, MeasureKind, MeasureRegion, UnitSystem};
 use plx_results::AnalysisKind;
 
@@ -19,6 +19,7 @@ pub fn evaluate(
     frd: &FrdImport,
     dat: Option<&plx_io::dat::DatImport>,
     node_sets: &BTreeMap<String, Vec<NodeId>>,
+    units: UnitSystem,
 ) -> Result<f64, String> {
     let increments: Vec<_> = frd.increments.iter().filter(|i| i.step == step).collect();
     let component = |field: &str, component: &str| {
@@ -66,6 +67,34 @@ pub fn evaluate(
                 .map(|&v| f64::from(v))
                 .ok_or_else(|| format!("no value at node {node}"))
         }
+        MeasureKind::PointValue {
+            field,
+            component: name,
+            point,
+        } => {
+            let values = component(field, name)?;
+            match frd.mesh.locate(*point) {
+                PointLocation::Found { weights, .. } => {
+                    let value: f64 = (weights.iter())
+                        .map(|&(index, w)| {
+                            values.get(index).map_or(f64::NAN, |&v| f64::from(v)) * w
+                        })
+                        .sum();
+                    if value.is_finite() {
+                        Ok(value)
+                    } else {
+                        Err(format!(
+                            "{field} has no value at a node of the element at the point"
+                        ))
+                    }
+                }
+                PointLocation::Outside { distance } => Err(format!(
+                    "the point lies outside the mesh, {} from its nearest node",
+                    length(distance, units)
+                )),
+                PointLocation::Empty => Err("the results have no solid or plane elements".into()),
+            }
+        }
         MeasureKind::History {
             set,
             field,
@@ -103,12 +132,21 @@ pub fn evaluate(
     }
 }
 
+/// A length in SI units as a message shows it, in `units`.
+fn length(metres: f64, units: UnitSystem) -> String {
+    let shown = units.shown(metres, plx_model::Quantity::Length);
+    let unit = units.unit(plx_model::Quantity::Length);
+    format!("{} {unit}", crate::results::format_value(shown as f32))
+}
+
 /// What a worker thread needs to compute a measure.
 pub struct Job {
     pub kind: MeasureKind,
     pub step: u32,
     pub results: BoundResults,
     pub node_sets: BTreeMap<String, Vec<NodeId>>,
+    /// The units its messages give lengths in.
+    pub units: UnitSystem,
     /// Where the results files are written to be read.
     pub dir: PathBuf,
 }
@@ -127,7 +165,14 @@ fn run(job: &Job) -> Result<f64, String> {
         plx_io::project::restore_results(&job.results, &job.dir).map_err(|e| e.to_string())?;
     let frd = plx_io::frd::read_frd(&frd_path).map_err(|e| e.to_string())?;
     let dat = read_dat_beside(&frd_path);
-    evaluate(&job.kind, job.step, &frd, dat.as_ref(), &job.node_sets)
+    evaluate(
+        &job.kind,
+        job.step,
+        &frd,
+        dat.as_ref(),
+        &job.node_sets,
+        job.units,
+    )
 }
 
 /// Fields by name, each with the names of its components.
@@ -293,6 +338,16 @@ impl MeasureEditor {
                     .num_columns(2)
                     .spacing([12.0, 6.0])
                     .show(ui, |ui| self.form(ui));
+                if matches!(self.kind, MeasureKind::PointValue { .. }) {
+                    ui.weak(
+                        "The point is given by the X, Y and Z rows of the block: type the \
+                         coordinates there, or link numbers to them, such as a parameter of a \
+                         study. The field is interpolated with the shape functions of the \
+                         element that contains the point. A point just outside the mesh, \
+                         within 5 % of the size of the nearest element, takes the value at the \
+                         nearest point of that element; farther out the block has no value.",
+                    );
+                }
                 ui.weak(match &self.choices {
                     Choices::Read(_) => {
                         "Fields and components as the linked results have them. The value is \
@@ -397,6 +452,11 @@ impl MeasureEditor {
                 ui.label("Node");
                 ui.add(crate::numeric::count(node).range(1..=u32::MAX));
                 ui.end_row();
+            }
+            MeasureKind::PointValue {
+                field, component, ..
+            } => {
+                field_and_component(ui, offered.map(|o| o.fields.as_slice()), field, component);
             }
             MeasureKind::History {
                 set,
@@ -514,7 +574,15 @@ mod tests {
         let frd = plx_io::frd::read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
         let step = frd.increments.last().unwrap().step;
         let mises = MeasureKind::default();
-        let max = evaluate(&mises, step, &frd, None, &BTreeMap::new()).unwrap();
+        let max = evaluate(
+            &mises,
+            step,
+            &frd,
+            None,
+            &BTreeMap::new(),
+            UnitSystem::default(),
+        )
+        .unwrap();
         assert!(max > 0.0);
         let first = frd.mesh.node_ids()[0];
         let sets = BTreeMap::from([("ONE".to_owned(), vec![first])]);
@@ -529,8 +597,11 @@ mod tests {
             component: "MISES".into(),
             node: first,
         };
-        let one = evaluate(&in_set, step, &frd, None, &sets).unwrap();
-        assert_eq!(one, evaluate(&at, step, &frd, None, &sets).unwrap());
+        let one = evaluate(&in_set, step, &frd, None, &sets, UnitSystem::default()).unwrap();
+        assert_eq!(
+            one,
+            evaluate(&at, step, &frd, None, &sets, UnitSystem::default()).unwrap()
+        );
         assert!(one <= max);
         // Errors say why.
         let missing = MeasureKind::FieldExtreme {
@@ -539,9 +610,60 @@ mod tests {
             extreme: Extreme::Max,
             region: MeasureRegion::All,
         };
-        assert!(evaluate(&missing, step, &frd, None, &sets).is_err());
+        assert!(evaluate(&missing, step, &frd, None, &sets, UnitSystem::default()).is_err());
         let eigen = MeasureKind::Eigenfrequency { mode: 1 };
-        assert!(evaluate(&eigen, step, &frd, None, &sets).is_err());
+        assert!(evaluate(&eigen, step, &frd, None, &sets, UnitSystem::default()).is_err());
+    }
+
+    #[test]
+    fn a_measure_at_a_node_equals_the_measure_at_its_point() {
+        let frd = plx_io::frd::read_frd(&testdata("kragbalken_c3d8.frd")).unwrap();
+        let step = frd.increments.last().unwrap().step;
+        let sets = BTreeMap::new();
+        for (index, &node) in frd.mesh.node_ids().iter().enumerate().step_by(7) {
+            let at_node = MeasureKind::NodeValue {
+                field: "DISP".into(),
+                component: "U2".into(),
+                node,
+            };
+            let at_point = MeasureKind::PointValue {
+                field: "DISP".into(),
+                component: "U2".into(),
+                point: frd.mesh.coords()[index],
+            };
+            let a = evaluate(&at_node, step, &frd, None, &sets, UnitSystem::default()).unwrap();
+            let b = evaluate(&at_point, step, &frd, None, &sets, UnitSystem::default()).unwrap();
+            assert!(
+                (a - b).abs() <= 1e-9 * a.abs().max(1e-12),
+                "node {node}: {a} != {b}"
+            );
+        }
+        // Between two nodes the value lies between theirs; far away there is none.
+        let coords = frd.mesh.coords();
+        let (low, high) = coords.iter().fold(
+            ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]),
+            |(mut low, mut high), c| {
+                for k in 0..3 {
+                    low[k] = low[k].min(c[k]);
+                    high[k] = high[k].max(c[k]);
+                }
+                (low, high)
+            },
+        );
+        let middle: [f64; 3] = std::array::from_fn(|k| 0.5 * (low[k] + high[k]));
+        let at = |point| MeasureKind::PointValue {
+            field: "DISP".into(),
+            component: "ALL".into(),
+            point,
+        };
+        assert!(
+            evaluate(&at(middle), step, &frd, None, &sets, UnitSystem::default())
+                .unwrap()
+                .is_finite()
+        );
+        let far: [f64; 3] = std::array::from_fn(|k| high[k] + 10.0 * (high[k] - low[k]));
+        let why = evaluate(&at(far), step, &frd, None, &sets, UnitSystem::default()).unwrap_err();
+        assert!(why.contains("outside the mesh"), "{why}");
     }
 
     #[test]

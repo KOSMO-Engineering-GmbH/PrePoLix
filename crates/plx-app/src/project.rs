@@ -12,8 +12,8 @@ use egui_snarl::ui::{AnyPins, PinInfo, SnarlStyle, SnarlViewer, SnarlWidget};
 use egui_snarl::{InPin, NodeId, OutPin, Snarl};
 use plx_io::project::{self as file, Link, Project, ProjectAnalysis, ProjectNode};
 use plx_model::{
-    MathOp, MeasureKind, MeshPrimitive, ModelProperties, ModelSpace, Param, ParamSlot, Parameter,
-    PointRun, Quantity, StudyTable, UnitSystem, ValueKind,
+    MathOp, MeasureKind, MeshPrimitive, ModelProperties, ModelSpace, POINT_AXES, Param, ParamSlot,
+    Parameter, PointRun, Quantity, StudyTable, UnitSystem, ValueKind,
 };
 
 use crate::app::{AnalysisWindow, Request, Show};
@@ -1592,6 +1592,8 @@ enum Action {
     SetRefinement(u64, f64),
     /// The length of a CAD operation changed in its block.
     SetCadLength(u64, f64),
+    /// A coordinate of the point of a measure block, by its key in [`POINT_AXES`].
+    SetMeasurePoint(u64, &'static str, f64),
     /// A new CAD operation block at the position.
     AddCadOperation(egui::Pos2),
 
@@ -2127,7 +2129,8 @@ impl ProjectApp {
             return;
         };
         let units = measure.units;
-        let node_sets = (self.links.iter().find(|l| l.target == id))
+        let node_sets = self
+            .measure_link(id)
             .and_then(|l| self.nodes.iter().find(|n| n.id == l.source))
             .and_then(Node::link_data)
             .map(|d| measure_regions(&d).into_keys().collect())
@@ -2176,19 +2179,34 @@ impl ProjectApp {
             MeasureEditorResult::Ok(kind, units) => {
                 self.checkpoint(&[]);
                 self.measure_editor = None;
+                let at_point = kind.point().is_some();
                 if let Some(measure) = self.node(id).and_then(Node::as_measure_mut) {
                     measure.kind = kind;
                     measure.units = units;
+                }
+                // Without a point the block has no coordinate rows to link to.
+                if !at_point {
+                    self.links.retain(|l| {
+                        l.target != id
+                            || !matches!(links::slot(l), [cell, _] if cell == links::PARAMETERS)
+                    });
                 }
                 self.sync_due = true;
             }
         }
     }
 
+    /// The link of the results a measure block measures; value links to its coordinates
+    /// are others.
+    fn measure_link(&self, id: u64) -> Option<&Link> {
+        (self.links.iter())
+            .find(|l| l.target == id && matches!(links::slot(l), [cell] if cell == links::MEASURE))
+    }
+
     /// The results a measure block measures: the analysis, the step's number for CalculiX
     /// and the results it keeps; `None` without a link or results.
     fn measured(&self, id: u64) -> Option<(&Node, u32, &plx_io::project::BoundResults)> {
-        let link = self.links.iter().find(|l| l.target == id)?;
+        let link = self.measure_link(id)?;
         let source = self.nodes.iter().find(|n| n.id == link.source)?;
         let step = links::global_step_number(source.link_data()?.fe, link.item.get(1)?)?;
         Some((source, step, source.bound_results()?))
@@ -2223,7 +2241,8 @@ impl ProjectApp {
         let Some(key) = self.measure_key(id) else {
             return CellState::Missing;
         };
-        let fresh = (self.links.iter().find(|l| l.target == id))
+        let fresh = self
+            .measure_link(id)
             .zip(self.measured(id))
             .is_some_and(|(link, (source, _, _))| !source.out_of_date_for(link));
         match measure.value {
@@ -2299,9 +2318,9 @@ impl ProjectApp {
             let Some((source, step, bound)) = self.measured(id) else {
                 continue;
             };
-            let Some(kind) = (self.nodes.iter().find(|n| n.id == id))
+            let Some((kind, units)) = (self.nodes.iter().find(|n| n.id == id))
                 .and_then(Node::as_measure)
-                .map(|m| m.kind.clone())
+                .map(|m| (m.kind.clone(), m.units))
             else {
                 continue;
             };
@@ -2314,6 +2333,7 @@ impl ProjectApp {
                 step,
                 results: bound.clone(),
                 node_sets,
+                units,
                 dir,
             };
             self.measuring.insert(id, (key, crate::measure::start(job)));
@@ -2668,7 +2688,15 @@ impl ProjectApp {
                         }
                     }
                 }
-                Block::Measure(measure) => print.add(format!("{:?}", measure.kind).as_bytes()),
+                Block::Measure(measure) => {
+                    let mut kind = measure.kind.clone();
+                    for axis in POINT_AXES {
+                        if driven(links::PARAMETERS, axis) {
+                            kind.set_coordinate(axis, 0.0);
+                        }
+                    }
+                    print.add(format!("{kind:?}").as_bytes());
+                }
                 Block::Math(number) | Block::Switch(number) => {
                     print.add(format!("{:?}{:?}", number.operation, number.kind).as_bytes());
                     let switch = node.kind() == Kind::Switch;
@@ -3109,6 +3137,10 @@ impl ProjectApp {
                 .find(|p| &p.name == name)
                 .map(|p| p.value),
             [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => node.refinement(),
+            [cell, key] if cell == links::PARAMETERS && node.as_measure().is_some() => {
+                let axis = POINT_AXES.iter().position(|a| a == key)?;
+                Some(node.as_measure()?.kind.point()?[axis])
+            }
             [cell, key] if cell == links::PARAMETERS && node.as_cad().is_some() => {
                 (key == CAD_LENGTH).then(|| node.as_cad().map(|c| c.operation.value))?
             }
@@ -3155,6 +3187,11 @@ impl ProjectApp {
                         }
                     }
                     [_, key] if key == REFINEMENT => node.set_refinement(value),
+                    [_, key] if node.as_measure().is_some() => {
+                        if let Some(measure) = node.as_measure_mut() {
+                            measure.kind.set_coordinate(key, value);
+                        }
+                    }
                     [_, key] if key == CAD_LENGTH && node.as_cad().is_some() => {
                         if let Some(cad) = node.as_cad_mut()
                             && value.is_finite()
@@ -5186,6 +5223,7 @@ impl ProjectApp {
                     primitive: n.as_mesh().map(|m| m.primitive.clone()),
                     refinement: n.refinement().unwrap_or(1.0),
                     cad_length: n.as_cad().map_or(0.0, |c| c.operation.value),
+                    point: n.as_measure().and_then(|m| m.kind.point()),
                     parameters: (n.as_parameters()).map_or_else(Vec::new, |p| p.parameters.clone()),
                     exposed: n.exposing_fe().map_or_else(Vec::new, ExposedView::of),
                     units: n.units(),
@@ -6598,6 +6636,7 @@ impl ProjectApp {
             | Action::AddRefineMesh(_)
             | Action::SetRefinement(..)
             | Action::SetCadLength(..)
+            | Action::SetMeasurePoint(..)
             | Action::AddCadOperation(_)
 
             | Action::AddMeshExport(_)
@@ -6671,6 +6710,12 @@ impl ProjectApp {
                     && value.is_finite()
                 {
                     cad.operation.value = value;
+                }
+                self.sync_due = true;
+            }
+            Action::SetMeasurePoint(id, key, value) => {
+                if let Some(measure) = self.node(id).and_then(Node::as_measure_mut) {
+                    measure.kind.set_coordinate(key, value);
                 }
                 self.sync_due = true;
             }
@@ -7418,6 +7463,8 @@ enum RowWidget {
     Refinement,
     /// The length of a CAD operation, such as a fillet radius.
     CadLength,
+    /// A coordinate of the point of a measure block, by axis.
+    Coordinate(usize),
     /// A number of a parameters block, by its index.
     Value(usize),
     /// An exposed parameter of an analysis or a materials block, by its key.
@@ -7471,6 +7518,8 @@ struct BlockView {
     refinement: f64,
     /// The length of a CAD operation block.
     cad_length: f64,
+    /// The point of a measure block that measures at a point.
+    point: Option<[f64; 3]>,
     /// The numbers of a parameters block.
     parameters: Vec<Parameter>,
     /// The exposed parameters of an analysis or a materials block.
@@ -8406,6 +8455,9 @@ fn parameter_label(nodes: &[Node], id: u64, slot: &[String]) -> String {
         return "Factor".into();
     }
     let node = nodes.iter().find(|n| n.id == id);
+    if node.and_then(Node::as_measure).is_some() && POINT_AXES.contains(&key) {
+        return key.to_uppercase();
+    }
     if let Some((number, switch)) = node.and_then(Node::as_number) {
         let label = (number.inputs(switch).into_iter())
             .find(|(k, ..)| k == key)
@@ -8444,6 +8496,10 @@ fn value_kind(nodes: &[Node], id: u64, path: &[String]) -> Option<ValueKind> {
             table.inputs[table.input(name)?].kind
         }
         [cell, key] if cell == links::PARAMETERS && key == REFINEMENT => Some(ValueKind::Factor),
+        [cell, key] if cell == links::PARAMETERS && node.as_measure().is_some() => {
+            (node.as_measure()?.kind.point().is_some() && POINT_AXES.contains(&key.as_str()))
+                .then_some(ValueKind::LENGTH)
+        }
         [cell, key]
             if cell == links::PARAMETERS && key == CAD_LENGTH && node.as_cad().is_some() =>
         {
@@ -8902,7 +8958,33 @@ fn measure_rows(
         state: Some(state),
         ..row(&[links::VALUE, "Result"], text, NodeIcon::Results, tip)
     };
-    vec![results, what, value]
+    let mut rows = vec![results, what];
+    if measure.kind.point().is_some() {
+        for (axis, key) in POINT_AXES.into_iter().enumerate() {
+            let path = [links::PARAMETERS, key];
+            let linked_from = (incoming.iter())
+                .find(|(slot, _)| slot.iter().eq(path.iter()))
+                .map(|(_, source)| source.clone());
+            let label = key.to_uppercase();
+            rows.push(Row {
+                input: true,
+                linked_from,
+                widget: Some(RowWidget::Coordinate(axis)),
+                ..row(
+                    &path,
+                    label.clone(),
+                    NodeIcon::Setup,
+                    format!(
+                        "{label} of the point the field is read at, a length. Type it, or \
+                         drag the pin of a number here: a parameter, a Math block or an \
+                         input of a parameter study."
+                    ),
+                )
+            });
+        }
+    }
+    rows.push(value);
+    rows
 }
 
 /// The rows of a Campbell block: the analysis it sweeps, how far its sweep is and the
@@ -9446,6 +9528,7 @@ impl Viewer {
         }
         let (units, space, refinement) = (block.units, block.space, block.refinement);
         let cad_length = block.cad_length;
+        let point = block.point;
         let parameters = block.parameters.clone();
         let exposed = block.exposed.clone();
         let block_primitive = block.primitive.clone();
@@ -9622,6 +9705,24 @@ impl Viewer {
                 }
                 return;
             }
+            RowWidget::Coordinate(axis) => {
+                let Some(point) = point else {
+                    return;
+                };
+                let mut value = point[axis];
+                if row.linked_from.is_some() {
+                    ui.disable();
+                }
+                let response = ui.add_sized(
+                    field.size(),
+                    crate::numeric::quantity(&mut value, units, Quantity::Length),
+                );
+                response.on_hover_text(&tip);
+                if value != point[axis] {
+                    (self.actions).push(Action::SetMeasurePoint(id, POINT_AXES[axis], value));
+                }
+                return;
+            }
             RowWidget::Refinement => {
                 let mut value = refinement;
                 if row.linked_from.is_some() {
@@ -9707,6 +9808,7 @@ impl Viewer {
             },
             RowWidget::Refinement
             | RowWidget::CadLength
+            | RowWidget::Coordinate(_)
             | RowWidget::Value(_)
             | RowWidget::Exposed(_)
             | RowWidget::Operation
@@ -11641,6 +11743,61 @@ mod tests {
             Some(ProjectNode::Measure(written)) => assert_eq!(written, block),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_measure_at_a_point_takes_lengths_at_its_coordinates() {
+        let path = |p: &[&str]| p.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let block = file::MeasureBlock {
+            id: 5,
+            name: "Measure".into(),
+            kind: MeasureKind::PointValue {
+                field: "DISP".into(),
+                component: "U2".into(),
+                point: [0.1, 0.02, 0.0],
+            },
+            ..Default::default()
+        };
+        let node = Node::read(ProjectNode::Measure(block));
+        let incoming = vec![(path(&["Parameters", "x"]), "Parameters".to_owned())];
+        let rows = measure_rows(&node, &incoming, CellState::Missing, false);
+        let coordinates: Vec<_> = rows.iter().filter(|r| r.input).skip(1).collect();
+        assert_eq!(coordinates.len(), 3);
+        assert_eq!(coordinates[0].path, path(&["Parameters", "x"]));
+        assert_eq!(coordinates[0].text, "X");
+        assert_eq!(coordinates[0].linked_from.as_deref(), Some("Parameters"));
+        assert!(coordinates[2].linked_from.is_none());
+        assert_eq!(rows.last().unwrap().path, path(&["Value", "Result"]));
+        let parameters = Node::new(
+            2,
+            "Parameters".into(),
+            Block::Parameters(ParametersBlock {
+                units: Default::default(),
+                parameters: vec![
+                    Parameter::new("Load", ValueKind::Quantity(Quantity::Force), -50.0),
+                    Parameter::new("Length", ValueKind::LENGTH, 0.3),
+                ],
+            }),
+        );
+        let nodes = vec![node, parameters];
+        let x = path(&["Parameters", "x"]);
+        assert_eq!(value_kind(&nodes, 5, &x), Some(ValueKind::LENGTH));
+        assert_eq!(parameter_label(&nodes, 5, &x), "X");
+        assert_eq!(
+            refusal(&nodes, &[], 2, &path(&["Value", "Length"]), 5, &x),
+            None
+        );
+        assert!(refusal(&nodes, &[], 2, &path(&["Value", "Load"]), 5, &x).is_some());
+        // Another measure has no coordinates to link to.
+        let mut extreme = nodes;
+        if let Some(measure) = extreme[0].as_measure_mut() {
+            measure.kind = MeasureKind::default();
+        }
+        assert_eq!(value_kind(&extreme, 5, &x), None);
+        assert_eq!(
+            measure_rows(&extreme[0], &[], CellState::Missing, false).len(),
+            3
+        );
     }
 
     #[test]
