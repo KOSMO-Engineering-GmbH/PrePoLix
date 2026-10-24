@@ -633,10 +633,11 @@ impl Problem {
                  Section."
             }
             Problem::HeldOnlyByContact => {
-                "Additionally support the parts weakly (a Spring with a small \
-                 stiffness), let the contact surfaces touch at the start (Adjust in the \
-                 contact pair) or bring the parts into contact with a small \
-                 displacement in a first step."
+                "Turn Weak springs on again (Connections > Connection Settings): PrePoLix \
+                 then holds these parts with very soft springs. Otherwise support them \
+                 weakly yourself (a Spring with a small stiffness), let the contact \
+                 surfaces touch at the start (Adjust in the contact pair) or bring the \
+                 parts into contact with a small displacement in a first step."
             }
             Problem::ConflictingBoundaries => {
                 "Change the selection of the boundary conditions so that no nodes \
@@ -944,20 +945,97 @@ impl FeModel {
     }
 
     pub fn check(&self, mesh: &FeMesh, mesh_check: &MeshCheck) -> Vec<Finding> {
-        if self.contact_regions.is_empty() {
-            return self.check_explicit(mesh, mesh_check);
-        }
-        // Contact regions are checked as the ties and contact pairs they become; what is
-        // found on those belongs to the region.
-        let (lowered, origin) = self.lower_contacts(mesh);
-        let mut findings = lowered.check_explicit(mesh, mesh_check);
-        for finding in &mut findings {
-            if let Some(region) = origin.region_of(finding.item) {
-                finding.item = ModelItem::ContactRegion(region);
+        let mut findings = if self.contact_regions.is_empty() {
+            self.check_explicit(mesh, mesh_check)
+        } else {
+            // Contact regions are checked as the ties and contact pairs they become; what is
+            // found on those belongs to the region.
+            let (lowered, origin) = self.lower_contacts(mesh);
+            let mut findings = lowered.check_explicit(mesh, mesh_check);
+            for finding in &mut findings {
+                if let Some(region) = origin.region_of(finding.item) {
+                    finding.item = ModelItem::ContactRegion(region);
+                }
             }
+            self.check_contact_regions(mesh, &lowered, &mut findings);
+            findings
+        };
+        // The input file holds these parts with weak springs.
+        if self.contact_defaults.weak_springs {
+            findings.retain(|f| f.problem != Problem::HeldOnlyByContact);
         }
-        self.check_contact_regions(mesh, &lowered, &mut findings);
         findings
+    }
+
+    /// Weak springs to ground for the parts that only contacts hold in a static step, so
+    /// that CalculiX does not stall on the free motions before the contacts close: with
+    /// frictionless contact, an initial gap or Nlgeom it otherwise gives up with "too many
+    /// cutbacks", and node to surface contact drifts sideways by arbitrary amounts. Each
+    /// part gets a stiffness of [`WEAK_SPRING_FACTOR`](crate::WEAK_SPRING_FACTOR) E L per
+    /// direction, spread over all its nodes: E its Young's modulus, L the geometric mean of
+    /// its extents. None if the connection settings turn them off. For the model the input
+    /// file is written from, with the contact regions lowered.
+    pub fn weak_springs(&self, mesh: &FeMesh) -> Vec<crate::Spring> {
+        if !self.contact_defaults.weak_springs
+            || (self.contact_pairs.iter()).all(|p| !p.active)
+            || !self.steps.iter().any(|s| s.active)
+        {
+            return Vec::new();
+        }
+        let space = self.properties.space;
+        let findings = self.check_explicit(mesh, &MeshCheck::new(mesh, space));
+        let mut parts: Vec<usize> = (findings.iter())
+            .filter(|f| f.problem == Problem::HeldOnlyByContact)
+            .filter_map(|f| match f.item {
+                ModelItem::Part(p) => Some(p),
+                _ => None,
+            })
+            .collect();
+        parts.sort_unstable();
+        parts.dedup();
+        if parts.is_empty() {
+            return Vec::new();
+        }
+        let young = self.young_of_elements(mesh);
+        let mut springs = Vec::new();
+        for p in parts {
+            let Some(part) = mesh.parts.get(p) else {
+                continue;
+            };
+            let mut nodes: Vec<NodeId> = (part.elements.iter())
+                .filter_map(|&e| mesh.element(e))
+                .flat_map(|e| e.nodes.iter().copied())
+                .collect();
+            nodes.sort_unstable();
+            nodes.dedup();
+            let e = (part.elements.iter())
+                .filter_map(|e| young.get(e).copied())
+                .fold(0.0, f64::max);
+            let (mut min, mut max) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+            for x in nodes.iter().filter_map(|&n| mesh.node(n)) {
+                for i in 0..3 {
+                    min[i] = min[i].min(x[i]);
+                    max[i] = max[i].max(x[i]);
+                }
+            }
+            let extents: Vec<f64> = (0..3).map(|i| (max[i] - min[i]).max(0.0)).collect();
+            let largest = extents.iter().copied().fold(0.0, f64::max);
+            // A flat part counts with a hundredth of its size across.
+            let size = (extents.iter())
+                .map(|&x| x.max(0.01 * largest))
+                .product::<f64>()
+                .cbrt();
+            let k = crate::WEAK_SPRING_FACTOR * e * size;
+            if !(k.is_finite() && k > 0.0) || nodes.is_empty() {
+                continue;
+            }
+            let mut spring = crate::Spring::new(format!("PLX_Weak_Springs_{}", part.name));
+            spring.visible = false;
+            spring.region = Region::Nodes(nodes);
+            spring.stiffness = [k; 3];
+            springs.push(spring);
+        }
+        springs
     }
 
     /// Contact regions whose sides do not touch, contact pairs whose formulation differs
@@ -3255,10 +3333,23 @@ mod tests {
             name: "Surface_Interaction-1".into(),
             properties: Vec::new(),
         });
+        // Weak springs hold the part in the input file, so nothing is reported.
+        assert_eq!(check(&model, &mesh), []);
+        let springs = model.weak_springs(&mesh);
+        assert_eq!(springs.len(), 1, "{springs:?}");
+        assert_eq!(springs[0].name, "PLX_Weak_Springs_PART-2");
+        assert_eq!(springs[0].region, Region::Nodes((9..=16).collect()));
+        // A unit cube of steel: 1e-6 E L.
+        assert!(
+            (springs[0].stiffness[2] - 0.21).abs() < 1e-12,
+            "{springs:?}"
+        );
+        model.contact_defaults.weak_springs = false;
         assert_eq!(
             problems(&check(&model, &mesh))[1],
             (ModelItem::Part(1), Problem::HeldOnlyByContact)
         );
+        assert_eq!(model.weak_springs(&mesh), []);
         let mut tie = Tie::new("Tie-1");
         tie.master = Region::Surface("RIGHT".into());
         tie.slave = Region::Surface("LEFT".into());

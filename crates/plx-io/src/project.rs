@@ -1095,6 +1095,7 @@ mod tests {
             contact_defaults: plx_model::ContactDefaults {
                 formulation: Some(plx_model::ContactMethod::Mortar),
                 stiffness_factor: 5.0,
+                weak_springs: false,
             },
             amplitudes: vec![plx_model::Amplitude {
                 time_span: plx_model::AmplitudeTime::Total,
