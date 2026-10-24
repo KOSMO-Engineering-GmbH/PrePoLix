@@ -48,8 +48,8 @@ pub use color_scale::{ColorScale, ColorSpectrum};
 pub use connection::{
     BondedMethod, CONDUCTANCE_FACTOR, ContactBehavior, ContactDefaults, ContactRegion,
     ContactSettings, InterfaceTreatment, Lowered, ROUGH_FRICTION, Resolved, ResolvedContacts,
-    ResolvedKind, STICK_SLOPE_RATIO, STIFFNESS_FACTOR, SideRoles, Stiffness, TIED_STIFFNESS_FACTOR,
-    TOLERANCE_FACTOR, conducts_across_contacts, mortar_supports,
+    ResolvedKind, STIFFNESS_FACTOR, SideRoles, Stiffness, TIED_STIFFNESS_FACTOR, TOLERANCE_FACTOR,
+    conducts_across_contacts, mortar_supports,
 };
 pub use constraint::{CompressionOnly, NodeTie, RigidBody, Spring};
 pub use contact::{
