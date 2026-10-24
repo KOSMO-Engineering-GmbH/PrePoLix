@@ -71,6 +71,14 @@ pub enum MeasureKind {
         component: String,
         node: u32,
     },
+    /// A field component at a point, interpolated with the shape functions of the element
+    /// that contains it. The coordinates are in SI units, each a row of the block that a
+    /// value link can set.
+    PointValue {
+        field: String,
+        component: String,
+        point: [f64; 3],
+    },
     /// The first value of a history output (`.dat`), such as the total force of a set
     /// (`TOTAL_FORCE` / `RF3`).
     History {
@@ -81,6 +89,10 @@ pub enum MeasureKind {
     /// The eigenfrequency of mode `mode`, counted from 1, of a frequency step.
     Eigenfrequency { mode: u32 },
 }
+
+/// The keys of the coordinate rows of a measure at a point, X, Y and Z: a value link sets
+/// them at `["Parameters", key]`.
+pub const POINT_AXES: [&str; 3] = ["x", "y", "z"];
 
 impl Default for MeasureKind {
     fn default() -> Self {
@@ -95,13 +107,18 @@ impl Default for MeasureKind {
 
 impl MeasureKind {
     /// The kinds a measure editor offers, each with defaults.
-    pub fn choices() -> [Self; 4] {
+    pub fn choices() -> [Self; 5] {
         [
             Self::default(),
             Self::NodeValue {
                 field: "DISP".into(),
                 component: "ALL".into(),
                 node: 1,
+            },
+            Self::PointValue {
+                field: "DISP".into(),
+                component: "ALL".into(),
+                point: [0.0; 3],
             },
             Self::History {
                 set: String::new(),
@@ -116,6 +133,7 @@ impl MeasureKind {
         match self {
             Self::FieldExtreme { .. } => "Field extreme",
             Self::NodeValue { .. } => "Value at a node",
+            Self::PointValue { .. } => "Value at a point",
             Self::History { .. } => "History output",
             Self::Eigenfrequency { .. } => "Eigenfrequency",
         }
@@ -130,11 +148,38 @@ impl MeasureKind {
             | Self::NodeValue {
                 field, component, ..
             }
+            | Self::PointValue {
+                field, component, ..
+            }
             | Self::History {
                 field, component, ..
             } => (field, component),
             Self::Eigenfrequency { .. } => ("FREQ", ""),
         }
+    }
+
+    /// The point of a measure at a point.
+    pub fn point(&self) -> Option<[f64; 3]> {
+        match self {
+            Self::PointValue { point, .. } => Some(*point),
+            _ => None,
+        }
+    }
+
+    /// Sets the coordinate of a measure at a point by its key in [`POINT_AXES`]; whether it
+    /// changed.
+    pub fn set_coordinate(&mut self, key: &str, value: f64) -> bool {
+        let Self::PointValue { point, .. } = self else {
+            return false;
+        };
+        let Some(axis) = POINT_AXES.iter().position(|a| *a == key) else {
+            return false;
+        };
+        if !value.is_finite() || point[axis] == value {
+            return false;
+        }
+        point[axis] = value;
+        true
     }
 
     /// A short text of what it measures: "Maximum of STRESS MISES in TIP".
@@ -157,6 +202,9 @@ impl MeasureKind {
                 component,
                 node,
             } => format!("{field} {component} at node {node}"),
+            Self::PointValue {
+                field, component, ..
+            } => format!("{field} {component} at a point"),
             Self::History {
                 set,
                 field,
