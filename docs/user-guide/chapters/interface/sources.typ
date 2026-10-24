@@ -336,6 +336,16 @@ A value link joins like with like here too: once a block has a kind, it takes on
 that kind, and the output pane says why a link was refused. Changing the operation removes
 links to inputs the block no longer has.
 
+Every number field of a block, in a Math, Switch or Parameters block, a mesh block or an
+exposed parameter, works the same way. A number with more digits than the field holds shows
+as many of them as fit, and the unit always in full; hover over it for the whole value, which
+the block keeps: only the display is shortened. Click it to type, and the field starts from
+the whole value. A field a value link gives is read-only and its label is violet; the tooltip
+names the block it comes from.
+
+#screenshot("schematic-number-fields.png", [A of the Math block comes from the parameter
+  Length: the field shows 91.000273 mm, the tooltip the whole value 91.0002734375 mm])
+
 === Exposed parameters <exposed-parameters>
 
 Any number of an analysis that a study or a Parameters block should set, such as a force, a

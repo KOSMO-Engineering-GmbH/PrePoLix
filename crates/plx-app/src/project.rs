@@ -9474,7 +9474,6 @@ impl Viewer {
             RowWidget::Exposed(_) => egui::Sense::click(),
             _ => egui::Sense::hover(),
         };
-        let (rect, label) = ui.allocate_exact_size(egui::vec2(ROW_WIDTH, ROW_HEIGHT), sense);
         let link_color = wire_color(&[links::VALUE.to_owned()]);
         // The fields of a Math or Switch block leave room for the label of its operation.
         let width = match widget {
@@ -9484,6 +9483,10 @@ impl Viewer {
             | RowWidget::Choices => 112.0,
             _ => 118.0,
         };
+        // The label senses the pointer left of the field only, so that the field shows its
+        // own tooltip, with its full value, also while it is read-only.
+        let (label_id, rect) = ui.allocate_space(egui::vec2(ROW_WIDTH, ROW_HEIGHT));
+        let label = ui.interact(rect.with_max_x(rect.right() - 4.0 - width), label_id, sense);
         // A long label, such as the name of an exposed parameter, ends in an ellipsis before
         // the field; the tooltip has it in full.
         let mut job = egui::text::LayoutJob::simple_singleline(
@@ -9605,15 +9608,9 @@ impl Viewer {
                     ui.weak("gone");
                     return;
                 };
-                if row.linked_from.is_some() {
-                    ui.disable();
-                }
                 let before = value;
-                let response = ui.add_sized(
-                    field.size(),
-                    crate::parameter_set::field(&mut value, kind, units),
-                );
-                response.on_hover_text(&tip);
+                let drag = crate::parameter_set::field(&mut value, kind, units);
+                number_field(&mut ui, field, row, drag, &tip);
                 if value != before {
                     self.actions.push(Action::SetExposed(id, key, value));
                 }
@@ -9623,15 +9620,9 @@ impl Viewer {
                 let Some(mut parameter) = parameters.get(index).cloned() else {
                     return;
                 };
-                if row.linked_from.is_some() {
-                    ui.disable();
-                }
                 let before = parameter.value;
-                let response = ui.add_sized(
-                    field.size(),
-                    crate::parameter_set::field(&mut parameter.value, parameter.kind, units),
-                );
-                response.on_hover_text(&tip);
+                let drag = crate::parameter_set::field(&mut parameter.value, parameter.kind, units);
+                number_field(&mut ui, field, row, drag, &tip);
                 if parameter.value != before {
                     self.actions
                         .push(Action::SetParameter(id, index, parameter.value));
@@ -9640,14 +9631,8 @@ impl Viewer {
             }
             RowWidget::CadLength => {
                 let mut value = cad_length;
-                if row.linked_from.is_some() {
-                    ui.disable();
-                }
-                let response = ui.add_sized(
-                    field.size(),
-                    crate::numeric::quantity(&mut value, units, Quantity::Length),
-                );
-                response.on_hover_text(&tip);
+                let drag = crate::numeric::quantity(&mut value, units, Quantity::Length);
+                number_field(&mut ui, field, row, drag, &tip);
                 if value != cad_length {
                     self.actions.push(Action::SetCadLength(id, value));
                 }
@@ -9655,18 +9640,10 @@ impl Viewer {
             }
             RowWidget::Refinement => {
                 let mut value = refinement;
-                if row.linked_from.is_some() {
-                    ui.disable();
-                }
-                let response = ui.add_sized(
-                    field.size(),
-                    egui::DragValue::new(&mut value)
-                        .custom_parser(crate::numeric::evaluate)
-                        .range(0.05..=20.0)
-                        .speed(0.01)
-                        .max_decimals(3),
-                );
-                response.on_hover_text(&tip);
+                let drag = crate::numeric::drag_value(&mut value)
+                    .range(0.05..=20.0)
+                    .speed(0.01);
+                number_field(&mut ui, field, row, drag, &tip);
                 if value != refinement {
                     self.actions.push(Action::SetRefinement(id, value));
                 }
@@ -9684,14 +9661,16 @@ impl Viewer {
         let response = match widget {
             RowWidget::ExportPath => return,
             RowWidget::Param(param) => match primitive.slot(param.key) {
-                Some(ParamSlot::Length(value)) => ui.add_sized(
-                    field.size(),
-                    crate::numeric::quantity(value, units, Quantity::Length),
-                ),
-                Some(ParamSlot::Count(value)) => ui.add_sized(
-                    field.size(),
-                    crate::numeric::count(value).range(1..=10_000).speed(0.1),
-                ),
+                Some(ParamSlot::Length(value)) => {
+                    let drag = crate::numeric::quantity(value, units, Quantity::Length);
+                    number_field(&mut ui, field, row, drag, &tip);
+                    return self.set_primitive(id, primitive, before);
+                }
+                Some(ParamSlot::Count(value)) => {
+                    let drag = crate::numeric::count(value).range(1..=10_000).speed(0.1);
+                    number_field(&mut ui, field, row, drag, &tip);
+                    return self.set_primitive(id, primitive, before);
+                }
                 None => return,
             },
             RowWidget::Element => match &mut primitive {
@@ -9746,6 +9725,11 @@ impl Viewer {
             | RowWidget::Choices => return,
         };
         response.on_hover_text(&tip);
+        self.set_primitive(id, primitive, before);
+    }
+
+    /// Sets the edited mesh primitive of a block, if it changed.
+    fn set_primitive(&mut self, id: u64, primitive: MeshPrimitive, before: MeshPrimitive) {
         if primitive != before {
             self.actions.push(Action::SetPrimitive(id, primitive));
         }
@@ -9760,6 +9744,22 @@ impl Viewer {
 /// Width of the rows of a block.
 const ROW_WIDTH: f32 = 210.0;
 const ROW_HEIGHT: f32 = 20.0;
+
+/// The field of a number in a row of a block, the one every number of every block shows:
+/// as many digits as fit before its unit ([`crate::numeric::fitted`]), the full value in
+/// the tooltip; read-only while a value link gives it.
+fn number_field(
+    ui: &mut egui::Ui,
+    field: egui::Rect,
+    row: &Row,
+    drag: egui::DragValue<'_>,
+    tip: &str,
+) -> egui::Response {
+    if row.linked_from.is_some() {
+        ui.disable();
+    }
+    crate::numeric::fitted(ui, field.size(), drag, tip)
+}
 
 impl SnarlViewer<u64> for Viewer {
     fn title(&mut self, node: &u64) -> String {
