@@ -51,6 +51,8 @@ pub const WRITTEN_KEYWORDS: &[(&str, &str)] = &[
     ("*SURFACE BEHAVIOR", "Contact"),
     ("*CONTACT PAIR", "Contact"),
     ("*CLEARANCE", "Contact offset"),
+    ("*MODEL CHANGE", "Contacts switched in steps"),
+    ("*CHANGE FRICTION", "Friction changed in steps"),
     ("*FRICTION", "Contact with friction"),
     ("*GAP CONDUCTANCE", "Thermal contact"),
     ("*CONTACT FILE", "Contact field outputs"),

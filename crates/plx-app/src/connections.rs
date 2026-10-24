@@ -1153,12 +1153,14 @@ pub fn worksheet(
         indices.sort_unstable();
         for i in indices.into_iter().rev() {
             if i < fe.contact_regions.len() {
-                fe.contact_regions.remove(i);
+                let region = fe.contact_regions.remove(i);
+                fe.remove_contact_changes(&region.name);
             }
         }
         tree.selected = None;
         return;
     }
+    let names: Vec<String> = fe.contact_regions.iter().map(|r| r.name.clone()).collect();
     for &i in &selected {
         let Some(region) = fe.contact_regions.get_mut(i) else {
             continue;
@@ -1190,6 +1192,18 @@ pub fn worksheet(
                 fe.contact_regions[i].name = plx_model::next_name(&name, others);
             }
         }
+        // History outputs and step changes follow the new names, by way of names no region
+        // has, so that a name passed on from one region to another is not followed twice.
+        let renamed: Vec<(usize, &String)> = (names.iter().enumerate())
+            .filter(|(i, old)| fe.contact_regions[*i].name != **old)
+            .collect();
+        for &(i, old) in &renamed {
+            fe.rename_contact_pair(old, &format!("\u{0}{i}"));
+        }
+        for &(i, _) in &renamed {
+            let new = fe.contact_regions[i].name.clone();
+            fe.rename_contact_pair(&format!("\u{0}{i}"), &new);
+        }
     }
 }
 
@@ -1216,4 +1230,69 @@ fn exported_hover(resolved: &Resolved, units: UnitSystem) -> String {
     }
     lines.extend(resolved.why.iter().cloned());
     lines.join("\n")
+}
+
+/// Whether contacts take part in a step of this kind, so that it can switch them.
+fn step_takes_contact(kind: &plx_model::StepKind) -> bool {
+    use plx_model::StepKind;
+    matches!(
+        kind,
+        StepKind::Static(_)
+            | StepKind::Visco(_)
+            | StepKind::Dynamic(_)
+            | StepKind::CoupledTempDisp(_)
+            | StepKind::UncoupledTempDisp(_)
+    )
+}
+
+/// The contact regions in a step, as rows of the step dialog: switched on or off and the
+/// friction coefficient of frictional ones, from this step on. `index` is the step's place,
+/// `None` for a new step after the others.
+pub fn step_contacts(ui: &mut Ui, fe: &FeModel, step: &mut plx_model::Step, index: Option<usize>) {
+    let regions: Vec<&ContactRegion> = fe.contact_regions.iter().filter(|r| r.active).collect();
+    if regions.is_empty() || !step_takes_contact(&step.kind) {
+        return;
+    }
+    let earlier = &fe.steps[..index.unwrap_or(fe.steps.len()).min(fe.steps.len())];
+    ui.label("Contacts in this step").on_hover_text(
+        "Contact regions switched off or on, or with another friction coefficient, from \
+         this step on. A change holds in the following steps until another one.",
+    );
+    ui.vertical(|ui| {
+        egui::Grid::new("step contacts")
+            .num_columns(4)
+            .striped(true)
+            .spacing([12.0, 4.0])
+            .show(ui, |ui| {
+                ui.strong("Region");
+                ui.strong("Active");
+                ui.strong("Friction");
+                ui.label("");
+                ui.end_row();
+                for region in regions {
+                    let before = region.state_after(earlier);
+                    let mut wanted = region.state_in(step, before);
+                    ui.label(&region.name);
+                    ui.checkbox(&mut wanted.active, "");
+                    match &mut wanted.friction {
+                        Some(mu) => {
+                            ui.add(numeric::drag_value(mu).speed(0.01).range(0.0..=5.0));
+                        }
+                        None => {
+                            ui.weak("-");
+                        }
+                    }
+                    if wanted != region.state_in(step, before) {
+                        step.set_contact_state(&region.name, before, wanted);
+                    }
+                    if wanted != before {
+                        ui.weak("changed here");
+                    } else {
+                        ui.label("");
+                    }
+                    ui.end_row();
+                }
+            });
+    });
+    ui.end_row();
 }

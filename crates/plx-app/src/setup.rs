@@ -2487,6 +2487,7 @@ impl Editor {
             }
             Draft::Step(step, region) => {
                 step_form(ui, step, self.index.is_none(), &model.fe);
+                crate::connections::step_contacts(ui, &model.fe, step, self.index);
                 if step.kind.design_region().is_some() {
                     region.ui_labeled(ui, model, "Design region", "design region", true);
                     ui.label("");
@@ -3440,6 +3441,7 @@ impl Editor {
                     Some(existing) => {
                         existing.name = step.name;
                         existing.kind = step.kind;
+                        existing.contact_changes = step.contact_changes;
                     }
                     None => {
                         copy_items_of_last_step(fe, &mut step);
@@ -3665,8 +3667,20 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::InitialCondition(i) => remove(&mut fe.initial_conditions, i),
         TreeItem::Constraint(i) => remove(&mut fe.constraints, i),
         TreeItem::SurfaceInteraction(i) => remove(&mut fe.surface_interactions, i),
-        TreeItem::ContactPair(i) => remove(&mut fe.contact_pairs, i),
-        TreeItem::ContactRegion(i) => remove(&mut fe.contact_regions, i),
+        TreeItem::ContactPair(i) | TreeItem::ContactRegion(i) => {
+            let name = match item {
+                TreeItem::ContactPair(_) => fe.contact_pairs.get(i).map(|p| p.name.clone()),
+                _ => fe.contact_regions.get(i).map(|r| r.name.clone()),
+            };
+            let Some(name) = name else {
+                return false;
+            };
+            fe.remove_contact_changes(&name);
+            match item {
+                TreeItem::ContactPair(_) => remove(&mut fe.contact_pairs, i),
+                _ => remove(&mut fe.contact_regions, i),
+            }
+        }
         TreeItem::ContactDetection(i) => {
             let Some(name) = fe.contact_detections.get(i).map(|d| d.name.clone()) else {
                 return false;

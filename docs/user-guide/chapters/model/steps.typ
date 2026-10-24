@@ -12,6 +12,10 @@ exactly what is listed under it in the tree.]
 
 #screenshot("step.png", [Static step])
 
+In a model with contact regions the dialog also lists #ui("Contacts in this step"): regions
+switched off or on and friction coefficients changed from this step on, see
+@contact-steps.
+
 === Step types in the tree
 
 Every step shows a pictogram of its type in front of its name, so that you can tell the steps

@@ -948,7 +948,16 @@ mod tests {
             amplitude: None,
             factor_amplitude: None,
         });
-        model.steps.push(step);
+        // A second step pressing harder, to show the contacts of a step.
+        if std::env::var_os("PLX_CONTACT_DEMO_STEPS").is_some() {
+            let mut second = step.clone();
+            second.name = "Step-2".into();
+            second.loads[0].kind = plx_model::LoadKind::Pressure(10e6);
+            model.steps.push(step);
+            model.steps.push(second);
+        } else {
+            model.steps.push(step);
+        }
         let project = single(None, &mesh, &model, None);
         save_project(std::path::Path::new(&path), &project).unwrap();
     }
@@ -982,7 +991,17 @@ mod tests {
                 ..Default::default()
             }],
             sections: Vec::new(),
-            steps: vec![Step::new_static("Step-1"), Step::new_coupled("Step-2")],
+            steps: vec![
+                Step::new_static("Step-1"),
+                Step {
+                    contact_changes: vec![plx_model::ContactChange {
+                        region: "Region-1".into(),
+                        active: Some(false),
+                        friction: Some(0.3),
+                    }],
+                    ..Step::new_coupled("Step-2")
+                },
+            ],
             reference_points: vec![plx_model::ReferencePoint::new("RP-1", [1.0, 2.0, 3.0])],
             coordinate_systems: vec![plx_model::CoordinateSystem {
                 kind: plx_model::CoordinateSystemKind::Cylindrical,

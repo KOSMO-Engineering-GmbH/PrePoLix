@@ -7441,3 +7441,165 @@ fn no_separation_with_large_deformations_is_a_warning() {
             .any(|w| w.contains("small displacements"))
     );
 }
+
+/// A step after `model`'s first, its loads left out and its boundary conditions those of the
+/// first and `extra`.
+fn next_step(model: &FeModel, name: &str, extra: Vec<BoundaryCondition>) -> Step {
+    let mut step = model.steps[0].clone();
+    step.name = name.into();
+    step.loads.clear();
+    step.boundary_conditions.extend(extra);
+    step
+}
+
+/// A step switches a contact region off: pressed on before, the upper block held at its top
+/// no longer loads the lower one. The next step switches it on again and the pressure gets
+/// through.
+#[test]
+fn calculix_switches_contact_regions_off_and_on_in_steps() {
+    use plx_model::{ContactBehavior, ContactState};
+    let (mesh, mut model) = blocks_in_contact(0.0, ContactBehavior::Frictionless);
+    let side = |values| BoundaryCondition {
+        name: "Side-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes((110..=118).collect()),
+        kind: each_node(values),
+        amplitude: None,
+    };
+    model.steps[0]
+        .boundary_conditions
+        .push(side([Some(0.0), Some(0.0), None, None, None, None]));
+    let on = ContactState {
+        active: true,
+        friction: None,
+    };
+    let off = ContactState {
+        active: false,
+        ..on
+    };
+    let mut free = next_step(&model, "Step-2", Vec::new());
+    free.boundary_conditions[1] = side([Some(0.0), Some(0.0), Some(0.0), None, None, None]);
+    free.set_contact_state("Region-1", on, off);
+    assert_eq!(free.contact_changes.len(), 1);
+    let mut pressed = model.steps[0].clone();
+    pressed.name = "Step-3".into();
+    pressed.set_contact_state("Region-1", off, on);
+    model.steps.push(free);
+    let region = &model.contact_regions[0];
+    assert_eq!(region.state_after(&model.steps), off);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains(
+            "** Name: Region-1\n*Model change, Type=Contact pair, Remove\n\
+             Internal_Selection-1_Region-1_Slave, Internal_Selection-1_Region-1_Master\n"
+        ),
+        "{text}"
+    );
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let Some(frd) = run_ccx("region-switched-off", &text) else {
+        return;
+    };
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!(reaction.abs() < 1.0, "{reaction}");
+    model.steps.push(pressed);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Model change, Type=Contact pair, Add\n"));
+    let Some(frd) = run_ccx("region-switched-on", &text) else {
+        return;
+    };
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((reaction - 1000.0).abs() < 10.0, "{reaction}");
+}
+
+/// A step raises the friction of a sliding region: pushed further, the block slides at the
+/// new coefficient times the normal force. The region gets an interaction of its own, as
+/// the change applies to the whole interaction.
+#[test]
+fn calculix_changes_the_friction_of_a_region_in_a_step() {
+    use plx_model::{ContactBehavior, ContactState};
+    let (mesh, mut model) = blocks_in_contact(0.0, ContactBehavior::Frictional { mu: 0.15 });
+    let mut other = model.contact_regions[0].clone();
+    other.name = "Region-2".into();
+    other.active = false;
+    model.contact_regions.push(other);
+    let top = push_top(&mut model, 0.004);
+    let mut step = model.steps[0].clone();
+    step.name = "Step-2".into();
+    if let BoundaryKind::Displacement(d) = &mut step.boundary_conditions[1].kind {
+        d.values[0] = Some(0.008);
+    }
+    let before = model.contact_regions[0].state_after(&model.steps);
+    step.set_contact_state(
+        "Region-1",
+        before,
+        ContactState {
+            friction: Some(0.3),
+            ..before
+        },
+    );
+    model.steps.push(step);
+    let (lowered, _) = model.lower_contacts(&mesh);
+    let interactions: Vec<&str> = (lowered.contact_pairs.iter())
+        .map(|p| p.interaction.as_str())
+        .collect();
+    assert_eq!(interactions, ["PLX_Frictional", "PLX_Frictional-2"]);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Change friction, Interaction=PLX_Frictional\n*Friction\n0.3, 4200\n"),
+        "{text}"
+    );
+    let Some(frd) = run_ccx("region-friction-change", &text) else {
+        return;
+    };
+    let pushed = node_sum(&frd, "FORC", "F1", &top);
+    assert!((pushed - 300.0).abs() < 0.05 * 300.0, "{pushed}");
+}
+
+/// A tie cannot be switched in a step: a bonded region switched becomes a tied contact,
+/// unless chosen as a tie, which the model check reports, as it reports no separation.
+#[test]
+fn switched_bonded_regions_become_tied_contacts() {
+    use plx_model::{
+        BondedMethod, ContactBehavior, ContactState, MeshCheck, ModelItem, Problem, ResolvedKind,
+    };
+    let (mesh, mut model) = blocks_in_contact(0.0, ContactBehavior::Bonded);
+    let mut step = next_step(&model, "Step-2", Vec::new());
+    let on = ContactState {
+        active: true,
+        friction: None,
+    };
+    step.set_contact_state(
+        "Region-1",
+        on,
+        ContactState {
+            active: false,
+            ..on
+        },
+    );
+    model.steps.push(step);
+    let resolved = model.resolve_contacts(&mesh);
+    assert!(matches!(
+        resolved.items[0].kind,
+        ResolvedKind::Pair {
+            behavior: SurfaceBehavior::Tied { .. },
+            ..
+        }
+    ));
+    let check = MeshCheck::new(&mesh, model.properties.space);
+    let ignored = |model: &FeModel| {
+        (model.check(&mesh, &check).iter()).any(|f| {
+            f.problem == Problem::ContactChangeIgnored && f.item == ModelItem::ContactRegion(0)
+        })
+    };
+    assert!(!ignored(&model));
+    model.contact_regions[0].settings.bonded_method = Some(BondedMethod::Constraint);
+    assert!(ignored(&model));
+    assert!(
+        !write_inp(&mesh, &model, "")
+            .unwrap()
+            .contains("*Model change")
+    );
+    model.contact_regions[0].behavior = ContactBehavior::NoSeparation;
+    assert!(ignored(&model));
+}

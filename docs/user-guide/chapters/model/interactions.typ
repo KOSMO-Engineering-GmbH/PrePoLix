@@ -245,6 +245,24 @@ slides or does both, and on hover how many slave nodes are in contact, how many 
 largest pressure and the largest opening. A node slides when its shear stress reaches the
 friction coefficient times its pressure.
 
+==== Contacts in steps <contact-steps>
+
+Contact regions belong to the model, but a step can switch one off or on, or give a frictional
+one another friction coefficient: #ui("Contacts in this step") in the dialog of a static,
+visco, dynamic or temperature-displacement step lists the active regions as they are in that
+step. A change holds from its step on, in the following steps too, until another step changes
+the region again; #ui("changed here") marks what the step changes. Renaming a region keeps its
+changes, deleting it removes them.
+
+#screenshot("contact-step-changes.png", [Step-2 switches the bonded region off and raises the
+  friction of the frictional one to 0.3])
+
+CalculiX switches contact pairs only (`*MODEL CHANGE`, `*CHANGE FRICTION`). A bonded region a
+step switches is therefore written as a tied contact instead of a tie, and a region whose
+friction a step changes gets a surface interaction of its own. A bonded region chosen as a
+tie, a region of no separation and a region deactivated as a whole cannot change in steps;
+the model check reports them.
+
 === Surface interactions
 
 #menu("Interaction", "Advanced", "Create Surface Interaction ...") defines the contact behaviour

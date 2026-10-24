@@ -14,6 +14,7 @@ mod connection;
 mod constraint;
 mod contact;
 mod contact_check;
+mod contact_steps;
 pub mod convert;
 mod detection;
 mod element_type;
@@ -56,6 +57,7 @@ pub use contact::{
     GapConductance, InteractionProperty, SurfaceBehavior, SurfaceInteraction, Tie,
 };
 pub use contact_check::{ContactCheck, ContactStatus};
+pub use contact_steps::{ContactChange, ContactState};
 pub use detection::{
     ContactDetection, DetectionFilter, DetectionGrouping, DetectionReport, auto_detection_tolerance,
 };
@@ -389,6 +391,11 @@ impl FeModel {
                 *pair = new.to_string();
             }
         }
+        for change in self.steps.iter_mut().flat_map(|s| &mut s.contact_changes) {
+            if change.region == old {
+                change.region = new.to_string();
+            }
+        }
     }
 
     /// Whether an active step that takes it has an active submodel boundary condition, so
@@ -628,6 +635,10 @@ pub struct Step {
     /// they existed have none.
     #[serde(default)]
     pub defined_fields: Vec<DefinedField>,
+    /// Contact regions and pairs switched on or off, or given another friction, from this
+    /// step on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contact_changes: Vec<ContactChange>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1370,6 +1381,7 @@ impl Step {
             history_outputs: Vec::new(),
             field_outputs: FieldOutput::complex_frequency_defaults(),
             defined_fields: Vec::new(),
+            contact_changes: Vec::new(),
         }
     }
 
@@ -1391,6 +1403,7 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
+            contact_changes: Vec::new(),
             field_outputs: FieldOutput::defaults(),
         }
     }
@@ -1405,6 +1418,7 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
+            contact_changes: Vec::new(),
             field_outputs: FieldOutput::frequency_defaults(),
         }
     }
@@ -1419,6 +1433,7 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
+            contact_changes: Vec::new(),
             field_outputs: FieldOutput::defaults(),
         }
     }
@@ -1433,6 +1448,7 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
+            contact_changes: Vec::new(),
             field_outputs: FieldOutput::heat_transfer_defaults(),
         }
     }
@@ -1448,6 +1464,7 @@ impl Step {
             history_outputs: Vec::new(),
             field_outputs: FieldOutput::dynamic_defaults(),
             defined_fields: Vec::new(),
+            contact_changes: Vec::new(),
         }
     }
 
@@ -1478,6 +1495,7 @@ impl Step {
             loads: Vec::new(),
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
+            contact_changes: Vec::new(),
             field_outputs: FieldOutput::coupled_defaults(),
         }
     }

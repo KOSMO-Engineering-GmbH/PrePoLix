@@ -124,6 +124,9 @@ pub enum Problem {
     /// A region of no separation in a step with large deformations: its equations hold for
     /// small displacements only.
     NoSeparationLargeDeformation,
+    /// A step switches a contact region off or on that CalculiX cannot switch: a tie, the
+    /// equations of no separation, or a region deactivated as a whole.
+    ContactChangeIgnored,
     /// A wheel of a moving load that is off the selected surface at some positions.
     WheelOffSurface,
     /// Found in the solver output only.
@@ -161,6 +164,7 @@ impl Problem {
             | Problem::WheelOffSurface
             | Problem::ContactRegionOpen
             | Problem::NoSeparationLargeDeformation
+            | Problem::ContactChangeIgnored
             | Problem::DesignRegionIgnored
             | Problem::RigidBeamNodes
             | Problem::NoCreep => Severity::Warning,
@@ -217,6 +221,7 @@ impl Problem {
             Problem::MortarNotSupported => "Mortar contact not possible in this step",
             Problem::ContactRegionOpen => "Contact region open",
             Problem::NoSeparationLargeDeformation => "No separation with large deformations",
+            Problem::ContactChangeIgnored => "Contact cannot change in steps",
             Problem::WheelOffSurface => "Wheel off the surface",
             Problem::NoConvergence => "No convergence",
             Problem::MpcAndSpc => "Degree of freedom bound twice",
@@ -490,6 +495,12 @@ impl Problem {
                  deformations the sides slide and turn, and the equations no longer keep \
                  them together: gaps open or the sides press into each other."
             }
+            Problem::ContactChangeIgnored => {
+                "CalculiX switches contact pairs off and on within the steps, but not ties \
+                 and constraint equations: a bonded region written as a tie and a region of \
+                 no separation hold in every step. A region deactivated as a whole is not \
+                 written at all, so no step can switch it on."
+            }
             Problem::InvalidTiedContact => {
                 "CalculiX offers the Tied surface behavior only for Surface to surface \
                  contact pairs, and it needs a Friction model in the same surface \
@@ -730,6 +741,11 @@ impl Problem {
                  or make the region Frictionless with Adjust to touch: a contact that may \
                  open, but follows the sides."
             }
+            Problem::ContactChangeIgnored => {
+                "Set Bonded as to Auto or Contact (tied contact) with the Surface to surface \
+                 formulation, so that the region becomes a contact pair, or activate the \
+                 region and switch it off in the steps where it should not hold."
+            }
             Problem::InvalidTiedContact => {
                 "Edit the surface interaction and add Friction, and set the method of the \
                  contact pairs to Surface to surface. To bond parts, a Tie (Interaction > \
@@ -966,6 +982,23 @@ impl FeModel {
                     ),
                 ));
             }
+        }
+        let resolved = self.resolve_contacts(mesh);
+        for (i, (region, item)) in self.contact_regions.iter().zip(&resolved.items).enumerate() {
+            if !region.switched(&self.steps) {
+                continue;
+            }
+            let reason = match item.kind {
+                _ if !region.active => "it is deactivated as a whole",
+                crate::ResolvedKind::Tie { .. } => "it is written as a tie",
+                crate::ResolvedKind::NoSeparation { .. } => "no separation is written as equations",
+                crate::ResolvedKind::Pair { .. } => continue,
+            };
+            findings.push(Finding::new(
+                ModelItem::ContactRegion(i),
+                Problem::ContactChangeIgnored,
+                format!("{}: a step switches it, but {reason}", region.name),
+            ));
         }
         let nlgeom = (self.steps.iter()).find(|s| s.active && s.kind.nlgeom());
         for (i, region) in self.contact_regions.iter().enumerate() {

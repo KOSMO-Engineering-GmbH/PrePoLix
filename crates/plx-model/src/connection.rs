@@ -479,6 +479,8 @@ struct Derivation<'a> {
     nlgeom: bool,
     /// Some active step conducts heat across contacts.
     thermal: bool,
+    /// The steps, which may switch regions off and on.
+    steps: &'a [crate::Step],
 }
 
 /// Whether CalculiX conducts heat across the contact pairs in a step: those with
@@ -690,6 +692,7 @@ impl FeModel {
             defaults: &self.contact_defaults,
             nlgeom,
             thermal,
+            steps: &self.steps,
         };
         resolve(region, &a, &b, &model)
     }
@@ -714,6 +717,8 @@ impl FeModel {
         let mut tie_names: Vec<String> = self.ties.iter().map(|t| t.name.clone()).collect();
         // Active ties by their slave nodes, for merging those that share some.
         let mut ties: Vec<(Tie, BTreeSet<NodeId>, Vec<usize>)> = Vec::new();
+        // Interactions of one region each, whose friction a step changes.
+        let mut private: Vec<String> = Vec::new();
         for (r, (region, item)) in self.contact_regions.iter().zip(&resolved.items).enumerate() {
             let (master, slave, master_color, slave_color) = if item.a_is_master {
                 (
@@ -790,9 +795,11 @@ impl FeModel {
                     properties.extend(conductance.map(|c| {
                         InteractionProperty::GapConductance(crate::GapConductance::Constant(c))
                     }));
+                    // A step changing the friction changes the whole interaction.
+                    let own = region.friction_changed(&self.steps);
                     let interaction = match (lowered.surface_interactions.iter())
                         .skip(self.surface_interactions.len())
-                        .find(|i| i.properties == properties)
+                        .find(|i| i.properties == properties && !own && !private.contains(&i.name))
                     {
                         Some(found) => found.name.clone(),
                         None => {
@@ -804,6 +811,9 @@ impl FeModel {
                                 name: name.clone(),
                                 properties,
                             });
+                            if own {
+                                private.push(name.clone());
+                            }
                             name
                         }
                     };
@@ -826,6 +836,13 @@ impl FeModel {
         for (tie, _, regions) in ties {
             lowered.ties.push(tie);
             origin.tie_regions.push(regions);
+        }
+        // Changes in the steps are kept for the contact pairs; ties and equations stay.
+        let pairs: BTreeSet<String> = (lowered.contact_pairs.iter())
+            .map(|p| p.name.clone())
+            .collect();
+        for step in &mut lowered.steps {
+            step.contact_changes.retain(|c| pairs.contains(&c.region));
         }
         // Contact results for the contact check after solving, where none are asked for.
         if (lowered.contact_pairs.iter().skip(origin.first_pair)).any(|p| p.active) {
@@ -883,6 +900,7 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
         defaults,
         nlgeom,
         thermal,
+        steps,
     } = *model;
     let settings = &region.settings;
     let mut why = Vec::new();
@@ -938,6 +956,15 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
         (ContactBehavior::Bonded, Some(method)) => {
             why.push(format!("Bonded as {}, as chosen", method.name()));
             Some(method)
+        }
+        (ContactBehavior::Bonded, None)
+            if region.switched(steps) && formulation == ContactMethod::SurfaceToSurface =>
+        {
+            why.push(
+                "Bonded as a tied contact: a step switches it off or on, which a tie cannot do"
+                    .into(),
+            );
+            Some(BondedMethod::Contact)
         }
         (ContactBehavior::Bonded, None) => {
             why.push("Bonded as a tie constraint: linear, no contact iterations".into());
