@@ -43,6 +43,32 @@ pub struct ContactDetection {
 }
 
 impl ContactDetection {
+    /// The diagonal of the box around the parts the detection searches, all parts if it
+    /// names none. An automatic tolerance is 0.5 % of it.
+    pub fn searched_diagonal(&self, mesh: &FeMesh) -> f64 {
+        let (mut min, mut max) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        let searched =
+            (mesh.parts.iter()).filter(|p| self.parts.is_empty() || self.parts.contains(&p.name));
+        for element in searched.flat_map(|p| &p.elements) {
+            let Some(element) = mesh.element(*element) else {
+                continue;
+            };
+            for p in element.nodes.iter().filter_map(|&n| mesh.node(n)) {
+                for d in 0..3 {
+                    min[d] = min[d].min(p[d]);
+                    max[d] = max[d].max(p[d]);
+                }
+            }
+        }
+        if min[0] > max[0] {
+            return 0.0;
+        }
+        (0..3)
+            .map(|d| (max[d] - min[d]).powi(2))
+            .sum::<f64>()
+            .sqrt()
+    }
+
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),

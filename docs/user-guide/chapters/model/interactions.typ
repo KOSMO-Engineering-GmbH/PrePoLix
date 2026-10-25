@@ -133,7 +133,8 @@ shows the derived value in brackets; choosing something else overrides it for th
     for an interference fit, such as a shaft pressed into a hub (`*CLEARANCE`, surface to
     surface contacts only). Auto adjusts bonded regions and keeps the others as they are.],
   [Tolerance], [Distance within which the sides count as touching: tied by a tie, held by no
-    separation, closed by the adjustment. Auto is a quarter of the slave mesh size.],
+    separation, closed by the adjustment. Auto is a quarter of the slave mesh size, for a
+    region a detection found at least the distance the detection searched within.],
   [Heat conductance], [Shown when a step solves temperatures and displacements together: the
     heat flow across the closed contact per area and temperature difference. Auto is
     100 #sym.times k / h, k the thermal conductivity of the less conducting side: so much that
@@ -209,9 +210,10 @@ type.
   it searches the CAD geometry])
 
 On the geometry, #ui("Auto") for the tolerance is 0.5 % of the size of the parts searched;
-the triangles that show the faces say nothing about the mesh to come. The regions found leave
-their own tolerance to the mesh (a quarter of the slave side's element size, see
-@contact-regions) unless the detection sets one. A model with parts that do not come from the
+the triangles that show the faces say nothing about the mesh to come. The regions found keep
+#ui("Auto") as their own tolerance: a quarter of the slave side's element size (see
+@contact-regions), but at least the distance the detection searched within, so that a tie
+catches every node of faces the detection found touching, also across a small gap. A model with parts that do not come from the
 geometry, such as an imported mesh, is searched on its mesh as before.
 
 #screenshot("contact-detection-geometry-region.png", [The region found before meshing, shown

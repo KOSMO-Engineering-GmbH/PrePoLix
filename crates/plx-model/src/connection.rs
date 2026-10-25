@@ -488,6 +488,9 @@ impl Lowered {
 struct Properties {
     young: HashMap<ElementId, f64>,
     conductivity: HashMap<ElementId, f64>,
+    /// The distance each detection that found regions with an automatic tolerance searched
+    /// within, by its name.
+    detections: HashMap<String, f64>,
 }
 
 /// What the derivation needs to know about the model.
@@ -500,6 +503,8 @@ struct Derivation<'a> {
     thermal: bool,
     /// The steps, which may switch regions off and on.
     steps: &'a [crate::Step],
+    /// The distance the detection that found the region searched within.
+    detected_within: Option<f64>,
 }
 
 /// Whether CalculiX conducts heat across the contact pairs in a step: those with
@@ -651,9 +656,23 @@ impl FeModel {
     }
 
     fn properties_of_elements(&self, mesh: &FeMesh) -> Properties {
+        let detections = (self.contact_detections.iter())
+            .filter(|d| {
+                (self.contact_regions.iter()).any(|r| {
+                    r.settings.tolerance.is_none() && r.detected_by.as_ref() == Some(&d.name)
+                })
+            })
+            .map(|d| {
+                let distance = d
+                    .tolerance
+                    .unwrap_or_else(|| d.searched_diagonal(mesh) * 0.005);
+                (d.name.clone(), distance)
+            })
+            .collect();
         Properties {
             young: self.young_of_elements(mesh),
             conductivity: self.material_of_elements(mesh, |m| m.conductivity),
+            detections,
         }
     }
 
@@ -711,12 +730,16 @@ impl FeModel {
         let thermal = active.clone().any(|s| conducts_across_contacts(&s.kind));
         let a = Side::new(&region.side_a, mesh, properties);
         let b = Side::new(&region.side_b, mesh, properties);
+        let detected_within = (region.detected_by.as_ref())
+            .and_then(|name| properties.detections.get(name))
+            .copied();
         let model = Derivation {
             formulation,
             defaults: &self.contact_defaults,
             nlgeom,
             thermal,
             steps: &self.steps,
+            detected_within,
         };
         resolve(region, &a, &b, &model)
     }
@@ -938,6 +961,7 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
         nlgeom,
         thermal,
         steps,
+        detected_within,
     } = *model;
     let settings = &region.settings;
     let mut why = Vec::new();
@@ -976,9 +1000,19 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
     let mesh_size = [slave.mesh_size, master.mesh_size]
         .into_iter()
         .find(|&h| h > 0.0);
-    let tolerance = settings
-        .tolerance
-        .or_else(|| mesh_size.map(|h| TOLERANCE_FACTOR * h));
+    // Automatically a quarter of the mesh size, but at least the distance the detection that
+    // found the region searched within, so that a tie catches every node it saw touching:
+    // a detection on the geometry finds faces apart by up to 0.5 % of the model size.
+    let by_mesh = mesh_size.map(|h| TOLERANCE_FACTOR * h);
+    let by_detection = detected_within.filter(|&d| by_mesh.is_none_or(|m| d > m));
+    let tolerance = settings.tolerance.or(by_detection).or(by_mesh);
+    let tolerance_reason = match by_detection {
+        Some(_) => format!(
+            "Tolerance: the distance the detection searched within, more than \
+             {TOLERANCE_FACTOR} x mesh size"
+        ),
+        None => format!("Tolerance: {TOLERANCE_FACTOR} x mesh size"),
+    };
     let bonded_method = match (region.behavior, settings.bonded_method) {
         (ContactBehavior::Bonded, Some(BondedMethod::Contact))
             if formulation != ContactMethod::SurfaceToSurface =>
@@ -1043,8 +1077,7 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
         );
         if settings.tolerance.is_none() && tolerance.is_some() {
             why.push(format!(
-                "Tolerance: {TOLERANCE_FACTOR} x mesh size; slave nodes further from the \
-                 master stay free"
+                "{tolerance_reason}; slave nodes further from the master stay free"
             ));
         }
         if nlgeom {
@@ -1063,7 +1096,7 @@ fn resolve(region: &ContactRegion, a: &Side, b: &Side, model: &Derivation) -> Re
             why.push("No offset: a tie keeps the sides as they are".into());
         }
         if settings.tolerance.is_none() && tolerance.is_some() {
-            why.push(format!("Tolerance: {TOLERANCE_FACTOR} x mesh size"));
+            why.push(tolerance_reason);
         }
         ResolvedKind::Tie {
             tolerance,

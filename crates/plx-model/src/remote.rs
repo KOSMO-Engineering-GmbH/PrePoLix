@@ -195,6 +195,60 @@ impl FeModel {
         held
     }
 
+    /// The translations (directions 1 to 3) that boundary conditions hold directly at each
+    /// node in any active step, as CalculiX sees them. An equation may not depend on them
+    /// and a rigid body may not take their nodes ("dependent side of a MPC and a SPC").
+    /// A displacement in a coordinate system of its own and a symmetry plane that is no
+    /// coordinate plane hold their directions in local axes, which counts as all three.
+    pub fn held_translations(&self, mesh: &FeMesh) -> BTreeMap<NodeId, [bool; 3]> {
+        let space = self.properties.space;
+        let mut held: BTreeMap<NodeId, [bool; 3]> = BTreeMap::new();
+        for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
+            for (i, bc) in step.boundary_conditions.iter().enumerate() {
+                if !bc.active
+                    || !step.kind.supports_boundary(&bc.kind)
+                    || bc.region.reference_point().is_some()
+                {
+                    continue;
+                }
+                let directions = match &bc.kind {
+                    BoundaryKind::Displacement(d) => {
+                        if self.formulation(mesh, s, i) != Some(Formulation::Nodes) {
+                            continue;
+                        }
+                        let given = std::array::from_fn(|k| d.values[k].is_some());
+                        if d.system != GLOBAL && given.iter().any(|&g| g) {
+                            [true; 3]
+                        } else {
+                            given
+                        }
+                    }
+                    BoundaryKind::Submodel { dofs, .. } => [dofs[0], dofs[1], dofs[2]],
+                    BoundaryKind::Symmetry { normal } => {
+                        let axis = crate::symmetry_plane(mesh, &bc.region, space, *normal)
+                            .ok()
+                            .and_then(|plane| plane.axis());
+                        match axis {
+                            Some(axis) => std::array::from_fn(|k| k == axis),
+                            None => [true; 3],
+                        }
+                    }
+                    BoundaryKind::Temperature(_) => continue,
+                };
+                if !directions.iter().any(|&d| d) {
+                    continue;
+                }
+                for node in bc.region.nodes(mesh) {
+                    let entry = held.entry(node).or_default();
+                    for k in 0..3 {
+                        entry[k] |= directions[k];
+                    }
+                }
+            }
+        }
+        held
+    }
+
     /// Follows a renamed displacement: history outputs of its point keep referring to it.
     pub fn rename_remote_point(&mut self, old: &str, new: &str) {
         for output in self.steps.iter_mut().flat_map(|s| &mut s.history_outputs) {

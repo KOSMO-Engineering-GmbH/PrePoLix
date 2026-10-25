@@ -315,13 +315,28 @@ pub fn model_keywords(
         .flat_map(|cut| cut.pairs.iter().map(|&(original, copy)| (copy, original)))
         .collect();
     let lines = LineElements::new(mesh, model)?;
-    // Regions are resolved first: their sets must precede the materials and steps.
+    // The boundary conditions leave out the slave nodes of cyclic symmetries, which its MPCs
+    // depend on; every other constraint keeps off what these two hold.
+    let cyclic_slaves = cyclic_slave_nodes(mesh, model);
+    let mut held = model.held_translations(mesh);
+    held.retain(|n, _| !cyclic_slaves.contains(n));
+    sets.dofs = dofs::Dofs::new(held);
+    sets.dofs.mark_nodes(cyclic_slaves.iter().copied());
+    // Regions are resolved first: their sets must precede the materials and steps. The
+    // constraints come in their order of precedence for the dependent degrees of freedom
+    // (see [`dofs`]): rigid bodies and remote points, pre-tension cuts, node ties, last
+    // springs and contact regions.
     let materials = materials(model);
     let mut sections = sections(&mut sets, model)?;
-    let mut generated = constraints::springs(&mut sets, model)?;
+    let mut generated = constraints::Generated::default();
     let mut constraints = constraints(&mut sets, model, &mut generated)?;
     let pre_tension_sections = pre_tension_sections(&mut sets, model, &cuts, &mut generated);
+    let node_ties = node_ties(&mut sets, model, &lines)?;
+    constraints::springs(&mut sets, model, &mut generated)?;
     constraints.extend(generated.equations);
+    if let Some(comments) = sets.dofs.comments() {
+        constraints.insert(0, Keyword::generated(comments));
+    }
     sections.extend(generated.sections);
     let mut materials = materials;
     materials.extend(generated.material);
@@ -334,12 +349,11 @@ pub fn model_keywords(
         .map(|i| interaction(i, &InteractionDefaults::of(i, mesh, model, &young)))
         .collect();
     let (mut contact_pairs, pair_surfaces) = contact_pairs(&mut sets, model)?;
-    contact_pairs.extend(node_ties(&mut sets, model, &lines)?);
+    contact_pairs.extend(node_ties);
     let initial_conditions = initial_conditions(&mut sets, model)?;
     let design_variables = design_variables(&mut sets, model)?;
     let amplitudes = amplitudes(model)?;
     let flux_kinds = FluxKinds::of(model);
-    let cyclic_slaves = cyclic_slave_nodes(mesh, model);
     let steps = model
         .steps
         .iter()
@@ -687,6 +701,8 @@ struct Sets<'a> {
     transforms: Vec<(String, Transform)>,
     /// Nodes of line, shell and membrane elements, see [`rigid_body`].
     expanded: BTreeSet<NodeId>,
+    /// The dependent degrees of freedom of all MPCs so far.
+    dofs: dofs::Dofs,
 }
 
 /// The nodes CalculiX's `*Rigid body` adds for a reference point: the reference node takes
@@ -723,6 +739,7 @@ impl<'a> Sets<'a> {
             submodel_sets: Vec::new(),
             transforms: Vec::new(),
             expanded: plx_model::expanded_nodes(mesh),
+            dofs: dofs::Dofs::default(),
         };
         for (name, ids) in &mesh.node_sets {
             sets.node_sets.push((name.clone(), ids.clone()));
@@ -1453,7 +1470,13 @@ fn constraints(
                 RemoteBehavior::Deformable => {
                     let space = model.properties.space;
                     for equation in point.equations(sets.mesh, space) {
-                        remote_equation(&mut text, &equation, point.axes, [reference, rotation]);
+                        let mut terms = remote_terms(&equation, point.axes, [reference, rotation]);
+                        let mesh = sets.mesh;
+                        if (sets.dofs).claim_equation(&bc.name, &mut terms, |n| {
+                            n != reference && n != rotation && mesh.node(n).is_some()
+                        }) {
+                            equation_text(&mut text, &terms);
+                        }
                     }
                 }
             }
@@ -1606,13 +1629,12 @@ fn pre_tension_sections(
             generated.nodes.push((node, centre));
             sets.pre_tension_nodes.insert(load.name.clone(), node);
             let mut out = format!("** Name: {}\n", load.name);
-            for equation in pre_tension::equations(cut, node) {
-                let _ = writeln!(out, "*Equation\n{}", equation.len());
-                let terms: Vec<String> = (equation.iter())
-                    .map(|(node, dof, factor)| format!("{node}, {dof}, {}", number(*factor)))
-                    .collect();
-                for chunk in terms.chunks(4) {
-                    let _ = writeln!(out, "{}", chunk.join(", "));
+            let mesh = sets.mesh;
+            for mut equation in pre_tension::equations(cut, node) {
+                if (sets.dofs).claim_equation(&load.name, &mut equation, |n| {
+                    n != node && mesh.node(n).is_some()
+                }) {
+                    equation_text(&mut out, &equation);
                 }
             }
             keywords.push(Keyword::generated(out));
@@ -1686,7 +1708,10 @@ fn node_tie(sets: &mut Sets, tie: &NodeTie, lines: &LineElements) -> Result<Keyw
     }
     for &node in rest {
         for dof in 1..=3 {
-            let _ = writeln!(out, "*Equation\n2\n{node}, {dof}, 1, {first}, {dof}, -1");
+            let mut terms = [(node, dof, 1.0), (first, dof, -1.0)];
+            if sets.dofs.claim_equation(&tie.name, &mut terms, |_| true) {
+                equation_text(&mut out, &terms);
+            }
         }
     }
     Ok(Keyword::generated(out))
@@ -2033,8 +2058,13 @@ fn rigid_body(
     nodes: [NodeId; 2],
 ) -> Result<(), WriteError> {
     let [reference, rotation] = nodes;
+    // Nodes that a boundary condition or another constraint binds already stay out.
+    let all = region.nodes(sets.mesh);
+    let count = all.len();
+    let kept = sets.dofs.claim_nodes(item, all);
+    let whole = kept.len() == count;
     let (expanded, others): (Vec<NodeId>, Vec<NodeId>) =
-        (region.nodes(sets.mesh).into_iter()).partition(|n| sets.expanded.contains(n));
+        (kept.into_iter()).partition(|n| sets.expanded.contains(n));
     let rigid = |text: &mut String, set: String| {
         let _ = writeln!(
             text,
@@ -2042,7 +2072,12 @@ fn rigid_body(
         );
     };
     if expanded.is_empty() {
-        rigid(text, sets.node_set(item, region)?);
+        let set = if whole {
+            sets.node_set(item, region)?
+        } else {
+            sets.node_set(item, &Region::Nodes(others))?
+        };
+        rigid(text, set);
         return Ok(());
     }
     if !others.is_empty() {
@@ -2050,7 +2085,7 @@ fn rigid_body(
     }
     text.push_str("** Nodes of beams and shells, which CalculiX refuses in a rigid body\n");
     for row in plx_model::rigid_rows(sets.mesh, &expanded, position) {
-        remote_equation(text, &row, axes, nodes);
+        equation_text(text, &remote_terms(&row, axes, nodes));
     }
     Ok(())
 }
@@ -2062,17 +2097,16 @@ fn formulation(model: &FeModel, mesh: &FeMesh, step: &str, bc: &str) -> Option<F
     model.formulation(mesh, s, i)
 }
 
-/// An `*Equation` of a remote point: its terms with the point's translations and rotations
-/// on the reference and rotation node, turned into the point's directions, which the
+/// The terms of an `*Equation` of a remote point: the point's translations and rotations on
+/// the reference and rotation node, turned into the point's directions, which the
 /// `*Transform` of the two nodes makes theirs.
-fn remote_equation(
-    out: &mut String,
+fn remote_terms(
     equation: &[(RemoteDof, f64)],
     axes: Option<[[f64; 3]; 3]>,
     [reference, rotation]: [NodeId; 2],
-) {
-    let mut terms: Vec<(NodeId, usize, f64)> = Vec::new();
-    let mut add = |node: NodeId, dof: usize, value: f64| match terms
+) -> Vec<dofs::Term> {
+    let mut terms: Vec<dofs::Term> = Vec::new();
+    let mut add = |node: NodeId, dof: u8, value: f64| match terms
         .iter_mut()
         .find(|(n, d, _)| *n == node && *d == dof)
     {
@@ -2082,7 +2116,7 @@ fn remote_equation(
     for &(dof, value) in equation {
         let (node, global) = match dof {
             RemoteDof::Node(node, k) => {
-                add(node, k + 1, value);
+                add(node, k as u8 + 1, value);
                 continue;
             }
             RemoteDof::Translation(k) => (reference, k),
@@ -2093,14 +2127,19 @@ fn remote_equation(
             Some(axes) => {
                 for (j, axis) in axes.iter().enumerate() {
                     if axis[global] != 0.0 {
-                        add(node, j + 1, value * axis[global]);
+                        add(node, j as u8 + 1, value * axis[global]);
                     }
                 }
             }
-            None => add(node, global + 1, value),
+            None => add(node, global as u8 + 1, value),
         }
     }
     terms.retain(|(_, _, v)| *v != 0.0);
+    terms
+}
+
+/// An `*Equation` of its terms, the dependent one first.
+fn equation_text(out: &mut String, terms: &[dofs::Term]) {
     let _ = writeln!(out, "*Equation\n{}", terms.len());
     let terms: Vec<String> = (terms.iter())
         .map(|(node, dof, value)| format!("{node}, {dof}, {}", number(*value)))
@@ -3515,6 +3554,9 @@ fn empty(item: &str, what: &'static str) -> WriteError {
 }
 
 mod constraints;
+mod dofs;
 mod pre_tension;
+
+pub use dofs::resolved_overlaps;
 #[cfg(test)]
 mod tests;

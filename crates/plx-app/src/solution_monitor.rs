@@ -459,6 +459,17 @@ impl BackgroundSolve {
             }
             self.findings = findings;
         }
+        // Warnings that point to wrong results, after any run.
+        let warnings = plx_model::diagnose_solver_warnings(analysis.output());
+        for finding in &warnings {
+            self.after.push(format!(
+                "Warning: {}: {}. {}",
+                finding.problem.title(),
+                finding.detail,
+                finding.problem.fix()
+            ));
+        }
+        self.findings.extend(warnings);
         let results = analysis
             .results()
             .filter(|_| matches!(status, JobStatus::Completed | JobStatus::FailedWithResults));

@@ -3899,9 +3899,16 @@ fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
     // A hinge between beams keeps the nodes and ties their translations.
     model.node_ties[0].rotations = false;
     let text = write_inp(&mesh, &model, "").unwrap();
-    let expected: String = (1..=3)
+    // Node 101 is held in z: that equation depends on node 3 instead, which CalculiX
+    // would otherwise refuse ("dependent side of a MPC and a SPC").
+    let mut expected: String = (1..=2)
         .map(|dof| format!("*Equation\n2\n101, {dof}, 1, 3, {dof}, -1\n"))
         .collect();
+    expected.push_str("*Equation\n2\n3, 3, -1, 101, 3, 1\n");
+    assert_eq!(
+        crate::inp::resolved_overlaps(&write_inp(&mesh, &model, "").unwrap()),
+        ["Node_Tie-1: 1 equation on another degree of freedom (the first one is held already)"]
+    );
     assert!(
         text.contains(&format!("** Name: Node_Tie-1\n{expected}")) && !text.contains("101, 4, 1"),
         "{text}"
@@ -7158,6 +7165,44 @@ fn a_bonded_region_is_a_tie_with_a_tolerance_of_the_mesh_size() {
     assert!(resolved.items[0].a_is_master);
 }
 
+/// A region a detection found keeps at least the distance the detection searched within as
+/// its automatic tolerance: a detection on the geometry finds faces further apart than a
+/// quarter of the mesh size, and CalculiX would leave their nodes untied ("too far away").
+#[test]
+fn calculix_ties_a_detected_gap_wider_than_a_quarter_of_the_mesh_size() {
+    let (mesh, mut model) = blocks_joined_by_region(1.5, plx_model::ContactBehavior::Bonded);
+    let mut detection = plx_model::ContactDetection::new("Detection-1");
+    detection.tolerance = Some(2.0);
+    model.contact_detections.push(detection);
+    model.contact_regions[0].detected_by = Some("Detection-1".into());
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Tie, Name=Region-1, Position tolerance=2\n"),
+        "{text}"
+    );
+    let resolved = model.resolve_contacts(&mesh);
+    assert!(
+        (resolved.items[0].why.iter())
+            .any(|w| w.starts_with("Tolerance: the distance the detection")),
+        "{:?}",
+        resolved.items[0].why
+    );
+    // Not found by a detection: a quarter of the mesh size.
+    model.contact_regions[0].detected_by = None;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("Position tolerance=1.25\n"), "{text}");
+    model.contact_regions[0].detected_by = Some("Detection-1".into());
+    let Some(frd) = run_ccx(
+        "region-detected-gap",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((reaction - 1000.0).abs() < 1.0, "{reaction}");
+}
+
 #[test]
 fn bonded_regions_sharing_slave_nodes_become_one_tie() {
     let (mesh, lower, upper) = two_blocks(0.0);
@@ -7584,6 +7629,101 @@ fn calculix_holds_a_region_of_no_separation_together_and_lets_it_slide() {
     );
     let slide = node_value(&frd, "DISP", "U1", 105) - node_value(&frd, "DISP", "U1", 14);
     assert!((slide - 0.01).abs() < 1e-3, "{slide}");
+}
+
+/// A boundary condition on slave nodes of a region of no separation, the case CalculiX
+/// aborted on ("dependent side of a MPC and a SPC"): the upper block's side x = 0 is held
+/// in z, also at the slave nodes on it. Their equations depend on the master node below
+/// instead, which the side holds then too, as the side itself is held.
+#[test]
+fn calculix_solves_no_separation_on_nodes_held_by_a_boundary_condition() {
+    let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::NoSeparation);
+    model.contact_regions[0].settings.sides = Some(plx_model::SideRoles::AIsMaster);
+    let side: Vec<NodeId> = [101, 104, 107, 110, 113, 116].into();
+    model.steps[0].boundary_conditions.push(BoundaryCondition {
+        distribution: None,
+        name: "Side-1".into(),
+        active: true,
+        visible: true,
+        region: Region::Nodes(side),
+        kind: each_node([None, None, Some(0.0), None, None, None]),
+        amplitude: None,
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    // Nodes 101, 104 and 107 sit on the master nodes 10, 13 and 16.
+    for (slave, master) in [(101, 10), (104, 13), (107, 16)] {
+        assert!(
+            text.contains(&format!("*Equation\n2\n{master}, 3, 1, {slave}, 3, -1\n")),
+            "{text}"
+        );
+    }
+    assert!(
+        text.contains("*Equation\n2\n105, 3, -1, 14, 3, 1\n"),
+        "{text}"
+    );
+    assert_eq!(
+        crate::inp::resolved_overlaps(&text),
+        ["Region-1: 3 equations on another degree of freedom (the first one is held already)"]
+    );
+    let Some(frd) = run_ccx("region-no-separation-held", &text) else {
+        return;
+    };
+    assert!(node_value(&frd, "DISP", "U3", 10).abs() < 1e-12);
+    let (below, above) = (
+        node_value(&frd, "DISP", "U3", 14),
+        node_value(&frd, "DISP", "U3", 105),
+    );
+    assert!(
+        below < 0.0 && (below - above).abs() < 1e-9,
+        "{below} {above}"
+    );
+}
+
+/// A rigid body leaves out the nodes a boundary condition holds, as the point of a remote
+/// displacement does: CalculiX refuses them in it.
+#[test]
+fn calculix_solves_a_rigid_body_on_nodes_held_by_a_boundary_condition() {
+    let (mesh, mut model) = blocks_joined_by_region(0.0, plx_model::ContactBehavior::Bonded);
+    model.steps[0].loads.clear();
+    model
+        .reference_points
+        .push(ReferencePoint::new("RP-1", [5.0, 5.0, 20.0]));
+    let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+    body.region = Region::Nodes((110..=118).collect());
+    model.constraints.push(Constraint::RigidBody(body));
+    for (name, region, values) in [
+        (
+            "Corner-1",
+            Region::Nodes(vec![110]),
+            [None, None, Some(0.0)],
+        ),
+        (
+            "Lift-1",
+            Region::ReferencePoint("RP-1".into()),
+            [Some(0.0), Some(0.0), Some(-0.001)],
+        ),
+    ] {
+        let [x, y, z] = values;
+        model.steps[0].boundary_conditions.push(BoundaryCondition {
+            distribution: None,
+            name: name.into(),
+            active: true,
+            visible: true,
+            region,
+            kind: each_node([x, y, z, Some(0.0), Some(0.0), Some(0.0)]),
+            amplitude: None,
+        });
+    }
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert_eq!(
+        crate::inp::resolved_overlaps(&text),
+        ["Rigid_Body-1: 1 node left out (held already)"]
+    );
+    let Some(frd) = run_ccx("rigid-body-held", &text) else {
+        return;
+    };
+    assert!(node_value(&frd, "DISP", "U3", 110).abs() < 1e-12);
+    assert!((node_value(&frd, "DISP", "U3", 114) + 0.001).abs() < 1e-9);
 }
 
 /// An offset replaces the geometric gap: a negative one presses blocks that just touch

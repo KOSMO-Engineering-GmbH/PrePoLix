@@ -45,7 +45,9 @@ mod validity;
 
 pub use amplitude::{Amplitude, AmplitudeTime};
 pub use cad_operation::{CadOperation, CadOperationKind};
-pub use checks::{Finding, MeshCheck, Problem, Severity, diagnose_solver_output};
+pub use checks::{
+    Finding, MeshCheck, Problem, Severity, diagnose_solver_output, diagnose_solver_warnings,
+};
 pub use color_scale::{ColorScale, ColorSpectrum};
 pub use connection::{
     BondedMethod, CONDUCTANCE_FACTOR, ContactBehavior, ContactDefaults, ContactRegion,

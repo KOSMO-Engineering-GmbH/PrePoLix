@@ -316,6 +316,7 @@ impl Analysis {
             Some(keyword) => before_first_step(&input, keyword),
             None => input,
         };
+        let overlaps = plx_io::inp::resolved_overlaps(&input);
         // The model check leaves out the steps; their keywords are still tested.
         let keywords = if check_model {
             let full = plx_io::inp::write_inp(&model.mesh, &fe, &heading).unwrap_or_default();
@@ -358,6 +359,11 @@ impl Analysis {
             work_dir.display()
         )];
         output.extend(copied);
+        // Constraints the input file writer had to change so that they do not bind a degree of
+        // freedom twice.
+        output.extend(
+            (overlaps.into_iter()).map(|line| format!("Overlapping constraints resolved: {line}")),
+        );
         if let Some(run) = &restart {
             output.push(run.describe());
         }
