@@ -2836,6 +2836,187 @@ fn calculix_preloads_a_bolt_split_into_two_tied_parts() {
     }
 }
 
+/// Two blocks clamped at their far ends with their faces of the cut on the geometry, and a
+/// bolt across them: the bolt and a bonded contact region on the same faces.
+fn bolted_blocks(preload: f64) -> (FeMesh, FeModel, Vec<NodeId>) {
+    let (mut mesh, lower, upper) = two_blocks(0.0);
+    for (face, faces) in [(1, &lower), (2, &upper)] {
+        let nodes: BTreeSet<NodeId> = (faces.iter())
+            .flat_map(|&(e, f)| constraints::face_node_ids(&mesh, e, f))
+            .collect();
+        mesh.cad.faces.insert(face, faces.clone());
+        mesh.cad
+            .nodes
+            .insert(CadEntity::Face(face), nodes.into_iter().collect());
+    }
+    let mut model = stacked_blocks(&mesh);
+    let ends: Vec<NodeId> = (mesh.node_ids().iter().zip(mesh.coords()))
+        .filter(|(_, c)| c[2] == 0.0 || c[2] == 20.0)
+        .map(|(&id, _)| id)
+        .collect();
+    model.steps[0].boundary_conditions[0].region = Region::Nodes(ends.clone());
+    model.steps[0].loads.clear();
+    let mut second = model.steps[0].clone();
+    second.name = "Step-2".into();
+    model.steps.push(second);
+    let mut region = plx_model::ContactRegion::new(
+        "Bonded - LOWER to UPPER",
+        plx_model::ContactBehavior::Bonded,
+    );
+    region.side_a = Region::Geometry(vec![CadEntity::Face(2)]);
+    region.side_b = Region::Geometry(vec![CadEntity::Face(1)]);
+    model.contact_regions.push(region);
+    let mut bolt = plx_model::Bolt::new("Bolt-1");
+    bolt.side_a = Region::Geometry(vec![CadEntity::Face(2)]);
+    bolt.side_b = Region::Geometry(vec![CadEntity::Face(1)]);
+    bolt.preload = plx_model::Preload::Force(preload);
+    model.bolts.push(bolt);
+    let bottom = (ends.iter().copied())
+        .filter(|&n| mesh.node(n).unwrap()[2] == 0.0)
+        .collect();
+    (mesh, model, bottom)
+}
+
+#[test]
+fn a_bolt_replaces_the_contact_region_on_its_cut_and_locks_after_its_preload() {
+    let (mesh, model, _) = bolted_blocks(1000.0);
+    assert_eq!(
+        model.replaced_contact_regions(&mesh),
+        [(0, 0)].into_iter().collect()
+    );
+    let (lowered, origin) = model.lower_bolts(&mesh);
+    assert!(!lowered.contact_regions[0].active);
+    // The cut is on one side, tied to the other one.
+    assert_eq!(lowered.ties.len(), 1);
+    assert_eq!(origin.bolt_of(plx_model::ModelItem::Tie(0)), Some(0));
+    let kinds: Vec<_> = (lowered.steps.iter())
+        .map(|s| s.loads[0].kind.clone())
+        .collect();
+    assert!(matches!(
+        kinds[0],
+        LoadKind::PreTension {
+            value: 1000.0,
+            lock: false,
+            ..
+        }
+    ));
+    assert!(matches!(kinds[1], LoadKind::PreTension { lock: true, .. }));
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("*Cload\n"), "{text}");
+    assert!(text.contains("*Boundary, Fixed\n"), "{text}");
+    assert!(
+        text.contains("** Name: Bonded - LOWER to UPPER: Deactivated"),
+        "{text}"
+    );
+    assert!(text.contains("*Tie, Name=Bolt-1_Cut"), "{text}");
+}
+
+#[test]
+fn a_bolt_follows_the_actions_of_its_steps() {
+    let (mesh, mut model, _) = bolted_blocks(1000.0);
+    model.steps[1].bolt_changes.push(plx_model::BoltChange {
+        bolt: "Bolt-1".into(),
+        action: plx_model::BoltAction::Open,
+    });
+    let (lowered, _) = model.lower_bolts(&mesh);
+    assert_eq!(lowered.steps[1].loads, []);
+    model.steps[1].bolt_changes[0].action = plx_model::BoltAction::Adjust(0.01);
+    let (lowered, _) = model.lower_bolts(&mesh);
+    assert!(matches!(
+        lowered.steps[1].loads[0].kind,
+        LoadKind::PreTension {
+            value: 0.01,
+            by_displacement: true,
+            lock: false,
+            ..
+        }
+    ));
+    // A step that takes no forces is skipped: the preload goes into the next one.
+    model.steps[1].bolt_changes.clear();
+    model.steps.insert(0, Step::new_frequency("Modes"));
+    assert_eq!(model.bolt_action(&model.bolts[0], 0), None);
+    assert_eq!(
+        model.bolt_action(&model.bolts[0], 1),
+        Some(plx_model::BoltAction::Load(1000.0))
+    );
+    assert_eq!(
+        model.bolt_action(&model.bolts[0], 2),
+        Some(plx_model::BoltAction::Lock)
+    );
+}
+
+/// The preload of the bolt across two blocks clamped at their ends goes through the blocks
+/// in full, and stays when the bolt is locked in the next step. The bonded contact region on
+/// the same faces would make CalculiX loop forever if it were written too.
+#[test]
+fn calculix_preloads_the_bolt_across_two_blocks() {
+    let force = 1000.0;
+    let (mesh, model, bottom) = bolted_blocks(force);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let Some(frd) = run_ccx("schraube", &text) else {
+        return;
+    };
+    let reaction: f64 = (bottom.iter())
+        .map(|&node| node_value(&frd, "FORC", "F3", node))
+        .sum();
+    assert!((reaction.abs() - force).abs() < 1e-3 * force, "{reaction}");
+}
+
+/// A bolt meshed in one piece is cut at the faces inside it, without a tie.
+#[test]
+fn calculix_preloads_a_bolt_cut_inside_its_mesh() {
+    let force = 1000.0;
+    let (mesh, mut model) = pre_tension(force, false);
+    let LoadKind::PreTension { .. } = model.steps[0].loads[0].kind else {
+        unreachable!()
+    };
+    let faces = model.steps[0].loads.remove(0).region;
+    let mut bolt = plx_model::Bolt::new("Bolt-1");
+    bolt.side_a = faces;
+    bolt.preload = plx_model::Preload::Force(force);
+    model.bolts.push(bolt);
+    let resolved = model.resolve_bolt(&model.bolts[0], &mesh).unwrap();
+    assert_eq!(resolved.tied_to, None);
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Tie"), "{text}");
+    let Some(frd) = run_ccx("schraube-ganz", &text) else {
+        return;
+    };
+    let reaction: f64 = (mesh.node_sets["FIX"].iter())
+        .map(|&node| node_value(&frd, "FORC", "F1", node))
+        .sum();
+    assert!((reaction.abs() - force).abs() < 1e-3 * force, "{reaction}");
+}
+
+#[test]
+fn the_model_check_reports_what_keeps_a_bolt_from_working() {
+    use plx_model::{MeshCheck, ModelItem, Problem};
+    let problems = |model: &FeModel, mesh: &FeMesh| -> Vec<(ModelItem, Problem)> {
+        (model
+            .check(mesh, &MeshCheck::new(mesh, model.properties.space))
+            .into_iter())
+        .map(|f| (f.item, f.problem))
+        .collect()
+    };
+    let (mesh, mut model, _) = bolted_blocks(1000.0);
+    assert_eq!(problems(&model, &mesh), []);
+    model.bolts[0].preload = plx_model::Preload::Force(0.0);
+    assert_eq!(
+        problems(&model, &mesh),
+        [(ModelItem::Bolt(0), Problem::BoltWithoutPreload)]
+    );
+    model.bolts[0].preload = plx_model::Preload::Force(1000.0);
+    let mut tie = plx_model::Tie::new("Tie-1");
+    tie.master = model.bolts[0].side_a.clone();
+    tie.slave = model.bolts[0].side_b.clone();
+    model.ties.push(tie);
+    assert!(problems(&model, &mesh).contains(&(ModelItem::Bolt(0), Problem::BoltFacesUsedTwice)));
+    model.ties.clear();
+    model.bolts[0].side_a = Region::Faces(Vec::new());
+    model.bolts[0].side_b = Region::Faces(Vec::new());
+    assert!(problems(&model, &mesh).contains(&(ModelItem::Bolt(0), Problem::InvalidBolt)));
+}
+
 #[test]
 fn a_tie_writes_its_surfaces_slave_first() {
     let (mesh, lower, upper) = two_blocks(0.0);

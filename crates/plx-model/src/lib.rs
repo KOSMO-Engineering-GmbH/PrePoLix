@@ -6,6 +6,7 @@
 //! file is written, so the user never has to define sets by hand.
 
 mod amplitude;
+mod bolt;
 mod cad_operation;
 pub mod campbell;
 mod checks;
@@ -44,6 +45,7 @@ pub mod units;
 mod validity;
 
 pub use amplitude::{Amplitude, AmplitudeTime};
+pub use bolt::{Bolt, BoltAction, BoltChange, LoweredBolts, Preload, ResolvedBolt};
 pub use cad_operation::{CadOperation, CadOperationKind};
 pub use checks::{
     Finding, MeshCheck, Problem, Severity, diagnose_solver_output, diagnose_solver_warnings,
@@ -159,6 +161,10 @@ pub struct FeModel {
     /// Settings shared by the contact regions.
     #[serde(default)]
     pub contact_defaults: ContactDefaults,
+    /// Bolts preloaded across a cut through their shank, written as the pre-tension loads
+    /// and ties they stand for ([`FeModel::lower_bolts`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bolts: Vec<Bolt>,
     /// Time curves boundary conditions and loads refer to by name.
     #[serde(default)]
     pub amplitudes: Vec<Amplitude>,
@@ -222,6 +228,7 @@ impl FeModel {
             .chain((self.ties.iter()).flat_map(|t| [&t.master, &t.slave]))
             .chain(self.node_ties.iter().map(|t| &t.region))
             .chain(self.contact_regions.iter().flat_map(ContactRegion::regions))
+            .chain(self.bolts.iter().flat_map(Bolt::regions))
             .chain(self.mesh_sets.iter().map(|s| &s.region))
             .chain(self.steps.iter().flat_map(|step| {
                 (step.boundary_conditions.iter().map(|b| &b.region))
@@ -351,6 +358,7 @@ impl FeModel {
             .chain((self.ties.iter_mut()).flat_map(|t| [&mut t.master, &mut t.slave]))
             .chain(self.node_ties.iter_mut().map(|t| &mut t.region))
             .chain((self.contact_regions.iter_mut()).flat_map(ContactRegion::regions_mut))
+            .chain(self.bolts.iter_mut().flat_map(Bolt::regions_mut))
             .chain(self.mesh_sets.iter_mut().map(|s| &mut s.region))
             .chain(self.steps.iter_mut().flat_map(|step| {
                 (step.boundary_conditions.iter_mut().map(|b| &mut b.region))
@@ -480,6 +488,7 @@ impl FeModel {
             )
             .chain((self.contact_pairs.iter_mut()).flat_map(|c| [&mut c.master, &mut c.slave]))
             .chain((self.contact_regions.iter_mut()).flat_map(ContactRegion::regions_mut))
+            .chain(self.bolts.iter_mut().flat_map(Bolt::regions_mut))
             .chain(self.initial_conditions.iter_mut().map(|i| &mut i.region))
             .chain(self.mesh_sets.iter_mut().map(|s| &mut s.region))
             .chain(self.steps.iter_mut().flat_map(|step| {
@@ -692,6 +701,9 @@ pub struct Step {
     /// step on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contact_changes: Vec<ContactChange>,
+    /// What bolts do in this step instead of their automatic action.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bolt_changes: Vec<BoltChange>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1435,6 +1447,7 @@ impl Step {
             field_outputs: FieldOutput::complex_frequency_defaults(),
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
+            bolt_changes: Vec::new(),
         }
     }
 
@@ -1457,6 +1470,7 @@ impl Step {
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
+            bolt_changes: Vec::new(),
             field_outputs: FieldOutput::defaults(),
         }
     }
@@ -1472,6 +1486,7 @@ impl Step {
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
+            bolt_changes: Vec::new(),
             field_outputs: FieldOutput::frequency_defaults(),
         }
     }
@@ -1487,6 +1502,7 @@ impl Step {
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
+            bolt_changes: Vec::new(),
             field_outputs: FieldOutput::defaults(),
         }
     }
@@ -1502,6 +1518,7 @@ impl Step {
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
+            bolt_changes: Vec::new(),
             field_outputs: FieldOutput::heat_transfer_defaults(),
         }
     }
@@ -1518,6 +1535,7 @@ impl Step {
             field_outputs: FieldOutput::dynamic_defaults(),
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
+            bolt_changes: Vec::new(),
         }
     }
 
@@ -1549,6 +1567,7 @@ impl Step {
             history_outputs: Vec::new(),
             defined_fields: Vec::new(),
             contact_changes: Vec::new(),
+            bolt_changes: Vec::new(),
             field_outputs: FieldOutput::coupled_defaults(),
         }
     }

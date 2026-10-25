@@ -515,6 +515,7 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
                 TreeItem::Model,
             ],
         ),
+        ModelItem::Bolt(_) => (TreeItem::Group("Contacts"), vec![TreeItem::Model]),
         ModelItem::BoundaryCondition(s, i) => (TreeItem::BoundaryCondition(s, i), step(s, "BCs")),
         ModelItem::Load(s, i) => (TreeItem::Load(s, i), step(s, "Loads")),
         ModelItem::HistoryOutput(s, i) => {

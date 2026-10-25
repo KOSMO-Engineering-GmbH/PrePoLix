@@ -986,6 +986,7 @@ mod tests {
             .unwrap()
             .mesh;
         let model = FeModel {
+            bolts: Vec::new(),
             distributions: Vec::new(),
             properties: Default::default(),
             materials: vec![Material {

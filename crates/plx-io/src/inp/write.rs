@@ -266,6 +266,15 @@ pub fn model_keywords(
     } else {
         mesh
     };
+    // Bolts become pre-tension loads and ties, and switch off the contact regions on
+    // their cuts.
+    let bolted;
+    let model = if model.bolts.is_empty() {
+        model
+    } else {
+        bolted = model.lower_bolts(mesh).0;
+        &bolted
+    };
     // Contact regions become the ties and contact pairs they stand for.
     let lowered;
     let model = if model.contact_regions.is_empty() {

@@ -15,6 +15,7 @@ pub enum ModelItem {
     Tie(usize),
     NodeTie(usize),
     ContactRegion(usize),
+    Bolt(usize),
     /// Boundary condition by step and index.
     BoundaryCondition(usize, usize),
     /// Load by step and index.
@@ -121,6 +122,17 @@ impl FeModel {
             if let Some(reason) = reason {
                 invalid.push(Invalid {
                     item: ModelItem::ContactRegion(i),
+                    reason,
+                });
+            }
+        }
+        for (i, bolt) in self.bolts.iter().enumerate() {
+            let reason = (bolt.side_a.missing_reference(mesh))
+                .map(|r| format!("Side A: {r}"))
+                .or_else(|| (bolt.side_b.missing_reference(mesh)).map(|r| format!("Side B: {r}")));
+            if let Some(reason) = reason {
+                invalid.push(Invalid {
+                    item: ModelItem::Bolt(i),
                     reason,
                 });
             }

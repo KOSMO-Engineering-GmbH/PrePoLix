@@ -72,6 +72,16 @@ pub enum Problem {
     /// A pre-tension load locked in the first step it acts in: there is no length of a
     /// previous step to keep, so CalculiX holds the bolt at its unstretched length.
     LockWithoutPreload,
+    /// A bolt whose cut cannot be made: no faces of solid elements, or a side missing.
+    InvalidBolt,
+    /// A bolt without a preload: zero, or no step that takes one.
+    BoltWithoutPreload,
+    /// The faces of a bolt's cut also in a tie or contact pair defined by hand: CalculiX
+    /// then loops forever or does not converge.
+    BoltFacesUsedTwice,
+    /// A bonding contact region at a bolt's cut, such as the shank bonded into its hole:
+    /// it holds the shank, and the bolt cannot stretch.
+    BoltHeldAtCut,
     /// Beams held by pins only, free to turn about the line through them.
     SpinAboutPins,
     HeldOnlyByContact,
@@ -187,6 +197,8 @@ impl Problem {
             | Problem::HeldRigidBodyNodes
             | Problem::TieNodesNotTied
             | Problem::LockWithoutPreload
+            | Problem::BoltWithoutPreload
+            | Problem::BoltHeldAtCut
             | Problem::NoCreep => Severity::Warning,
             _ => Severity::Error,
         }
@@ -235,6 +247,10 @@ impl Problem {
             Problem::DesignRegionIgnored => "Design region ignored",
             Problem::NoCreep => "Visco step without creep",
             Problem::LockWithoutPreload => "Bolt locked before it is preloaded",
+            Problem::InvalidBolt => "Bolt cannot be cut",
+            Problem::BoltWithoutPreload => "Bolt without preload",
+            Problem::BoltFacesUsedTwice => "Faces of a bolt's cut used twice",
+            Problem::BoltHeldAtCut => "Bolt held at its cut",
             Problem::InvalidCyclicSymmetry => "Invalid cyclic symmetry",
             Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
             Problem::NoRotation => "No rotation",
@@ -500,6 +516,26 @@ impl Problem {
                  about the axis, which must be a whole number: CalculiX solves only sectors \
                  that close the full circle. A model of N sectors carries the nodal diameters \
                  0 to N/2 only."
+            }
+            Problem::InvalidBolt => {
+                "A bolt is cut between the faces of solid elements: the two faces of a bolt \
+                 split into two bodies, or the face inside a bolt meshed in one piece. The \
+                 bolt has no such faces, so it is left out of the input file."
+            }
+            Problem::BoltWithoutPreload => {
+                "The bolt is preloaded in the first step that takes forces. Its preload is \
+                 zero, or no step takes one (frequency and heat transfer steps do not), so the \
+                 bolt only holds its two halves together."
+            }
+            Problem::BoltFacesUsedTwice => {
+                "The bolt joins the two sides of its cut itself. A tie or contact pair on the \
+                 same faces binds the nodes a second time: CalculiX then loops forever while \
+                 resolving the constraints, or the contact does not converge."
+            }
+            Problem::BoltHeldAtCut => {
+                "A bonded or rough contact region touches the cut of the \
+                 bolt, for example the shank bonded into its hole. It holds the shank, so the \
+                 preload compresses the region instead of stretching the bolt."
             }
             Problem::LockWithoutPreload => {
                 "Lock keeps the length the bolt had at the end of the previous step. In the \
@@ -788,6 +824,21 @@ impl Problem {
                  keep the nodal diameter range within 0 to half the number of sectors."
             }
             Problem::VelocityIgnored => "Add a Dynamic step or deactivate the initial condition.",
+            Problem::InvalidBolt => {
+                "Pick the two faces of the cut on the geometry, or element faces of solid \
+                 elements."
+            }
+            Problem::BoltWithoutPreload => {
+                "Enter the preload of the bolt, and add a static step if the analysis has none."
+            }
+            Problem::BoltFacesUsedTwice => {
+                "Deactivate or delete the tie or contact pair on the faces of the cut; the bolt \
+                 replaces it."
+            }
+            Problem::BoltHeldAtCut => {
+                "Make the region frictionless or frictional, so that the shank can slide in \
+                 its hole."
+            }
             Problem::LockWithoutPreload => {
                 "Preload the bolt by force or displacement in this step and lock it in the \
                  following steps."
@@ -1030,6 +1081,25 @@ impl FeModel {
 
     /// All problems of the model, invalid references included, errors first.
     pub fn check(&self, mesh: &FeMesh, mesh_check: &MeshCheck) -> Vec<Finding> {
+        if self.bolts.is_empty() {
+            return self.check_connections(mesh, mesh_check);
+        }
+        // Bolts are checked as the pre-tension loads and ties they become, with the contact
+        // regions they replace switched off; what is found on those belongs to the bolt.
+        let (lowered, origin) = self.lower_bolts(mesh);
+        let mut findings = lowered.check_connections(mesh, mesh_check);
+        for finding in &mut findings {
+            if let Some(bolt) = origin.bolt_of(finding.item) {
+                finding.item = ModelItem::Bolt(bolt);
+            }
+        }
+        self.check_bolts(mesh, &origin, &mut findings);
+        findings.sort_by_key(|f| f.severity());
+        findings
+    }
+
+    /// [`FeModel::check`] of a model without bolts.
+    fn check_connections(&self, mesh: &FeMesh, mesh_check: &MeshCheck) -> Vec<Finding> {
         let mut findings = if self.contact_regions.is_empty() {
             self.check_explicit(mesh, mesh_check)
         } else {
@@ -1467,6 +1537,96 @@ impl FeModel {
                         *item,
                         Problem::SharedRigidBody,
                         format!("{name}: {shared} nodes also in {other}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// What only the bolts themselves tell: references, cuts that cannot be made, missing
+    /// preloads, and other connections on their cut.
+    fn check_bolts(
+        &self,
+        mesh: &FeMesh,
+        lowered: &crate::LoweredBolts,
+        findings: &mut Vec<Finding>,
+    ) {
+        let invalid = self.invalid_items(mesh);
+        for item in invalid
+            .iter()
+            .filter(|i| matches!(i.item, ModelItem::Bolt(_)))
+        {
+            findings.push(Finding::new(
+                item.item,
+                Problem::MissingReference,
+                item.reason.clone(),
+            ));
+        }
+        for (b, bolt) in self.bolts.iter().enumerate().filter(|(_, b)| b.active) {
+            if invalid.iter().any(|i| i.item == ModelItem::Bolt(b)) {
+                continue;
+            }
+            if let Err(reason) = self.resolve_bolt(bolt, mesh) {
+                findings.push(Finding::new(
+                    ModelItem::Bolt(b),
+                    Problem::InvalidBolt,
+                    format!("{}: {reason}", bolt.name),
+                ));
+                continue;
+            }
+            let preloaded = (0..self.steps.len()).any(|s| match self.bolt_action(bolt, s) {
+                Some(crate::BoltAction::Load(v) | crate::BoltAction::Adjust(v)) => v != 0.0,
+                _ => false,
+            });
+            if !preloaded {
+                findings.push(Finding::new(
+                    ModelItem::Bolt(b),
+                    Problem::BoltWithoutPreload,
+                    format!("{} is not preloaded in any step", bolt.name),
+                ));
+            }
+            let cut = bolt.nodes(mesh);
+            let on_cut = |region: &Region| -> bool {
+                let nodes = crate::bolt::side_nodes(region, mesh);
+                let on = nodes.iter().filter(|n| cut.contains(n)).count();
+                !nodes.is_empty() && 2 * on >= nodes.len()
+            };
+            let twice = (self
+                .ties
+                .iter()
+                .filter(|t| t.active)
+                .map(|t| (&t.name, [&t.master, &t.slave])))
+            .chain(
+                (self.contact_pairs.iter().filter(|p| p.active))
+                    .map(|p| (&p.name, [&p.master, &p.slave])),
+            );
+            for (name, sides) in twice {
+                if sides.iter().all(|side| on_cut(side)) {
+                    findings.push(Finding::new(
+                        ModelItem::Bolt(b),
+                        Problem::BoltFacesUsedTwice,
+                        format!("{name} lies on the cut of {}", bolt.name),
+                    ));
+                }
+            }
+            for (r, region) in self.contact_regions.iter().enumerate() {
+                let holds = matches!(
+                    region.behavior,
+                    crate::ContactBehavior::Bonded | crate::ContactBehavior::Rough
+                );
+                if !region.active || !holds || lowered.replaced.contains_key(&r) {
+                    continue;
+                }
+                let touches = region.regions().into_iter().any(|side| {
+                    crate::bolt::side_nodes(side, mesh)
+                        .iter()
+                        .any(|n| cut.contains(n))
+                });
+                if touches {
+                    findings.push(Finding::new(
+                        ModelItem::ContactRegion(r),
+                        Problem::BoltHeldAtCut,
+                        format!("{} holds {} at its cut", region.name, bolt.name),
                     ));
                 }
             }
