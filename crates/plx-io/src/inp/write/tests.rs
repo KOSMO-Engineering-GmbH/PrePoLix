@@ -6384,16 +6384,20 @@ fn a_cyclic_symmetry_tie_is_written_like_prepomax_does() {
     let mut tie = plx_model::Tie::new("Tie-1");
     tie.master = Region::Faces(left);
     tie.slave = Region::Faces(right);
-    tie.cyclic = Some(plx_model::CyclicSymmetry {
-        graph_sectors: 3,
-        check_angle: false,
-        ..Default::default()
-    });
+    tie.cyclic = Some(plx_model::CyclicSymmetry::default());
     model.ties.push(tie);
+    // The number of sectors follows from the 30 degrees between the cut faces, and all
+    // of them show by default.
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Cyclic symmetry model, N=12, Tie=Tie-1, Ngraph=12\n0, 0, 0, 0, 0, 1\n"),
+        "{text}"
+    );
+    model.ties[0].cyclic.as_mut().unwrap().display = plx_model::SectorDisplay::Single;
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
         "*Tie, Name=Tie-1, Cyclic symmetry\n",
-        "*Cyclic symmetry model, N=12, Tie=Tie-1, Ngraph=3, Check=No\n0, 0, 0, 0, 0, 1\n",
+        "*Cyclic symmetry model, N=12, Tie=Tie-1\n0, 0, 0, 0, 0, 1\n",
         "*Frequency\n20\n*Select cyclic symmetry modes\n",
     ] {
         assert!(text.contains(line), "{line:?} missing in\n{text}");
@@ -6414,6 +6418,12 @@ fn a_cyclic_symmetry_tie_is_written_like_prepomax_does() {
     let nodes = &text[text.find(set).unwrap() + set.len()..];
     let nodes: Vec<&str> = nodes.lines().next().unwrap().split(", ").collect();
     assert_eq!(nodes.len(), 3 * 4, "{nodes:?}");
+    // Cut faces that are not a whole fraction of the circle about the axis do not export.
+    model.ties[0].cyclic.as_mut().unwrap().axis_direction = [1.0, 0.0, 0.0];
+    assert!(matches!(
+        write_inp(&mesh, &model, ""),
+        Err(WriteError::InvalidCyclicSymmetry { .. })
+    ));
 }
 
 /// The sector computes the frequencies of the whole disk, sorted by nodal diameter.
@@ -8020,6 +8030,41 @@ fn calculix_strains_the_bar_by_a_distributed_temperature() {
         .map(|&n| node_value(&frd, "DISP", "U1", n))
         .collect();
     assert_all_close(&growth, 1e-5 * 100.0 * 100.0 / 2.0, 1e-3);
+}
+
+/// The upper block rests on the lower one by a frictionless contact only: nothing holds it
+/// sideways, and with an initial gap nothing holds it at all before the gap closes. CalculiX
+/// gives up on both with "too many cutbacks"; weak springs to ground hold the block and take
+/// about a millionth of the load.
+#[test]
+fn calculix_solves_a_part_held_only_by_contact_with_weak_springs() {
+    for (name, gap, nlgeom) in [("spalt", 0.01, false), ("spalt-nlgeom", 0.01, true)] {
+        let (mesh, mut model) =
+            blocks_joined_by_region(gap, plx_model::ContactBehavior::Frictionless);
+        if let plx_model::StepKind::Static(settings) = &mut model.steps[0].kind {
+            settings.nlgeom = nlgeom;
+        }
+        let text = write_inp(&mesh, &model, "").unwrap();
+        // The upper block: 1e-6 E L with L = 10 mm, spread over its 18 nodes.
+        assert!(
+            text.contains("*Element, Type=SPRING1, Elset=PLX_Weak_Springs_UPPER_All\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("*Spring, Elset=PLX_Weak_Springs_UPPER_DOF_3\n3\n1.16666667E-1\n"),
+            "{text}"
+        );
+        model.contact_defaults.weak_springs = false;
+        let without = write_inp(&mesh, &model, "").unwrap();
+        assert!(!without.contains("SPRING1"), "{without}");
+        model.contact_defaults.weak_springs = true;
+        let Some(frd) = run_ccx(&format!("weak-springs-{name}"), &text) else {
+            return;
+        };
+        let bottom: Vec<NodeId> = (1..=9).collect();
+        let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+        assert!((reaction - 1000.0).abs() < 0.1, "{name}: {reaction}");
+    }
 }
 
 /// A bonded region whose contact values a history output prints becomes a tied contact,

@@ -103,8 +103,15 @@ fn main() -> eframe::Result {
 }
 
 /// The program icon for the window and the task bar, exported from
-/// `assets/icon/prepolix-icon.typ` by `scripts/make_icon.py`.
-fn window_icon() -> egui::IconData {
+/// `assets/icon/prepolix-icon.typ` by `scripts/make_icon.py`. Decoded once: the analysis
+/// windows ask for it in every frame.
+fn window_icon() -> std::sync::Arc<egui::IconData> {
+    static ICON: std::sync::LazyLock<std::sync::Arc<egui::IconData>> =
+        std::sync::LazyLock::new(|| std::sync::Arc::new(decode_window_icon()));
+    ICON.clone()
+}
+
+fn decode_window_icon() -> egui::IconData {
     let decoder = png::Decoder::new(std::io::Cursor::new(include_bytes!(
         "../assets/icon/prepolix.png"
     )));

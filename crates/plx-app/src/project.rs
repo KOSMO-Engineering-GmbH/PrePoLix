@@ -1777,6 +1777,9 @@ pub struct ProjectApp {
     /// Whether the solution and results of each analysis were up to date as the links last
     /// took them, see [`ProjectApp::freshness`].
     synced_freshness: Vec<(u64, CellState, CellState)>,
+    /// The title last given to the window: setting it asks egui for another frame, so it
+    /// is set only when it changes, else the app would draw without pause.
+    shown_title: String,
 }
 
 impl ProjectApp {
@@ -1848,6 +1851,7 @@ impl ProjectApp {
             opening: None,
             update_queue: VecDeque::new(),
             updating: Vec::new(),
+            shown_title: String::new(),
             export_queue: Vec::new(),
             update_failed: false,
             solves: Vec::new(),
@@ -6046,6 +6050,9 @@ impl ProjectApp {
     /// something changed, in the order of the links so that a chain is done in one go.
     fn sync_links(&mut self, ctx: &egui::Context) {
         self.poll_restoring();
+        if self.restoring.values().any(Option::is_some) {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
         self.refresh_files(ctx);
         // A new value of a measure goes to the parameter study that waits for it.
         if !self.measuring.is_empty() {
@@ -7193,7 +7200,7 @@ impl ProjectApp {
                 .with_app_id("prepolix")
                 .with_inner_size([1400.0, 900.0])
                 .with_min_inner_size([640.0, 400.0])
-                .with_icon(std::sync::Arc::new(crate::window_icon()));
+                .with_icon(crate::window_icon());
             if let Some(position) = analysis.window_position {
                 builder = builder.with_position(position);
             }
@@ -7338,7 +7345,10 @@ impl eframe::App for ProjectApp {
         crate::style::sync(&ctx);
         self.poll_opening();
         let title = format!("{} - PrePoLix", self.project_name());
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        if title != self.shown_title {
+            self.shown_title = title.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F5)) {
             self.solve_shortcut();
         }

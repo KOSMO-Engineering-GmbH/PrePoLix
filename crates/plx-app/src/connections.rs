@@ -786,6 +786,16 @@ pub fn connections_form(ui: &mut Ui, fe: &FeModel, defaults: &mut ContactDefault
             .range(1e-3..=1e4),
     );
     ui.end_row();
+    ui.label("Weak springs").on_hover_text(format!(
+        "Parts held only by contacts get very soft springs to ground in the input file, \
+         {:e} E L per direction spread over their nodes (E the Young's modulus, L the size \
+         of the part). They keep the parts from drifting before the contacts close, \
+         which otherwise often ends in \"too many cutbacks\" with frictionless contact, \
+         an initial gap or Nlgeom, and carry about a millionth of the load.",
+        plx_model::WEAK_SPRING_FACTOR
+    ));
+    ui.checkbox(&mut defaults.weak_springs, "For parts held only by contact");
+    ui.end_row();
 }
 
 /// Why the region cannot be applied as it is.

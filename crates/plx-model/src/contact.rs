@@ -443,52 +443,135 @@ pub struct Tie {
 
 /// A sector of a part that repeats about an axis, such as a blade of an impeller
 /// (`*CYCLIC SYMMETRY MODEL`). Frequency steps then compute the modes by nodal diameter.
+/// The number of sectors is not stored: it follows from the angle between the two cut faces
+/// ([`CyclicSymmetry::sectors`]), as CalculiX solves only sectors that close the full circle.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CyclicSymmetry {
-    /// Number of sectors in 360 degrees (`N=`).
-    pub sectors: u32,
-    /// Sectors the results are expanded to (`NGRAPH=`); all of them show the whole part.
-    pub graph_sectors: u32,
     pub axis_point: [f64; 3],
     pub axis_direction: [f64; 3],
-    /// Lets CalculiX check that the sector angle fits the number of sectors.
-    pub check_angle: bool,
+    /// What the results show (`NGRAPH=`).
+    pub display: SectorDisplay,
+}
+
+/// The sectors the results of a cyclic symmetric model are expanded to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SectorDisplay {
+    /// Only the modelled sector (`NGRAPH=1`).
+    Single,
+    /// The whole part (`NGRAPH=N`).
+    #[default]
+    All,
 }
 
 impl Default for CyclicSymmetry {
     fn default() -> Self {
         Self {
-            sectors: 12,
-            graph_sectors: 12,
             axis_point: [0.0; 3],
             axis_direction: [0.0, 0.0, 1.0],
-            check_angle: true,
+            display: SectorDisplay::All,
         }
     }
 }
 
+/// How far the angle between the cut faces may be off 360 degrees over a whole number of
+/// sectors, relative to that angle.
+const SECTOR_ANGLE_TOLERANCE: f64 = 2e-3;
+
 impl CyclicSymmetry {
-    /// The highest nodal diameter the sectors can carry, PrePoMax's limit.
-    pub fn highest_nodal_diameter(&self) -> u32 {
-        self.sectors / 2
+    /// The highest nodal diameter `sectors` sectors can carry, PrePoMax's limit.
+    pub fn highest_nodal_diameter(sectors: u32) -> u32 {
+        sectors / 2
     }
 
-    /// Why CalculiX would reject the settings.
+    /// Why CalculiX would reject the settings, whatever the sides.
     pub fn problem(&self) -> Option<String> {
-        if self.sectors < 2 {
-            Some("The number of sectors must be at least 2.".into())
-        } else if !(1..=self.sectors).contains(&self.graph_sectors) {
-            Some("The displayed sectors must be between 1 and the number of sectors.".into())
-        } else if self.axis_direction.iter().all(|v| *v == 0.0) {
+        if self.axis_direction.iter().all(|v| *v == 0.0) {
             Some("The axis direction must not be the zero vector.".into())
         } else {
             None
         }
     }
+
+    /// The angle in radians between the master and the slave side about the axis, from
+    /// the mean direction of their points seen from the axis. On cut faces through the
+    /// axis all points of a side lie in the same direction, so the mesh does not matter.
+    pub fn sector_angle(&self, master: &[[f64; 3]], slave: &[[f64; 3]]) -> Result<f64, String> {
+        if let Some(problem) = self.problem() {
+            return Err(problem);
+        }
+        if master.is_empty() || slave.is_empty() {
+            return Err("Pick both cut faces of the sector to find the number of sectors.".into());
+        }
+        let axis = glam::DVec3::from(self.axis_direction).normalize();
+        let point = glam::DVec3::from(self.axis_point);
+        let size = (master.iter().chain(slave))
+            .map(|p| (glam::DVec3::from(*p) - point).length())
+            .fold(0.0, f64::max);
+        // Points on the axis have no direction.
+        let direction = |points: &[[f64; 3]]| -> glam::DVec3 {
+            let radial = |p: &[f64; 3]| {
+                let r = glam::DVec3::from(*p) - point;
+                r - r.dot(axis) * axis
+            };
+            (points.iter().map(radial))
+                .filter(|r| r.length() > 1e-9 * size)
+                .map(glam::DVec3::normalize)
+                .sum()
+        };
+        let (m, s) = (direction(master), direction(slave));
+        if m.length() < 1e-6 || s.length() < 1e-6 {
+            return Err("A cut face lies on the axis. Check the axis point and direction.".into());
+        }
+        Ok(m.cross(s).dot(axis).atan2(m.dot(s)).abs())
+    }
+
+    /// The number of sectors in 360 degrees for the cut faces `master` and `slave` (`N=`).
+    pub fn sectors(&self, master: &[[f64; 3]], slave: &[[f64; 3]]) -> Result<u32, String> {
+        let angle = self.sector_angle(master, slave)?;
+        let degrees = angle.to_degrees();
+        if degrees < 1e-6 {
+            return Err(
+                "The cut faces lie in the same direction from the axis. Check the \
+                        axis point and direction."
+                    .into(),
+            );
+        }
+        let sectors = 360.0 / degrees;
+        let whole = sectors.round();
+        if whole < 2.0 || (360.0 / whole - degrees).abs() > SECTOR_ANGLE_TOLERANCE * degrees {
+            return Err(format!(
+                "The cut faces are {} degrees apart, which does not divide 360 degrees \
+                 (360 / {} = {}). CalculiX needs sectors that close the full circle; check \
+                 the cut faces and the axis.",
+                round_to(degrees, 4),
+                round_to(degrees, 4),
+                round_to(sectors, 3)
+            ));
+        }
+        Ok(whole as u32)
+    }
+}
+
+/// `value` with at most `digits` decimals, for messages.
+fn round_to(value: f64, digits: i32) -> f64 {
+    let factor = 10f64.powi(digits);
+    (value * factor).round() / factor
 }
 
 impl Tie {
+    /// The number of sectors of a cyclic symmetry tie, from the angle between its sides;
+    /// `None` for an ordinary tie.
+    pub fn cyclic_sectors(&self, mesh: &plx_mesh::FeMesh) -> Option<Result<u32, String>> {
+        let cyclic = self.cyclic.as_ref()?;
+        let points = |region: &Region| -> Vec<[f64; 3]> {
+            (region.nodes(mesh).into_iter())
+                .filter_map(|n| mesh.node(n))
+                .collect()
+        };
+        Some(cyclic.sectors(&points(&self.master), &points(&self.slave)))
+    }
+
     /// Turns the tie around, as [`ContactPair::swap_master_slave`].
     pub fn swap_master_slave(&mut self) {
         std::mem::swap(&mut self.master, &mut self.slave);

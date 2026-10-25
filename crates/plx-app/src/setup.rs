@@ -1144,6 +1144,8 @@ pub struct Editor {
     picker: Picker,
     /// The playing preview of a displacement boundary condition's motion.
     motion: Option<MotionPreview>,
+    /// The number of sectors of a cyclic symmetry tie, found from its cut faces.
+    cyclic: contacts::CyclicSectors,
     /// The expose buttons of its numbers, set up when it is first shown.
     expose: Option<expose::Scope>,
     /// The blocks value links give exposed parameters of the model from, by key.
@@ -1934,6 +1936,7 @@ impl Editor {
             error: None,
             picker: Picker::default(),
             motion: None,
+            cyclic: Default::default(),
             expose: None,
             linked: Vec::new(),
             detection_scope: None,
@@ -1955,6 +1958,7 @@ impl Editor {
             error: None,
             picker: Picker::default(),
             motion: None,
+            cyclic: Default::default(),
             expose: None,
             linked: Vec::new(),
             detection_scope: None,
@@ -1991,6 +1995,7 @@ impl Editor {
             error: None,
             picker: Picker::default(),
             motion: None,
+            cyclic: Default::default(),
             expose: None,
             linked: Vec::new(),
             detection_scope: None,
@@ -2125,6 +2130,7 @@ impl Editor {
             error: None,
             picker: Picker::default(),
             motion: None,
+            cyclic: Default::default(),
             expose: None,
             linked: Vec::new(),
             detection_scope: None,
@@ -2432,8 +2438,9 @@ impl Editor {
                         result = EditorResult::Cancel;
                     }
                     if ui.button("OK").clicked() {
-                        self.error = (self.validate(&model.fe).err())
+                        let error = (self.validate(&model.fe).err())
                             .or_else(|| self.validate_set(model).err());
+                        self.error = error.or_else(|| self.validate_sectors(model).err());
                         if self.error.is_none() {
                             result = EditorResult::Ok;
                         }
@@ -2568,7 +2575,10 @@ impl Editor {
                 region.ui(ui, model);
             }
             Draft::Step(step, region) => {
-                step_form(ui, step, self.index.is_none(), &model.fe);
+                let sectors = (model.fe.cyclic_tie())
+                    .and_then(|t| t.cyclic_sectors(&model.mesh))
+                    .and_then(Result::ok);
+                step_form(ui, step, self.index.is_none(), &model.fe, sectors);
                 crate::connections::step_contacts(ui, &model.fe, step, self.index);
                 if step.kind.design_region().is_some() {
                     region.ui_labeled(ui, model, "Design region", "design region", true);
@@ -3241,7 +3251,7 @@ impl Editor {
             Draft::Connections(defaults) => connections::connections_form(ui, &model.fe, defaults),
             Draft::Tie(tie, regions) => {
                 name_row(ui, &mut tie.name);
-                contacts::tie_form(ui, model, tie, regions);
+                contacts::tie_form(ui, model, tie, regions, &mut self.cyclic);
             }
             Draft::MeshSet(set, region, _) => {
                 name_row(ui, &mut set.name);
@@ -3463,6 +3473,29 @@ impl Editor {
 
     /// The name of a set must be new among the mesh's sets of its kind, and an element set
     /// must not take the name of a part, whose elements the input file gathers under it.
+    /// Cut faces of a cyclic symmetry tie that do not divide the full circle.
+    fn validate_sectors(&mut self, model: &Model) -> Result<(), String> {
+        let Draft::Tie(tie, regions) = &self.draft else {
+            return Ok(());
+        };
+        // The form shows why under Sectors.
+        match self.cyclic.get(model, tie, regions) {
+            Some(Err(_)) => Err("The cyclic symmetry has no valid number of sectors, see \
+                                 Sectors."
+                .into()),
+            _ => Ok(()),
+        }
+    }
+
+    /// The whole part a cyclic symmetry tie dialog's sector stands for, previewed in the 3D
+    /// view.
+    pub fn cyclic_preview(&mut self, model: &Model) -> Option<crate::model::CyclicPreview> {
+        let Draft::Tie(tie, regions) = &self.draft else {
+            return None;
+        };
+        self.cyclic.preview(model, tie, regions)
+    }
+
     fn validate_set(&self, model: &Model) -> Result<(), String> {
         let Draft::MeshSet(set, _, replaces) = &self.draft else {
             return Ok(());
@@ -4891,7 +4924,14 @@ fn step_kind_label(kind: &StepKind) -> &'static str {
 
 /// The step dialog. The kind is chosen when the step is created, as in PrePoMax's list of
 /// step types; switching it starts with that kind's default field outputs.
-fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
+/// `cyclic_sectors` is the number of sectors of a cyclic symmetric model.
+fn step_form(
+    ui: &mut Ui,
+    step: &mut Step,
+    creating: bool,
+    fe: &FeModel,
+    cyclic_sectors: Option<u32>,
+) {
     name_row(ui, &mut step.name);
     ui.label("Type");
     if creating {
@@ -4914,7 +4954,7 @@ fn step_form(ui: &mut Ui, step: &mut Step, creating: bool, fe: &FeModel) {
     let units = fe.properties.units;
     match &mut step.kind {
         StepKind::Static(settings) => static_form(ui, settings, units),
-        StepKind::Frequency(settings) => frequency_form(ui, settings, units, fe.cyclic_symmetry()),
+        StepKind::Frequency(settings) => frequency_form(ui, settings, units, cyclic_sectors),
         StepKind::Dynamic(settings) => dynamic_form(ui, settings, units),
         StepKind::ModalDynamics(settings) => modal_dynamics_form(ui, settings, units),
         StepKind::SteadyStateDynamics(settings) => steady_state_form(ui, settings, units),
@@ -5279,7 +5319,7 @@ fn frequency_form(
     ui: &mut Ui,
     settings: &mut FrequencyStep,
     units: UnitSystem,
-    cyclic: Option<&CyclicSymmetry>,
+    cyclic_sectors: Option<u32>,
 ) {
     ui.label("");
     ui.checkbox(
@@ -5315,8 +5355,8 @@ fn frequency_form(
         "Store matrices and eigenmodes (Storage, .eig)",
     );
     ui.end_row();
-    if let Some(cyclic) = cyclic {
-        nodal_diameter_rows(ui, &mut settings.nodal_diameters, cyclic);
+    if let Some(sectors) = cyclic_sectors {
+        nodal_diameter_rows(ui, &mut settings.nodal_diameters, sectors);
     }
     ui.label("");
     ui.weak("Loads have no effect in a frequency step; only the boundary conditions count.");
@@ -5325,8 +5365,8 @@ fn frequency_form(
 
 /// The nodal diameters a cyclic symmetric model is solved for, PrePoMax's minimum and
 /// maximum cyclic symmetry mode; unchecked, CalculiX solves all of them.
-fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, cyclic: &CyclicSymmetry) {
-    let highest = cyclic.highest_nodal_diameter();
+fn nodal_diameter_rows(ui: &mut Ui, range: &mut Option<[u32; 2]>, sectors: u32) {
+    let highest = CyclicSymmetry::highest_nodal_diameter(sectors);
     let mut set = range.is_some();
     ui.checkbox(&mut set, "Nodal diameter range")
         .on_hover_text(format!(
@@ -6125,6 +6165,7 @@ mod tests {
             error: None,
             picker: Picker::default(),
             motion: None,
+            cyclic: Default::default(),
             expose: None,
             linked: Vec::new(),
             detection_scope: None,

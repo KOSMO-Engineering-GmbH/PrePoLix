@@ -122,6 +122,9 @@ pub struct Model {
     /// Offsets of single nodes by index, the motion preview of a boundary condition dialog:
     /// the nodes are drawn moved, the rest of the mesh stays put.
     pub motion: Option<Vec<(usize, [f64; 3])>>,
+    /// The whole part a cyclic symmetry tie dialog's sector stands for, drawn as the
+    /// wireframe of the other sectors.
+    pub cyclic_preview: Option<CyclicPreview>,
     /// Node indices of each part and the part of each node, built when first needed.
     part_nodes: std::sync::OnceLock<PartNodes>,
     /// Nodes and elements of each part's skin, built when first needed.
@@ -309,6 +312,14 @@ impl Highlight {
         self.lines.extend(other.lines);
         self.secondary_lines.extend(other.secondary_lines);
     }
+}
+
+/// A sector repeated about an axis, previewed while its cyclic symmetry tie is edited.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CyclicPreview {
+    pub axis_point: [f64; 3],
+    pub axis_direction: [f64; 3],
+    pub sectors: u32,
 }
 
 /// A visible face or line under the mouse.
@@ -728,6 +739,7 @@ impl Model {
             explosion: Explosion::default(),
             query_annotations: Vec::new(),
             motion: None,
+            cyclic_preview: None,
             part_nodes: Default::default(),
             skin_lookup: Default::default(),
             cad_display: Default::default(),
@@ -1312,7 +1324,33 @@ impl Model {
     pub fn scene_meshes(&self) -> Vec<RenderMesh> {
         let mut meshes = self.render_meshes();
         meshes.extend(self.global_wireframe());
+        meshes.extend(self.cyclic_wireframe());
         meshes
+    }
+
+    /// The other sectors of a cyclic symmetry preview: the outline of all parts rotated
+    /// about the axis by each multiple of the sector angle, as a mesh of lines only.
+    fn cyclic_wireframe(&self) -> Option<RenderMesh> {
+        let preview = self
+            .cyclic_preview
+            .as_ref()
+            .filter(|_| self.results.is_none())?;
+        let axis = DVec3::from(preview.axis_direction).try_normalize()?;
+        let point = DVec3::from(preview.axis_point);
+        let coords = self.exploded_coords();
+        let mut mesh = RenderMesh::default();
+        for k in 1..preview.sectors {
+            let angle = std::f64::consts::TAU * f64::from(k) / f64::from(preview.sectors);
+            let instance = DAffine3::from_translation(point)
+                * DAffine3::from_axis_angle(axis, angle)
+                * DAffine3::from_translation(-point);
+            let turned = transform_coords(&coords, &instance);
+            for skin in &self.skins {
+                mesh.wireframe_edges
+                    .extend(wireframe_edges(&turned, skin, self.origin));
+            }
+        }
+        Some(mesh)
     }
 
     /// The edges of the global model of a submodel, deformed by the same scale as the
