@@ -1590,6 +1590,7 @@ impl AnalysisWindow {
         self.workbench.properties_window(&ctx);
         self.workbench.editor_window(&ctx);
         self.workbench.update_motion_preview(&ctx);
+        self.workbench.update_cyclic_preview();
         self.workbench.confirm_delete_window(&ctx);
         self.workbench.contact_search_window(&ctx);
         self.workbench.contact_worksheet_window(&ctx);
@@ -5317,6 +5318,18 @@ impl Workbench {
         }
         if model.motion != motion {
             model.motion = motion;
+            self.results_changed |= self.tree_view == TreeView::FeModel;
+        }
+    }
+
+    /// A cyclic symmetry tie dialog draws the other sectors of its part in the 3D view.
+    fn update_cyclic_preview(&mut self) {
+        let Some(model) = &mut self.model else {
+            return;
+        };
+        let preview = (self.editor.as_mut()).and_then(|e| e.cyclic_preview(model));
+        if model.cyclic_preview != preview {
+            model.cyclic_preview = preview;
             self.results_changed |= self.tree_view == TreeView::FeModel;
         }
     }

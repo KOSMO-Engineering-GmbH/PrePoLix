@@ -458,9 +458,11 @@ impl Problem {
                  period. Without such a material it computes the same as a Static step."
             }
             Problem::InvalidCyclicSymmetry => {
-                "A cyclic symmetry tie models a whole part by one sector of a 3D mesh. It \
-                 needs at least two sectors and an axis, and a sector of N carries the nodal \
-                 diameters 0 to N/2 only."
+                "A cyclic symmetry tie models a whole part by one sector of a 3D mesh. The \
+                 number of sectors N is 360 degrees over the angle between the two cut faces \
+                 about the axis, which must be a whole number: CalculiX solves only sectors \
+                 that close the full circle. A model of N sectors carries the nodal diameters \
+                 0 to N/2 only."
             }
             Problem::VelocityIgnored => {
                 "Only a Dynamic step (time integration) starts from an initial velocity; \
@@ -723,9 +725,9 @@ impl Problem {
                 "Edit a material of the model and tick Creep (Norton), or use a Static step."
             }
             Problem::InvalidCyclicSymmetry => {
-                "Edit the tie: check the number of sectors and the axis direction, or untick \
-                 Cyclic symmetry in 2D models. In the Frequency step keep the nodal diameter \
-                 range within 0 to half the number of sectors."
+                "Edit the tie: pick the two cut faces of the sector as master and slave and \
+                 check the axis, or untick Cyclic symmetry in 2D models. In the Frequency step \
+                 keep the nodal diameter range within 0 to half the number of sectors."
             }
             Problem::VelocityIgnored => "Add a Dynamic step or deactivate the initial condition.",
             Problem::NoRotation => {
@@ -920,15 +922,17 @@ impl MeshCheck {
 }
 
 impl FeModel {
-    /// All problems of the model, invalid references included, errors first.
-    /// Cyclic symmetry ties CalculiX rejects and nodal diameters the sectors cannot carry.
-    fn check_cyclic_symmetry(&self, findings: &mut Vec<Finding>) {
+    /// Cyclic symmetry ties CalculiX rejects, such as cut faces that do not divide the
+    /// full circle, and nodal diameters the sectors cannot carry.
+    fn check_cyclic_symmetry(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
         for (i, tie) in self.ties.iter().enumerate().filter(|(_, t)| t.active) {
-            let Some(cyclic) = &tie.cyclic else { continue };
+            let Some(sectors) = tie.cyclic_sectors(mesh) else {
+                continue;
+            };
             let problem = if self.properties.space.is_2d() {
                 Some("Cyclic symmetry needs a 3D model.".to_string())
             } else {
-                cyclic.problem()
+                sectors.err()
             };
             if let Some(problem) = problem {
                 let detail = format!("{}: {problem}", tie.name);
@@ -939,9 +943,10 @@ impl FeModel {
                 ));
             }
         }
-        let Some(highest) = self.cyclic_symmetry().map(|c| c.highest_nodal_diameter()) else {
+        let Some(Some(Ok(sectors))) = self.cyclic_tie().map(|t| t.cyclic_sectors(mesh)) else {
             return;
         };
+        let highest = crate::CyclicSymmetry::highest_nodal_diameter(sectors);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             if let StepKind::Frequency(f) = &step.kind
                 && let Some([min, max]) = f.nodal_diameters
@@ -960,6 +965,7 @@ impl FeModel {
         }
     }
 
+    /// All problems of the model, invalid references included, errors first.
     pub fn check(&self, mesh: &FeMesh, mesh_check: &MeshCheck) -> Vec<Finding> {
         let mut findings = if self.contact_regions.is_empty() {
             self.check_explicit(mesh, mesh_check)
@@ -1209,7 +1215,7 @@ impl FeModel {
                 ));
             }
         }
-        self.check_cyclic_symmetry(&mut findings);
+        self.check_cyclic_symmetry(mesh, &mut findings);
         self.check_tied_contacts(&mut findings);
         self.check_amplitudes(&mut findings);
         self.check_shared_rigid_bodies(mesh, &mut findings);
@@ -3113,11 +3119,11 @@ mod tests {
     fn cyclic_symmetry_needs_valid_sectors_and_nodal_diameters() {
         let mesh = cubes(2, true);
         let mut model = model(&mesh);
+        // About the z axis through the origin: node 2 lies at (1, 0, 0), node 1 on the axis.
         let mut tie = crate::Tie::new("Tie-1");
-        tie.cyclic = Some(crate::CyclicSymmetry {
-            sectors: 1,
-            ..Default::default()
-        });
+        tie.master = Region::Nodes(vec![2]);
+        tie.slave = Region::Nodes(vec![1]);
+        tie.cyclic = Some(crate::CyclicSymmetry::default());
         model.ties.push(tie);
         let mut frequency = Step::new_frequency("Step-2");
         frequency.boundary_conditions = model.steps[0].boundary_conditions.clone();
@@ -3131,12 +3137,20 @@ mod tests {
                 .map(|f| f.item)
                 .collect()
         };
-        // One sector, and nodal diameters beyond the 0 sectors / 2 it carries.
-        assert_eq!(cyclic(&model), [ModelItem::Tie(0), ModelItem::Step(1)]);
-        // Twelve sectors carry up to 6.
-        model.ties[0].cyclic.as_mut().unwrap().sectors = 12;
+        // A side on the axis has no angle.
+        assert_eq!(cyclic(&model), [ModelItem::Tie(0)]);
+        // (2, 1, 0) is 26.6 degrees from the master side: no whole number of sectors.
+        model.ties[0].slave = Region::Nodes(vec![11]);
+        assert_eq!(cyclic(&model), [ModelItem::Tie(0)]);
+        // 90 degrees are four sectors, carrying the nodal diameters up to 2.
+        model.ties[0].slave = Region::Nodes(vec![4]);
         assert_eq!(cyclic(&model), [ModelItem::Step(1)]);
-        model.ties[0].cyclic.as_mut().unwrap().sectors = 14;
+        // 45 degrees are eight sectors, up to 4.
+        model.ties[0].slave = Region::Nodes(vec![3]);
+        assert_eq!(cyclic(&model), [ModelItem::Step(1)]);
+        if let StepKind::Frequency(f) = &mut model.steps[1].kind {
+            f.nodal_diameters = Some([0, 4]);
+        }
         assert_eq!(cyclic(&model), []);
     }
 

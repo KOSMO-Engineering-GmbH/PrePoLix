@@ -7,11 +7,12 @@ use egui::{RichText, Ui};
 use plx_mesh::FeMesh;
 use plx_model::{
     ContactMethod, ContactPair, CyclicSymmetry, FeModel, Friction, GapConductance,
-    InteractionProperty, Quantity, Region, SurfaceBehavior, SurfaceInteraction, Tie, UnitSystem,
+    InteractionProperty, Quantity, Region, SectorDisplay, SurfaceBehavior, SurfaceInteraction, Tie,
+    UnitSystem,
 };
 
 use crate::icons::{self, Icon};
-use crate::model::{Highlight, Model};
+use crate::model::{CyclicPreview, Highlight, Model};
 use crate::numeric;
 use crate::selection::Target;
 use crate::setup::{FACE_SOURCES, RegionDraft, region_highlight};
@@ -145,7 +146,13 @@ fn optional_row(
 }
 
 /// The properties of a tie below the constraint dialog's type list.
-pub fn tie_form(ui: &mut Ui, model: &Model, tie: &mut Tie, regions: &mut MasterSlave) {
+pub fn tie_form(
+    ui: &mut Ui,
+    model: &Model,
+    tie: &mut Tie,
+    regions: &mut MasterSlave,
+    sectors: &mut CyclicSectors,
+) {
     let length = (model.fe.properties.units, Quantity::Length);
     optional_row(
         ui,
@@ -165,15 +172,20 @@ pub fn tie_form(ui: &mut Ui, model: &Model, tie: &mut Tie, regions: &mut MasterS
     color_row(ui, "Slave color", &mut tie.slave_color);
     if !model.fe.properties.space.is_2d() || tie.cyclic.is_some() {
         cyclic_symmetry_rows(ui, model, &mut tie.cyclic);
+        if tie.cyclic.is_some() {
+            sector_rows(ui, model, tie, regions, sectors);
+        }
     }
 }
 
-/// PrePoMax's cyclic symmetry tie: the sector count, the shown sectors and the axis.
+/// PrePoMax's cyclic symmetry tie: the axis about which the sector repeats.
 fn cyclic_symmetry_rows(ui: &mut Ui, model: &Model, cyclic: &mut Option<CyclicSymmetry>) {
     ui.label("");
     let mut on = cyclic.is_some();
-    ui.checkbox(&mut on, "Cyclic symmetry")
-        .on_hover_text("The slave side is the master side rotated by one sector about the axis.");
+    ui.checkbox(&mut on, "Cyclic symmetry").on_hover_text(
+        "The slave side is the master side rotated by one sector about the axis. Pick the \
+         two cut faces of the sector as master and slave.",
+    );
     ui.end_row();
     if on != cyclic.is_some() {
         *cyclic = on.then(CyclicSymmetry::default);
@@ -181,13 +193,6 @@ fn cyclic_symmetry_rows(ui: &mut Ui, model: &Model, cyclic: &mut Option<CyclicSy
     let Some(cyclic) = cyclic else {
         return;
     };
-    ui.label("Number of sectors");
-    ui.add(crate::numeric::count(&mut cyclic.sectors).range(2..=10_000));
-    ui.end_row();
-    ui.label("Displayed sectors");
-    ui.add(crate::numeric::count(&mut cyclic.graph_sectors).range(1..=cyclic.sectors.max(1)))
-        .on_hover_text("Sectors the results are expanded to; all sectors show the whole part.");
-    ui.end_row();
     let units = model.fe.properties.units;
     ui.label(RichText::new("Axis point").strong());
     ui.end_row();
@@ -203,9 +208,99 @@ fn cyclic_symmetry_rows(ui: &mut Ui, model: &Model, cyclic: &mut Option<CyclicSy
         ui.add(numeric::drag_value(value).speed(0.1));
         ui.end_row();
     }
-    ui.label("");
-    ui.checkbox(&mut cyclic.check_angle, "Check the sector angle");
+}
+
+/// The number of sectors found from the cut faces, and what the results show of them.
+fn sector_rows(
+    ui: &mut Ui,
+    model: &Model,
+    tie: &mut Tie,
+    regions: &MasterSlave,
+    sectors: &mut CyclicSectors,
+) {
+    ui.label("Sectors");
+    match sectors.get(model, tie, regions) {
+        Some(Ok(n)) => {
+            let angle = 360.0 / f64::from(*n);
+            ui.label(format!("{n} ({} degrees each)", round_angle(angle)))
+                .on_hover_text(
+                    "360 degrees over the angle between the cut faces about the axis. The \
+                     3D view previews the whole part.",
+                );
+        }
+        Some(Err(problem)) => {
+            ui.add(
+                egui::Label::new(RichText::new(problem.as_str()).color(crate::style::error()))
+                    .wrap(),
+            );
+        }
+        None => {
+            ui.label("");
+        }
+    }
     ui.end_row();
+    let Some(cyclic) = &mut tie.cyclic else {
+        return;
+    };
+    ui.label("Results show");
+    ui.horizontal(|ui| {
+        ui.radio_value(&mut cyclic.display, SectorDisplay::Single, "Single sector")
+            .on_hover_text("Only the modelled sector (NGRAPH=1).");
+        ui.radio_value(&mut cyclic.display, SectorDisplay::All, "All sectors")
+            .on_hover_text("The results are expanded to the whole part (NGRAPH=N).");
+    });
+    ui.end_row();
+}
+
+/// A sector angle for the dialog: 30, 22.5 or 51.4286 degrees.
+fn round_angle(angle: f64) -> f64 {
+    (angle * 1e4).round() / 1e4
+}
+
+/// The number of sectors of the cyclic symmetry in a tie dialog, worked out again only when
+/// its sides or its axis change.
+#[derive(Default)]
+pub struct CyclicSectors {
+    key: Option<(Region, Region, CyclicSymmetry)>,
+    sectors: Option<Result<u32, String>>,
+}
+
+impl CyclicSectors {
+    /// `None` for a tie without cyclic symmetry.
+    pub fn get(
+        &mut self,
+        model: &Model,
+        tie: &Tie,
+        regions: &MasterSlave,
+    ) -> Option<&Result<u32, String>> {
+        let cyclic = tie.cyclic.as_ref()?;
+        let (master, slave) = regions.regions();
+        let key = (master, slave, cyclic.clone());
+        if self.key.as_ref() != Some(&key) {
+            let mut sides = Tie::new("");
+            (sides.master, sides.slave) = (key.0.clone(), key.1.clone());
+            sides.cyclic = Some(key.2.clone());
+            self.sectors = sides.cyclic_sectors(&model.mesh);
+            self.key = Some(key);
+        }
+        self.sectors.as_ref()
+    }
+
+    /// The whole part the dialog's sector stands for, drawn in the 3D view while it is open.
+    pub fn preview(
+        &mut self,
+        model: &Model,
+        tie: &Tie,
+        regions: &MasterSlave,
+    ) -> Option<CyclicPreview> {
+        let sectors = *self.get(model, tie, regions)?.as_ref().ok()?;
+        let cyclic = tie.cyclic.as_ref()?;
+        Some(CyclicPreview {
+            axis_point: cyclic.axis_point,
+            axis_direction: cyclic.axis_direction,
+            sectors,
+        })
+    }
 }
 
 pub fn contact_pair_form(

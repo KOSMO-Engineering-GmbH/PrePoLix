@@ -13,18 +13,24 @@ part. For a static step the tie makes both cut faces move alike (nodal diameter 
 Create a tie (@contacts) between the two cut faces of the sector and tick
 #ui("Cyclic symmetry") in its dialog. CalculiX rotates the master face by one sector about the
 axis onto the slave face (`*TIE, CYCLIC SYMMETRY` and `*CYCLIC SYMMETRY MODEL`); which face is
-which does not matter, as long as the sector angle is 360° divided by the number of sectors.
+which does not matter.
+
+The number of sectors is not entered: PrePoLix measures the angle between the two cut faces
+about the axis and divides 360° by it, 12 sectors for a 30° sector. CalculiX solves only sectors
+that close the full circle, so an angle that does not divide 360° (such as 25°) is an error in
+the dialog and in the model check; it usually means a wrong axis or a wrong face. While the
+dialog is open, the 3D view draws the other sectors as a wireframe around the meshed one, so the
+axis and the faces can be checked at a glance.
 
 #screenshot("cyclic-symmetry-tie.png", [Tie dialog with the cyclic symmetry of a 30° disk
-sector])
+sector; the wireframe previews the other eleven sectors])
 
 #fields(
-  [Number of sectors], [Sectors in 360° (`N`), 12 for a 30° sector.],
-  [Displayed sectors], [Sectors the results are expanded to (`NGRAPH`). All sectors show the
-    whole part; fewer keep large models small.],
   [Axis point / Axis direction], [A point on the axis of rotation and its direction.],
-  [Check the sector angle], [Lets CalculiX check that the angle between the cut faces fits the
-    number of sectors (`CHECK=NO` when unticked).],
+  [Sectors], [The number of sectors found from the cut faces (`N`), or why none fits.],
+  [Results show], [#ui("All sectors") expands the results to the whole part
+    (`NGRAPH=N`), #ui("Single sector") keeps only the meshed one, which keeps the results of
+    large models small.],
 )
 
 Only 3D models can be cyclic symmetric. The nodes of the slave face follow the master face, so
@@ -41,8 +47,8 @@ the nodal diameters 0 to $N\/2$; unticked, all of them are computed. The
 #screenshot("cyclic-symmetry-step.png", [Frequency step of a cyclic symmetric model, nodal
 diameters 0 to 3])
 
-The model check (@model-check) reports invalid sector settings, a cyclic symmetry tie in a 2D
-model and nodal diameters beyond $N\/2$.
+The model check (@model-check) reports cut faces that do not divide the full circle, a cyclic
+symmetry tie in a 2D model and nodal diameters beyond $N\/2$.
 
 === Results
 
