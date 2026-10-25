@@ -1585,7 +1585,7 @@ impl FeModel {
                     format!("{} is not preloaded in any step", bolt.name),
                 ));
             }
-            let cut = bolt.nodes(mesh);
+            let cut = self.bolt_cut_nodes(bolt, mesh);
             let on_cut = |region: &Region| -> bool {
                 let nodes = crate::bolt::side_nodes(region, mesh);
                 let on = nodes.iter().filter(|n| cut.contains(n)).count();
@@ -1623,8 +1623,10 @@ impl FeModel {
                         .any(|n| cut.contains(n))
                 });
                 if touches {
+                    // Shown at the bolt: detected regions have long names, the warning
+                    // sign after them is often out of sight.
                     findings.push(Finding::new(
-                        ModelItem::ContactRegion(r),
+                        ModelItem::Bolt(b),
                         Problem::BoltHeldAtCut,
                         format!("{} holds {} at its cut", region.name, bolt.name),
                     ));

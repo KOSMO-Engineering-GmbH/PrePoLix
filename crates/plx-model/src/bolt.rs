@@ -128,6 +128,9 @@ pub struct ResolvedBolt {
     pub cut_on_a: bool,
     /// Distance the tie looks for the other side within.
     pub tie_tolerance: Option<f64>,
+    /// The axis of a shank picked by its cylindrical faces and cut across its middle; the
+    /// direction of the preload unless the bolt gives one.
+    pub shank_axis: Option<[f64; 3]>,
     /// Why, in words, for the dialog.
     pub why: String,
 }
@@ -201,6 +204,11 @@ impl FeModel {
         if a.is_empty() && b.is_empty() {
             return Err("no faces of solid elements on the cut".into());
         }
+        if b.is_empty()
+            && let Some(shank) = Shank::of(&a, mesh)
+        {
+            return shank.cut(&a, mesh);
+        }
         let nodes = |faces: &[(ElementId, u8)]| -> BTreeSet<NodeId> {
             faces.iter().flat_map(|&f| face_nodes(mesh, f)).collect()
         };
@@ -214,6 +222,7 @@ impl FeModel {
                 tied_to: None,
                 cut_on_a: !a.is_empty(),
                 tie_tolerance: None,
+                shank_axis: None,
                 why: "The sides share their nodes: the mesh is cut between them.".into(),
             });
         }
@@ -233,6 +242,7 @@ impl FeModel {
             tied_to: Some(other.clone()),
             cut_on_a,
             tie_tolerance: (size > 0.0).then_some(0.25 * size),
+            shank_axis: None,
             why: format!(
                 "Two bodies: the mesh is cut on side {region}{} and tied to the other side.",
                 if size_a == size_b {
@@ -244,6 +254,17 @@ impl FeModel {
         })
     }
 
+    /// The nodes on the cut of a bolt: of both its sides, or of the faces the slice through
+    /// a shank cuts.
+    pub fn bolt_cut_nodes(&self, bolt: &Bolt, mesh: &FeMesh) -> BTreeSet<NodeId> {
+        match self.resolve_bolt(bolt, mesh) {
+            Ok(resolved) if resolved.shank_axis.is_some() => (resolved.cut_faces.iter())
+                .flat_map(|&f| face_nodes(mesh, f))
+                .collect(),
+            _ => bolt.nodes(mesh),
+        }
+    }
+
     /// The contact regions the active bolts replace, with the bolt: those with both sides
     /// mostly on the faces of a bolt's cut.
     pub fn replaced_contact_regions(&self, mesh: &FeMesh) -> BTreeMap<usize, usize> {
@@ -253,7 +274,7 @@ impl FeModel {
         }
         let bolts: Vec<(usize, BTreeSet<NodeId>)> = (self.bolts.iter().enumerate())
             .filter(|(_, b)| b.active)
-            .map(|(i, b)| (i, b.nodes(mesh)))
+            .map(|(i, b)| (i, self.bolt_cut_nodes(b, mesh)))
             .collect();
         for (r, region) in self.contact_regions.iter().enumerate() {
             let sides = region.regions().map(|side| side_nodes(side, mesh));
@@ -330,7 +351,7 @@ impl FeModel {
                         value,
                         by_displacement,
                         lock,
-                        direction: bolt.axis,
+                        direction: bolt.axis.or(resolved.shank_axis),
                     },
                     amplitude: None,
                     factor_amplitude: None,
@@ -415,7 +436,8 @@ fn face_nodes(mesh: &FeMesh, (element, face): (ElementId, u8)) -> Vec<NodeId> {
         .collect()
 }
 
-/// Outward normal (not unit) and area of an element face.
+/// Normal of an element face by the order of its corners, which points into the element
+/// for CalculiX's faces; its length is the area.
 fn face_normal(mesh: &FeMesh, (element, face): (ElementId, u8)) -> Option<[f64; 3]> {
     let element = mesh.element(element)?;
     let topology = element.faces().get(usize::from(face).checked_sub(1)?)?;
@@ -459,4 +481,267 @@ fn mean_size(faces: &[(ElementId, u8)], mesh: &FeMesh) -> f64 {
     } else {
         (areas.iter().sum::<f64>() / areas.len() as f64).sqrt()
     }
+}
+
+/// A bolt shank picked by its cylindrical faces.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Shank {
+    axis: [f64; 3],
+    /// A point on the axis.
+    centre: [f64; 3],
+    radius: f64,
+    /// Where the faces end along the axis, as distances from the origin.
+    start: f64,
+    end: f64,
+}
+
+impl Shank {
+    /// The shank whose cylindrical faces these are; `None` for faces that are not part of a
+    /// cylinder, such as the flat faces of a cut. The axis is the direction the faces'
+    /// normals are all square to: the eigenvector of the smallest eigenvalue of the sum of
+    /// `n nᵀ` weighted by the face areas.
+    fn of(faces: &[(ElementId, u8)], mesh: &FeMesh) -> Option<Shank> {
+        let normals: Vec<([f64; 3], [f64; 3])> = (faces.iter())
+            .filter_map(|&f| Some((face_centre(mesh, f)?, face_normal(mesh, f)?)))
+            .collect();
+        let mut m = [[0.0; 3]; 3];
+        let mut total = 0.0;
+        for (_, n) in &normals {
+            let area = norm(*n);
+            if area == 0.0 {
+                continue;
+            }
+            total += area;
+            for i in 0..3 {
+                for j in 0..3 {
+                    m[i][j] += n[i] * n[j] / area;
+                }
+            }
+        }
+        if total == 0.0 {
+            return None;
+        }
+        let (values, vectors) = symmetric_eigen(m);
+        let order = {
+            let mut order = [0, 1, 2];
+            order.sort_by(|&i, &j| values[i].total_cmp(&values[j]));
+            order
+        };
+        // A cylinder: the normals turn about one axis by a quarter turn at least.
+        if values[order[0]] > 0.05 * total || values[order[1]] < 0.1 * total {
+            return None;
+        }
+        let axis = vectors[order[0]];
+        // Centre and radius from the faces' centres and normals in the plane square to
+        // the axis: centre + radius * normal = face centre, by least squares.
+        let u = vectors[order[1]];
+        let v = vectors[order[2]];
+        let mut ata = [[0.0; 3]; 3];
+        let mut atb = [0.0; 3];
+        for (p, n) in &normals {
+            let unit = n.map(|c| c / norm(*n).max(f64::MIN_POSITIVE));
+            let (nu, nv) = (dot(unit, u), dot(unit, v));
+            let length = (nu * nu + nv * nv).sqrt();
+            if length == 0.0 {
+                continue;
+            }
+            let (nu, nv) = (nu / length, nv / length);
+            for (row, b) in [([1.0, 0.0, nu], dot(*p, u)), ([0.0, 1.0, nv], dot(*p, v))] {
+                for i in 0..3 {
+                    for j in 0..3 {
+                        ata[i][j] += row[i] * row[j];
+                    }
+                    atb[i] += row[i] * b;
+                }
+            }
+        }
+        let [cu, cv, radius] = solve3(ata, atb)?;
+        let (start, end) = (faces.iter())
+            .flat_map(|&f| face_nodes(mesh, f))
+            .filter_map(|n| mesh.node(n))
+            .map(|p| dot(p, axis))
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), t| {
+                (lo.min(t), hi.max(t))
+            });
+        let centre = [0, 1, 2].map(|i| cu * u[i] + cv * v[i]);
+        (radius.abs() > 0.0 && start < end).then_some(Shank {
+            axis,
+            centre,
+            radius: radius.abs(),
+            start,
+            end,
+        })
+    }
+
+    /// The slice across the middle of the shank: the faces between the elements inside the
+    /// shank below the middle and those above it, on the elements below. The slice follows
+    /// the element faces, so the mesh needs no new nodes.
+    fn cut(&self, faces: &[(ElementId, u8)], mesh: &FeMesh) -> Result<ResolvedBolt, String> {
+        let elements: BTreeSet<ElementId> = faces.iter().map(|&(e, _)| e).collect();
+        let parts: Vec<&plx_mesh::Part> = (mesh.parts.iter())
+            .filter(|p| p.elements.iter().any(|e| elements.contains(e)))
+            .collect();
+        if parts.len() > 1 {
+            return Err("the faces of the shank belong to several parts".into());
+        }
+        let candidates: Vec<&plx_mesh::Element> = match parts.first() {
+            Some(part) => (part.elements.iter())
+                .filter_map(|&e| mesh.element(e))
+                .collect(),
+            None => mesh.elements().iter().collect(),
+        };
+        let middle = 0.5 * (self.start + self.end);
+        let reach = self.radius + 0.25 * mean_size(faces, mesh);
+        let mut below = Vec::new();
+        let mut above: BTreeMap<Vec<NodeId>, ()> = BTreeMap::new();
+        for element in candidates {
+            if element.shape.family() != plx_mesh::ElementFamily::Solid {
+                continue;
+            }
+            let Some(centre) = element_centre(mesh, element) else {
+                continue;
+            };
+            // Off the axis by the part of `centre - self.centre` square to it.
+            let off = [0, 1, 2].map(|i| centre[i] - self.centre[i]);
+            let along = dot(off, self.axis);
+            let radial = [0, 1, 2].map(|i| off[i] - along * self.axis[i]);
+            if norm(radial) > reach {
+                continue;
+            }
+            if dot(centre, self.axis) < middle {
+                below.push(element);
+            } else {
+                for face in element.faces() {
+                    above.insert(corner_key(element, face.corners), ());
+                }
+            }
+        }
+        let mut cut_faces = Vec::new();
+        for element in below {
+            for (i, face) in element.faces().iter().enumerate() {
+                if above.contains_key(&corner_key(element, face.corners)) {
+                    cut_faces.push((element.id, (i + 1) as u8));
+                }
+            }
+        }
+        if cut_faces.is_empty() {
+            return Err("no element faces across the middle of the shank".into());
+        }
+        // The cut faces are the upper faces of the elements below the middle: the preload
+        // pulls along their outward normal, the axis.
+        let axis = self.axis;
+        Ok(ResolvedBolt {
+            cut_faces,
+            tied_to: None,
+            cut_on_a: true,
+            tie_tolerance: None,
+            shank_axis: Some(axis),
+            why: "The shank is picked: the mesh is cut across the middle of its cylindrical \
+                  face, along the element faces."
+                .into(),
+        })
+    }
+}
+
+/// The corner nodes of an element face in order, which identify the face on both elements
+/// at it.
+fn corner_key(element: &plx_mesh::Element, corners: &[usize]) -> Vec<NodeId> {
+    let mut key: Vec<NodeId> = (corners.iter())
+        .filter_map(|&i| element.nodes.get(i).copied())
+        .collect();
+    key.sort_unstable();
+    key
+}
+
+/// The mean of the corner nodes of an element face.
+fn face_centre(mesh: &FeMesh, (element, face): (ElementId, u8)) -> Option<[f64; 3]> {
+    let element = mesh.element(element)?;
+    let topology = element.faces().get(usize::from(face).checked_sub(1)?)?;
+    mean_point(
+        mesh,
+        topology
+            .corners
+            .iter()
+            .filter_map(|&i| element.nodes.get(i)),
+    )
+}
+
+/// The mean of the nodes of an element.
+fn element_centre(mesh: &FeMesh, element: &plx_mesh::Element) -> Option<[f64; 3]> {
+    mean_point(mesh, element.nodes.iter())
+}
+
+fn mean_point<'a>(mesh: &FeMesh, nodes: impl Iterator<Item = &'a NodeId>) -> Option<[f64; 3]> {
+    let mut sum = [0.0; 3];
+    let mut count = 0.0;
+    for p in nodes.filter_map(|&n| mesh.node(n)) {
+        for (s, c) in sum.iter_mut().zip(p) {
+            *s += c;
+        }
+        count += 1.0;
+    }
+    (count > 0.0).then(|| sum.map(|s| s / count))
+}
+
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn norm(a: [f64; 3]) -> f64 {
+    dot(a, a).sqrt()
+}
+
+/// Eigenvalues and unit eigenvectors of a symmetric 3×3 matrix, by Jacobi rotations.
+fn symmetric_eigen(mut a: [[f64; 3]; 3]) -> ([f64; 3], [[f64; 3]; 3]) {
+    let mut v = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    for _ in 0..50 {
+        let (mut p, mut q, mut largest) = (0, 1, 0.0);
+        for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+            if a[i][j].abs() > largest {
+                (p, q, largest) = (i, j, a[i][j].abs());
+            }
+        }
+        let scale = a[0][0].abs() + a[1][1].abs() + a[2][2].abs();
+        if largest <= 1e-15 * scale.max(f64::MIN_POSITIVE) {
+            break;
+        }
+        let theta = 0.5 * (2.0 * a[p][q]).atan2(a[q][q] - a[p][p]);
+        let (sin, cos) = theta.sin_cos();
+        // a = Jᵀ a J with the rotation J in the plane p, q.
+        for row in &mut a {
+            let (akp, akq) = (row[p], row[q]);
+            row[p] = cos * akp - sin * akq;
+            row[q] = sin * akp + cos * akq;
+        }
+        let (row_p, row_q) = (a[p], a[q]);
+        a[p] = [0, 1, 2].map(|k| cos * row_p[k] - sin * row_q[k]);
+        a[q] = [0, 1, 2].map(|k| sin * row_p[k] + cos * row_q[k]);
+        for row in &mut v {
+            let (vp, vq) = (row[p], row[q]);
+            row[p] = cos * vp - sin * vq;
+            row[q] = sin * vp + cos * vq;
+        }
+    }
+    let vectors = [0, 1, 2].map(|k| [v[0][k], v[1][k], v[2][k]]);
+    ([a[0][0], a[1][1], a[2][2]], vectors)
+}
+
+/// The solution of a 3×3 linear system by Cramer's rule; `None` when it is singular.
+fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
+    let det = |m: [[f64; 3]; 3]| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    };
+    let d = det(a);
+    if d.abs() < 1e-300 {
+        return None;
+    }
+    Some([0, 1, 2].map(|k| {
+        let mut m = a;
+        for i in 0..3 {
+            m[i][k] = b[i];
+        }
+        det(m) / d
+    }))
 }

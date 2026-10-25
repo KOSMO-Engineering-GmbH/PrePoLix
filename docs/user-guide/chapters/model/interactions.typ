@@ -355,7 +355,8 @@ rest.
 #fields(
   [Side A, Side B], [The faces on the two sides of the cut. For a bolt split into two parts in
     the CAD geometry these are the two cut faces, for a bolt meshed in one piece the element
-    faces on one side of the cut (side B stays empty).],
+    faces on one side of the cut (side B stays empty). For a bolt that is not cut at all, pick
+    only the cylindrical face of its shank as side A, see below.],
   [Preload by], [#ui("Force") pulls the two sides together with the preload, #ui("Shortening")
     shortens the bolt by a length.],
   [Axis], [The direction of the bolt axis. Unticked, PrePoLix uses the normal of the cut;
@@ -378,6 +379,23 @@ an action of its own instead:
   [Lock], [Kept at its length at the end of the previous step (`*BOUNDARY, FIXED`).],
   [Open], [Loose: no preload, the cut carries no force.],
 )
+
+==== Picking the shank
+
+A bolt does not need to be cut in the CAD geometry: pick the cylindrical face of the free
+shank, between head and nut, as #ui("Side A") and leave #ui("Side B") empty. PrePoLix finds
+the axis of the shank from the face and cuts the bolt across the middle of the face. The cut
+follows the element faces of the mesh, like a staircase in a tetrahedral mesh, so the bolt
+needs no new mesh; the preload acts along the axis. #ui("Exported as") says when the shank was
+recognised. Hide the clamped parts (@view) to reach the shank in the 3D view.
+
+#screenshot("bolt-shank.png", [Only the shank of an uncut bolt picked: PrePoLix cuts it across
+  its middle])
+
+The bolt must be one part of its own, at least where the shank is. Its contact with the hole
+must let the shank slide: the contact detection usually finds the head, the nut and the shank
+as one bonded region with the clamped parts. The model check then warns at the bolt that the
+region holds it at its cut; make that region frictional or frictionless.
 
 ==== What PrePoLix writes
 

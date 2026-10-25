@@ -2959,7 +2959,7 @@ fn calculix_preloads_the_bolt_across_two_blocks() {
     let reaction: f64 = (bottom.iter())
         .map(|&node| node_value(&frd, "FORC", "F3", node))
         .sum();
-    assert!((reaction.abs() - force).abs() < 1e-3 * force, "{reaction}");
+    assert!((reaction + force).abs() < 1e-3 * force, "{reaction}");
     // The bolt force is printed under the bolt's name, in the preload step and while locked.
     let names: Vec<&str> = dat.sets.iter().map(|s| s.name.as_str()).collect();
     let bolt = (dat.sets.iter())
@@ -8578,4 +8578,190 @@ fn contact_outputs_of_regions_without_contact_elements_are_left_out() {
             "{behavior:?}"
         );
     }
+}
+
+/// A bolt shank of radius 5 and length 40, its axis tilted out of z: wedges around the axis
+/// and a ring of hexahedra, 12 around and 8 along, as part EALL. Both ends are held (node
+/// set FIX at the start, TIP at the end); the bolt is picked by its cylindrical faces.
+fn shank_bolt(preload: f64) -> (FeMesh, FeModel) {
+    let (around, along, radius, length) = (12, 8, 5.0, 40.0);
+    let (tilt, turn) = (0.4_f64, 0.7_f64);
+    // The axis z turned about x by `tilt`, then about z by `turn`.
+    let rotate = |[x, y, z]: [f64; 3]| -> [f64; 3] {
+        let (y, z) = (
+            y * tilt.cos() - z * tilt.sin(),
+            y * tilt.sin() + z * tilt.cos(),
+        );
+        let (x, y) = (
+            x * turn.cos() - y * turn.sin(),
+            x * turn.sin() + y * turn.cos(),
+        );
+        [x, y, z]
+    };
+    let per_layer = 1 + 2 * around;
+    let node = |layer: usize, ring: usize, i: usize| -> usize {
+        1 + layer * per_layer
+            + if ring == 0 {
+                0
+            } else {
+                1 + (ring - 1) * around + i % around
+            }
+    };
+    let mut text = String::from("*Node\n");
+    for layer in 0..=along {
+        let z = length * layer as f64 / along as f64;
+        let mut points = vec![(node(layer, 0, 0), [0.0, 0.0, z])];
+        for ring in 1..=2 {
+            for i in 0..around {
+                let angle = std::f64::consts::TAU * i as f64 / around as f64;
+                let r = radius * ring as f64 / 2.0;
+                points.push((node(layer, ring, i), [r * angle.cos(), r * angle.sin(), z]));
+            }
+        }
+        for (id, p) in points {
+            let [x, y, z] = rotate(p);
+            let _ = writeln!(text, "{id}, {x}, {y}, {z}");
+        }
+    }
+    let mut wedges = String::from("*Element, Type=C3D6, Elset=EALL\n");
+    let mut hexes = String::from("*Element, Type=C3D8, Elset=EALL\n");
+    let mut shank = Vec::new();
+    let mut id = 1;
+    for layer in 0..along {
+        for i in 0..around {
+            let (b, t) = (layer, layer + 1);
+            let _ = writeln!(
+                wedges,
+                "{id}, {}, {}, {}, {}, {}, {}",
+                node(b, 0, 0),
+                node(b, 1, i),
+                node(b, 1, i + 1),
+                node(t, 0, 0),
+                node(t, 1, i),
+                node(t, 1, i + 1)
+            );
+            id += 1;
+            let _ = writeln!(
+                hexes,
+                "{id}, {}, {}, {}, {}, {}, {}, {}, {}",
+                node(b, 1, i),
+                node(b, 2, i),
+                node(b, 2, i + 1),
+                node(b, 1, i + 1),
+                node(t, 1, i),
+                node(t, 2, i),
+                node(t, 2, i + 1),
+                node(t, 1, i + 1)
+            );
+            // Face 4 (nodes 2, 6, 7, 3) lies on the cylinder.
+            shank.push((id as ElementId, 4));
+            id += 1;
+        }
+    }
+    let ends = |layer: usize| -> String {
+        let ids: Vec<String> = (0..per_layer)
+            .map(|k| (1 + layer * per_layer + k).to_string())
+            .collect();
+        ids.join(",\n")
+    };
+    let _ = write!(
+        text,
+        "{wedges}{hexes}*Nset, Nset=FIX\n{}\n*Nset, Nset=TIP\n{}\n",
+        ends(0),
+        ends(along)
+    );
+    let mesh = crate::inp::read_inp_str(&text, None).unwrap().mesh;
+    let (_, mut model) = cantilever(tip_force());
+    let step = &mut model.steps[0];
+    step.loads.clear();
+    let mut tip = step.boundary_conditions[0].clone();
+    tip.name = "Fixed-2".into();
+    tip.region = Region::NodeSet("TIP".into());
+    step.boundary_conditions.push(tip);
+    let mut second = model.steps[0].clone();
+    second.name = "Step-2".into();
+    model.steps.push(second);
+    let mut bolt = plx_model::Bolt::new("Bolt-1");
+    bolt.side_a = Region::Faces(shank);
+    bolt.preload = plx_model::Preload::Force(preload);
+    model.bolts.push(bolt);
+    (mesh, model)
+}
+
+/// Picked by the cylindrical faces of its shank, a bolt is cut across the middle along the
+/// element faces and preloaded along its axis.
+#[test]
+fn a_bolt_picked_by_its_shank_is_cut_across_its_middle() {
+    let force = 1000.0;
+    let (mesh, model) = shank_bolt(force);
+    let resolved = model.resolve_bolt(&model.bolts[0], &mesh).unwrap();
+    // 12 wedges and 12 hexahedra below the middle.
+    assert_eq!(resolved.cut_faces.len(), 24, "{resolved:?}");
+    assert_eq!(resolved.tied_to, None);
+    let axis = resolved.shank_axis.unwrap();
+    let (tilt, turn) = (0.4_f64, 0.7_f64);
+    let expected = [
+        tilt.sin() * turn.sin(),
+        -tilt.sin() * turn.cos(),
+        tilt.cos(),
+    ];
+    let along: f64 = axis.iter().zip(expected).map(|(a, b)| a * b).sum();
+    assert!((along.abs() - 1.0).abs() < 1e-9, "{axis:?}");
+    // The cut faces lie in the middle: all their nodes half way along the axis.
+    for &(e, f) in &resolved.cut_faces {
+        for n in constraints::face_node_ids(&mesh, e, f) {
+            let p = mesh.node(n).unwrap();
+            let t: f64 = p.iter().zip(expected).map(|(a, b)| a * b).sum();
+            assert!((t - 20.0).abs() < 1e-9, "{t}");
+        }
+    }
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(!text.contains("*Tie"), "{text}");
+    let Some((frd, dat)) = run_ccx_frd_dat("schraube-schaft", &text) else {
+        return;
+    };
+    let reaction: [f64; 3] = std::array::from_fn(|i| {
+        (mesh.node_sets["FIX"].iter())
+            .map(|&node| node_value(&frd, "FORC", ["F1", "F2", "F3"][i], node))
+            .sum()
+    });
+    // The bolt is in tension: the support at its start pulls it away from the middle.
+    let axial: f64 = reaction.iter().zip(expected).map(|(a, b)| a * b).sum();
+    assert!((axial + force).abs() < 1e-3 * force, "{reaction:?}");
+    let bolt = dat.sets.iter().find(|s| s.name == "BOLT-1").unwrap();
+    let forces = &bolt
+        .field("FORCES")
+        .unwrap()
+        .component("RF1")
+        .unwrap()
+        .entries[0];
+    for value in &forces.values {
+        assert!((value - force).abs() < 1e-3 * force, "{:?}", forces.values);
+    }
+}
+
+/// A shank bonded into its hole cannot stretch: the model check warns at the bolt.
+#[test]
+fn the_model_check_warns_of_a_shank_bonded_into_its_hole() {
+    use plx_model::{MeshCheck, ModelItem, Problem};
+    let (mesh, mut model) = shank_bolt(1000.0);
+    let problems = |model: &FeModel| -> Vec<(ModelItem, Problem)> {
+        (model
+            .check(&mesh, &MeshCheck::new(&mesh, model.properties.space))
+            .into_iter())
+        .map(|f| (f.item, f.problem))
+        .collect()
+    };
+    assert_eq!(problems(&model), []);
+    let mut region = plx_model::ContactRegion::new("Bore", plx_model::ContactBehavior::Bonded);
+    region.side_a = model.bolts[0].side_a.clone();
+    region.side_b = Region::NodeSet("TIP".into());
+    model.contact_regions.push(region);
+    assert_eq!(
+        problems(&model),
+        [(ModelItem::Bolt(0), Problem::BoltHeldAtCut)]
+    );
+    // Sliding in its hole, the shank stretches.
+    model.contact_regions[0].behavior = plx_model::ContactBehavior::Frictionless;
+    assert_eq!(problems(&model), []);
 }

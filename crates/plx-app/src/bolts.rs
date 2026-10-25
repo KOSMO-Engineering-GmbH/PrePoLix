@@ -39,7 +39,17 @@ pub fn bolt_form(
     sides.ui_named(ui, model, ["Side A", "Side B"]);
     (bolt.side_a, bolt.side_b) = sides.regions();
     ui.label("");
-    ui.weak("The faces on the two sides of the cut through the shank.");
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "The faces on the two sides of the cut through the shank, or only the \
+                 cylindrical face of the shank as side A: PrePoLix then cuts the bolt across \
+                 its middle.",
+            )
+            .weak(),
+        )
+        .wrap(),
+    );
     ui.end_row();
     ui.label("Preload by");
     ui.horizontal(|ui| {
@@ -224,7 +234,7 @@ pub fn set_step_actions(fe: &mut FeModel, name: &str, actions: &[Option<BoltActi
     }
 }
 
-/// A bolt needs side A; side B may stay empty for a cut inside a mesh.
+/// A bolt needs side A; side B may stay empty for a cut inside a mesh or a picked shank.
 pub fn validate_bolt(sides: &MasterSlave) -> Result<(), String> {
     let empty = match sides.regions().0 {
         plx_model::Region::Faces(faces) => faces.is_empty(),
