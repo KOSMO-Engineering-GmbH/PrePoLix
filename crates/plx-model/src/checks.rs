@@ -44,6 +44,13 @@ pub enum Problem {
     /// Nodes in two rigid bodies, of rigid body constraints or displacements on a point:
     /// CalculiX keeps them in the first and only warns.
     SharedRigidBody,
+    /// Nodes of a rigid body constraint that a boundary condition holds directly: CalculiX
+    /// refuses them ("dependent side of a MPC and a SPC"), so the input file leaves them
+    /// out of the rigid body.
+    HeldRigidBodyNodes,
+    /// Slave nodes of a tie CalculiX did not tie: the master side lies opposite them but
+    /// further away than the position tolerance. Found in the output of a run.
+    TieNodesNotTied,
     /// Beam, truss, shell or membrane nodes in a rigid body or rigid displacement point:
     /// CalculiX 2.23 refuses them in a `*RIGID BODY`, so they are coupled by linear
     /// equations, which hold for small rotations only. Warned of in steps with large
@@ -174,6 +181,8 @@ impl Problem {
             | Problem::ContactOutputIgnored
             | Problem::DesignRegionIgnored
             | Problem::RigidBeamNodes
+            | Problem::HeldRigidBodyNodes
+            | Problem::TieNodesNotTied
             | Problem::NoCreep => Severity::Warning,
             _ => Severity::Error,
         }
@@ -211,6 +220,8 @@ impl Problem {
             Problem::NoPhysicalConstants => "Physical constants missing",
             Problem::NoRigidBody => "Reference point without rigid body",
             Problem::SharedRigidBody => "Nodes in several rigid bodies or remote points",
+            Problem::HeldRigidBodyNodes => "Rigid body on nodes held by a boundary condition",
+            Problem::TieNodesNotTied => "Nodes of a bonded contact not tied",
             Problem::RigidBeamNodes => "Beam or shell nodes in a rigid body",
             Problem::InvalidPlastic => "Invalid plasticity",
             Problem::InvalidCreep => "Invalid creep law",
@@ -280,11 +291,24 @@ impl Problem {
                  of the point these nodes lag behind the rigid motion. As with a rigid body, \
                  the rotations of beam and shell nodes are not coupled."
             }
+            Problem::TieNodesNotTied => {
+                "CalculiX ties a slave node of a bonded contact region or tie only if the \
+                 master side is closer than the position tolerance. These nodes are further \
+                 away: they stay unconnected, the parts can open there and the stresses next \
+                 to them are wrong. CalculiX lists the nodes in the file \
+                 <job>_WarnNodeMissTiedContact.nam of the working directory."
+            }
+            Problem::HeldRigidBodyNodes => {
+                "A node of a rigid body follows its reference point; a boundary condition on \
+                 it binds it a second time, which CalculiX refuses (\"dependent side of a MPC \
+                 and a SPC\"). PrePoLix leaves these nodes out of the rigid body: they keep \
+                 their boundary condition, and the rigid body is not held by it."
+            }
             Problem::SharedRigidBody => {
                 "A node can follow one rigid body or remote point only. Rigid body constraints \
                  and displacements on a point each tie their selection to it; where two share \
-                 nodes, CalculiX leaves these nodes in the first rigid body and the second \
-                 moves without them, or it stops on equations that depend on each other."
+                 nodes, PrePoLix leaves these nodes in the first rigid body and the second \
+                 moves without them."
             }
             Problem::NoRigidBody => {
                 "A boundary condition or load on a reference point acts on the rigid body the \
@@ -544,8 +568,11 @@ impl Problem {
             }
             Problem::MpcAndSpc => {
                 "A degree of freedom is both fixed by a boundary condition and bound as \
-                 the dependent degree of freedom of an equation (MPC), e.g. by user \
-                 *EQUATION keywords. CalculiX then aborts."
+                 the dependent degree of freedom of an equation (MPC). CalculiX then aborts. \
+                 PrePoLix keeps the equations and rigid bodies it writes itself off the \
+                 degrees of freedom that boundary conditions or other constraints hold (the \
+                 solver output lists what it changed), so the overlap comes from a \
+                 combination it does not resolve yet."
             }
             Problem::RotationIn2d => {
                 "Rotations (degrees of freedom 4 to 6) were fixed in a 2D model. \
@@ -614,6 +641,15 @@ impl Problem {
                  node instead of a rigid body. For small rotations nothing needs to change. \
                  A run that stopped with this message used an input file from an older \
                  PrePoLix: run the analysis again."
+            }
+            Problem::TieNodesNotTied => {
+                "Set the Tolerance of the contact region (or tie) a little above the largest \
+                 distance, or close the gap in the geometry. A gap that should stay open is no \
+                 bonded contact: use another behavior or Interface treatment there."
+            }
+            Problem::HeldRigidBodyNodes => {
+                "To hold the rigid body, put the boundary condition on its reference point, or \
+                 leave the nodes of the rigid body out of the boundary condition's selection."
             }
             Problem::SharedRigidBody => {
                 "Make the selections of the rigid bodies and displacements on a point separate, \
@@ -793,8 +829,9 @@ impl Problem {
                  initial increment) and refine the mesh at the contact surfaces."
             }
             Problem::MpcAndSpc => {
-                "Remove the boundary condition from the dependent nodes of the equation \
-                 or reformulate the equation."
+                "Look up the node of the message in the input file and leave it out of \
+                 the boundary condition or of the constraint, contact region or remote \
+                 displacement that binds it."
             }
             Problem::RotationIn2d => "In 2D models prescribe only U1 and U2.",
             Problem::UnknownKeyword => {
@@ -1346,11 +1383,25 @@ impl FeModel {
     /// displacements, one per selection as in the input file.
     fn check_shared_rigid_bodies(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
         let mut bodies: Vec<(ModelItem, &str, HashSet<NodeId>)> = Vec::new();
+        let mut held = None;
         for (i, constraint) in self.constraints.iter().enumerate() {
             if let Constraint::RigidBody(body) = constraint
                 && body.active
             {
-                let nodes = body.region.nodes(mesh).into_iter().collect();
+                let nodes: HashSet<NodeId> = body.region.nodes(mesh).into_iter().collect();
+                let held = held.get_or_insert_with(|| self.held_translations(mesh));
+                let count = nodes.iter().filter(|n| held.contains_key(n)).count();
+                if count > 0 {
+                    findings.push(Finding::new(
+                        ModelItem::Constraint(i),
+                        Problem::HeldRigidBodyNodes,
+                        format!(
+                            "{}: {count} nodes held by boundary conditions, left out of the \
+                             rigid body",
+                            body.name
+                        ),
+                    ));
+                }
                 bodies.push((ModelItem::Constraint(i), &body.name, nodes));
             }
         }
@@ -2794,6 +2845,39 @@ fn eigen(matrix: &[[f64; 6]; 6], n: usize) -> ([f64; 6], [[f64; 6]; 6]) {
     (values, vectors)
 }
 
+/// Warnings CalculiX gives in its output after any run that point to wrong results: slave
+/// nodes of ties it did not tie because the master side is too far away ("no tied MPC
+/// generated for node ... too far away; distance: ... tolerance: ...").
+pub fn diagnose_solver_warnings(lines: &[String]) -> Vec<Finding> {
+    let text = lines.join(" ").to_ascii_lowercase();
+    let marker = "too far away; distance:";
+    let (mut count, mut distance, mut tolerance) = (0usize, 0.0f64, 0.0f64);
+    for (at, _) in text.match_indices(marker) {
+        let mut words = text[at + marker.len()..].split_whitespace();
+        let Some(d) = words.next().and_then(|w| w.parse::<f64>().ok()) else {
+            continue;
+        };
+        count += 1;
+        distance = distance.max(d);
+        if words.next() == Some("tolerance:")
+            && let Some(t) = words.next().and_then(|w| w.parse::<f64>().ok())
+        {
+            tolerance = tolerance.max(t);
+        }
+    }
+    if count == 0 {
+        return Vec::new();
+    }
+    vec![Finding::new(
+        ModelItem::Analysis,
+        Problem::TieNodesNotTied,
+        format!(
+            "{count} slave nodes not tied: up to {distance:.4e} from the master side, \
+             tolerance {tolerance:.4e} (lengths in the units of the input file)"
+        ),
+    )]
+}
+
 /// Problems CalculiX reports in its output after a failed run, mapped to the explanations of
 /// the checks. Distorted elements and elements without material are also attached to their
 /// parts.
@@ -3667,6 +3751,59 @@ mod tests {
         assert!(
             found.contains(&(ModelItem::Load(0, 0), Problem::NoRigidBody)),
             "{found:?}"
+        );
+    }
+
+    #[test]
+    fn untied_slave_nodes_are_found_in_the_solver_output() {
+        let lines: Vec<String> = [
+            " *WARNING in gentiedmpc: no tied MPC",
+            "          generated for node       126382",
+            "          opposite master face found but",
+            "          too far away; distance:    1.6141397112631843E-003",
+            "          tolerance:    9.5492346099999999E-004",
+            " *WARNING in gentiedmpc: no tied MPC",
+            "          generated for node       126385",
+            "          opposite master face found but",
+            "          too far away; distance:    1.7738618684124165E-003",
+            "          tolerance:    9.5492346099999999E-004",
+        ]
+        .map(String::from)
+        .into();
+        let found = diagnose_solver_warnings(&lines);
+        assert_eq!(
+            problems(&found),
+            [(ModelItem::Analysis, Problem::TieNodesNotTied)]
+        );
+        assert_eq!(
+            found[0].detail,
+            "2 slave nodes not tied: up to 1.7739e-3 from the master side, tolerance \
+             9.5492e-4 (lengths in the units of the input file)"
+        );
+        assert!(diagnose_solver_warnings(&["Job finished".into()]).is_empty());
+    }
+
+    #[test]
+    fn a_rigid_body_on_held_nodes_is_warned_of() {
+        let mesh = cubes(1, false);
+        let mut model = model(&mesh);
+        model
+            .reference_points
+            .push(ReferencePoint::new("RP-1", [0.0; 3]));
+        let held = model.steps[0].boundary_conditions[0].region.nodes(&mesh);
+        let mut body = RigidBody::new("Rigid_Body-1", "RP-1");
+        body.region = Region::Nodes(held[..2].to_vec());
+        model.constraints.push(Constraint::RigidBody(body));
+        let found = check(&model, &mesh);
+        let finding = (found.iter())
+            .find(|f| f.problem == Problem::HeldRigidBodyNodes)
+            .unwrap();
+        assert_eq!(finding.item, ModelItem::Constraint(0));
+        assert_eq!(finding.severity(), Severity::Warning);
+        assert!(
+            finding.detail.contains("2 nodes held"),
+            "{}",
+            finding.detail
         );
     }
 

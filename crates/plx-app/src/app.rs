@@ -3893,6 +3893,17 @@ impl Workbench {
                     );
                 }
             }
+            // Warnings that point to wrong results, after any run.
+            let warnings = plx_model::diagnose_solver_warnings(analysis.output());
+            for finding in &warnings {
+                analysis.note(format!(
+                    "Warning: {}: {}. {}",
+                    finding.problem.title(),
+                    finding.detail,
+                    finding.problem.fix()
+                ));
+            }
+            self.solver_findings.extend(warnings);
         }
         if analysis.is_running() {
             ctx.request_repaint_after(std::time::Duration::from_millis(200));

@@ -7168,6 +7168,44 @@ fn a_bonded_region_is_a_tie_with_a_tolerance_of_the_mesh_size() {
     assert!(resolved.items[0].a_is_master);
 }
 
+/// A region a detection found keeps at least the distance the detection searched within as
+/// its automatic tolerance: a detection on the geometry finds faces further apart than a
+/// quarter of the mesh size, and CalculiX would leave their nodes untied ("too far away").
+#[test]
+fn calculix_ties_a_detected_gap_wider_than_a_quarter_of_the_mesh_size() {
+    let (mesh, mut model) = blocks_joined_by_region(1.5, plx_model::ContactBehavior::Bonded);
+    let mut detection = plx_model::ContactDetection::new("Detection-1");
+    detection.tolerance = Some(2.0);
+    model.contact_detections.push(detection);
+    model.contact_regions[0].detected_by = Some("Detection-1".into());
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(
+        text.contains("*Tie, Name=Region-1, Position tolerance=2\n"),
+        "{text}"
+    );
+    let resolved = model.resolve_contacts(&mesh);
+    assert!(
+        (resolved.items[0].why.iter())
+            .any(|w| w.starts_with("Tolerance: the distance the detection")),
+        "{:?}",
+        resolved.items[0].why
+    );
+    // Not found by a detection: a quarter of the mesh size.
+    model.contact_regions[0].detected_by = None;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("Position tolerance=1.25\n"), "{text}");
+    model.contact_regions[0].detected_by = Some("Detection-1".into());
+    let Some(frd) = run_ccx(
+        "region-detected-gap",
+        &write_inp(&mesh, &model, "").unwrap(),
+    ) else {
+        return;
+    };
+    let bottom: Vec<NodeId> = (1..=9).collect();
+    let reaction = node_sum(&frd, "FORC", "F3", &bottom);
+    assert!((reaction - 1000.0).abs() < 1.0, "{reaction}");
+}
+
 #[test]
 fn bonded_regions_sharing_slave_nodes_become_one_tie() {
     let (mesh, lower, upper) = two_blocks(0.0);

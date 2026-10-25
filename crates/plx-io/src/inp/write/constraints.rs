@@ -126,7 +126,7 @@ struct Writer {
     next_element: ElementId,
     /// Linear equations as (node, degree of freedom, factor) terms, the dependent term first,
     /// with the name of the constraint or contact region they belong to.
-    equations: Vec<(String, Vec<(NodeId, u8, f64)>)>,
+    equations: Vec<(String, Vec<super::dofs::Term>)>,
     /// Gap elements with their ground and surface node.
     gaps: Vec<(ElementId, [NodeId; 2])>,
     ground: Vec<NodeId>,
