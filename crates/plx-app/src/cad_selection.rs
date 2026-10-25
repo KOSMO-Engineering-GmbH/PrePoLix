@@ -484,6 +484,7 @@ mod tests {
         };
         let step = &mut model.fe.steps[0];
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Fix".into(),
             active: true,
             visible: true,
@@ -492,6 +493,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            distribution: None,
             name: "Pull".into(),
             active: true,
             visible: true,
@@ -664,6 +666,7 @@ mod tests {
         model.fe.sections.push(second);
         let step = &mut model.fe.steps[0];
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Fix".into(),
             active: true,
             visible: true,
@@ -672,6 +675,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            distribution: None,
             name: "Pull".into(),
             active: true,
             visible: true,

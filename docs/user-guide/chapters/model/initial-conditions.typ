@@ -8,7 +8,7 @@ The region can be a selection, parts, a node set or a surface.
 #fields(
   [Temperature], [A temperature (default 20), for example as reference for thermal expansion or
     as start value of a transient heat transfer analysis. Written as `*INITIAL CONDITIONS,
-    TYPE=TEMPERATURE`.],
+    TYPE=TEMPERATURE`. A #ui("Distribution") (@distributions) makes it vary over the region.],
   [Velocity], [The velocity `V1`, `V2`, `V3` of every node of the region at the start of a
     dynamic step (@dynamic-step). Written as `*INITIAL CONDITIONS, TYPE=VELOCITY`.],
   [Angular velocity], [A rotation of the region about an axis: #ui("X"), #ui("Y"), #ui("Z") is a

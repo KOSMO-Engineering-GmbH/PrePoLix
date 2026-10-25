@@ -58,6 +58,7 @@ pub enum TreeItem {
     /// A node tie, listed with the contact pairs.
     NodeTie(usize),
     Amplitude(usize),
+    Distribution(usize),
     InitialCondition(usize),
     Step(usize),
     /// A container inside a step, such as "BCs".
@@ -524,6 +525,10 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
             TreeItem::Amplitude(i),
             vec![TreeItem::Group("Amplitudes"), TreeItem::Model],
         ),
+        ModelItem::Distribution(i) => (
+            TreeItem::Distribution(i),
+            vec![TreeItem::Group("Distributions"), TreeItem::Model],
+        ),
         ModelItem::Material(i) => (
             TreeItem::Material(i),
             vec![TreeItem::Group("Materials"), TreeItem::Model],
@@ -577,6 +582,7 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Contact Pairs") => Some(NewItem::ContactPair),
         TreeItem::Group(CONTACT_REGIONS) => Some(NewItem::ContactRegion),
         TreeItem::Group("Amplitudes") => Some(NewItem::Amplitude),
+        TreeItem::Group("Distributions") => Some(NewItem::Distribution),
         TreeItem::Group("Initial Conditions") => Some(NewItem::InitialCondition),
         TreeItem::StepGroup(step, "BCs") => Some(NewItem::BoundaryCondition(step)),
         TreeItem::StepGroup(step, "Loads") => Some(NewItem::Load(step)),
@@ -667,6 +673,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
             | TreeItem::Tie(_)
             | TreeItem::NodeTie(_)
             | TreeItem::Amplitude(_)
+            | TreeItem::Distribution(_)
             | TreeItem::InitialCondition(_)
             | TreeItem::Step(_)
             | TreeItem::BoundaryCondition(..)
@@ -726,6 +733,7 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
         Mesh | Group("Parts") => matches!(item, Part(_)),
         Group("Constraints") => matches!(item, Constraint(_)),
         Group("Amplitudes") => matches!(item, Amplitude(_)),
+        Group("Distributions") => matches!(item, Distribution(_)),
         Group("Contacts") => matches!(
             item,
             SurfaceInteraction(_)
@@ -1914,7 +1922,10 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 tree.advanced_contacts(ui, &fe);
             });
         });
-        tree.leaf(ui, TreeItem::Group("Distributions"), "Distributions");
+        let distributions = (fe.distributions.iter().enumerate())
+            .map(|(i, d)| (TreeItem::Distribution(i), d.name.as_str()))
+            .collect();
+        tree.container(ui, "Distributions", distributions);
         let amplitudes = (fe.amplitudes.iter().enumerate())
             .map(|(i, a)| (TreeItem::Amplitude(i), a.name.as_str()))
             .collect();

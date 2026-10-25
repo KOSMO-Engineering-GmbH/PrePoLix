@@ -13,7 +13,8 @@ fields.
 #fields(
   [Type], [#ui("Temperature") is the only type.],
   [Source], [#ui("By value"): one temperature on the nodes of a region, with an optional
-    #ui("Amplitude") (@amplitudes) that scales it over the step. #ui("From result file"): the
+    #ui("Amplitude") (@amplitudes) that scales it over the step and an optional
+    #ui("Distribution") (@distributions) that makes it vary over the region. #ui("From result file"): the
     temperatures of all nodes from the `.frd` file of a heat transfer analysis on the same mesh,
     with the #ui("Step") of that file to read (counted from 1).],
   [Temperature, Region], [The value (default 20) and the nodes it applies to: a selection,

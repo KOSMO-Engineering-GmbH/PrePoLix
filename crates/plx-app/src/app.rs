@@ -3401,6 +3401,7 @@ impl Workbench {
                 true,
             ),
             (NewItem::Amplitude, "Create Amplitude …", true),
+            (NewItem::Distribution, "Create Distribution …", true),
             (NewItem::Step, "Create Step …", true),
             (
                 NewItem::BoundaryCondition(last_step.unwrap_or(0)),
@@ -7287,6 +7288,7 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
         | NewItem::Tie
         | NewItem::NodeTie => TreeItem::Group("Contacts"),
         NewItem::Amplitude => TreeItem::Group("Amplitudes"),
+        NewItem::Distribution => TreeItem::Group("Distributions"),
         NewItem::MeshSetupItem => TreeItem::Group("Mesh Setup"),
         _ => return None,
     })

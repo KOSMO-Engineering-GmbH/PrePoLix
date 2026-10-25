@@ -33,6 +33,7 @@ pub enum ModelItem {
     Analysis,
     InitialCondition(usize),
     Amplitude(usize),
+    Distribution(usize),
 }
 
 /// An item with a missing reference and why it is invalid.
@@ -129,6 +130,7 @@ impl FeModel {
                 let reason = (bc.region.missing_reference(mesh))
                     .or_else(|| self.missing_region_point(&bc.region))
                     .or_else(|| self.missing_amplitude([&bc.amplitude]))
+                    .or_else(|| self.missing_distribution(&bc.distribution))
                     .or_else(|| match &bc.kind {
                         // An unknown coordinate system, or no node in the pinball region.
                         crate::BoundaryKind::Displacement(displacement) => {
@@ -179,6 +181,7 @@ impl FeModel {
                         .or_else(|| {
                             self.missing_amplitude([&load.amplitude, &load.factor_amplitude])
                         })
+                        .or_else(|| self.missing_distribution(&load.distribution))
                 };
                 if let Some(reason) = reason {
                     invalid.push(Invalid {
@@ -214,7 +217,8 @@ impl FeModel {
                 let reason = match &field.kind {
                     crate::DefinedFieldKind::Temperature(_) => (field.region)
                         .missing_reference(mesh)
-                        .or_else(|| self.missing_amplitude([&field.amplitude])),
+                        .or_else(|| self.missing_amplitude([&field.amplitude]))
+                        .or_else(|| self.missing_distribution(&field.distribution)),
                     crate::DefinedFieldKind::TemperatureFromFile { file, .. } => (!file.is_file())
                         .then(|| format!("Result file {} does not exist", file.display())),
                 };
@@ -227,7 +231,9 @@ impl FeModel {
             }
         }
         for (i, condition) in self.initial_conditions.iter().enumerate() {
-            if let Some(reason) = condition.region.missing_reference(mesh) {
+            let reason = (condition.region.missing_reference(mesh))
+                .or_else(|| self.missing_distribution(&condition.distribution));
+            if let Some(reason) = reason {
                 invalid.push(Invalid {
                     item: ModelItem::InitialCondition(i),
                     reason,
@@ -238,6 +244,14 @@ impl FeModel {
             if let Some(reason) = amplitude.points_problem() {
                 invalid.push(Invalid {
                     item: ModelItem::Amplitude(i),
+                    reason,
+                });
+            }
+        }
+        for (i, distribution) in self.distributions.iter().enumerate() {
+            if let Some(reason) = distribution.problem() {
+                invalid.push(Invalid {
+                    item: ModelItem::Distribution(i),
                     reason,
                 });
             }
@@ -264,6 +278,13 @@ impl FeModel {
         let name = region.remote_point()?;
         (self.remote_displacement(mesh, name).is_none())
             .then(|| format!("Displacement {name} does not exist or has no point"))
+    }
+
+    /// The distribution reference, if it names no distribution of the model.
+    fn missing_distribution(&self, reference: &Option<String>) -> Option<String> {
+        (reference.as_deref())
+            .filter(|name| self.distribution(name).is_none())
+            .map(|name| format!("Distribution {name} does not exist"))
     }
 
     /// The first of the amplitude references that names no amplitude of the model.
@@ -436,6 +457,7 @@ mod tests {
     fn model() -> FeModel {
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Fixed-1".into(),
             active: true,
             visible: true,

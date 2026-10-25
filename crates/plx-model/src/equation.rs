@@ -1,7 +1,8 @@
-//! Equations of derived outputs in PrePoMax's syntax, which is NCalc's: `=STRESS.MISES / 235`,
-//! with the arithmetic and comparison operators, `? :`, and functions such as `Sqrt`, `Max`
-//! or `If`. Results are referred to as `FIELD.COMPONENT`; a name containing characters an
-//! identifier cannot hold, like `Limit-1.RATIO`, is written in brackets: `[Limit-1.RATIO]`.
+//! Equations of derived outputs and distributions in PrePoMax's syntax, which is NCalc's:
+//! `=STRESS.MISES / 235`, with the arithmetic and comparison operators, `? :`, and functions
+//! such as `Sqrt`, `Max` or `If`. Results are referred to as `FIELD.COMPONENT`; a name
+//! containing characters an identifier cannot hold, like `Limit-1.RATIO`, is written in
+//! brackets: `[Limit-1.RATIO]`.
 
 /// A parsed equation; its variables are numbered in order of appearance.
 #[derive(Clone, Debug, PartialEq)]
