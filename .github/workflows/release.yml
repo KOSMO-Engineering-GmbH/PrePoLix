@@ -19,7 +19,9 @@ env:
 
 jobs:
   windows-installer:
-    runs-on: ubuntu-latest
+    # Fest auf 24.04: ubuntu-latest ist im Oktober 2026 auf 26.04 gewechselt, dort (binutils 2.45,
+    # mingw-w64 13, CMake 4) scheitert der Windows-Build von OpenBLAS für ccx.
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
