@@ -226,6 +226,33 @@ pairs if you have any. The #ui("Stiffness factor") replaces the 10 of the normal
 The model check reports a manual contact pair whose method differs from the formulation, and
 mortar contact in a step other than static.
 
+#screenshot("connection-settings-weak-springs.png", [Connection settings with weak springs for
+  parts held only by contact])
+
+===== Weak springs <weak-springs>
+
+A part that only contacts hold, such as a block pressed onto another one with nothing else
+fixing it, can move freely until its contacts close, and frictionless contact never holds it
+along the surfaces. CalculiX often gives up on such a model with "too many cutbacks": with an
+initial gap, with frictionless contact in a step with Nlgeom, and node to surface contact
+lets the part drift sideways by arbitrary amounts. #ui("Weak springs") (on by default) gives
+every such part very soft springs to ground in the input file: in each direction 10#super[-6]
+E L in total, spread over all nodes of the part, E its Young's modulus and L its size (the
+geometric mean of its extents). The springs are not shown in the tree, and the model check no
+longer reports these parts. They count for contact pairs you define by hand too.
+
+The springs carry about a millionth of the load once the contacts are closed, and the force
+it takes to close an initial gap g, of the order 10#super[-6] E g L. Two things to keep in mind:
+
+- A part that really is a mechanism, e.g. pushed sideways on a frictionless contact, no longer
+  aborts but moves very far: the springs alone hold it. Huge displacements of a part held only
+  by contact mean that something is missing, not that the result is right.
+- In a frequency step after a static step the free motions of these parts are no longer at
+  0 Hz but at a few thousandths of the first eigenfrequency of the part.
+
+Turn #ui("Weak springs") off to see the warning again and hold the parts yourself, e.g. with a
+#ui("Spring") constraint (@constraints).
+
 ==== Contact worksheet
 
 #menu("Interaction", "Contact Worksheet ...") or #ui("Contact Worksheet ...") in the context menu

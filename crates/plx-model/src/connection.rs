@@ -310,6 +310,9 @@ pub struct ContactDefaults {
     pub formulation: Option<ContactMethod>,
     /// Normal stiffness of contacts as a factor on E / h.
     pub stiffness_factor: f64,
+    /// Parts held only by contact get weak springs to ground in the input file, see
+    /// [`FeModel::weak_springs`].
+    pub weak_springs: bool,
 }
 
 impl Default for ContactDefaults {
@@ -317,6 +320,7 @@ impl Default for ContactDefaults {
         Self {
             formulation: None,
             stiffness_factor: STIFFNESS_FACTOR,
+            weak_springs: true,
         }
     }
 }
@@ -326,6 +330,13 @@ impl Default for ContactDefaults {
 /// millimetres is about 50 E / h for elements of a millimetre and 1000 times softer in
 /// metres; a factor on E / h is the same in every unit system.
 pub const STIFFNESS_FACTOR: f64 = 10.0;
+/// Stiffness of the weak springs of a part held only by contact in each direction, in units
+/// of E L, E the part's Young's modulus and L its size: about the stiffness of the part
+/// itself times this factor. Tried with CalculiX 2.21 and 2.23 on a block resting on another
+/// one: 1e-6 solves every case (frictionless, initial gap, Nlgeom, all three formulations)
+/// and the springs take about 1e-6 of the load, plus a share of the order 1e-6 E g / (p L)
+/// for a gap g closed under the pressure p; 1e-8 fails node to surface contact again.
+pub const WEAK_SPRING_FACTOR: f64 = 1e-6;
 /// The factor of a bonded region modeled as a tied contact, which should not give way.
 pub const TIED_STIFFNESS_FACTOR: f64 = 100.0;
 /// Tie tolerance in units of the slave side's mesh size.

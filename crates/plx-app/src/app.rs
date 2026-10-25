@@ -1590,6 +1590,7 @@ impl AnalysisWindow {
         self.workbench.properties_window(&ctx);
         self.workbench.editor_window(&ctx);
         self.workbench.update_motion_preview(&ctx);
+        self.workbench.update_cyclic_preview();
         self.workbench.confirm_delete_window(&ctx);
         self.workbench.contact_search_window(&ctx);
         self.workbench.contact_worksheet_window(&ctx);
@@ -5321,6 +5322,18 @@ impl Workbench {
         }
     }
 
+    /// A cyclic symmetry tie dialog draws the other sectors of its part in the 3D view.
+    fn update_cyclic_preview(&mut self) {
+        let Some(model) = &mut self.model else {
+            return;
+        };
+        let preview = (self.editor.as_mut()).and_then(|e| e.cyclic_preview(model));
+        if model.cyclic_preview != preview {
+            model.cyclic_preview = preview;
+            self.results_changed |= self.tree_view == TreeView::FeModel;
+        }
+    }
+
     /// Highlights the region of the open dialog, or of the item selected in the tree; a
     /// selected part is outlined in the FE model and in the results alike.
     fn update_highlight(&mut self) {
@@ -6300,12 +6313,16 @@ impl Workbench {
 
     /// Plays the animation and shows its window; marks the scene for rebuilding.
     fn animate(&mut self, ctx: &egui::Context) {
-        if let Some((file, encoder)) = &self.animation_encoding
-            && let Some(result) = encoder.poll()
-        {
-            self.output
-                .push(result.unwrap_or_else(|err| format!("{file}: {err}")));
-            self.animation_encoding = None;
+        if let Some((file, encoder)) = &self.animation_encoding {
+            match encoder.poll() {
+                Some(result) => {
+                    self.output
+                        .push(result.unwrap_or_else(|err| format!("{file}: {err}")));
+                    self.animation_encoding = None;
+                }
+                // Looked at again soon: nothing else may draw a frame meanwhile.
+                None => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+            }
         }
         let model = match self.tree_view {
             TreeView::Results => self.results.get_mut(self.current_result),
