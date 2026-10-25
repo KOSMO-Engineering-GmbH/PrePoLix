@@ -11602,6 +11602,7 @@ mod tests {
         let mut fe = plx_model::FeModel::default();
         let mut step = plx_model::Step::new_static("Step-1");
         step.boundary_conditions.push(plx_model::BoundaryCondition {
+            distribution: None,
             name: "Fixed".into(),
             active: true,
             visible: true,
@@ -11770,6 +11771,7 @@ mod tests {
         let mut model = plx_model::FeModel::default();
         let mut step = plx_model::Step::new_static("Step-1");
         step.loads.push(plx_model::Load {
+            distribution: None,
             name: "Force-1".into(),
             active: true,
             visible: true,

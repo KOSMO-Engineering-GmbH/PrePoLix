@@ -1758,6 +1758,7 @@ mod tests {
             ..FeModel::default()
         };
         let fixed = plx_model::BoundaryCondition {
+            distribution: None,
             name: "Fixed-1".into(),
             active: true,
             visible: true,
@@ -1768,6 +1769,7 @@ mod tests {
         let mut spin = plx_model::Step::new_static("Step-1");
         spin.boundary_conditions.push(fixed.clone());
         spin.loads.push(plx_model::Load {
+            distribution: None,
             name: "Centrifugal-1".into(),
             active: true,
             visible: true,

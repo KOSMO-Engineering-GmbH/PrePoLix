@@ -562,6 +562,7 @@ pub fn apply_results(fe: &mut FeModel, link: &Link, global: u32, file: PathBuf) 
                 return false;
             };
             let field = DefinedField {
+                distribution: None,
                 name: LINKED_TEMPERATURES.into(),
                 active: true,
                 region: plx_model::Region::Parts(Vec::new()),
@@ -1597,6 +1598,7 @@ mod tests {
     fn steps_keep_the_global_step_a_results_link_set() {
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Submodel-1".into(),
             active: true,
             visible: true,
@@ -1810,6 +1812,7 @@ mod tests {
             path(&["Setup", "Steps", "Load", "Global results"])
         );
         target.steps[1].boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Cut".into(),
             active: true,
             visible: true,

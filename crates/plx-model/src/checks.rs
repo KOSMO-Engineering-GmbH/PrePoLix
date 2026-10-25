@@ -85,6 +85,8 @@ pub enum Problem {
     NoLoad,
     /// An amplitude that no boundary condition, load or defined field uses.
     UnusedAmplitude,
+    /// A distribution that no pressure or temperature uses.
+    UnusedDistribution,
     /// A radiation load in a model without absolute zero or Stefan-Boltzmann constant.
     NoPhysicalConstants,
     /// A defined temperature in a step whose materials have no thermal expansion.
@@ -160,6 +162,7 @@ impl Problem {
             | Problem::VelocityIgnored
             | Problem::NoLoad
             | Problem::UnusedAmplitude
+            | Problem::UnusedDistribution
             | Problem::NoExpansion
             | Problem::NoRotation
             | Problem::ContactIgnored
@@ -204,6 +207,7 @@ impl Problem {
             Problem::IncrementExceedsStep => "Increment larger than the step",
             Problem::NoLoad => "No load",
             Problem::UnusedAmplitude => "Amplitude not used",
+            Problem::UnusedDistribution => "Distribution not used",
             Problem::NoPhysicalConstants => "Physical constants missing",
             Problem::NoRigidBody => "Reference point without rigid body",
             Problem::SharedRigidBody => "Nodes in several rigid bodies or remote points",
@@ -425,6 +429,10 @@ impl Problem {
             Problem::NoLoad => {
                 "The step has neither an active load nor a prescribed displacement. The \
                  analysis runs, but all results are zero."
+            }
+            Problem::UnusedDistribution => {
+                "No pressure, temperature boundary condition, initial temperature or defined \
+                 temperature refers to this distribution, so it has no effect."
             }
             Problem::UnusedAmplitude => {
                 "No boundary condition, load or defined field refers to this amplitude, so it \
@@ -694,6 +702,10 @@ impl Problem {
                 "In the step choose an initial increment no larger than the time period."
             }
             Problem::NoLoad => "Under Loads create a load or activate a deactivated one.",
+            Problem::UnusedDistribution => {
+                "Choose the distribution in the Distribution field of the pressure or \
+                 temperature it belongs to, or delete it."
+            }
             Problem::UnusedAmplitude => {
                 "Choose the amplitude in the Amplitude field of the boundary condition, load or \
                  defined field it belongs to, or delete it."
@@ -1218,6 +1230,19 @@ impl FeModel {
         self.check_cyclic_symmetry(mesh, &mut findings);
         self.check_tied_contacts(&mut findings);
         self.check_amplitudes(&mut findings);
+        let used = self.used_distributions();
+        for (i, distribution) in self.distributions.iter().enumerate() {
+            if !used.contains(distribution.name.as_str()) {
+                findings.push(Finding::new(
+                    ModelItem::Distribution(i),
+                    Problem::UnusedDistribution,
+                    format!(
+                        "{} is not used by any load or temperature",
+                        distribution.name
+                    ),
+                ));
+            }
+        }
         self.check_shared_rigid_bodies(mesh, &mut findings);
         let trusses = Trusses::new(self, mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
@@ -3014,6 +3039,7 @@ mod tests {
     fn model(mesh: &FeMesh) -> FeModel {
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Fixed-1".into(),
             active: true,
             visible: true,
@@ -3022,6 +3048,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            distribution: None,
             name: "Force-1".into(),
             active: true,
             visible: true,
@@ -3165,6 +3192,7 @@ mod tests {
         let mesh = cubes(2, true);
         let mut model = model(&mesh);
         model.initial_conditions.push(crate::InitialCondition {
+            distribution: None,
             name: "Initial_Velocity-1".into(),
             active: true,
             region: Region::Nodes(vec![1]),
@@ -3246,6 +3274,7 @@ mod tests {
         let step = &mut model.steps[0];
         step.loads.clear();
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Submodel-1".into(),
             active: true,
             visible: true,
@@ -3273,6 +3302,7 @@ mod tests {
         let mesh = cubes(1, false);
         let mut model = model(&mesh);
         let symmetry = |nodes: Vec<NodeId>| BoundaryCondition {
+            distribution: None,
             name: "Symmetry-1".into(),
             active: true,
             visible: true,
@@ -3337,6 +3367,7 @@ mod tests {
         );
         // Two corners fixed leave the rotation about the line through them.
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Fixed-1".into(),
             active: true,
             visible: true,
@@ -3546,6 +3577,7 @@ mod tests {
         model.materials[0].density = None;
         assert_eq!(check(&model, &mesh), []);
         model.steps[0].loads.push(Load {
+            distribution: None,
             name: "Gravity-1".into(),
             active: true,
             visible: true,
@@ -3689,6 +3721,7 @@ mod tests {
         // A remote displacement holds no nodes of the mesh itself.
         let mut values = [Some(0.0); 6];
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Remote_Displacement-1".into(),
             active: true,
             visible: true,
@@ -3774,6 +3807,7 @@ mod tests {
         let mut model = model(&mesh);
         let step = &mut model.steps[0];
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Displacement-1".into(),
             active: true,
             visible: true,
@@ -3815,12 +3849,14 @@ mod tests {
         let parts: Vec<String> = mesh.parts.iter().map(|p| p.name.clone()).collect();
         model.steps[0].loads.clear();
         model.initial_conditions.push(crate::InitialCondition {
+            distribution: None,
             name: "Initial_Temperature-1".into(),
             active: true,
             region: Region::Parts(parts.clone()),
             kind: crate::InitialConditionKind::Temperature(20.0),
         });
         model.steps[0].defined_fields.push(crate::DefinedField {
+            distribution: None,
             name: "Defined_Temperature-1".into(),
             active: true,
             region: Region::Parts(parts),
@@ -4108,6 +4144,7 @@ mod tests {
         let bcs = &mut model.steps[0].boundary_conditions;
         bcs[0].region = Region::Nodes(vec![1]);
         bcs.push(BoundaryCondition {
+            distribution: None,
             name: "Pin".into(),
             active: true,
             visible: true,
@@ -4129,6 +4166,7 @@ mod tests {
         );
         // The missing rotations given by another boundary condition make a clamp.
         model.steps[0].boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Rotations".into(),
             active: true,
             visible: true,
@@ -4206,6 +4244,7 @@ mod tests {
         bcs[0].region = Region::Nodes(vec![1]);
         bcs[0].kind = BoundaryKind::displacement([Some(0.0), None, Some(0.0), None, None, None]);
         bcs.push(BoundaryCondition {
+            distribution: None,
             name: "Roller".into(),
             active: true,
             visible: true,
@@ -4214,6 +4253,7 @@ mod tests {
             amplitude: None,
         });
         bcs.push(BoundaryCondition {
+            distribution: None,
             name: "Plane".into(),
             active: true,
             visible: true,
@@ -4268,6 +4308,7 @@ mod tests {
         let mut model = model(&mesh);
         let mut step = Step::new_heat_transfer("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Temperature-1".into(),
             active: true,
             visible: true,
@@ -4276,6 +4317,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            distribution: None,
             name: "Flux-1".into(),
             active: true,
             visible: true,

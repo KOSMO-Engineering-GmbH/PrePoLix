@@ -604,6 +604,7 @@ mod tests {
     fn model() -> FeModel {
         let mut step = Step::new_static("Step-1");
         step.loads.push(Load {
+            distribution: None,
             name: "Force-1".into(),
             active: true,
             visible: true,
@@ -658,6 +659,7 @@ mod tests {
             speed: 5.0,
         };
         fe.initial_conditions.push(crate::InitialCondition {
+            distribution: None,
             name: "Spin".into(),
             active: true,
             region: Region::Nodes(vec![1]),
@@ -696,6 +698,7 @@ mod tests {
         fe.steps[0]
             .boundary_conditions
             .push(crate::BoundaryCondition {
+                distribution: None,
                 name: "Remote-1".into(),
                 active: true,
                 visible: true,

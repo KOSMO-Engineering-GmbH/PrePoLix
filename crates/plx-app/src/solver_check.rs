@@ -485,6 +485,7 @@ fn component_values(frd: &FrdImport, field: &str, component: &str, nodes: &[Node
 pub(crate) fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeModel {
     let mut step = Step::new_static("Step-1");
     step.boundary_conditions.push(BoundaryCondition {
+        distribution: None,
         name: "Fixed-1".into(),
         active: true,
         visible: true,
@@ -493,6 +494,7 @@ pub(crate) fn beam_model(mesh: &FeMesh, load: LoadKind, region: Region) -> FeMod
         amplitude: None,
     });
     step.loads.push(Load {
+        distribution: None,
         name: "Load-1".into(),
         active: true,
         visible: true,

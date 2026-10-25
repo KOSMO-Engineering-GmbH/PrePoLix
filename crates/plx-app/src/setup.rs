@@ -12,9 +12,9 @@ use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     AXIS_LABELS, Amplitude, BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition,
     BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CyclicSymmetry,
-    DefinedField, DefinedFieldKind, Displacement, DynamicProcedure, DynamicStep, Elastic,
-    EquationSolver, FeModel, Field, FieldOutput, Formulation, FrequencyStep, GLOBAL, Hardening,
-    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
+    DefinedField, DefinedFieldKind, Displacement, Distribution, DynamicProcedure, DynamicStep,
+    Elastic, EquationSolver, FeModel, Field, FieldOutput, Formulation, FrequencyStep, GLOBAL,
+    Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
     InitialConditionKind, ItemRef, Load, LoadKind, Material, MeshSet, ModalDamping,
     ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie, OutputDimension, OutputKind,
     PlasticPoint, Quantity, Region, RemoteBehavior, Section, SectionKind, SensitivityStep, SetKind,
@@ -26,6 +26,7 @@ use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_
 use crate::connections::{self, RegionView};
 use crate::constraint_dialog::ConstraintDraft;
 use crate::contacts::{self, MasterSlave};
+use crate::distribution_dialog::{self, DistributionView, distribution_row};
 use crate::expose;
 use crate::icons::{self, Icon};
 use crate::model::{Highlight, Hit, Model};
@@ -77,6 +78,8 @@ pub enum NewItem {
     NodeTie,
     /// A time curve for boundary conditions and loads.
     Amplitude,
+    /// A factor over the model for pressures and temperatures.
+    Distribution,
     /// A field output derived from results, created in the Results tree.
     ResultFieldOutput,
     /// A history output derived from results, created in the Results tree.
@@ -1086,6 +1089,7 @@ enum Draft {
     Tie(Tie, MasterSlave),
     NodeTie(NodeTie, RegionDraft),
     Amplitude(Amplitude, AmplitudeView),
+    Distribution(Distribution, DistributionView),
     /// A user-defined set; editing a set read from an input file makes it one, which then
     /// replaces the set of the name given.
     MeshSet(MeshSet, RegionDraft, Option<String>),
@@ -1742,6 +1746,7 @@ impl Editor {
                 let existing = names(&fe.initial_conditions, |i| &i.name);
                 Draft::InitialCondition(
                     InitialCondition {
+                        distribution: None,
                         name: next_name(TEMPERATURE, existing),
                         active: true,
                         region: Region::Nodes(Vec::new()),
@@ -1757,6 +1762,7 @@ impl Editor {
                 Draft::DefinedField(
                     step,
                     DefinedField {
+                        distribution: None,
                         name: next_name(DEFINED_TEMPERATURE, existing),
                         active: true,
                         region: Region::Nodes(Vec::new()),
@@ -1781,6 +1787,7 @@ impl Editor {
                 Draft::BoundaryCondition(
                     step,
                     BoundaryCondition {
+                        distribution: None,
                         name: next_name(name, existing),
                         active: true,
                         visible: true,
@@ -1801,6 +1808,7 @@ impl Editor {
                 Draft::Load(
                     step,
                     Load {
+                        distribution: None,
                         name: next_name(name, existing),
                         active: true,
                         visible: true,
@@ -1908,6 +1916,10 @@ impl Editor {
             NewItem::Amplitude => {
                 let name = next_name("Amplitude", names(&fe.amplitudes, |a| &a.name));
                 Draft::Amplitude(Amplitude::new(name), AmplitudeView::default())
+            }
+            NewItem::Distribution => {
+                let name = next_name("Distribution", names(&fe.distributions, |d| &d.name));
+                Draft::Distribution(Distribution::new(name), DistributionView::default())
             }
             NewItem::ResultFieldOutput
             | NewItem::ResultHistoryOutput
@@ -2103,6 +2115,13 @@ impl Editor {
                 let amplitude = fe.amplitudes.get(i)?.clone();
                 (Draft::Amplitude(amplitude, AmplitudeView::default()), i)
             }
+            TreeItem::Distribution(i) => {
+                let distribution = fe.distributions.get(i)?.clone();
+                (
+                    Draft::Distribution(distribution, DistributionView::default()),
+                    i,
+                )
+            }
             _ => return None,
         };
         Some(Self {
@@ -2138,6 +2157,7 @@ impl Editor {
             Draft::Tie(t, _) => ("Tie", &t.name),
             Draft::NodeTie(t, _) => ("Node Tie", &t.name),
             Draft::Amplitude(a, _) => ("Amplitude", &a.name),
+            Draft::Distribution(d, _) => ("Distribution", &d.name),
             Draft::MeshSet(set, _, _) => (set.kind.label(), &set.name),
         };
         let action = if self.index.is_some() {
@@ -2599,6 +2619,9 @@ impl Editor {
                         ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0))
                     });
                     ui.end_row();
+                    distribution_row(ui, "bc distribution", &mut bc.distribution, &model.fe);
+                } else {
+                    bc.distribution = None;
                 }
                 // Nodes of 2D models only move in the x-y plane; a point, of a rigid body or
                 // of a displacement, also turns about z in a plane model.
@@ -2737,6 +2760,10 @@ impl Editor {
                     });
                 ui.end_row();
                 show_dropped_note(ui);
+                // Only a pressure varies by a distribution.
+                if !matches!(load.kind, LoadKind::Pressure(_)) {
+                    load.distribution = None;
+                }
                 match &mut load.kind {
                     LoadKind::Moment(moment) => {
                         if two_d {
@@ -2771,6 +2798,8 @@ impl Editor {
                             )
                         });
                         ui.end_row();
+                        let reference = &mut load.distribution;
+                        distribution_row(ui, "load distribution", reference, &model.fe);
                     }
                     LoadKind::Force { value, each_node } => {
                         force_rows(ui, value, two_d, units);
@@ -3008,6 +3037,9 @@ impl Editor {
                         }
                     });
                 ui.end_row();
+                if condition.kind.is_velocity() {
+                    condition.distribution = None;
+                }
                 match &mut condition.kind {
                     InitialConditionKind::Temperature(t) => {
                         ui.label("Temperature");
@@ -3015,6 +3047,8 @@ impl Editor {
                             ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0))
                         });
                         ui.end_row();
+                        let reference = &mut condition.distribution;
+                        distribution_row(ui, "initial distribution", reference, &model.fe);
                     }
                     InitialConditionKind::Velocity(v) => {
                         vector_rows(ui, v, ["V1", "V2", "V3"], two_d, Quantity::Velocity, units);
@@ -3094,6 +3128,9 @@ impl Editor {
                     }
                 });
                 ui.end_row();
+                if !field.kind.takes_region() {
+                    field.distribution = None;
+                }
                 match &mut field.kind {
                     DefinedFieldKind::Temperature(t) => {
                         ui.label("Temperature");
@@ -3101,6 +3138,8 @@ impl Editor {
                             ui.add(numeric::quantity(t, units, Quantity::Temperature).speed(1.0))
                         });
                         ui.end_row();
+                        let reference = &mut field.distribution;
+                        distribution_row(ui, "defined field distribution", reference, &model.fe);
                         amplitude_row(
                             ui,
                             "Amplitude",
@@ -3181,6 +3220,10 @@ impl Editor {
             Draft::Constraint(c) => c.form(ui, model, &taken, self.index.is_none()),
             // Laid out by their own dialogs, see show.
             Draft::SurfaceInteraction(..) | Draft::Amplitude(..) => {}
+            Draft::Distribution(distribution, view) => {
+                name_row(ui, &mut distribution.name);
+                distribution_dialog::distribution_rows(ui, distribution, view, model);
+            }
             Draft::ContactPair(pair, regions) => {
                 name_row(ui, &mut pair.name);
                 contacts::contact_pair_form(ui, model, pair, regions);
@@ -3240,6 +3283,7 @@ impl Editor {
             Draft::Tie(..) => names(&fe.ties, |t| &t.name),
             Draft::NodeTie(..) => names(&fe.node_ties, |t| &t.name),
             Draft::Amplitude(..) => names(&fe.amplitudes, |a| &a.name),
+            Draft::Distribution(..) => names(&fe.distributions, |d| &d.name),
             // Against the mesh's sets, see validate_set.
             Draft::MeshSet(..) => Vec::new(),
         };
@@ -3269,6 +3313,7 @@ impl Editor {
             Draft::Tie(t, _) => &t.name,
             Draft::NodeTie(t, _) => &t.name,
             Draft::Amplitude(a, _) => &a.name,
+            Draft::Distribution(d, _) => &d.name,
             Draft::MeshSet(set, _, _) => &set.name,
         };
         if name.trim().is_empty() {
@@ -3354,6 +3399,7 @@ impl Editor {
                 }
             }
             Draft::Amplitude(amplitude, _) => amplitude_dialog::validate(amplitude)?,
+            Draft::Distribution(distribution, _) => distribution_dialog::validate(distribution)?,
             Draft::FieldOutput(_, output) => output.check_variables()?,
             Draft::HistoryOutput(_, output, region) => {
                 validate_history_output(output, region, fe)?;
@@ -3504,6 +3550,7 @@ impl Editor {
             Draft::Tie(..) => Some(TreeItem::Tie(fe.ties.len())),
             Draft::NodeTie(..) => Some(TreeItem::NodeTie(fe.node_ties.len())),
             Draft::Amplitude(..) => Some(TreeItem::Amplitude(fe.amplitudes.len())),
+            Draft::Distribution(..) => Some(TreeItem::Distribution(fe.distributions.len())),
             Draft::MeshSet(ref set, ..) => Some(match set.kind {
                 SetKind::Nodes => TreeItem::NodeSet(set.name.clone()),
                 SetKind::Elements => TreeItem::ElementSet(set.name.clone()),
@@ -3706,6 +3753,14 @@ impl Editor {
                 }
                 put(&mut fe.amplitudes, index, amplitude);
             }
+            Draft::Distribution(distribution, _) => {
+                // Pressures and temperatures follow a renamed distribution.
+                if let Some(old) = index.and_then(|i| fe.distributions.get(i)) {
+                    let old = old.name.clone();
+                    fe.rename_distribution(&old, &distribution.name);
+                }
+                put(&mut fe.distributions, index, distribution);
+            }
             Draft::MeshSet(mut set, region, replaces) => {
                 set.region = region.region();
                 // Items on the set follow a new name.
@@ -3813,6 +3868,7 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
         TreeItem::Tie(i) => remove(&mut fe.ties, i),
         TreeItem::NodeTie(i) => remove(&mut fe.node_ties, i),
         TreeItem::Amplitude(i) => remove(&mut fe.amplitudes, i),
+        TreeItem::Distribution(i) => remove(&mut fe.distributions, i),
         _ => false,
     }
 }
@@ -5694,6 +5750,7 @@ mod tests {
         let mut fe = FeModel::default();
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Displacement_Rotation-1".into(),
             active: true,
             visible: true,
@@ -5799,6 +5856,7 @@ mod tests {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         fe.steps[0].boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Fixed-1".into(),
             active: true,
             visible: true,
@@ -5807,6 +5865,7 @@ mod tests {
             amplitude: None,
         });
         fe.steps[0].loads.push(Load {
+            distribution: None,
             name: "Pressure-1".into(),
             active: true,
             visible: true,
@@ -5877,6 +5936,7 @@ mod tests {
         let step = &mut fe.steps[1];
         step.boundary_conditions = vec![
             BoundaryCondition {
+                distribution: None,
                 name: "Fixed-1".into(),
                 active: true,
                 visible: true,
@@ -5885,6 +5945,7 @@ mod tests {
                 amplitude: None,
             },
             BoundaryCondition {
+                distribution: None,
                 name: "Temperature-1".into(),
                 active: true,
                 visible: true,
@@ -5895,6 +5956,7 @@ mod tests {
         ];
         step.loads = vec![
             Load {
+                distribution: None,
                 name: "Pressure-1".into(),
                 active: true,
                 visible: true,
@@ -5904,6 +5966,7 @@ mod tests {
                 factor_amplitude: None,
             },
             Load {
+                distribution: None,
                 name: "Convective_Film-1".into(),
                 active: true,
                 visible: true,
@@ -5978,6 +6041,7 @@ mod tests {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         fe.steps[0].loads.push(Load {
+            distribution: None,
             name: "Force-1".into(),
             active: true,
             visible: true,
@@ -6001,6 +6065,7 @@ mod tests {
         let mut fe = FeModel::default();
         Editor::create(NewItem::Step, &fe).unwrap().apply(&mut fe);
         fe.steps[0].boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Fixed-1".into(),
             active: true,
             visible: true,
@@ -6070,6 +6135,7 @@ mod tests {
         }
         assert_eq!(fe.amplitudes[0].name, "Amplitude-1");
         let mut film = Load {
+            distribution: None,
             name: "Film-1".into(),
             active: true,
             visible: true,
@@ -6124,6 +6190,7 @@ mod tests {
         let (plate, columns) = (part("PLATTE"), part("STUETZEN"));
         let mut step = Step::new_static("Step-1");
         step.boundary_conditions.push(BoundaryCondition {
+            distribution: None,
             name: "Feet".into(),
             active: true,
             visible: true,
@@ -6132,6 +6199,7 @@ mod tests {
             amplitude: None,
         });
         step.loads.push(Load {
+            distribution: None,
             name: "Pressure".into(),
             active: true,
             visible: true,

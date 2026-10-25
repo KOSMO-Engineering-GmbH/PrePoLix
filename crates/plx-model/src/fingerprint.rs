@@ -42,6 +42,7 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         contact_detections: _,
         contact_defaults,
         amplitudes,
+        distributions,
         initial_conditions,
         steps,
         reference_points,
@@ -87,6 +88,7 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         hash.add_debug(contact_defaults);
     }
     hash.add_debug(amplitudes);
+    hash.add_debug(distributions);
     hash.add_debug(initial_conditions);
     // Temperatures read from results files count by their folder and file name too.
     let mut steps = steps[..count.min(steps.len())].to_vec();
@@ -196,6 +198,7 @@ mod tests {
         let mut fe = FeModel::default();
         let mut step = Step::new_static("Step-1");
         let field = |file: &str| crate::DefinedField {
+            distribution: None,
             name: "Temperatures".into(),
             active: true,
             region: crate::Region::Parts(Vec::new()),
