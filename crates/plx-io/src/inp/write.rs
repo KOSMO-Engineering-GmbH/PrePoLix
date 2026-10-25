@@ -370,11 +370,12 @@ pub fn model_keywords(
     }
     let mut element_blocks = elements(mesh, space, &lines);
     element_blocks.extend(generated.elements);
-    let node_sets = sets
-        .node_sets
-        .iter()
-        .map(|(name, ids)| Keyword::generated(id_list(&format!("*Nset, Nset={name}"), ids)))
-        .collect();
+    let node_sets =
+        (shortened_names(&sets.shortened).into_iter())
+            .chain(sets.node_sets.iter().map(|(name, ids)| {
+                Keyword::generated(id_list(&format!("*Nset, Nset={name}"), ids))
+            }))
+            .collect();
     let element_sets = sets
         .element_sets
         .iter()
@@ -660,6 +661,8 @@ struct Sets<'a> {
     surfaces: Vec<(String, Surface)>,
     /// Upper-case names in use; CalculiX names are case-insensitive.
     used: BTreeSet<String>,
+    /// Names too long for CalculiX as written, each with the name it stands for.
+    shortened: Vec<(String, String)>,
     /// Face element sets and node set of each element surface.
     surface_sets: BTreeMap<String, (Vec<(String, u8)>, String)>,
     /// The pre-tension node of each pre-tension load, by the load's name.
@@ -710,6 +713,7 @@ impl<'a> Sets<'a> {
                 .chain(mesh.element_sets.keys().map(|n| n.to_ascii_uppercase()))
                 .chain(mesh.surfaces.keys().map(|n| n.to_ascii_uppercase()))
                 .collect(),
+            shortened: Vec::new(),
             surface_sets: BTreeMap::new(),
             reference_nodes: BTreeMap::new(),
             remote_points: Vec::new(),
@@ -772,10 +776,17 @@ impl<'a> Sets<'a> {
 
     /// Next free name `<prefix>-<n>_<postfix>`, like PrePoMax's `GetNextNumberedKey`.
     fn free_name(&mut self, prefix: &str, postfix: &str) -> String {
-        (1..)
-            .map(|n| format!("{prefix}-{n}_{postfix}"))
-            .find(|name| self.used.insert(name.to_ascii_uppercase()))
-            .expect("unbounded range")
+        let (name, full) = (1..)
+            .map(|n| {
+                let head = format!("{prefix}-{n}_");
+                (fitted_name(&head, postfix), format!("{head}{postfix}"))
+            })
+            .find(|(name, _)| self.used.insert(name.to_ascii_uppercase()))
+            .expect("unbounded range");
+        if full != name {
+            self.shortened.push((name.clone(), full));
+        }
+        name
     }
 
     /// An element surface as PrePoMax builds it: one element set per face number and a node
@@ -3445,6 +3456,45 @@ fn number(value: f64) -> String {
 }
 
 /// Item names as CalculiX accepts them: no spaces, commas or other special characters.
+/// Longest set or surface name CalculiX reads.
+const NAME_LIMIT: usize = 80;
+
+/// Longest name of a set made for a region: an element surface appends the face (`_S6`) to
+/// its sets.
+const SET_NAME_LIMIT: usize = NAME_LIMIT - 3;
+
+/// Start of the comment that names what a shortened name stands for, which the reader of
+/// the `.dat` file puts back.
+pub const SHORTENED_NAME: &str = "** Shortened name: ";
+
+/// `head` and `postfix` as one name, which CalculiX reads: a name too long keeps its start
+/// and ends in a hash of the whole name, so that names alike in their start differ.
+fn fitted_name(head: &str, postfix: &str) -> String {
+    let full = format!("{head}{postfix}");
+    if full.len() <= SET_NAME_LIMIT {
+        return full;
+    }
+    // FNV-1a, case-insensitive like the names.
+    let hash = (full.bytes()).fold(0x811c_9dc5_u32, |hash, byte| {
+        (hash ^ u32::from(byte.to_ascii_uppercase())).wrapping_mul(0x0100_0193)
+    });
+    let keep = SET_NAME_LIMIT.saturating_sub(head.len() + 9);
+    let start: String = postfix.chars().take(keep).collect();
+    format!("{head}{start}_{hash:08X}")
+}
+
+/// The comments naming what each shortened name stands for.
+fn shortened_names(shortened: &[(String, String)]) -> Vec<Keyword> {
+    if shortened.is_empty() {
+        return Vec::new();
+    }
+    let mut text = String::new();
+    for (short, full) in shortened {
+        let _ = writeln!(text, "{SHORTENED_NAME}{short} = {full}");
+    }
+    vec![Keyword::generated(text)]
+}
+
 fn name(item: &str) -> String {
     item.chars()
         .map(|c| {

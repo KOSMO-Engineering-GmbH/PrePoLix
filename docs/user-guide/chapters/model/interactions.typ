@@ -106,7 +106,8 @@ side is A does not matter: PrePoLix chooses the master side itself.
   [Side A / Side B], [The two regions, picked like the master and slave of a contact pair. A
     region usually is the touching faces of one part.],
   [From definition], [Names the region by its type and parts, e.g.
-    #ui("Frictional - Block to Cap").],
+    #ui("Frictional - Block to Cap"). A name that starts with the type follows it when the
+    type changes, here or in the worksheet.],
   [Exported as], [What PrePoLix writes for CalculiX, with the derived stiffness and the reasons
     below in grey.],
 )

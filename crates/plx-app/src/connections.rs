@@ -1285,10 +1285,10 @@ pub fn worksheet(
             Change::Behavior(behavior) => {
                 // Frictional keeps its coefficient.
                 if behavior.name() != region.behavior.name() {
-                    region.behavior = behavior;
+                    region.set_behavior(behavior);
                 }
             }
-            Change::Friction(mu) => region.behavior = ContactBehavior::Frictional { mu },
+            Change::Friction(mu) => region.set_behavior(ContactBehavior::Frictional { mu }),
             Change::Flip => region.flip(),
             Change::Active(active) => region.active = active,
             Change::Rename => region.name = region.name_from_definition(&model.mesh),
@@ -1297,7 +1297,7 @@ pub fn worksheet(
         // A detected region the user changed is kept when detecting again.
         region.edited |= region.detected_by.is_some();
     }
-    if let Change::Rename = change {
+    if (fe.contact_regions.iter().zip(&names)).any(|(r, old)| r.name != *old) {
         // Names stay unique: a repeated one gets a number.
         for i in 0..fe.contact_regions.len() {
             let name = fe.contact_regions[i].name.clone();

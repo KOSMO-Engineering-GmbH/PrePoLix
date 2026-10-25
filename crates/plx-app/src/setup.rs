@@ -3242,7 +3242,13 @@ impl Editor {
                     }
                 });
                 ui.end_row();
+                let behavior = region.behavior;
                 connections::region_form(ui, model, region, sides, view);
+                // A name made from the definition follows the type.
+                if region.behavior.name() != behavior.name() {
+                    let new = std::mem::replace(&mut region.behavior, behavior);
+                    region.set_behavior(new);
+                }
             }
             Draft::ContactDetection(detection) => {
                 name_row(ui, &mut detection.name);
