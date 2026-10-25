@@ -6,6 +6,7 @@ mod animation;
 mod animation_export;
 mod app;
 mod arrows;
+mod bolts;
 mod cad_editor;
 mod cad_selection;
 mod campbell;

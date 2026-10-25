@@ -688,8 +688,10 @@ struct Sets<'a> {
     shortened: Vec<(String, String)>,
     /// Face element sets and node set of each element surface.
     surface_sets: BTreeMap<String, (Vec<(String, u8)>, String)>,
-    /// The pre-tension node of each pre-tension load, by the load's name.
+    /// The pre-tension node of each pre-tension load and the node set by which its force
+    /// and shortening are printed, by the load's name.
     pre_tension_nodes: BTreeMap<String, NodeId>,
+    pre_tension_sets: BTreeMap<String, String>,
     /// The original node of each copy a pre-tension cut made.
     cut_originals: BTreeMap<NodeId, NodeId>,
     /// Node sets of submodel boundary conditions, with the first boundary condition naming
@@ -744,6 +746,7 @@ impl<'a> Sets<'a> {
             remote_points: Vec::new(),
             remote_names: BTreeMap::new(),
             pre_tension_nodes: BTreeMap::new(),
+            pre_tension_sets: BTreeMap::new(),
             cut_originals: BTreeMap::new(),
             submodel_sets: Vec::new(),
             transforms: Vec::new(),
@@ -1637,6 +1640,9 @@ fn pre_tension_sections(
             next_node += 1;
             generated.nodes.push((node, centre));
             sets.pre_tension_nodes.insert(load.name.clone(), node);
+            let set = sets.free_name("Internal_Selection", &name(&load.name));
+            sets.node_sets.push((set.clone(), vec![node]));
+            sets.pre_tension_sets.insert(load.name.clone(), set);
             let mut out = format!("** Name: {}\n", load.name);
             let mesh = sets.mesh;
             for mut equation in pre_tension::equations(cut, node) {
@@ -2669,6 +2675,16 @@ fn step_block<'f>(
             history_outputs.push(deactivated(&output.name));
         } else if let Some(keyword) = history_output(sets, output, pair_surfaces)? {
             history_outputs.push(keyword);
+        }
+    }
+    // The force of a bolt is the reaction of its pre-tension node, also while it is locked,
+    // and its shortening the node's displacement: shown under the name of the load.
+    for load in step.loads.iter().filter(|l| l.active) {
+        if let Some(set) = sets.pre_tension_sets.get(&load.name) {
+            history_outputs.push(Keyword::generated(format!(
+                "** Name: {}\n*Node print, Nset={set}\nRF, U\n",
+                load.name
+            )));
         }
     }
     // CalculiX writes all results of the step in one form: the node outputs follow the

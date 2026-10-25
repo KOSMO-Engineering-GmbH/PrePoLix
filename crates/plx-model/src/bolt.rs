@@ -163,10 +163,21 @@ impl LoweredBolts {
 const REPLACED_SHARE: f64 = 0.5;
 
 impl FeModel {
-    /// What the bolt does in the step `index`: the change of the step, else the preload in
-    /// the first active step that takes it, the lock after it and nothing before it.
-    /// `None` when the step takes no pre-tension or the bolt is open.
+    /// What the bolt does in the step `index`: the change of the step, else
+    /// [`FeModel::auto_bolt_action`]. `None` when the step takes no pre-tension or the bolt
+    /// is open.
     pub fn bolt_action(&self, bolt: &Bolt, index: usize) -> Option<BoltAction> {
+        let auto = self.auto_bolt_action(bolt, index)?;
+        let action = (self.steps[index].bolt_changes.iter())
+            .find(|c| c.bolt == bolt.name)
+            .map_or(auto, |c| c.action);
+        (action != BoltAction::Open).then_some(action)
+    }
+
+    /// What the bolt does in the step `index` without a change: the preload in the first
+    /// active step that takes it, the lock after it and nothing before it. `None` when the
+    /// step takes no pre-tension.
+    pub fn auto_bolt_action(&self, bolt: &Bolt, index: usize) -> Option<BoltAction> {
         let step = self.steps.get(index)?;
         if !step.active || !takes_pre_tension(step) {
             return None;
@@ -175,15 +186,11 @@ impl FeModel {
             .steps
             .iter()
             .position(|s| s.active && takes_pre_tension(s))?;
-        let action = (step.bolt_changes.iter())
-            .find(|c| c.bolt == bolt.name)
-            .map(|c| c.action)
-            .unwrap_or(match index.cmp(&first) {
-                std::cmp::Ordering::Less => BoltAction::Open,
-                std::cmp::Ordering::Equal => bolt.preload.into(),
-                std::cmp::Ordering::Greater => BoltAction::Lock,
-            });
-        (action != BoltAction::Open).then_some(action)
+        Some(match index.cmp(&first) {
+            std::cmp::Ordering::Less => BoltAction::Open,
+            std::cmp::Ordering::Equal => bolt.preload.into(),
+            std::cmp::Ordering::Greater => BoltAction::Lock,
+        })
     }
 
     /// How the sides of the bolt are joined: the side with the finer mesh is cut, the other
@@ -227,8 +234,12 @@ impl FeModel {
             cut_on_a,
             tie_tolerance: (size > 0.0).then_some(0.25 * size),
             why: format!(
-                "Two bodies: the mesh is cut on side {region} (finer mesh) and tied to the \
-                 other side."
+                "Two bodies: the mesh is cut on side {region}{} and tied to the other side.",
+                if size_a == size_b {
+                    ""
+                } else {
+                    " (finer mesh)"
+                }
             ),
         })
     }

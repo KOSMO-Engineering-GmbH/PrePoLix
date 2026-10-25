@@ -3336,6 +3336,9 @@ impl Workbench {
         if ui.button("Create Contact Region …").clicked() {
             kind = Some(NewItem::ContactRegion);
         }
+        if ui.button("Create Bolt …").clicked() {
+            kind = Some(NewItem::Bolt);
+        }
         if ui.button("Contact Worksheet …").clicked() {
             self.contact_worksheet = true;
         }
@@ -7295,6 +7298,7 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
         NewItem::Constraint => TreeItem::Group("Constraints"),
         NewItem::SurfaceInteraction
         | NewItem::ContactRegion
+        | NewItem::Bolt
         | NewItem::ContactPair
         | NewItem::Tie
         | NewItem::NodeTie => TreeItem::Group("Contacts"),

@@ -2953,13 +2953,29 @@ fn calculix_preloads_the_bolt_across_two_blocks() {
     let force = 1000.0;
     let (mesh, model, bottom) = bolted_blocks(force);
     let text = write_inp(&mesh, &model, "").unwrap();
-    let Some(frd) = run_ccx("schraube", &text) else {
+    let Some((frd, dat)) = run_ccx_frd_dat("schraube", &text) else {
         return;
     };
     let reaction: f64 = (bottom.iter())
         .map(|&node| node_value(&frd, "FORC", "F3", node))
         .sum();
     assert!((reaction.abs() - force).abs() < 1e-3 * force, "{reaction}");
+    // The bolt force is printed under the bolt's name, in the preload step and while locked.
+    let names: Vec<&str> = dat.sets.iter().map(|s| s.name.as_str()).collect();
+    let bolt = (dat.sets.iter())
+        .find(|s| s.name == "BOLT-1")
+        .unwrap_or_else(|| panic!("no bolt force in {names:?}"));
+    let forces = &bolt
+        .field("FORCES")
+        .unwrap()
+        .component("RF1")
+        .unwrap()
+        .entries[0];
+    let steps: Vec<u32> = bolt.rows.iter().map(|r| r.0).collect();
+    assert_eq!(steps, [1, 2], "{:?}", bolt.rows);
+    for value in &forces.values {
+        assert!((value - force).abs() < 1e-3 * force, "{:?}", forces.values);
+    }
 }
 
 /// A bolt meshed in one piece is cut at the faces inside it, without a tie.

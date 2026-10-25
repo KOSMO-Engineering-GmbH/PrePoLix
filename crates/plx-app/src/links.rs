@@ -622,7 +622,8 @@ pub fn entries(fe: &FeModel, category: &str) -> Vec<String> {
                 .chain(fe.surface_interactions.iter().map(|s| s.name.as_str()))
                 .chain(fe.contact_pairs.iter().map(|c| c.name.as_str()))
                 .chain(fe.ties.iter().map(|t| t.name.as_str()))
-                .chain(fe.node_ties.iter().map(|t| t.name.as_str())),
+                .chain(fe.node_ties.iter().map(|t| t.name.as_str()))
+                .chain(fe.bolts.iter().map(|b| b.name.as_str())),
         ),
         "Amplitudes" => names(&mut fe.amplitudes.iter().map(|a| a.name.as_str())),
         "Initial Conditions" => names(&mut fe.initial_conditions.iter().map(|c| c.name.as_str())),
@@ -774,6 +775,7 @@ fn category_fingerprint(hash: &mut Fnv, fe: &FeModel, category: &str, name: Opti
             add(hash, &fe.contact_pairs, |c| &c.name, name);
             add(hash, &fe.ties, |t| &t.name, name);
             add(hash, &fe.node_ties, |t| &t.name, name);
+            add(hash, &fe.bolts, |b| &b.name, name);
         }
         "Amplitudes" => add(hash, &fe.amplitudes, |a| &a.name, name),
         "Initial Conditions" => add(hash, &fe.initial_conditions, |c| &c.name, name),
@@ -914,6 +916,7 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
             );
             copy(&mut target.ties, &source.ties, |t| &t.name, name);
             copy(&mut target.node_ties, &source.node_ties, |t| &t.name, name);
+            copy(&mut target.bolts, &source.bolts, |b| &b.name, name);
         }
         "Amplitudes" => copy(
             &mut target.amplitudes,
@@ -1236,6 +1239,11 @@ fn category_items(fe: &FeModel, category: &str, name: Option<&str>) -> Vec<TreeI
                     .filter(|(_, t)| wanted(&t.name))
                     .map(|(i, _)| TreeItem::NodeTie(i)),
             );
+            items.extend(
+                (fe.bolts.iter().enumerate())
+                    .filter(|(_, b)| wanted(&b.name))
+                    .map(|(i, _)| TreeItem::Bolt(i)),
+            );
         }
         "Amplitudes" => items.extend(
             (fe.amplitudes.iter().enumerate())
@@ -1297,6 +1305,7 @@ pub fn path_of(fe: &FeModel, item: &TreeItem) -> Option<Vec<String>> {
         TreeItem::ContactRegion(i) => entry("Contacts", &fe.contact_regions.get(*i)?.name),
         TreeItem::Tie(i) => entry("Contacts", &fe.ties.get(*i)?.name),
         TreeItem::NodeTie(i) => entry("Contacts", &fe.node_ties.get(*i)?.name),
+        TreeItem::Bolt(i) => entry("Contacts", &fe.bolts.get(*i)?.name),
         TreeItem::Amplitude(i) => entry("Amplitudes", &fe.amplitudes.get(*i)?.name),
         TreeItem::InitialCondition(i) => {
             entry("Initial Conditions", &fe.initial_conditions.get(*i)?.name)

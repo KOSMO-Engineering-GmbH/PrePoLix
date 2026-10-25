@@ -52,6 +52,8 @@ pub enum TreeItem {
     ContactRegion(usize),
     /// A search for contact regions under Connections, holding the regions it found.
     ContactDetection(usize),
+    /// A bolt preloaded across a cut, under Connections.
+    Bolt(usize),
     ContactPair(usize),
     /// A tie of two surfaces, listed with the contact pairs.
     Tie(usize),
@@ -446,6 +448,7 @@ fn can_deactivate(item: &TreeItem) -> bool {
             | TreeItem::DefinedField(..)
             | TreeItem::Constraint(_)
             | TreeItem::ContactRegion(_)
+            | TreeItem::Bolt(_)
             | TreeItem::ContactPair(_)
             | TreeItem::Tie(_)
             | TreeItem::NodeTie(_)
@@ -515,7 +518,14 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
                 TreeItem::Model,
             ],
         ),
-        ModelItem::Bolt(_) => (TreeItem::Group("Contacts"), vec![TreeItem::Model]),
+        ModelItem::Bolt(i) => (
+            TreeItem::Bolt(i),
+            vec![
+                TreeItem::Group(BOLTS),
+                TreeItem::Group("Contacts"),
+                TreeItem::Model,
+            ],
+        ),
         ModelItem::BoundaryCondition(s, i) => (TreeItem::BoundaryCondition(s, i), step(s, "BCs")),
         ModelItem::Load(s, i) => (TreeItem::Load(s, i), step(s, "Loads")),
         ModelItem::HistoryOutput(s, i) => {
@@ -568,6 +578,8 @@ fn advanced_contacts() -> Vec<TreeItem> {
 
 /// The container of the contact regions, under Connections (the group "Contacts").
 pub const CONTACT_REGIONS: &str = "Contact Regions";
+/// The container of the bolts, under Connections.
+pub const BOLTS: &str = "Bolts";
 /// The container of the keyword-near contact objects under Connections: surface
 /// interactions, contact pairs, ties and node ties.
 pub const ADVANCED_CONTACTS: &str = "Advanced";
@@ -582,6 +594,7 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
         TreeItem::Group("Surface Interactions") => Some(NewItem::SurfaceInteraction),
         TreeItem::Group("Contact Pairs") => Some(NewItem::ContactPair),
         TreeItem::Group(CONTACT_REGIONS) => Some(NewItem::ContactRegion),
+        TreeItem::Group(BOLTS) => Some(NewItem::Bolt),
         TreeItem::Group("Amplitudes") => Some(NewItem::Amplitude),
         TreeItem::Group("Distributions") => Some(NewItem::Distribution),
         TreeItem::Group("Initial Conditions") => Some(NewItem::InitialCondition),
@@ -670,6 +683,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
             | TreeItem::SurfaceInteraction(_)
             | TreeItem::ContactRegion(_)
             | TreeItem::ContactDetection(_)
+            | TreeItem::Bolt(_)
             | TreeItem::ContactPair(_)
             | TreeItem::Tie(_)
             | TreeItem::NodeTie(_)
@@ -740,15 +754,18 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
             SurfaceInteraction(_)
                 | ContactRegion(_)
                 | ContactDetection(_)
+                | Bolt(_)
                 | ContactPair(_)
                 | Tie(_)
                 | NodeTie(_)
                 | Group("Surface Interactions")
                 | Group("Contact Pairs")
                 | Group(CONTACT_REGIONS)
+                | Group(BOLTS)
                 | Group(ADVANCED_CONTACTS)
         ),
         Group(CONTACT_REGIONS) => matches!(item, ContactRegion(_)),
+        Group(BOLTS) => matches!(item, Bolt(_)),
         Group(ADVANCED_CONTACTS) => matches!(
             item,
             SurfaceInteraction(_)
@@ -918,6 +935,8 @@ struct Tree<'a> {
     master_slave: HashSet<TreeItem>,
     /// The detection each detected contact region is shown under.
     detected: HashMap<usize, usize>,
+    /// The contact regions bolts replace, with the bolt.
+    replaced: std::collections::BTreeMap<usize, usize>,
     /// Constraints, boundary conditions and loads with a symbol in the 3D view, and whether
     /// it is shown; hidden ones get PrePoMax's hide icon.
     symbols: HashMap<TreeItem, bool>,
@@ -1122,6 +1141,9 @@ impl Tree<'_> {
                     if ui.button("Create Contact Region …").clicked() {
                         self.response.create = Some(NewItem::ContactRegion);
                     }
+                    if ui.button("Create Bolt …").clicked() {
+                        self.response.create = Some(NewItem::Bolt);
+                    }
                     if ui.button("Connection Settings …").clicked() {
                         self.response.open = Some(item.clone());
                     }
@@ -1324,6 +1346,7 @@ impl Tree<'_> {
             TreeItem::Group("Surface Interactions") => TreeIcon::SurfaceInteraction,
             TreeItem::Group("Contact Pairs") => TreeIcon::ContactPair,
             TreeItem::Group(CONTACT_REGIONS) => TreeIcon::ContactPair,
+            TreeItem::Group(BOLTS) => TreeIcon::Load,
             TreeItem::ContactDetection(_) => TreeIcon::Contacts,
             TreeItem::Group("Distributions") => TreeIcon::Distribution,
             TreeItem::Group("Amplitudes") => TreeIcon::Amplitude,
@@ -1755,6 +1778,7 @@ pub fn show(
         symbols: HashMap::new(),
         master_slave: HashSet::new(),
         detected: HashMap::new(),
+        replaced: Default::default(),
         step_count: 0,
         step_names: Vec::new(),
         part_indices: Vec::new(),
@@ -1836,6 +1860,7 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
                 tree.detected.insert(r, d);
             }
         }
+        tree.replaced = model.replaced_regions();
         for finding in model.findings().into_iter().chain(solver.iter().cloned()) {
             let (item, mut containers) = tree_items(finding.item);
             if let TreeItem::ContactRegion(r) = item
@@ -1889,10 +1914,13 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             tree.inactive.insert(TreeItem::NodeTie(i));
         }
         for (i, region) in fe.contact_regions.iter().enumerate() {
-            if !region.active {
+            if !region.active || tree.replaced.contains_key(&i) {
                 tree.inactive.insert(TreeItem::ContactRegion(i));
             }
             tree.master_slave.insert(TreeItem::ContactRegion(i));
+        }
+        for (i, _) in (fe.bolts.iter().enumerate()).filter(|(_, b)| !b.active) {
+            tree.inactive.insert(TreeItem::Bolt(i));
         }
         let constraints = (fe.constraints.iter().enumerate())
             .map(|(i, c)| (TreeItem::Constraint(i), c.name()))
@@ -1903,21 +1931,37 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
             || !fe.contact_pairs.is_empty()
             || !fe.ties.is_empty()
             || !fe.node_ties.is_empty();
-        let open = advanced || !fe.contact_regions.is_empty() || !fe.contact_detections.is_empty();
+        let open = advanced
+            || !fe.contact_regions.is_empty()
+            || !fe.contact_detections.is_empty()
+            || !fe.bolts.is_empty();
+        // A region a bolt replaces says so after its name.
+        let region_names: Vec<String> = (fe.contact_regions.iter().enumerate())
+            .map(
+                |(r, region)| match tree.replaced.get(&r).and_then(|&b| fe.bolts.get(b)) {
+                    Some(bolt) => format!("{} (replaced by {})", region.name, bolt.name),
+                    None => region.name.clone(),
+                },
+            )
+            .collect();
         // The group keeps its name "Contacts", which links of the project schematic use.
         tree.branch(ui, contacts, "Connections", open, |tree, ui| {
             for (d, detection) in fe.contact_detections.iter().enumerate() {
-                let regions = (fe.contact_regions.iter().enumerate())
-                    .filter(|(r, _)| tree.detected.get(r) == Some(&d))
-                    .map(|(r, region)| (TreeItem::ContactRegion(r), region.name.as_str()))
+                let regions = (0..fe.contact_regions.len())
+                    .filter(|r| tree.detected.get(r) == Some(&d))
+                    .map(|r| (TreeItem::ContactRegion(r), region_names[r].as_str()))
                     .collect();
                 tree.detection(ui, d, &detection.name, regions);
             }
-            let regions = (fe.contact_regions.iter().enumerate())
-                .filter(|(r, _)| !tree.detected.contains_key(r))
-                .map(|(i, r)| (TreeItem::ContactRegion(i), r.name.as_str()))
+            let regions = (0..fe.contact_regions.len())
+                .filter(|r| !tree.detected.contains_key(r))
+                .map(|r| (TreeItem::ContactRegion(r), region_names[r].as_str()))
                 .collect();
             tree.container(ui, CONTACT_REGIONS, regions);
+            let bolts = (fe.bolts.iter().enumerate())
+                .map(|(i, b)| (TreeItem::Bolt(i), b.name.as_str()))
+                .collect();
+            tree.container(ui, BOLTS, bolts);
             let group = TreeItem::Group(ADVANCED_CONTACTS);
             tree.branch(ui, group, ADVANCED_CONTACTS, advanced, |tree, ui| {
                 tree.advanced_contacts(ui, &fe);
