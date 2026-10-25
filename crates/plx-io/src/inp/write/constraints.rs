@@ -33,13 +33,22 @@ pub(super) struct Generated {
     pub material: Option<Keyword>,
 }
 
-/// The elements, sections and equations of the active springs and supports; ties are written
-/// as `*Tie` by the caller.
-pub(super) fn springs(sets: &mut Sets, model: &FeModel) -> Result<Generated, WriteError> {
+/// Adds the elements, sections and equations of the active springs and supports to `out`,
+/// which holds what other constraints generated before; ties are written as `*Tie` by the
+/// caller. Their equations come last for the dependent degrees of freedom (see
+/// [`super::dofs`]).
+pub(super) fn springs(
+    sets: &mut Sets,
+    model: &FeModel,
+    out: &mut Generated,
+) -> Result<(), WriteError> {
     let mesh = sets.mesh;
     let mut writer = Writer {
-        out: Generated::default(),
-        next_node: mesh.node_ids().iter().max().map_or(1, |n| n + 1),
+        next_node: (mesh.node_ids().iter().copied())
+            .chain(out.nodes.iter().map(|(id, _)| *id))
+            .max()
+            .map_or(1, |n| n + 1),
+        out: std::mem::take(out),
         next_element: mesh
             .elements()
             .iter()
@@ -71,7 +80,7 @@ pub(super) fn springs(sets: &mut Sets, model: &FeModel) -> Result<Generated, Wri
             Constraint::Tie(_) | Constraint::NodeTie(_) => {}
         }
     }
-    let mut out = writer.out;
+    *out = writer.out;
     if !writer.gaps.is_empty() {
         let mut block = String::from("*Element, Type=GAPUNI\n");
         for (element, [a, b]) in &writer.gaps {
@@ -92,7 +101,11 @@ pub(super) fn springs(sets: &mut Sets, model: &FeModel) -> Result<Generated, Wri
             "*Material, Name={name}\n*Density\n1\n*Elastic\n1, 0\n*Plastic\n0, 0\n"
         )));
     }
-    for equation in writer.equations {
+    for (item, mut equation) in writer.equations {
+        let movable = |n: NodeId| mesh.node(n).is_some();
+        if !sets.dofs.claim_equation(&item, &mut equation, movable) {
+            continue;
+        }
         let mut text = format!("*Equation\n{}\n", equation.len());
         let terms: Vec<String> = (equation.iter())
             .map(|(node, dof, factor)| format!("{node}, {dof}, {}", number(*factor)))
@@ -104,15 +117,16 @@ pub(super) fn springs(sets: &mut Sets, model: &FeModel) -> Result<Generated, Wri
         }
         out.equations.push(Keyword::generated(text));
     }
-    Ok(out)
+    Ok(())
 }
 
 struct Writer {
     out: Generated,
     next_node: NodeId,
     next_element: ElementId,
-    /// Linear equations as (node, degree of freedom, factor) terms, the dependent term first.
-    equations: Vec<Vec<(NodeId, u8, f64)>>,
+    /// Linear equations as (node, degree of freedom, factor) terms, the dependent term first,
+    /// with the name of the constraint or contact region they belong to.
+    equations: Vec<(String, Vec<(NodeId, u8, f64)>)>,
     /// Gap elements with their ground and surface node.
     gaps: Vec<(ElementId, [NodeId; 2])>,
     ground: Vec<NodeId>,
@@ -230,7 +244,7 @@ impl Writer {
                     for dof in 1..=3 {
                         let mut equation = vec![(other, dof, 1.0)];
                         equation.extend(terms.iter().map(|&(n, f)| (n, dof, -f)));
-                        self.equations.push(equation);
+                        self.equations.push((spring.name.clone(), equation));
                     }
                     other
                 }
@@ -316,7 +330,7 @@ impl Writer {
                 }
             }
             held.insert(node);
-            self.equations.push(equation);
+            self.equations.push((region.name.clone(), equation));
         }
         Ok(())
     }

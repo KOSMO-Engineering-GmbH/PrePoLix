@@ -16,8 +16,8 @@ use plx_mesh::{
 use plx_model::{BeamOrientation, BeamProfile, BeamSection, Region, Section, SectionKind};
 
 pub use write::{
-    Keyword, KeywordKind, SHORTENED_NAME, WriteError, model_keywords, write_check_inp,
-    write_deformed_mesh_inp, write_inp, write_inp_with_sets_of, write_keywords,
+    Keyword, KeywordKind, SHORTENED_NAME, WriteError, model_keywords, resolved_overlaps,
+    write_check_inp, write_deformed_mesh_inp, write_inp, write_inp_with_sets_of, write_keywords,
 };
 
 use lines::{Keyword as KeywordLine, SourceLine, fields, is_keyword, parse_f64};
