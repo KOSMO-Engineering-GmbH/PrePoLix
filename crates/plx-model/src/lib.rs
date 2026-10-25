@@ -1662,9 +1662,14 @@ pub enum LoadKind {
     /// Bolt preload across a cut through the shank (`*PRE-TENSION SECTION`), PrePoMax's
     /// pre-tension load: the region is the element faces on one side of the cut, the value
     /// the force pulling the two sides together, or the shortening when `by_displacement`.
+    /// The shortening counts from the start of the analysis, so 0 loosens the bolt; `lock`
+    /// keeps the length the bolt had at the end of the previous step instead
+    /// (`*BOUNDARY, FIXED`), and the value is not used.
     PreTension {
         value: f64,
         by_displacement: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        lock: bool,
         /// Direction of the preload; `None` lets CalculiX take the surface normal.
         direction: Option<[f64; 3]>,
     },

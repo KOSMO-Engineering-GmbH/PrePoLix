@@ -12,9 +12,12 @@ the shank together with a force, or shortens the bolt by a given length. Create 
   [Region], [The element faces on *one* side of a cut through the bolt shank, picked in the 3D
     view or as a surface. The cut must lie inside the bolt mesh: split the shank with a plane
     in the CAD geometry or pick the faces of one element layer.],
-  [Preload by], [#ui("Force") (default) or #ui("Displacement").],
+  [Preload by], [#ui("Force") (default), #ui("Displacement") or #ui("Lock").],
   [Force], [The force pulling the two sides together; a positive value tightens the bolt.],
-  [Shortening], [The length the bolt is shortened by, when preloading by displacement.],
+  [Shortening], [The length the bolt is shortened by since the start of the analysis, when
+    preloading by displacement. A shortening of 0 in a later step loosens the bolt again.],
+  [Lock], [Keeps the length the bolt has at the end of the previous step (`*BOUNDARY, FIXED`):
+    the bolt then works like a stiff part of the joint, and its force follows the other loads.],
   [Direction], [The direction of the bolt axis. Unticked, PrePoLix uses the normal of the
     selected faces; #ui("Given") takes the components #ui("X"), #ui("Y"), #ui("Z").],
 )
@@ -25,9 +28,12 @@ of the nodes on the cut. `*Equation`s tie the copies to the other side the way C
 `*PRE-TENSION SECTION` does: the gap normal to the cut is the first degree of freedom of a new
 node per load, the sides cannot slide against each other. The preload is a `*CLOAD` with the
 force or a `*BOUNDARY` with the shortening on this node. The same load name in a later step
-reuses the node, so a bolt tightened by a force in the first step can be held at its length in
-the next step with a displacement of 0, like the usual "preload, then load" sequence of a bolted
-joint.
+reuses the node.
+
+For the usual "preload, then load" sequence of a bolted joint, tighten the bolt by a force in the
+first step and copy the load into the following steps with #ui("Lock"). A step without the load
+leaves the bolt loose. The model check warns of a bolt locked in the first step it acts in: there
+is no previous length to keep then, and the bolt carries no preload.
 
 #note[CalculiX's `*PRE-TENSION SECTION` separates only the elements with a
 face on the cut. In a tetrahedral mesh, elements that touch the cut with just an edge or a

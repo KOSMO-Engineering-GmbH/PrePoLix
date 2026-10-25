@@ -69,6 +69,9 @@ pub enum Problem {
     RigidBodyMotion,
     /// Truss nodes that no bar or support holds in some direction.
     Mechanism,
+    /// A pre-tension load locked in the first step it acts in: there is no length of a
+    /// previous step to keep, so CalculiX holds the bolt at its unstretched length.
+    LockWithoutPreload,
     /// Beams held by pins only, free to turn about the line through them.
     SpinAboutPins,
     HeldOnlyByContact,
@@ -183,6 +186,7 @@ impl Problem {
             | Problem::RigidBeamNodes
             | Problem::HeldRigidBodyNodes
             | Problem::TieNodesNotTied
+            | Problem::LockWithoutPreload
             | Problem::NoCreep => Severity::Warning,
             _ => Severity::Error,
         }
@@ -230,6 +234,7 @@ impl Problem {
             Problem::NoSensitivityBase => "No step for the sensitivities",
             Problem::DesignRegionIgnored => "Design region ignored",
             Problem::NoCreep => "Visco step without creep",
+            Problem::LockWithoutPreload => "Bolt locked before it is preloaded",
             Problem::InvalidCyclicSymmetry => "Invalid cyclic symmetry",
             Problem::VelocityIgnored => "Initial velocity without a Dynamic step",
             Problem::NoRotation => "No rotation",
@@ -495,6 +500,11 @@ impl Problem {
                  about the axis, which must be a whole number: CalculiX solves only sectors \
                  that close the full circle. A model of N sectors carries the nodal diameters \
                  0 to N/2 only."
+            }
+            Problem::LockWithoutPreload => {
+                "Lock keeps the length the bolt had at the end of the previous step. In the \
+                 first step the pre-tension acts in there is none, and CalculiX holds the bolt \
+                 at its unstretched length: the bolt carries no preload."
             }
             Problem::VelocityIgnored => {
                 "Only a Dynamic step (time integration) starts from an initial velocity; \
@@ -778,6 +788,10 @@ impl Problem {
                  keep the nodal diameter range within 0 to half the number of sectors."
             }
             Problem::VelocityIgnored => "Add a Dynamic step or deactivate the initial condition.",
+            Problem::LockWithoutPreload => {
+                "Preload the bolt by force or displacement in this step and lock it in the \
+                 following steps."
+            }
             Problem::NoRotation => {
                 "Create a Centrifugal load in the static step before the Frequency step."
             }
@@ -1264,6 +1278,7 @@ impl FeModel {
                 ));
             }
         }
+        self.check_pre_tension_locks(&mut findings);
         self.check_cyclic_symmetry(mesh, &mut findings);
         self.check_tied_contacts(&mut findings);
         self.check_amplitudes(&mut findings);
@@ -1454,6 +1469,29 @@ impl FeModel {
                         format!("{name}: {shared} nodes also in {other}"),
                     ));
                 }
+            }
+        }
+    }
+
+    /// Pre-tension loads locked in the first active step they act in.
+    fn check_pre_tension_locks(&self, findings: &mut Vec<Finding>) {
+        let mut preloaded = std::collections::BTreeSet::new();
+        for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
+            for (i, load) in step.loads.iter().enumerate().filter(|(_, l)| l.active) {
+                let LoadKind::PreTension { lock, .. } = load.kind else {
+                    continue;
+                };
+                if lock && !preloaded.contains(&load.name) {
+                    findings.push(Finding::new(
+                        ModelItem::Load(s, i),
+                        Problem::LockWithoutPreload,
+                        format!(
+                            "{} is locked in {} without a preload before",
+                            load.name, step.name
+                        ),
+                    ));
+                }
+                preloaded.insert(load.name.clone());
             }
         }
     }
@@ -3203,6 +3241,35 @@ mod tests {
         model.steps[0].loads[0].amplitude = None;
         model.steps[0].loads[0].factor_amplitude = Some("Ramp".into());
         assert_eq!(check(&model, &mesh), []);
+    }
+
+    #[test]
+    fn a_bolt_locked_before_its_preload_is_reported() {
+        let mesh = cubes(2, true);
+        let mut model = model(&mesh);
+        let force = model.steps[0].loads[0].clone();
+        let mut bolt = force.clone();
+        bolt.name = "Bolt".into();
+        bolt.kind = LoadKind::PreTension {
+            value: 1000.0,
+            by_displacement: false,
+            lock: false,
+            direction: None,
+        };
+        model.steps[0].loads.push(bolt);
+        let mut second = model.steps[0].clone();
+        second.name = "Step-2".into();
+        let LoadKind::PreTension { lock, .. } = &mut second.loads[1].kind else {
+            unreachable!()
+        };
+        *lock = true;
+        model.steps.push(second.clone());
+        assert_eq!(check(&model, &mesh), []);
+        model.steps[0].loads.pop();
+        assert_eq!(
+            problems(&check(&model, &mesh)),
+            [(ModelItem::Load(1, 1), Problem::LockWithoutPreload)]
+        );
     }
 
     #[test]

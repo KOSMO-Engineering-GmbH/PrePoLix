@@ -2532,12 +2532,16 @@ fn step_block<'f>(
             LoadKind::PreTension {
                 value,
                 by_displacement,
+                lock,
                 ..
             } => {
                 // The preload is the first degree of freedom of the pre-tension node: a
-                // force, or the shortening of the bolt as a prescribed displacement.
+                // force, or the shortening of the bolt since the start as a prescribed
+                // displacement. Locked, the node keeps the shortening of the previous step.
                 let node = sets.pre_tension_nodes[&load.name];
-                if by_displacement {
+                if lock {
+                    let _ = writeln!(out, "*Boundary, Fixed\n{node}, 1, 1");
+                } else if by_displacement {
                     let _ = writeln!(out, "*Boundary{amplitude}\n{node}, 1, 1, {}", number(value));
                 } else {
                     let _ = writeln!(out, "*Cload{amplitude}\n{node}, 1, {}", number(value));
