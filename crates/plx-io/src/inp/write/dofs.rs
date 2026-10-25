@@ -174,20 +174,19 @@ fn describe(changes: &Changes) -> String {
     let mut parts = Vec::new();
     if changes.left_out > 0 {
         parts.push(format!(
-            "{} left out (already held by a boundary condition or another constraint)",
+            "{} left out (held already)",
             plural(changes.left_out, "node", "nodes")
         ));
     }
     if changes.moved > 0 {
         parts.push(format!(
-            "{} on another degree of freedom (the first one is held by a boundary \
-             condition or another constraint)",
+            "{} on another degree of freedom (the first one is held already)",
             plural(changes.moved, "equation", "equations")
         ));
     }
     if changes.dropped > 0 {
         parts.push(format!(
-            "{} left out (all its degrees of freedom are held already)",
+            "{} left out (all degrees of freedom held already)",
             plural(changes.dropped, "equation", "equations")
         ));
     }
@@ -231,13 +230,11 @@ mod tests {
         assert_eq!(
             dofs.comments().unwrap(),
             format!(
-                "{PREFIX}A: 1 equation on another degree of freedom (the first one is held by \
-                 a boundary condition or another constraint)\n\
-                 {PREFIX}B: 1 equation on another degree of freedom (the first one is held by \
-                 a boundary condition or another constraint); 1 equation left out (all its \
-                 degrees of freedom are held already)\n\
-                 {PREFIX}C: 1 node left out (already held by a boundary condition or another \
-                 constraint)\n"
+                "{PREFIX}A: 1 equation on another degree of freedom (the first one is held \
+                 already)\n\
+                 {PREFIX}B: 1 equation on another degree of freedom (the first one is held \
+                 already); 1 equation left out (all degrees of freedom held already)\n\
+                 {PREFIX}C: 1 node left out (held already)\n"
             )
         );
     }

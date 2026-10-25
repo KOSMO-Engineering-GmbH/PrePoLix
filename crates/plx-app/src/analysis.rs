@@ -362,8 +362,7 @@ impl Analysis {
         // Constraints the input file writer had to change so that they do not bind a degree of
         // freedom twice.
         output.extend(
-            (overlaps.into_iter())
-                .map(|line| format!("PrePoLix resolved overlapping constraints: {line}")),
+            (overlaps.into_iter()).map(|line| format!("Overlapping constraints resolved: {line}")),
         );
         if let Some(run) = &restart {
             output.push(run.describe());

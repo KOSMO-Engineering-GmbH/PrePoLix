@@ -169,7 +169,8 @@ only by contact (contact pairs without tied surface behavior; tied contact holds
 when #ui("Weak springs") is turned off in the connection settings (@weak-springs), conflicting boundary conditions, loads on fixed nodes, rotations without effect,
 beam nodes with only some of their rotations given (CalculiX holds them all, and nonlinear steps
 mostly fail to converge), beams held by pins only, which are free to turn about the line
-through the pins (CalculiX solves them all the same), steps without load and amplitudes that
+through the pins (CalculiX solves them all the same), rigid bodies on nodes that a boundary
+condition holds (@overlapping-constraints), steps without load and amplitudes that
 nothing uses.
 
 #screenshot("beam-rotations-partly-held.png", [A beam end that holds only the rotation about Z])
@@ -187,6 +188,37 @@ constants missing"; other messages appear as "CalculiX error" with the text of t
 
 The checks do not stop a run; their errors are listed at the top of the monitor. Missing
 references do stop it, because the input file cannot be written.
+
+=== Overlapping constraints <overlapping-constraints>
+
+Several items of a model are written as constraint equations (MPCs) that make some degrees of
+freedom follow others: regions of no separation, rigid bodies, displacements on a point, bolt
+pre-tension cuts, node ties between beams and springs to a surface. CalculiX aborts when a
+boundary condition holds such a dependent degree of freedom ("dependent side of a MPC and a
+SPC") or when two equations depend on it. PrePoLix keeps them apart when it writes the input
+file, so the items can overlap freely, for example a fixed support on a face that also lies in a
+region of no separation.
+
+The degrees of freedom are handed out in this order: boundary conditions and cyclic symmetry
+first, then rigid bodies and displacements on a point, pre-tension cuts, node ties, springs and
+last the regions of no separation. An equation whose dependent degree of freedom is taken
+already depends on another of its terms instead: a free direction of the same node, or else the
+node on the other side, which then follows the held node, as Abaqus moves the constraint to
+the independent side. An equation whose terms are all held binds nothing new and is left out.
+A rigid body leaves out the nodes that are held already; the model check warns when a boundary
+condition holds nodes of a rigid body. Ties need nothing of this: CalculiX skips the held
+directions of their slave nodes by itself.
+
+The input file lists the changes as comments at the top of the constraints, and the monitor
+shows them when the run starts.
+
+#screenshot("overlapping-constraints-monitor.png", [A support holds the edge of a region of no
+  separation in Z: its three equations there depend on the nodes of the master side])
+
+A slave node of a bonded region (a tie) that is further from the master side than the
+tolerance stays untied: CalculiX only warns about it. After every run the analysis gets the
+warning "Nodes of a bonded contact not tied" with the number of nodes and the largest distance;
+raise the #ui("Tolerance") of the region above it (@contact-regions) or close the gap.
 
 == Exporting the input file <export-inp>
 

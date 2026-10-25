@@ -3907,10 +3907,7 @@ fn node_ties_merge_the_nodes_or_hinge_beams_with_equations() {
     expected.push_str("*Equation\n2\n3, 3, -1, 101, 3, 1\n");
     assert_eq!(
         crate::inp::resolved_overlaps(&write_inp(&mesh, &model, "").unwrap()),
-        [
-            "Node_Tie-1: 1 equation on another degree of freedom (the first one is held by a \
-          boundary condition or another constraint)"
-        ]
+        ["Node_Tie-1: 1 equation on another degree of freedom (the first one is held already)"]
     );
     assert!(
         text.contains(&format!("** Name: Node_Tie-1\n{expected}")) && !text.contains("101, 4, 1"),
@@ -7666,10 +7663,7 @@ fn calculix_solves_no_separation_on_nodes_held_by_a_boundary_condition() {
     );
     assert_eq!(
         crate::inp::resolved_overlaps(&text),
-        [
-            "Region-1: 3 equations on another degree of freedom (the first one is held by a \
-          boundary condition or another constraint)"
-        ]
+        ["Region-1: 3 equations on another degree of freedom (the first one is held already)"]
     );
     let Some(frd) = run_ccx("region-no-separation-held", &text) else {
         return;
@@ -7723,10 +7717,7 @@ fn calculix_solves_a_rigid_body_on_nodes_held_by_a_boundary_condition() {
     let text = write_inp(&mesh, &model, "").unwrap();
     assert_eq!(
         crate::inp::resolved_overlaps(&text),
-        [
-            "Rigid_Body-1: 1 node left out (already held by a boundary condition or another \
-          constraint)"
-        ]
+        ["Rigid_Body-1: 1 node left out (held already)"]
     );
     let Some(frd) = run_ccx("rigid-body-held", &text) else {
         return;
