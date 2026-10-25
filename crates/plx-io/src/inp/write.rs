@@ -262,6 +262,18 @@ pub fn model_keywords(
         lowered = model.lower_contacts(mesh).0;
         &lowered
     };
+    // Parts held only by contact get weak springs to ground.
+    let springs = model.weak_springs(mesh);
+    let sprung;
+    let model = if springs.is_empty() {
+        model
+    } else {
+        let mut copy = model.clone();
+        copy.constraints
+            .extend(springs.into_iter().map(plx_model::Constraint::Spring));
+        sprung = copy;
+        &sprung
+    };
     let lines = LineElements::new(mesh, model)?;
     // Node ties of beams, and of anything without rotations, are written as one shared node.
     let merged_nodes = node_merges(mesh, model, &lines);
