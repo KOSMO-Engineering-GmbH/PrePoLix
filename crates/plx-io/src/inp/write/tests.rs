@@ -1065,6 +1065,7 @@ fn pre_tension(value: f64, by_displacement: bool) -> (FeMesh, FeModel) {
         kind: LoadKind::PreTension {
             value,
             by_displacement,
+            lock: false,
             direction: None,
         },
         amplitude: None,
@@ -1364,7 +1365,8 @@ fn a_pre_tension_load_cuts_the_mesh_and_ties_the_sides_by_equations() {
     second.name = "Step-2".into();
     second.loads[0].kind = LoadKind::PreTension {
         value: 0.0,
-        by_displacement: true,
+        by_displacement: false,
+        lock: true,
         direction: Some([1.0, 0.0, 0.0]),
     };
     model.steps.push(second);
@@ -1377,7 +1379,7 @@ fn a_pre_tension_load_cuts_the_mesh_and_ties_the_sides_by_equations() {
     assert_eq!(text.matches(", 109, 1, -1\n").count(), 9);
     assert!(text.contains("108, 5.00000000E1, "), "{text}");
     assert!(text.contains("*Cload\n109, 1, 1000\n"), "{text}");
-    assert!(text.contains("*Boundary\n109, 1, 1, 0\n"), "{text}");
+    assert!(text.contains("*Boundary, Fixed\n109, 1, 1\n"), "{text}");
 }
 
 /// A bar 100 x 10 x 10 along x of C3D10 tetrahedra, six per cube of 10 x 5 x 5, with node set
@@ -1515,6 +1517,7 @@ fn calculix_preloads_a_tetrahedral_bar_across_the_cut() {
         model.steps[0].loads[0].kind = LoadKind::PreTension {
             value: force,
             by_displacement: false,
+            lock: false,
             direction,
         };
         model.steps[0].boundary_conditions[1].region = Region::NodeSet("TIP".into());
@@ -1562,6 +1565,35 @@ fn calculix_preloads_the_clamped_bar_across_the_cut() {
     for id in (1..=99).filter(|&id| mesh.node(id).is_some_and(|c| c[0] == 50.0)) {
         let s = node_value(&frd, "STRESS", "S11", id);
         assert!((s - 10.0).abs() < 0.3, "{s}");
+    }
+}
+
+/// A bolt locked in the step after its preload keeps its length and so its force; a
+/// shortening of 0 instead loosens it, as the shortening counts from the start.
+#[test]
+fn calculix_keeps_the_preload_of_a_locked_bolt() {
+    let force = 1000.0;
+    for (name, lock, expected) in [("verriegelt", true, force), ("gelockert", false, 0.0)] {
+        let (mesh, mut model) = pre_tension(force, false);
+        let mut second = model.steps[0].clone();
+        second.name = "Step-2".into();
+        second.loads[0].kind = LoadKind::PreTension {
+            value: 0.0,
+            by_displacement: true,
+            lock,
+            direction: None,
+        };
+        model.steps.push(second);
+        let Some(frd) = run_ccx(name, &write_inp(&mesh, &model, "").unwrap()) else {
+            return;
+        };
+        let reaction: f64 = (mesh.node_sets["FIX"].iter())
+            .map(|&node| node_value(&frd, "FORC", "F1", node))
+            .sum();
+        assert!(
+            (reaction.abs() - expected).abs() < 1e-3 * force,
+            "{name}: {reaction}"
+        );
     }
 }
 
@@ -2773,6 +2805,7 @@ fn calculix_preloads_a_bolt_split_into_two_tied_parts() {
             kind: LoadKind::PreTension {
                 value: force,
                 by_displacement: false,
+                lock: false,
                 direction: None,
             },
             amplitude: None,

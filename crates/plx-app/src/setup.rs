@@ -1549,6 +1549,7 @@ fn load_kinds() -> [(&'static str, &'static str, LoadKind); 12] {
             LoadKind::PreTension {
                 value: 0.0,
                 by_displacement: false,
+                lock: false,
                 direction: None,
             },
         ),
@@ -2819,15 +2820,27 @@ impl Editor {
                     LoadKind::PreTension {
                         value,
                         by_displacement,
+                        lock,
                         direction,
                     } => {
+                        // Force, displacement or lock: one choice of the two flags.
+                        let mut by = (*lock, *by_displacement);
                         ui.label("Preload by");
                         ui.horizontal(|ui| {
-                            ui.radio_value(by_displacement, false, "Force");
-                            ui.radio_value(by_displacement, true, "Displacement");
+                            ui.radio_value(&mut by, (false, false), "Force");
+                            ui.radio_value(&mut by, (false, true), "Displacement");
+                            ui.radio_value(&mut by, (true, *by_displacement), "Lock")
+                                .on_hover_text(
+                                    "Keeps the length the bolt has at the end of the previous \
+                                     step; the bolt force then follows the other loads.",
+                                );
                         });
+                        (*lock, *by_displacement) = by;
                         ui.end_row();
-                        if *by_displacement {
+                        if *lock {
+                            ui.label("");
+                            ui.weak("Length of the previous step");
+                        } else if *by_displacement {
                             ui.label("Shortening");
                             expose::field(ui, Field::Value, |ui| {
                                 ui.add(
@@ -2855,7 +2868,8 @@ impl Editor {
                         for line in [
                             "Select the element faces on one side of a cut through the bolt shank.",
                             "A positive force pulls the two sides together; a displacement shortens the bolt.",
-                            "A later step with displacement 0 keeps the bolt at its length.",
+                            "The shortening counts from the start: 0 loosens the bolt.",
+                            "Lock in a later step to keep the bolt at its length.",
                         ] {
                             ui.label("");
                             ui.weak(line);
