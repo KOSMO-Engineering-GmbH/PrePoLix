@@ -1736,6 +1736,9 @@ pub struct ProjectApp {
     show_minimap: bool,
     /// The point of the schematic the view is to centre on next, from the minimap.
     look_at: Option<egui::Pos2>,
+    /// The part of the schematic the minimap spans while the pointer is down on it, so the map
+    /// holds still under the pointer while the view follows.
+    minimap_bounds: Option<egui::Rect>,
     /// Where the pins of the schematic were drawn on the screen in the last frame.
     pin_rects: Vec<(PinKey, egui::Rect)>,
     /// The pin a wire is being dragged from in the schematic.
@@ -1845,6 +1848,7 @@ impl ProjectApp {
             show_all: false,
             show_minimap: true,
             look_at: None,
+            minimap_bounds: None,
             pin_rects: Vec::new(),
             dragging: None,
             new_analysis: None,
