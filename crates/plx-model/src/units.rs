@@ -52,6 +52,8 @@ pub enum Quantity {
     /// Absolute temperature, converted with the offset of its scale.
     Temperature,
     Area,
+    /// Second moment of area of a beam profile.
+    SecondMomentOfArea,
     Volume,
     Velocity,
     RotationalSpeed,
@@ -88,13 +90,14 @@ pub enum Quantity {
 
 impl Quantity {
     /// Every quantity, in the order a list offers them.
-    pub const ALL: [Quantity; 27] = [
+    pub const ALL: [Quantity; 28] = [
         Quantity::Length,
         Quantity::Angle,
         Quantity::Mass,
         Quantity::Time,
         Quantity::Temperature,
         Quantity::Area,
+        Quantity::SecondMomentOfArea,
         Quantity::Volume,
         Quantity::Velocity,
         Quantity::RotationalSpeed,
@@ -127,6 +130,7 @@ impl Quantity {
             Quantity::Time => "Time",
             Quantity::Temperature => "Temperature",
             Quantity::Area => "Area",
+            Quantity::SecondMomentOfArea => "Second moment of area",
             Quantity::Volume => "Volume",
             Quantity::Velocity => "Velocity",
             Quantity::RotationalSpeed => "Rotational speed",
@@ -160,6 +164,7 @@ impl Quantity {
             Quantity::Time => d(0, 0, 1, 0, 0),
             Quantity::Temperature => d(0, 0, 0, 1, 0),
             Quantity::Area => d(2, 0, 0, 0, 0),
+            Quantity::SecondMomentOfArea => d(4, 0, 0, 0, 0),
             Quantity::Volume => d(3, 0, 0, 0, 0),
             Quantity::Velocity => d(1, 0, -1, 0, 0),
             Quantity::RotationalSpeed => d(0, 0, -1, 0, 1),
@@ -283,6 +288,7 @@ impl UnitSystem {
             Time => ["s"; 4],
             Temperature => ["°C", "°C", "°C", "°F"],
             Area => ["m²", "mm²", "m²", "in²"],
+            SecondMomentOfArea => ["m^4", "mm^4", "m^4", "in^4"],
             Volume => ["m³", "mm³", "m³", "in³"],
             Velocity => ["m/s", "mm/s", "m/s", "in/s"],
             RotationalSpeed => ["rad/s"; 4],

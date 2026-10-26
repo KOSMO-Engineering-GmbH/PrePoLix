@@ -121,6 +121,9 @@ pub enum Problem {
     DesignRegionIgnored,
     /// A Visco step in a model whose materials have no creep law: it is a static step.
     NoCreep,
+    /// A step CalculiX's general beam (user element U1) cannot take: large deformations,
+    /// buckling, direct dynamics, heat transfer.
+    GeneralBeamStep,
     /// A cyclic symmetry tie CalculiX rejects, or nodal diameters beyond what its sectors
     /// carry.
     InvalidCyclicSymmetry,
@@ -246,6 +249,7 @@ impl Problem {
             Problem::NoSensitivityBase => "No step for the sensitivities",
             Problem::DesignRegionIgnored => "Design region ignored",
             Problem::NoCreep => "Visco step without creep",
+            Problem::GeneralBeamStep => "Step not possible with general beam profiles",
             Problem::LockWithoutPreload => "Bolt locked before it is preloaded",
             Problem::InvalidBolt => "Bolt cannot be cut",
             Problem::BoltWithoutPreload => "Bolt without preload",
@@ -509,6 +513,13 @@ impl Problem {
             Problem::NoCreep => {
                 "A Visco step lets the materials with a creep law (Norton) creep over its time \
                  period. Without such a material it computes the same as a Static step."
+            }
+            Problem::GeneralBeamStep => {
+                "I, T, channel, angle and general profiles are not beam sections of CalculiX \
+                 itself: they are written as general sections of its user element U1, a \
+                 linear beam. It computes Static steps without large deformations (Nlgeom), \
+                 Frequency steps (CalculiX 2.23, not 2.21) and the modal and steady state \
+                 dynamics built on them; other steps stop CalculiX with an error."
             }
             Problem::InvalidCyclicSymmetry => {
                 "A cyclic symmetry tie models a whole part by one sector of a 3D mesh. The \
@@ -817,6 +828,10 @@ impl Problem {
             }
             Problem::NoCreep => {
                 "Edit a material of the model and tick Creep (Norton), or use a Static step."
+            }
+            Problem::GeneralBeamStep => {
+                "Untick Nlgeom, use a Static or Frequency step, or give the beams a \
+                 rectangular, circular, pipe or box cross-section."
             }
             Problem::InvalidCyclicSymmetry => {
                 "Edit the tie: pick the two cut faces of the sector as master and slave and \
@@ -1367,8 +1382,29 @@ impl FeModel {
         }
         self.check_shared_rigid_bodies(mesh, &mut findings);
         let trusses = Trusses::new(self, mesh);
+        let general_beams = self.general_beam_sections(mesh);
         for (s, step) in self.steps.iter().enumerate().filter(|(_, s)| s.active) {
             self.check_step(s, mesh, mesh_check, &trusses, &mut findings);
+            let general_fits = !step.kind.nlgeom()
+                && matches!(
+                    step.kind,
+                    StepKind::Static(_)
+                        | StepKind::Frequency(_)
+                        | StepKind::ModalDynamics(_)
+                        | StepKind::SteadyStateDynamics(_)
+                );
+            if !general_beams.is_empty() && !general_fits {
+                findings.push(Finding::new(
+                    ModelItem::Step(s),
+                    Problem::GeneralBeamStep,
+                    format!(
+                        "{}{}: {} use general beam profiles",
+                        step.name,
+                        if step.kind.nlgeom() { " (Nlgeom)" } else { "" },
+                        general_beams.join(", ")
+                    ),
+                ));
+            }
             let stored = self.properties.stored_modes.is_some()
                 || (self.steps[..s].iter().filter(|p| p.active))
                     .any(|p| matches!(&p.kind, StepKind::Frequency(f) if f.storage));
@@ -1810,6 +1846,19 @@ impl FeModel {
     }
 
     /// Parts with elements no section covers.
+    /// The beam sections on elements whose cross-section is a general profile, which
+    /// CalculiX knows only as the user element U1.
+    fn general_beam_sections(&self, mesh: &FeMesh) -> Vec<&str> {
+        (self.sections.iter())
+            .filter(|s| {
+                self.section_profile(&s.kind)
+                    .is_some_and(|p| !p.is_native())
+            })
+            .filter(|s| !s.region.elements(mesh).is_empty())
+            .map(|s| s.name.as_str())
+            .collect()
+    }
+
     fn check_sections(&self, mesh: &FeMesh, findings: &mut Vec<Finding>) {
         let whole: HashSet<&str> = (self.sections.iter())
             .filter_map(|s| match &s.region {
@@ -4445,6 +4494,61 @@ mod tests {
         // Meshed lines are B31 or B32 whatever their section; a truss section makes them
         // trusses all the same.
         assert_eq!(check(&model, &mesh)[0].problem, Problem::RigidBodyMotion);
+    }
+
+    #[test]
+    fn general_beam_profiles_refuse_steps_that_user_element_u1_cannot_take() {
+        let mut mesh = FeMesh::default();
+        for (id, x) in [0.0, 1.0, 2.0].into_iter().enumerate() {
+            mesh.set_node(id as u32 + 1, [x, 0.0, 0.0]);
+        }
+        for (id, nodes) in [(1, vec![1, 2]), (2, vec![2, 3])] {
+            mesh.add_element(Element {
+                id,
+                type_name: "B31".into(),
+                shape: ElementShape::Line2,
+                nodes,
+            })
+            .unwrap();
+        }
+        mesh.parts.push(Part {
+            name: "BEAM".into(),
+            elements: vec![1, 2],
+        });
+        let mut model = model(&mesh);
+        beam_section(&mut model);
+        model.cross_sections[0].profile = crate::BeamProfile::I {
+            h: 0.2,
+            b: 0.1,
+            tw: 0.006,
+            tf: 0.008,
+        };
+        model.steps[0].boundary_conditions[0].region = Region::Nodes(vec![1]);
+        model.steps[0].loads[0].region = Region::Nodes(vec![3]);
+        let refused = |model: &FeModel| {
+            (check(model, &mesh).into_iter())
+                .filter(|f| f.problem == Problem::GeneralBeamStep)
+                .map(|f| f.detail)
+                .collect::<Vec<_>>()
+        };
+        // A linear static step is what U1 computes.
+        assert_eq!(refused(&model), Vec::<String>::new());
+        let StepKind::Static(settings) = &mut model.steps[0].kind else {
+            unreachable!()
+        };
+        settings.nlgeom = true;
+        assert_eq!(
+            refused(&model),
+            ["Step-1 (Nlgeom): Section-1 use general beam profiles"]
+        );
+        model.steps[0].kind = StepKind::Buckle(Default::default());
+        assert_eq!(refused(&model).len(), 1);
+        model.steps[0].kind = StepKind::Frequency(Default::default());
+        assert!(refused(&model).is_empty());
+        // Native profiles are CalculiX's own beams, which take every step.
+        model.cross_sections[0].profile = crate::BeamProfile::ALL[0];
+        model.steps[0].kind = StepKind::Buckle(Default::default());
+        assert!(refused(&model).is_empty());
     }
 
     #[test]

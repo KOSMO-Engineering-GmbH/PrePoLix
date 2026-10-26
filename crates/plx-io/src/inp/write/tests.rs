@@ -3970,6 +3970,103 @@ fn beam_sections_type_their_elements_and_write_the_normal() {
     assert!(text.contains("Section=CIRC\n4, 4\n0, 0, 1\n"), "{text}");
 }
 
+/// An I-beam is no beam section of CalculiX: it is written as a general section of the user
+/// element U1, which bends like the textbook beam, and read back from its comment.
+#[test]
+fn general_profiles_are_written_for_user_element_u1() {
+    let mesh = line_chain(10, 0, 1000.0, false);
+    let i_beam = BeamProfile::I {
+        h: 100.0,
+        b: 50.0,
+        tw: 4.0,
+        tf: 6.0,
+    };
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Beam(BeamSection {
+            orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+            ..beam("I")
+        }),
+        LoadKind::force([0.0, 0.0, 100.0]),
+    );
+    model.cross_sections.push(CrossSection {
+        name: "I".into(),
+        profile: i_beam,
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*User element, Type=U1, Nodes=2, Integration points=2, Maxdof=6\n\
+         *Element, Type=U1, Elset=BEAM\n1, 1, 2\n",
+        "Material=Steel, Section=GENERAL\n",
+        "** Profile: I(h:100.0,b:50.0,tw:4.0,tf:6.0); Normal: 0, 0, 1\n",
+    ] {
+        assert!(text.contains(line), "{line} missing in\n{text}");
+    }
+    let import = read_inp_str(&text, None).unwrap();
+    assert_eq!(import.cross_sections[0].profile, i_beam);
+    assert_eq!(
+        import.sections[0].kind,
+        SectionKind::Beam(BeamSection {
+            cross_section: import.cross_sections[0].name.clone(),
+            orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+            offset: [0.0; 2],
+        })
+    );
+    assert_eq!(import.mesh.element(1).unwrap().type_name, "U1");
+    // A tip force in the 1-direction (z) bends it about its weak axis, with shear in the web.
+    let p = i_beam.properties();
+    let g = 210_000.0 / 2.6;
+    let expected = 100.0 * 1000.0_f64.powi(3) / (3.0 * 210_000.0 * p.i22)
+        + 100.0 * 1000.0 / (i_beam.shear_factor() * g * p.area);
+    if let Some(frd) = run_ccx("u1-beam", &text) {
+        let sag = node_value(&frd, "DISP", "U3", 11);
+        assert!(
+            (sag - expected).abs() < 0.02 * expected,
+            "{sag} != {expected}"
+        );
+    }
+    // An angle is written about its principal axes: the normal turned about the beam.
+    let angle = BeamProfile::L {
+        h: 80.0,
+        b: 40.0,
+        t: 6.0,
+    };
+    model.cross_sections.last_mut().unwrap().profile = angle;
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let (sin, cos) = angle.principal_turn().sin_cos();
+    let general = format!("Section=GENERAL\n{}, ", number(angle.data_line()[0]));
+    let at = text.find(&general).expect(&text);
+    let written: Vec<f64> = (text[at..].lines().nth(2).unwrap().split(','))
+        .map(|v| v.trim().parse().unwrap())
+        .collect();
+    // The 2-direction is x cross z = -y.
+    for (w, e) in written.iter().zip([0.0, -sin, cos]) {
+        assert!((w - e).abs() < 1e-9, "{written:?}");
+    }
+    assert!(text.contains("; Normal: 0, 0, 1\n"), "{text}");
+    let import = read_inp_str(&text, None).unwrap();
+    assert_eq!(import.cross_sections[0].profile, angle);
+    if let Some(frd) = run_ccx("u1-angle", &text) {
+        // Skew bending: the force along u deflects by the inverse of the moment tensor.
+        let p = angle.properties();
+        let (uu, vv, uv) = (p.i22, p.i11, p.i12);
+        let bending = 100.0 * 1000.0_f64.powi(3) / (3.0 * 210_000.0) * vv / (uu * vv - uv * uv);
+        let expected = bending + 100.0 * 1000.0 / (angle.shear_factor() * g * p.area);
+        let sag = node_value(&frd, "DISP", "U3", 11);
+        assert!(
+            (sag - expected).abs() < 0.02 * expected,
+            "{sag} != {expected}"
+        );
+        // and sideways along v, the 2-direction -y.
+        let side = -uv / vv * bending;
+        let lateral = -node_value(&frd, "DISP", "U2", 11);
+        assert!(
+            (lateral - side).abs() < 0.02 * side.abs(),
+            "{lateral} != {side}"
+        );
+    }
+}
+
 #[test]
 fn automatic_normals_split_a_frame_into_groups() {
     use plx_mesh::{Element, ElementShape};

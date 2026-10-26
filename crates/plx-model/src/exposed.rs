@@ -5,8 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    BeamProfile, BoundaryKind, DefinedFieldKind, FeModel, InitialConditionKind, LoadKind, Quantity,
-    SectionKind, StepKind, ValueKind,
+    BoundaryKind, DefinedFieldKind, FeModel, InitialConditionKind, LoadKind, Quantity, SectionKind,
+    StepKind, ValueKind,
 };
 
 /// The item of the model a field belongs to, by its name, and of the step it is in.
@@ -134,6 +134,15 @@ pub enum Field {
     Wall2,
     Wall3,
     Wall4,
+    /// The height, flange width and thicknesses of an I, T, U or L profile.
+    Height,
+    Width,
+    WebThickness,
+    FlangeThickness,
+    /// The second moments of area and the shear factor of a general profile.
+    I11,
+    I22,
+    ShearFactor,
     TimePeriod,
     InitialIncrement,
     /// The number of eigenfrequencies of a frequency step.
@@ -180,6 +189,13 @@ impl Field {
             Self::Wall2 => "t2",
             Self::Wall3 => "t3",
             Self::Wall4 => "t4",
+            Self::Height => "h",
+            Self::Width => "b",
+            Self::WebThickness => "tw",
+            Self::FlangeThickness => "tf",
+            Self::I11 => "I11",
+            Self::I22 => "I22",
+            Self::ShearFactor => "k",
             Self::TimePeriod => "Time period",
             Self::InitialIncrement => "Initial increment",
             Self::Modes => "Modes",
@@ -197,7 +213,7 @@ impl Field {
     pub const ROTATION: [Self; 3] = [Self::RotationX, Self::RotationY, Self::RotationZ];
     pub const LOCATION: [Self; 3] = [Self::LocationX, Self::LocationY, Self::LocationZ];
     pub const AXIS: [Self; 3] = [Self::AxisX, Self::AxisY, Self::AxisZ];
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 43] = [
         Self::Value,
         Self::X,
         Self::Y,
@@ -224,6 +240,13 @@ impl Field {
         Self::Wall2,
         Self::Wall3,
         Self::Wall4,
+        Self::Height,
+        Self::Width,
+        Self::WebThickness,
+        Self::FlangeThickness,
+        Self::I11,
+        Self::I22,
+        Self::ShearFactor,
         Self::TimePeriod,
         Self::InitialIncrement,
         Self::Modes,
@@ -362,21 +385,12 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
         }
         ItemRef::CrossSection(name) => {
             let cross_section = fe.cross_sections.iter_mut().find(|c| &c.name == name)?;
-            let value = match (&mut cross_section.profile, field) {
-                (BeamProfile::Rect { a, .. } | BeamProfile::Box { a, .. }, Field::BeamA) => a,
-                (BeamProfile::Rect { b, .. } | BeamProfile::Box { b, .. }, Field::BeamB) => b,
-                (
-                    BeamProfile::Circ { radius } | BeamProfile::Pipe { radius, .. },
-                    Field::Radius,
-                ) => radius,
-                (BeamProfile::Pipe { thickness, .. }, Field::Thickness) => thickness,
-                (BeamProfile::Box { t, .. }, Field::Wall1) => &mut t[0],
-                (BeamProfile::Box { t, .. }, Field::Wall2) => &mut t[1],
-                (BeamProfile::Box { t, .. }, Field::Wall3) => &mut t[2],
-                (BeamProfile::Box { t, .. }, Field::Wall4) => &mut t[3],
-                _ => return None,
-            };
-            real(value, Quantity::Length)
+            let dimension =
+                (cross_section.profile.dimensions_mut().into_iter()).find(|d| d.field == field)?;
+            match dimension.quantity {
+                Some(quantity) => real(dimension.value, quantity),
+                None => Some((Slot::Real(dimension.value), ValueKind::Factor)),
+            }
         }
         ItemRef::Step(name) => {
             let step = step_named(fe, name)?;

@@ -36,7 +36,16 @@ Double-click #ui("Cross-Sections"), right-click it and choose #ui("Create ..."),
 #fields(
   [Profile], [#ui("Rectangular") (thicknesses a and b in the 1- and 2-direction),
     #ui("Circular") (radius), #ui("Pipe") (outer radius and wall thickness) or #ui("Box") (widths a
-    and b and the wall thicknesses t1 to t4 at +1, +2, -1 and -2).],
+    and b and the wall thicknesses t1 to t4 at +1, +2, -1 and -2); or one of the general profiles
+    below.],
+  [I-Beam, T-Beam, Channel (U)], [Height h in the 2-direction, flange width b in the 1-direction,
+    web thickness tw and flange thickness tf. The T has its flange at +2, the channel its web at
+    -1.],
+  [Angle (L)], [Legs h along +2 and b along +1 from the corner, thickness t.],
+  [General (A, I)], [A profile given by its values: area A, the second moments of area I11 and
+    I22 about the 1- and 2-axis through the centroid and the factor k of CalculiX described
+    below. It is drawn as the rectangle with the same moments. Switching another profile to
+    #ui("General") takes over its values.],
 )
 
 The sketch below the fields shows the profile with the 1-direction to the right and the
@@ -48,6 +57,33 @@ from the 1-direction, in the units of the model.
 
 #screenshot("cross-section-dialog.png", [The cross-sections under Sections and the dialog of a box
 profile whose thicker wall at +1 moves the centroid in the 1-direction])
+
+==== General profiles <general-profiles>
+
+CalculiX has beam sections of its own for rectangles, circles, pipes and boxes only, which it
+expands into solids. I, T, channel, angle and general profiles are written as a general section
+(`SECTION=GENERAL`) of its user element `U1`, a linear beam that knows the profile by its area
+and second moments of area. So:
+
+- The beam axis runs through the centroid: the profile lies with its centroid on the nodes, and
+  the section takes no offsets.
+- The beams need lines with 2 nodes; mesh the lines linear.
+- An unsymmetric profile such as an angle is written about its principal axes: PrePoLix turns
+  the normal about each beam by the angle of axis I, so that it bends askew as it should.
+- CalculiX computes Static steps without large deformations (#ui("Nlgeom")) and Frequency steps
+  (from CalculiX 2.23, which PrePoLix ships), and the modal and steady state dynamics built on
+  them. The model check refuses other steps with "Step not possible with general beam profiles".
+- The shear stiffness is k G A with k the share of the area in the web (a leg of an angle), and
+  the torsion stiffness k G (I11 + I22). For open profiles the torsion is far too stiff, CalculiX
+  knows no warping.
+- The results draw the beams as lines with their profile swept along them. CalculiX gives
+  section forces instead of stresses for them; the results show no stresses on these beams.
+
+#screenshot("cross-section-angle.png", [An angle: its principal axes are turned against the
+  1-direction, and CalculiX takes it as a general section of U1])
+
+#screenshot("general-beam-results.png", [A portal frame of I-beam columns and a channel
+  girder, solved as U1 beams, with the profiles in the results])
 
 Every dimension can be exposed as a parameter with the #ui("P") button next to it, so that a
 parameter study can vary the profile. Renaming a cross-section renames it in the beam sections
@@ -66,7 +102,8 @@ keeps them in one place for several analyses.
 )
 
 Beams are written as `*BEAM SECTION` with `B31` or `B32` elements. Pipe and box sections need
-quadratic lines and are written as `B32R`, as CalculiX requires.
+quadratic lines and are written as `B32R`, as CalculiX requires; general profiles need linear
+lines and are written as `U1` (@general-profiles).
 
 ==== Beam profiles in the FE model and the results <beam-profiles>
 

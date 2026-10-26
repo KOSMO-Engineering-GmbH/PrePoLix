@@ -244,7 +244,7 @@ pub fn beam_mesh(
                         triangles.push([i, n + j, n + i]);
                     }
                 }
-                None => {
+                None if loops[0].round => {
                     push([0.0, 0.0]);
                     for &at in outer {
                         push(at);
@@ -253,6 +253,16 @@ pub fn beam_mesh(
                     for i in 0..n {
                         triangles.push([0, 1 + i, 1 + (i + 1) % n]);
                     }
+                }
+                // I, T, U and L profiles are concave: a fan from the centre would not fill
+                // them.
+                None => {
+                    for &at in outer {
+                        push(at);
+                    }
+                    triangles.extend(
+                        (plx_model::triangulate(outer).into_iter()).map(|t| t.map(|k| k as u32)),
+                    );
                 }
             }
             for [p, q, r] in triangles {
@@ -426,9 +436,31 @@ mod tests {
         let mut mesh = beam();
         mesh.set_node(3, [1.0, 1.0, 0.0]);
         let render = swept(&mesh, Some(rect(0.1, 0.1)));
-        // Four walls of two triangles along each element and four end faces, fans of four.
-        assert_eq!(render.triangles.len(), (2 * 4 * 2 + 4 * 4) * 3);
+        // Four walls of two triangles along each element and four end faces of two.
+        assert_eq!(render.triangles.len(), (2 * 4 * 2 + 4 * 2) * 3);
         assert!(render.mesh_edges.is_empty());
+    }
+
+    #[test]
+    fn concave_profiles_close_their_ends() {
+        let shape = BeamShape {
+            profile: BeamProfile::I {
+                h: 0.2,
+                b: 0.1,
+                tw: 0.01,
+                tf: 0.02,
+            },
+            normal: DVec3::Z,
+            offset: [0.0; 2],
+        };
+        let area = shape.profile.properties().area as f32;
+        let render = swept(&beam(), Some(shape));
+        assert!(
+            (volume(&render) - 2.0 * area).abs() < 1e-5,
+            "{} {}",
+            volume(&render),
+            2.0 * area
+        );
     }
 
     #[test]

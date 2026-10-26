@@ -3,7 +3,7 @@
 //! axes through it.
 
 use egui::{Color32, FontId, Pos2, Rect, Shape, Stroke, Ui, pos2, vec2};
-use plx_model::{BeamProfile, CrossSection, Field, Quantity, UnitSystem};
+use plx_model::{BeamProfile, CrossSection, Quantity, UnitSystem};
 
 use crate::{expose, numeric, setup, style};
 
@@ -19,9 +19,11 @@ pub fn form(ui: &mut Ui, cross_section: &mut CrossSection, units: UnitSystem) {
     egui::ComboBox::from_id_salt("cross-section profile")
         .selected_text(profile.label())
         .width(200.0)
+        // All kinds without scrolling.
+        .height(400.0)
         .show_ui(ui, |ui| {
             for other in BeamProfile::ALL {
-                let selected = other.keyword() == profile.keyword();
+                let selected = std::mem::discriminant(&other) == std::mem::discriminant(profile);
                 if ui.selectable_label(selected, other.label()).clicked() && !selected {
                     *profile = scaled_like(other, profile);
                 }
@@ -32,6 +34,24 @@ pub fn form(ui: &mut Ui, cross_section: &mut CrossSection, units: UnitSystem) {
     if profile.needs_reduced_integration() {
         ui.label("");
         ui.weak("Pipe and box need beams on lines with 3 nodes (B32R).");
+        ui.end_row();
+    }
+    if !profile.is_native() {
+        ui.label("");
+        ui.scope(|ui| {
+            ui.set_max_width(SKETCH.x);
+            let note = "A general beam of CalculiX (U1): lines with 2 nodes, the axis through \
+                        the centroid, linear Static and Frequency steps only.";
+            ui.add(egui::Label::new(egui::RichText::new(note).weak()).wrap())
+        })
+        .inner
+        .on_hover_text(
+            "CalculiX has beam sections of its own for rectangles, circles, pipes and boxes \
+             only. Other profiles are written by their area and second moments of area about \
+             the principal axes, for the user element U1. It takes neither large \
+             deformations (Nlgeom) nor buckling, its torsion stiffness is k G (I11 + I22), \
+             and the results show no stresses on it.",
+        );
         ui.end_row();
     }
     ui.label("");
@@ -53,37 +73,57 @@ fn scaled_like(kind: BeamProfile, like: &BeamProfile) -> BeamProfile {
             thickness: wall,
         },
         BeamProfile::Box { .. } => BeamProfile::Box { a, b, t: [wall; 4] },
+        BeamProfile::I { .. } => BeamProfile::I {
+            h: b,
+            b: a,
+            tw: wall * 0.6,
+            tf: wall,
+        },
+        BeamProfile::T { .. } => BeamProfile::T {
+            h: b,
+            b: a,
+            tw: wall * 0.6,
+            tf: wall,
+        },
+        BeamProfile::U { .. } => BeamProfile::U {
+            h: b,
+            b: a,
+            tw: wall * 0.6,
+            tf: wall,
+        },
+        BeamProfile::L { .. } => BeamProfile::L {
+            h: b,
+            b: a,
+            t: wall,
+        },
+        // The values of the profile it was, so that a known section can be adjusted.
+        BeamProfile::General { .. } => {
+            let p = like.properties();
+            BeamProfile::General {
+                area: p.area,
+                i11: p.i11,
+                i22: p.i22,
+                k: like.shear_factor(),
+            }
+        }
     }
 }
 
 /// The dimension fields of a profile, each one an exposable parameter.
 fn dimensions(ui: &mut Ui, profile: &mut BeamProfile, units: UnitSystem) {
-    let length = |ui: &mut Ui, label: &str, value: &mut f64, field: Field| {
-        ui.label(label);
-        expose::field(ui, field, |ui| {
-            ui.add(numeric::quantity(value, units, Quantity::Length).range(0.0..=f64::MAX))
+    for dimension in profile.dimensions_mut() {
+        ui.label(dimension.label);
+        let value = dimension.value;
+        expose::field(ui, dimension.field, |ui| {
+            let field = match dimension.quantity {
+                Some(Quantity::Length) => numeric::quantity(value, units, Quantity::Length),
+                // Areas and second moments span many orders of magnitude.
+                Some(quantity) => numeric::physical(value, units, quantity),
+                None => numeric::drag_value(value).speed(0.01),
+            };
+            ui.add(field.range(0.0..=f64::MAX))
         });
         ui.end_row();
-    };
-    match profile {
-        BeamProfile::Rect { a, b } => {
-            length(ui, "Thickness in 1-direction (a)", a, Field::BeamA);
-            length(ui, "Thickness in 2-direction (b)", b, Field::BeamB);
-        }
-        BeamProfile::Circ { radius } => length(ui, "Radius", radius, Field::Radius),
-        BeamProfile::Pipe { radius, thickness } => {
-            length(ui, "Outer radius", radius, Field::Radius);
-            length(ui, "Wall thickness", thickness, Field::Thickness);
-        }
-        BeamProfile::Box { a, b, t } => {
-            length(ui, "Width in 1-direction (a)", a, Field::BeamA);
-            length(ui, "Width in 2-direction (b)", b, Field::BeamB);
-            let [t1, t2, t3, t4] = t;
-            length(ui, "Wall thickness at +1 (t1)", t1, Field::Wall1);
-            length(ui, "Wall thickness at +2 (t2)", t2, Field::Wall2);
-            length(ui, "Wall thickness at -1 (t3)", t3, Field::Wall3);
-            length(ui, "Wall thickness at -2 (t4)", t4, Field::Wall4);
-        }
     }
 }
 
@@ -139,12 +179,19 @@ fn paint(ui: &Ui, rect: Rect, profile: &BeamProfile) {
     };
     let fill = style::adapt(Color32::from_rgb(170, 190, 215));
     let edge = Stroke::new(1.5, style::adapt(Color32::from_rgb(40, 70, 120)));
-    // The outer outline filled, the holes painted over with the background; every profile
-    // has convex outlines.
+    // The outer outline filled, the holes painted over with the background. I, T, U and L
+    // profiles are concave, so the outline is filled by its triangles.
     for (k, outline) in outlines.iter().enumerate() {
         let points: Vec<Pos2> = outline.points.iter().map(|&p| at(p)).collect();
         let color = if k == 0 { fill } else { style::window() };
-        painter.add(Shape::convex_polygon(points.clone(), color, Stroke::NONE));
+        let mut mesh = egui::Mesh::default();
+        for &point in &points {
+            mesh.colored_vertex(point, color);
+        }
+        for [a, b, c] in plx_model::triangulate(&outline.points) {
+            mesh.add_triangle(a as u32, b as u32, c as u32);
+        }
+        painter.add(Shape::mesh(mesh));
         painter.add(Shape::closed_line(points, edge));
     }
     // The beam's 1- and 2-direction from the nodes, at the centre of the profile.
@@ -210,7 +257,14 @@ fn clip_to(rect: Rect, start: Pos2, direction: egui::Vec2) -> Pos2 {
 
 /// Area, centroid and second moments of area of a profile as text, in the model's units.
 fn properties(ui: &mut Ui, profile: &BeamProfile, units: UnitSystem) {
-    let p = profile.properties();
+    let mut p = profile.properties();
+    // A centroid at the centre up to rounding is at the centre.
+    let size = profile.size().into_iter().fold(0.0, f64::max);
+    for c in &mut p.centroid {
+        if c.abs() < 1e-9 * size {
+            *c = 0.0;
+        }
+    }
     let length = plx_model::STORED.factor_to(Quantity::Length, units);
     let unit = units.unit(Quantity::Length);
     let value = |v: f64, power: i32| {
@@ -232,7 +286,12 @@ fn properties(ui: &mut Ui, profile: &BeamProfile, units: UnitSystem) {
         format!("Principal: I = {}, II = {}", value(big, 4), value(small, 4)),
         format!(
             "Axis I at {:.1} deg from the 1-direction",
-            angle.to_degrees()
+            // Without a sign on 0.
+            if angle.to_degrees().abs() < 0.05 {
+                0.0
+            } else {
+                angle.to_degrees()
+            }
         ),
     ];
     for line in lines {
@@ -253,6 +312,12 @@ mod tests {
         let boxed = scaled_like(BeamProfile::ALL[3], &rect);
         assert_eq!(boxed.size(), [0.02, 0.04]);
         assert!(boxed.is_valid());
+        // Every kind made from it is valid, the general one with its values.
+        for kind in BeamProfile::ALL {
+            assert!(scaled_like(kind, &rect).is_valid(), "{kind:?}");
+        }
+        let general = scaled_like(BeamProfile::ALL[8], &rect);
+        assert_eq!(general.properties().i11, rect.properties().i11);
     }
 
     #[test]

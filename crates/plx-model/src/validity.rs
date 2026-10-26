@@ -353,6 +353,13 @@ impl Section {
                         beam.cross_section
                     ));
                 }
+                // The axis of CalculiX's general beam runs through the centroid.
+                Some(profile) if !profile.is_native() && beam.offset != [0.0; 2] => {
+                    return Some(format!(
+                        "{} profiles take no offset: the beam axis runs through the centroid",
+                        profile.label()
+                    ));
+                }
                 Some(_) => {}
             },
             SectionKind::Shell { thickness, .. } | SectionKind::Membrane { thickness, .. } => {

@@ -130,7 +130,12 @@ impl ElementShape {
                 _ => None,
             };
         }
-        if name.starts_with("B31") || name.starts_with("T3D2") || name.starts_with("T2D2") {
+        // U1 is the user element CalculiX has general beam sections for, a 2-node beam.
+        if name.starts_with("B31")
+            || name.starts_with("T3D2")
+            || name.starts_with("T2D2")
+            || name == "U1"
+        {
             return Some(Self::Line2);
         }
         if name.starts_with("B32") || name.starts_with("T3D3") || name.starts_with("T2D3") {
@@ -229,6 +234,7 @@ mod tests {
             ("CAX8R", ElementShape::Quad8),
             ("M3D6", ElementShape::Tri6),
             ("B31", ElementShape::Line2),
+            ("U1", ElementShape::Line2),
             ("B32R", ElementShape::Line3),
             ("T3D2", ElementShape::Line2),
         ];

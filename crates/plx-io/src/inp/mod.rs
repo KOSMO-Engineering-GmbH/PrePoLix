@@ -129,13 +129,22 @@ enum Block {
         /// `SECTION=` of a beam section.
         profile: String,
         values: Vec<Vec<f64>>,
+        /// The comment before a general beam section with its profile, see
+        /// [`PROFILE_COMMENT`].
+        comment: Option<String>,
     },
 }
+
+/// The start of the comment PrePoLix writes before a general `*Beam section`: CalculiX
+/// knows the profile by its area and second moments only, the results draw it from this.
+pub(crate) const PROFILE_COMMENT: &str = "** Profile: ";
 
 struct Reader {
     import: InpImport,
     unsupported_elements: BTreeSet<String>,
     duplicate_nodes: usize,
+    /// The last profile comment, for the beam section after it.
+    profile_comment: Option<String>,
 }
 
 impl Reader {
@@ -147,13 +156,16 @@ impl Reader {
             },
             unsupported_elements: BTreeSet::new(),
             duplicate_nodes: 0,
+            profile_comment: None,
         }
     }
 
     fn run(mut self, lines: &[SourceLine]) -> Result<InpImport, InpError> {
         let mut block = Block::Skip;
         for line in lines {
-            if is_keyword(&line.text) {
+            if let Some(profile) = line.text.strip_prefix(PROFILE_COMMENT) {
+                self.profile_comment = Some(profile.to_owned());
+            } else if is_keyword(&line.text) {
                 self.finish(&block, line)?;
                 block = self.start(KeywordLine::parse(&line.text), line)?;
             } else {
@@ -262,6 +274,7 @@ impl Reader {
                             .unwrap_or_default()
                             .to_ascii_uppercase(),
                         values: Vec::new(),
+                        comment: self.profile_comment.take(),
                     },
                     _ => Block::Skip,
                 };
@@ -384,6 +397,7 @@ impl Reader {
                 kind,
                 profile,
                 values,
+                comment,
             } => {
                 // A beam section has the dimensions and the normal, the others one line.
                 let needed = if matches!(kind, SectionKind::Beam(_)) {
@@ -402,7 +416,8 @@ impl Reader {
                 let elements = mesh.element_sets.get(set.as_str()).into_iter().flatten();
                 let lines = (elements.filter_map(|&id| mesh.element(id)))
                     .any(|e| e.shape.family() == ElementFamily::Line);
-                if let Some((kind, profile)) = read_section(kind, profile, values, lines, set) {
+                let read = read_section(kind, profile, values, lines, set, comment.as_deref());
+                if let Some((kind, profile)) = read {
                     if let Some(profile) = profile {
                         self.import.cross_sections.push(CrossSection {
                             name: set.clone(),
@@ -585,6 +600,7 @@ fn read_section(
     values: &[Vec<f64>],
     lines: bool,
     set: &str,
+    comment: Option<&str>,
 ) -> Option<(SectionKind, Option<BeamProfile>)> {
     let first = |k: usize| values[0].get(k).copied().filter(|v| *v > 0.0);
     Some(match kind {
@@ -623,6 +639,25 @@ fn read_section(
                     b: first(1)?,
                     t: [first(2)?, first(3)?, first(4)?, first(5)?],
                 },
+                "GENERAL" => {
+                    // PrePoLix's own comment names the profile and the normal it is drawn
+                    // with; otherwise the values: A, I11, I12, I22, k, whose I11 is the
+                    // moment of the 1-coordinate squared, see BeamProfile::data_line.
+                    if let Some((profile, normal)) = comment.and_then(general_profile) {
+                        let beam = SectionKind::Beam(BeamSection {
+                            cross_section: set.to_owned(),
+                            orientation: BeamOrientation::Direction(normal),
+                            offset: beam.offset,
+                        });
+                        return Some((beam, Some(profile)));
+                    }
+                    BeamProfile::General {
+                        area: first(0)?,
+                        i11: first(3)?,
+                        i22: first(1)?,
+                        k: first(4).unwrap_or(1.0),
+                    }
+                }
                 _ => return None,
             };
             let normal = values[1].get(..3)?;
@@ -635,6 +670,14 @@ fn read_section(
         }
         _ => return None,
     })
+}
+
+/// The profile and normal of a [`PROFILE_COMMENT`], without its start.
+fn general_profile(comment: &str) -> Option<(BeamProfile, [f64; 3])> {
+    let (profile, normal) = comment.split_once("; Normal:")?;
+    let profile: BeamProfile = ron::from_str(profile.trim()).ok()?;
+    let normal: Vec<f64> = fields(normal).map_while(parse_f64).collect();
+    Some((profile, normal.get(..3)?.try_into().ok()?))
 }
 
 fn parse_id(field: &str) -> Option<NodeId> {
