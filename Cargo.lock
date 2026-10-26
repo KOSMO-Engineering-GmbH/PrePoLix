@@ -2790,7 +2790,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plx-app"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "chrono",
  "cpal",
@@ -2823,11 +2823,11 @@ dependencies = [
 
 [[package]]
 name = "plx-core"
-version = "0.3.14"
+version = "0.3.15"
 
 [[package]]
 name = "plx-io"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "base64 0.22.1",
  "flate2",
@@ -2842,7 +2842,7 @@ dependencies = [
 
 [[package]]
 name = "plx-job"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "plx-core",
  "ron",
@@ -2852,7 +2852,7 @@ dependencies = [
 
 [[package]]
 name = "plx-mesh"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "plx-core",
  "ron",
@@ -2862,7 +2862,7 @@ dependencies = [
 
 [[package]]
 name = "plx-mesher"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "libloading 0.9.0",
  "log",
@@ -2873,7 +2873,7 @@ dependencies = [
 
 [[package]]
 name = "plx-model"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "glam",
  "plx-core",
@@ -2884,7 +2884,7 @@ dependencies = [
 
 [[package]]
 name = "plx-render"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "bytemuck",
  "glam",
@@ -2897,7 +2897,7 @@ dependencies = [
 
 [[package]]
 name = "plx-results"
-version = "0.3.14"
+version = "0.3.15"
 dependencies = [
  "glam",
  "plx-core",
