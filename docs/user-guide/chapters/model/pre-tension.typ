@@ -47,8 +47,12 @@ pre-tension load on the faces of one of them. PrePoLix writes the nodes of the c
 slave of the tie, whichever side you made the master, so the preload passes through it.]
 
 A pre-tension load can follow an #ui("Amplitude") (@amplitudes). The reaction force at the
-pre-tension node is the bolt force; request it with a history output (@history-outputs) of `RF`
-on the load.
+pre-tension node is the bolt force: PrePoLix prints it (`RF1`) and the shortening (`U1`) into the
+history results under the name of the load in every step that has the load (@history-outputs).
+
+#note[A #ui("Bolt") under #ui("Connections") (@bolts) is the simpler way for most joints: pick
+the faces on both sides of the cut and give the preload. It ties two bolt halves itself, locks
+the bolt after the preload step and replaces the contact region found on the cut.]
 
 #note[The preload acts across the cut only. Hold the bolt against rigid body motion with the
 contact or tie to the clamped parts, not with a support on the cut faces.]

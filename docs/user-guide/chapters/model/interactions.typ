@@ -341,6 +341,84 @@ region chosen as a tie, a region of no separation and a region deactivated as a 
 contact elements; the model check warns that their history output prints nothing, and the
 export leaves it out.
 
+=== Bolts <bolts>
+
+A bolt joins the two sides of a cut through a bolt shank and tightens them with a preload.
+Create it with #menu("Interaction", "Create Bolt ...") or #ui("Create Bolt ...") in the context
+menu of #ui("Connections"); it is listed under #ui("Connections") #sym.arrow.r #ui("Bolts").
+You pick the faces on the two sides of the cut and give the preload, PrePoLix works out the
+rest.
+
+#screenshot("bolt-dialog.png", [A bolt between two parts. The bonded contact region the contact
+  detection found on the cut is replaced by the bolt and shown greyed out in the tree])
+
+#fields(
+  [Side A, Side B], [The faces on the two sides of the cut. For a bolt split into two parts in
+    the CAD geometry these are the two cut faces, for a bolt meshed in one piece the element
+    faces on one side of the cut (side B stays empty). For a bolt that is not cut at all, pick
+    only the cylindrical face of its shank as side A, see below.],
+  [Preload by], [#ui("Force") pulls the two sides together with the preload, #ui("Shortening")
+    shortens the bolt by a length.],
+  [Axis], [The direction of the bolt axis. Unticked, PrePoLix uses the normal of the cut;
+    #ui("Given") takes the components #ui("X"), #ui("Y"), #ui("Z").],
+  [Steps], [What the bolt does in each step that takes loads, see below.],
+  [Exported as], [How PrePoLix writes the bolt for CalculiX: where it cuts the mesh, whether it
+    ties the two halves and which contact regions the bolt replaces.],
+)
+
+==== Steps of a bolt
+
+#ui("Auto") does what a bolted joint usually needs: the bolt is tightened with the preload in
+the first step that takes loads and locked at its length in all steps after it, so its force
+then follows the other loads. Steps before the preload step leave it loose. A step can choose
+an action of its own instead:
+
+#fields(
+  [Load], [Pulled together by a force, by default the preload.],
+  [Adjustment], [Shortened by a length since the start of the analysis.],
+  [Lock], [Kept at its length at the end of the previous step (`*BOUNDARY, FIXED`).],
+  [Open], [Loose: no preload, the cut carries no force.],
+)
+
+==== Picking the shank
+
+A bolt does not need to be cut in the CAD geometry: pick the cylindrical face of the free
+shank, between head and nut, as #ui("Side A") and leave #ui("Side B") empty. PrePoLix finds
+the axis of the shank from the face and cuts the bolt across the middle of the face. The cut
+follows the element faces of the mesh, like a staircase in a tetrahedral mesh, so the bolt
+needs no new mesh; the preload acts along the axis. #ui("Exported as") says when the shank was
+recognised. Hide the clamped parts (@view) to reach the shank in the 3D view.
+
+#screenshot("bolt-shank.png", [Only the shank of an uncut bolt picked: PrePoLix cuts it across
+  its middle])
+
+The bolt must be one part of its own, at least where the shank is. Its contact with the hole
+must let the shank slide: the contact detection usually finds the head, the nut and the shank
+as one bonded region with the clamped parts. The model check then warns at the bolt that the
+region holds it at its cut; make that region frictional or frictionless.
+
+==== What PrePoLix writes
+
+When the two sides share their nodes (one mesh through the cut), PrePoLix cuts the mesh between
+them. For two parts it cuts the side with the finer mesh and ties its nodes to the other side;
+the sides cannot slide against each other. The preload is the first degree of freedom of a new
+node, as with a pre-tension load (@pre-tension).
+
+The contact detection (@contact-detection) usually finds the two cut faces as a bonded contact
+region. A tie or contact on the cut next to the bolt would hold the halves together and keep
+CalculiX from converging, so the bolt replaces every contact region that lies on its cut: such
+a region is greyed out in the tree with #ui("(replaced by ...)") and left out of the input
+file. Contacts of the head and the nut with the clamped parts stay as they are; the model check
+warns when a bonded or rough region holds the bolt at its cut, and when two bolts or a bolt and
+a tie share faces.
+
+After the run the bolt force (`RF1`) and the shortening (`U1`) of every bolt are in the history
+results under the bolt's name in capitals, spaces written as underscores (`BOLT_M10`), in each
+step in which the bolt is tightened or locked (@history-outputs). An open bolt carries no force.
+
+#screenshot("bolt-force.png", [The force of a bolt in the preload step and, locked, in the
+  operation step])
+
 === Surface interactions
 
 #menu("Interaction", "Advanced", "Create Surface Interaction ...") defines the contact behaviour

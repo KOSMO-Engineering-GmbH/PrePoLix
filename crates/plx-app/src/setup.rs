@@ -71,6 +71,8 @@ pub enum NewItem {
     ContactRegion,
     /// A search for contact regions, kept to run it again.
     ContactDetection,
+    /// A bolt preloaded across a cut through its shank.
+    Bolt,
     ContactPair,
     /// Surfaces glued to each other; listed with the contact pairs.
     Tie,
@@ -1083,6 +1085,14 @@ enum Draft {
     /// A contact region with side A as master and side B as slave of the drafts.
     ContactRegion(plx_model::ContactRegion, MasterSlave, RegionView),
     ContactDetection(plx_model::ContactDetection),
+    /// A bolt with side A as master and side B as slave of the drafts, and its action in
+    /// each step (`None` automatic).
+    Bolt(
+        plx_model::Bolt,
+        MasterSlave,
+        Vec<Option<plx_model::BoltAction>>,
+        crate::bolts::BoltView,
+    ),
     /// The settings the contact regions share.
     Connections(plx_model::ContactDefaults),
     ContactPair(ContactPair, MasterSlave),
@@ -1106,7 +1116,8 @@ fn draft_region(draft: &Draft) -> Option<&RegionDraft> {
         | Draft::MeshSet(_, r, _) => Some(r),
         Draft::ContactPair(_, regions)
         | Draft::Tie(_, regions)
-        | Draft::ContactRegion(_, regions, _) => Some(regions.current()),
+        | Draft::ContactRegion(_, regions, _)
+        | Draft::Bolt(_, regions, ..) => Some(regions.current()),
         Draft::Constraint(c) => Some(c.region()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
@@ -1125,7 +1136,8 @@ fn draft_region_mut(draft: &mut Draft) -> Option<&mut RegionDraft> {
         | Draft::MeshSet(_, r, _) => Some(r),
         Draft::ContactPair(_, regions)
         | Draft::Tie(_, regions)
-        | Draft::ContactRegion(_, regions, _) => Some(regions.current_mut()),
+        | Draft::ContactRegion(_, regions, _)
+        | Draft::Bolt(_, regions, ..) => Some(regions.current_mut()),
         Draft::Constraint(c) => Some(c.region_mut()),
         Draft::HistoryOutput(_, output, r) if output.kind.region().is_some() => Some(r),
         Draft::DefinedField(_, field, r) if field.kind.takes_region() => Some(r),
@@ -1884,6 +1896,15 @@ impl Editor {
                     RegionView::default(),
                 )
             }
+            NewItem::Bolt => {
+                let name = next_name("Bolt", names(&fe.bolts, |b| &b.name));
+                Draft::Bolt(
+                    plx_model::Bolt::new(name),
+                    MasterSlave::new(contact_target(fe)),
+                    vec![None; fe.steps.len()],
+                    Default::default(),
+                )
+            }
             NewItem::ContactDetection => {
                 let existing = names(&fe.contact_detections, |d| &d.name);
                 let name = if existing.is_empty() {
@@ -2099,6 +2120,13 @@ impl Editor {
                 Draft::ContactDetection(fe.contact_detections.get(i)?.clone()),
                 i,
             ),
+            TreeItem::Bolt(i) => {
+                let bolt = fe.bolts.get(i)?.clone();
+                let sides =
+                    MasterSlave::from_regions(&bolt.side_a, &bolt.side_b, contact_target(fe), mesh);
+                let actions = crate::bolts::step_actions(fe, &bolt.name);
+                (Draft::Bolt(bolt, sides, actions, Default::default()), i)
+            }
             TreeItem::Group("Contacts") => (Draft::Connections(fe.contact_defaults.clone()), 0),
             TreeItem::Tie(i) => {
                 let tie = fe.ties.get(i)?.clone();
@@ -2154,6 +2182,7 @@ impl Editor {
             Draft::ContactPair(c, _) => ("Contact Pair", &c.name),
             Draft::ContactRegion(r, ..) => ("Contact Region", &r.name),
             Draft::ContactDetection(d) => ("Contact Detection", &d.name),
+            Draft::Bolt(b, ..) => ("Bolt", &b.name),
             Draft::Connections(_) => return "Connections".into(),
             Draft::Tie(t, _) => ("Tie", &t.name),
             Draft::NodeTie(t, _) => ("Node Tie", &t.name),
@@ -2251,7 +2280,8 @@ impl Editor {
         match &self.draft {
             Draft::ContactPair(_, regions)
             | Draft::Tie(_, regions)
-            | Draft::ContactRegion(_, regions, _) => regions.highlight(model),
+            | Draft::ContactRegion(_, regions, _)
+            | Draft::Bolt(_, regions, ..) => regions.highlight(model),
             Draft::Constraint(c) => c.highlight(model),
             _ => self
                 .region()
@@ -3264,6 +3294,10 @@ impl Editor {
                     region.set_behavior(new);
                 }
             }
+            Draft::Bolt(bolt, sides, actions, view) => {
+                name_row(ui, &mut bolt.name);
+                crate::bolts::bolt_form(ui, model, bolt, sides, actions, view);
+            }
             Draft::ContactDetection(detection) => {
                 name_row(ui, &mut detection.name);
                 connections::detection_form(ui, model, detection, self.detection_scope.as_ref());
@@ -3299,6 +3333,7 @@ impl Editor {
             Draft::ContactPair(..) => names(&fe.contact_pairs, |c| &c.name),
             Draft::ContactRegion(..) => names(&fe.contact_regions, |r| &r.name),
             Draft::ContactDetection(..) => names(&fe.contact_detections, |d| &d.name),
+            Draft::Bolt(..) => names(&fe.bolts, |b| &b.name),
             Draft::Connections(_) => Vec::new(),
             Draft::Tie(..) => names(&fe.ties, |t| &t.name),
             Draft::NodeTie(..) => names(&fe.node_ties, |t| &t.name),
@@ -3329,6 +3364,7 @@ impl Editor {
             Draft::ContactPair(c, _) => &c.name,
             Draft::ContactRegion(r, ..) => &r.name,
             Draft::ContactDetection(d) => &d.name,
+            Draft::Bolt(b, ..) => &b.name,
             Draft::Connections(_) => return Ok(()),
             Draft::Tie(t, _) => &t.name,
             Draft::NodeTie(t, _) => &t.name,
@@ -3404,6 +3440,7 @@ impl Editor {
             }
             Draft::ContactRegion(region, sides, _) => connections::validate_region(region, sides)?,
             Draft::ContactDetection(detection) => connections::validate_detection(detection)?,
+            Draft::Bolt(_, sides, ..) => crate::bolts::validate_bolt(sides)?,
             Draft::Tie(tie, regions) => {
                 regions.validate()?;
                 if let Some(problem) = tie.cyclic.as_ref().and_then(CyclicSymmetry::problem) {
@@ -3567,6 +3604,7 @@ impl Editor {
             Draft::ContactDetection(..) => {
                 Some(TreeItem::ContactDetection(fe.contact_detections.len()))
             }
+            Draft::Bolt(..) => Some(TreeItem::Bolt(fe.bolts.len())),
             Draft::Tie(..) => Some(TreeItem::Tie(fe.ties.len())),
             Draft::NodeTie(..) => Some(TreeItem::NodeTie(fe.node_ties.len())),
             Draft::Amplitude(..) => Some(TreeItem::Amplitude(fe.amplitudes.len())),
@@ -3711,6 +3749,16 @@ impl Editor {
                     }
                 }
                 put(&mut fe.contact_detections, index, detection);
+            }
+            Draft::Bolt(mut bolt, sides, actions, _) => {
+                (bolt.side_a, bolt.side_b) = sides.regions();
+                if let Some(existing) = index.and_then(|i| fe.bolts.get(i)) {
+                    bolt.active = existing.active;
+                    let old = existing.name.clone();
+                    fe.remove_bolt_changes(&old);
+                }
+                crate::bolts::set_step_actions(fe, &bolt.name, &actions);
+                put(&mut fe.bolts, index, bolt);
             }
             Draft::Connections(defaults) => fe.contact_defaults = defaults,
             Draft::Tie(mut tie, regions) => {
@@ -3869,6 +3917,13 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
                 _ => remove(&mut fe.contact_regions, i),
             }
         }
+        TreeItem::Bolt(i) => {
+            let Some(name) = fe.bolts.get(i).map(|b| b.name.clone()) else {
+                return false;
+            };
+            fe.remove_bolt_changes(&name);
+            remove(&mut fe.bolts, i)
+        }
         TreeItem::ContactDetection(i) => {
             let Some(name) = fe.contact_detections.get(i).map(|d| d.name.clone()) else {
                 return false;
@@ -3931,6 +3986,7 @@ fn active_mut<'a>(fe: &'a mut FeModel, item: &TreeItem) -> Option<&'a mut bool> 
         TreeItem::Constraint(i) => fe.constraints.get_mut(i).map(Constraint::active_mut),
         TreeItem::ContactPair(i) => fe.contact_pairs.get_mut(i).map(|c| &mut c.active),
         TreeItem::ContactRegion(i) => fe.contact_regions.get_mut(i).map(|r| &mut r.active),
+        TreeItem::Bolt(i) => fe.bolts.get_mut(i).map(|b| &mut b.active),
         TreeItem::Tie(i) => fe.ties.get_mut(i).map(|t| &mut t.active),
         TreeItem::NodeTie(i) => fe.node_ties.get_mut(i).map(|t| &mut t.active),
         TreeItem::InitialCondition(i) => fe.initial_conditions.get_mut(i).map(|c| &mut c.active),
@@ -4034,6 +4090,7 @@ pub fn item_highlight(model: &Model, item: &TreeItem) -> Highlight {
         TreeItem::ContactPair(i) => fe.contact_pairs.get(i).map(|c| [&c.master, &c.slave]),
         TreeItem::Tie(i) => fe.ties.get(i).map(|t| [&t.master, &t.slave]),
         TreeItem::ContactRegion(i) => fe.contact_regions.get(i).map(|r| [&r.side_a, &r.side_b]),
+        TreeItem::Bolt(i) => fe.bolts.get(i).map(|b| [&b.side_a, &b.side_b]),
         TreeItem::HistoryOutput(s, i) => {
             let output = fe.steps.get(s).and_then(|st| st.history_outputs.get(i));
             match output.map(|h| &h.kind) {
@@ -4121,6 +4178,11 @@ pub fn acting_on_parts(model: &Model, parts: &BTreeSet<usize>) -> BTreeSet<TreeI
     for (i, t) in fe.node_ties.iter().enumerate() {
         if on_parts(&t.region) {
             acting.insert(TreeItem::NodeTie(i));
+        }
+    }
+    for (i, b) in fe.bolts.iter().enumerate() {
+        if on_parts(&b.side_a) || on_parts(&b.side_b) {
+            acting.insert(TreeItem::Bolt(i));
         }
     }
     for (s, step) in fe.steps.iter().enumerate() {

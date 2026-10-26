@@ -41,6 +41,7 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         contact_regions,
         contact_detections: _,
         contact_defaults,
+        bolts,
         amplitudes,
         distributions,
         initial_conditions,
@@ -86,6 +87,9 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
             .collect();
         hash.add_debug(&regions);
         hash.add_debug(contact_defaults);
+    }
+    if !bolts.is_empty() {
+        hash.add_debug(bolts);
     }
     hash.add_debug(amplitudes);
     hash.add_debug(distributions);
