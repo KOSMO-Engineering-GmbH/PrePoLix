@@ -22,6 +22,8 @@ pub enum NodeIcon {
     Materials,
     /// Sections: an I profile.
     Sections,
+    /// Cross-sections: a box profile with the axes through its centroid.
+    CrossSections,
     /// Constraints: a support.
     Constraints,
     /// Contacts: two bodies touching.
@@ -199,6 +201,14 @@ pub fn paint(painter: &Painter, min: Pos2, icon: NodeIcon, color: Color32) {
             p(5.5, 4.5),
             p(2.0, 4.5),
         ]),
+        NodeIcon::CrossSections => {
+            closed(&[p(2.5, 2.5), p(11.5, 2.5), p(11.5, 11.5), p(2.5, 11.5)]);
+            closed(&[p(5.0, 5.0), p(9.0, 5.0), p(9.0, 9.0), p(5.0, 9.0)]);
+            line(&[p(7.0, 0.5), p(7.0, 2.5)]);
+            line(&[p(7.0, 11.5), p(7.0, 13.5)]);
+            line(&[p(0.5, 7.0), p(2.5, 7.0)]);
+            line(&[p(11.5, 7.0), p(13.5, 7.0)]);
+        }
         NodeIcon::Constraints => {
             closed(&[p(7.0, 1.5), p(2.5, 9.0), p(11.5, 9.0)]);
             line(&[p(1.0, 11.0), p(13.0, 11.0)]);

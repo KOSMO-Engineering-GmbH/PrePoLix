@@ -3,10 +3,10 @@ use std::process::Command;
 
 use plx_mesh::CadEntity;
 use plx_model::{
-    BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, DefinedField,
-    DefinedFieldKind, Displacement, DynamicStep, Elastic, EquationSolver, Hardening, Load,
-    Material, ModalDamping, ModalDynamicsStep, NodeTie, Plastic, PlasticPoint, ReferencePoint,
-    RigidBody, Section, SectionKind, SteadyStateDynamicsStep, UnitSystem,
+    BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, CrossSection,
+    DefinedField, DefinedFieldKind, Displacement, DynamicStep, Elastic, EquationSolver, Hardening,
+    Load, Material, ModalDamping, ModalDynamicsStep, NodeTie, Plastic, PlasticPoint,
+    ReferencePoint, RigidBody, Section, SectionKind, SteadyStateDynamicsStep, UnitSystem,
 };
 
 use super::*;
@@ -3867,6 +3867,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
         factor_amplitude: None,
     });
     FeModel {
+        cross_sections: line_cross_sections(),
         materials: vec![Material {
             name: "Steel".into(),
             density: None,
@@ -3892,11 +3893,40 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
     }
 }
 
+/// The cross-sections of [`line_model`], by name.
+fn line_cross_sections() -> Vec<CrossSection> {
+    let profiles = [
+        ("Rect", BeamProfile::Rect { a: 10.0, b: 5.0 }),
+        (
+            "Pipe",
+            BeamProfile::Pipe {
+                radius: 5.0,
+                thickness: 1.0,
+            },
+        ),
+        ("Circ", BeamProfile::Circ { radius: 2.0 }),
+        ("Box", BeamProfile::ALL[3].clone()),
+    ];
+    (profiles.into_iter())
+        .map(|(name, profile)| CrossSection {
+            name: name.into(),
+            profile,
+        })
+        .collect()
+}
+
+/// A beam section of a cross-section of [`line_cross_sections`].
+fn beam(cross_section: &str) -> BeamSection {
+    BeamSection {
+        cross_section: cross_section.into(),
+        ..BeamSection::DEFAULT
+    }
+}
+
 fn rect_beam(orientation: BeamOrientation) -> SectionKind {
     SectionKind::Beam(BeamSection {
-        profile: BeamProfile::Rect { a: 10.0, b: 5.0 },
         orientation,
-        offset: [0.0, 0.0],
+        ..beam("Rect")
     })
 }
 
@@ -3920,12 +3950,8 @@ fn beam_sections_type_their_elements_and_write_the_normal() {
     // Pipes and boxes need B32R and carry the offsets.
     let mut model = model;
     model.sections[0].kind = SectionKind::Beam(BeamSection {
-        profile: BeamProfile::Pipe {
-            radius: 5.0,
-            thickness: 1.0,
-        },
-        orientation: BeamOrientation::Automatic,
         offset: [0.5, 0.0],
+        ..beam("Pipe")
     });
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Element, Type=B32R, Elset=BEAM\n"), "{text}");
@@ -3939,12 +3965,157 @@ fn beam_sections_type_their_elements_and_write_the_normal() {
         "{text}"
     );
     // A circle is written by its diameter, as CalculiX reads it.
-    model.sections[0].kind = SectionKind::Beam(BeamSection {
-        profile: BeamProfile::Circ { radius: 2.0 },
-        ..BeamSection::DEFAULT
-    });
+    model.sections[0].kind = SectionKind::Beam(beam("Circ"));
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("Section=CIRC\n4, 4\n0, 0, 1\n"), "{text}");
+}
+
+/// An I-beam is no beam section of CalculiX: it is written as a general section of the user
+/// element U1, which bends like the textbook beam, and read back from its comment.
+#[test]
+fn general_profiles_are_written_for_user_element_u1() {
+    let mesh = line_chain(10, 0, 1000.0, false);
+    let i_beam = BeamProfile::I {
+        h: 100.0,
+        b: 50.0,
+        tw: 4.0,
+        tf: 6.0,
+    };
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Beam(BeamSection {
+            orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+            ..beam("I")
+        }),
+        LoadKind::force([0.0, 0.0, 100.0]),
+    );
+    model.cross_sections.push(CrossSection {
+        name: "I".into(),
+        profile: i_beam.clone(),
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    for line in [
+        "*User element, Type=U1, Nodes=2, Integration points=2, Maxdof=6\n\
+         *Element, Type=U1, Elset=BEAM\n1, 1, 2\n",
+        "Material=Steel, Section=GENERAL\n",
+        "** Profile: I(h:100.0,b:50.0,tw:4.0,tf:6.0); Normal: 0, 0, 1\n",
+    ] {
+        assert!(text.contains(line), "{line} missing in\n{text}");
+    }
+    let import = read_inp_str(&text, None).unwrap();
+    assert_eq!(import.cross_sections[0].profile, i_beam);
+    assert_eq!(
+        import.sections[0].kind,
+        SectionKind::Beam(BeamSection {
+            cross_section: import.cross_sections[0].name.clone(),
+            orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+            offset: [0.0; 2],
+        })
+    );
+    assert_eq!(import.mesh.element(1).unwrap().type_name, "U1");
+    // A tip force in the 1-direction (z) bends it about its weak axis, with shear in the web.
+    let p = i_beam.properties();
+    let g = 210_000.0 / 2.6;
+    let expected = 100.0 * 1000.0_f64.powi(3) / (3.0 * 210_000.0 * p.i22)
+        + 100.0 * 1000.0 / (i_beam.shear_factor() * g * p.area);
+    if let Some(frd) = run_ccx("u1-beam", &text) {
+        let sag = node_value(&frd, "DISP", "U3", 11);
+        assert!(
+            (sag - expected).abs() < 0.02 * expected,
+            "{sag} != {expected}"
+        );
+    }
+    // An angle is written about its principal axes: the normal turned about the beam.
+    let angle = BeamProfile::L {
+        h: 80.0,
+        b: 40.0,
+        t: 6.0,
+    };
+    model.cross_sections.last_mut().unwrap().profile = angle.clone();
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let (sin, cos) = angle.principal_turn().sin_cos();
+    let general = format!("Section=GENERAL\n{}, ", number(angle.data_line()[0]));
+    let at = text.find(&general).expect(&text);
+    let written: Vec<f64> = (text[at..].lines().nth(2).unwrap().split(','))
+        .map(|v| v.trim().parse().unwrap())
+        .collect();
+    // The 2-direction is x cross z = -y.
+    for (w, e) in written.iter().zip([0.0, -sin, cos]) {
+        assert!((w - e).abs() < 1e-9, "{written:?}");
+    }
+    assert!(text.contains("; Normal: 0, 0, 1\n"), "{text}");
+    let import = read_inp_str(&text, None).unwrap();
+    assert_eq!(import.cross_sections[0].profile, angle);
+    if let Some(frd) = run_ccx("u1-angle", &text) {
+        // Skew bending: the force along u deflects by the inverse of the moment tensor.
+        let p = angle.properties();
+        let (uu, vv, uv) = (p.i22, p.i11, p.i12);
+        let bending = 100.0 * 1000.0_f64.powi(3) / (3.0 * 210_000.0) * vv / (uu * vv - uv * uv);
+        let expected = bending + 100.0 * 1000.0 / (angle.shear_factor() * g * p.area);
+        let sag = node_value(&frd, "DISP", "U3", 11);
+        assert!(
+            (sag - expected).abs() < 0.02 * expected,
+            "{sag} != {expected}"
+        );
+        // and sideways along v, the 2-direction -y.
+        let side = -uv / vv * bending;
+        let lateral = -node_value(&frd, "DISP", "U2", 11);
+        assert!(
+            (lateral - side).abs() < 0.02 * side.abs(),
+            "{lateral} != {side}"
+        );
+    }
+}
+
+/// A sketched profile goes the way of the I-beam: a general section of U1, its polygons in
+/// the comment, which may be longer than a line of CalculiX.
+#[test]
+fn sketched_profiles_are_written_for_user_element_u1() {
+    let mesh = line_chain(10, 0, 1000.0, false);
+    // A hollow rectangle with an off-centre hole, so that the centroid is not the centre.
+    let sketch = BeamProfile::Sketch(plx_model::Sketch {
+        loops: vec![
+            vec![[0.0, 0.0], [50.0, 0.0], [50.0, 100.0], [0.0, 100.0]],
+            vec![[5.0, 5.0], [45.0, 5.0], [45.0, 80.0], [5.0, 80.0]],
+        ],
+    });
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Beam(BeamSection {
+            orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+            ..beam("Sketch")
+        }),
+        LoadKind::force([0.0, 0.0, 100.0]),
+    );
+    model.cross_sections.push(CrossSection {
+        name: "Sketch".into(),
+        profile: sketch.clone(),
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("Section=GENERAL\n"), "{text}");
+    let comment = (text.lines()).find(|l| l.starts_with("** Profile: Sketch("));
+    assert!(comment.is_some_and(|c| c.len() > 132), "{text}");
+    let import = read_inp_str(&text, None).unwrap();
+    assert_eq!(import.cross_sections[0].profile, sketch);
+    if let Some(frd) = run_ccx("u1-sketch", &text) {
+        let p = sketch.properties();
+        let g = 210_000.0 / 2.6;
+        let expected = 100.0 * 1000.0_f64.powi(3) / (3.0 * 210_000.0 * p.i22)
+            + 100.0 * 1000.0 / (sketch.shear_factor() * g * p.area);
+        let sag = node_value(&frd, "DISP", "U3", 11);
+        assert!(
+            (sag - expected).abs() < 0.02 * expected,
+            "{sag} != {expected}"
+        );
+    }
+    // A round one with many points, far wider than CalculiX reads a line.
+    let round = BeamProfile::Sketch(plx_model::Sketch::of(&BeamProfile::Circ { radius: 0.0123 }));
+    model.cross_sections.last_mut().unwrap().profile = round.clone();
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let import = read_inp_str(&text, None).unwrap();
+    assert_eq!(import.cross_sections[0].profile, round);
+    // CalculiX skips the comment however long it is.
+    run_ccx("u1-round-sketch", &text);
 }
 
 #[test]
@@ -4007,10 +4178,7 @@ fn sections_must_fit_their_elements() {
             if item == "Beam-1" && reason.contains("line element")),
         "{error}"
     );
-    model.sections[0].kind = SectionKind::Beam(BeamSection {
-        profile: BeamProfile::ALL[3],
-        ..BeamSection::DEFAULT
-    });
+    model.sections[0].kind = SectionKind::Beam(beam("Box"));
     let error = write_inp(&mesh, &model, "").unwrap_err();
     assert!(
         matches!(&error, WriteError::InvalidSection { reason, .. } if reason.contains("B32R")),
@@ -4404,13 +4572,8 @@ fn calculix_bends_a_pipe_like_beam_theory() {
     let mesh = line_chain(10, 0, 100.0, true);
     let model = line_model(
         &mesh,
-        SectionKind::Beam(BeamSection {
-            profile: BeamProfile::Pipe {
-                radius: r,
-                thickness: t,
-            },
-            ..BeamSection::DEFAULT
-        }),
+        // The pipe of line_cross_sections.
+        SectionKind::Beam(beam("Pipe")),
         LoadKind::force([0.0, -100.0, 0.0]),
     );
     let Some(frd) = run_ccx("rohr_b32r", &write_inp(&mesh, &model, "").unwrap()) else {

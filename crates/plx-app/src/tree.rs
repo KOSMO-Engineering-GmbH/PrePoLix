@@ -46,6 +46,8 @@ pub enum TreeItem {
     Surface(String),
     Material(usize),
     Section(usize),
+    /// A beam profile, under Sections.
+    CrossSection(usize),
     Constraint(usize),
     SurfaceInteraction(usize),
     /// Two surfaces in contact by the behavior the user wants, under Connections.
@@ -121,6 +123,9 @@ pub fn item_of(fe: &FeModel, item: &plx_model::ItemRef) -> Option<TreeItem> {
         }
         ItemRef::Section(name) => {
             TreeItem::Section(fe.sections.iter().position(|s| &s.name == name)?)
+        }
+        ItemRef::CrossSection(name) => {
+            TreeItem::CrossSection(fe.cross_sections.iter().position(|c| &c.name == name)?)
         }
         ItemRef::Step(name) => TreeItem::Step(step(name)?),
         ItemRef::InitialCondition(name) => TreeItem::InitialCondition(
@@ -503,6 +508,14 @@ fn tree_items(item: ModelItem) -> (TreeItem, Vec<TreeItem>) {
             TreeItem::Section(i),
             vec![TreeItem::Group("Sections"), TreeItem::Model],
         ),
+        ModelItem::CrossSection(i) => (
+            TreeItem::CrossSection(i),
+            vec![
+                TreeItem::Group(CROSS_SECTIONS),
+                TreeItem::Group("Sections"),
+                TreeItem::Model,
+            ],
+        ),
         ModelItem::Constraint(i) => (
             TreeItem::Constraint(i),
             vec![TreeItem::Group("Constraints"), TreeItem::Model],
@@ -576,6 +589,8 @@ fn advanced_contacts() -> Vec<TreeItem> {
     ]
 }
 
+/// The container of the cross-sections, under Sections.
+pub const CROSS_SECTIONS: &str = "Cross-Sections";
 /// The container of the contact regions, under Connections (the group "Contacts").
 pub const CONTACT_REGIONS: &str = "Contact Regions";
 /// The container of the bolts, under Connections.
@@ -589,6 +604,7 @@ fn creates(item: &TreeItem) -> Option<NewItem> {
     match *item {
         TreeItem::Group("Materials") => Some(NewItem::Material),
         TreeItem::Group("Sections") => Some(NewItem::Section),
+        TreeItem::Group(CROSS_SECTIONS) => Some(NewItem::CrossSection),
         TreeItem::Group("Steps") => Some(NewItem::Step),
         TreeItem::Group("Constraints") => Some(NewItem::Constraint),
         TreeItem::Group("Surface Interactions") => Some(NewItem::SurfaceInteraction),
@@ -679,6 +695,7 @@ fn is_fe_item(item: &TreeItem) -> bool {
         item,
         TreeItem::Material(_)
             | TreeItem::Section(_)
+            | TreeItem::CrossSection(_)
             | TreeItem::Constraint(_)
             | TreeItem::SurfaceInteraction(_)
             | TreeItem::ContactRegion(_)
@@ -747,6 +764,8 @@ fn contains(branch: &TreeItem, item: &TreeItem) -> bool {
         Model => !matches!(item, Model),
         Mesh | Group("Parts") => matches!(item, Part(_)),
         Group("Constraints") => matches!(item, Constraint(_)),
+        Group("Sections") => matches!(item, Section(_) | CrossSection(_) | Group(CROSS_SECTIONS)),
+        Group(CROSS_SECTIONS) => matches!(item, CrossSection(_)),
         Group("Amplitudes") => matches!(item, Amplitude(_)),
         Group("Distributions") => matches!(item, Distribution(_)),
         Group("Contacts") => matches!(
@@ -1340,7 +1359,7 @@ impl Tree<'_> {
             TreeItem::Group(PATHS) => TreeIcon::Path,
             TreeItem::Group(PLANE_RESULTS) => TreeIcon::PlaneResult,
             TreeItem::Group("Materials") => TreeIcon::Material,
-            TreeItem::Group("Sections") => TreeIcon::Section,
+            TreeItem::Group("Sections") | TreeItem::Group(CROSS_SECTIONS) => TreeIcon::Section,
             TreeItem::Group("Constraints") => TreeIcon::Constraints,
             TreeItem::Group("Contacts") => TreeIcon::Contacts,
             TreeItem::Group("Surface Interactions") => TreeIcon::SurfaceInteraction,
@@ -1884,8 +1903,21 @@ fn fe_model(tree: &mut Tree, ui: &mut Ui, model: Option<&mut Model>, solver: &[F
         tree.container(ui, "Materials", materials);
         let sections: Vec<(TreeItem, &str)> = (fe.sections.iter().enumerate())
             .map(|(i, s)| (TreeItem::Section(i), s.name.as_str()))
+            .filter(|(item, _)| !tree.hidden(item))
             .collect();
-        tree.container(ui, "Sections", sections);
+        let cross_sections: Vec<(TreeItem, &str)> = (fe.cross_sections.iter().enumerate())
+            .map(|(i, c)| (TreeItem::CrossSection(i), c.name.as_str()))
+            .collect();
+        // The cross-sections first, as the beam sections pick from them.
+        let text = counted("Sections", sections.len());
+        tree.branch(ui, TreeItem::Group("Sections"), text, true, |tree, ui| {
+            tree.container(ui, CROSS_SECTIONS, cross_sections);
+            tree.siblings = sections.iter().map(|(item, _)| item.clone()).collect();
+            for (item, label) in sections {
+                tree.leaf(ui, item, label);
+            }
+            tree.siblings.clear();
+        });
         for (i, constraint) in fe.constraints.iter().enumerate() {
             if !constraint.active() {
                 tree.inactive.insert(TreeItem::Constraint(i));

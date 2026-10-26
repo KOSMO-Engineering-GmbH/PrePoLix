@@ -68,24 +68,12 @@ impl FeModel {
                     c.value(thickness, Quantity::Length)
                 }
                 crate::SectionKind::Truss { area } => c.value(area, Quantity::Area),
-                crate::SectionKind::Beam(beam) => match &mut beam.profile {
-                    crate::BeamProfile::Rect { a, b } => {
-                        c.value(a, Quantity::Length);
-                        c.value(b, Quantity::Length);
-                    }
-                    crate::BeamProfile::Circ { radius } => c.value(radius, Quantity::Length),
-                    crate::BeamProfile::Pipe { radius, thickness } => {
-                        c.value(radius, Quantity::Length);
-                        c.value(thickness, Quantity::Length);
-                    }
-                    crate::BeamProfile::Box { a, b, t } => {
-                        c.value(a, Quantity::Length);
-                        c.value(b, Quantity::Length);
-                        c.all(t, Quantity::Length);
-                    }
-                },
+                crate::SectionKind::Beam(_) => {}
                 crate::SectionKind::Solid => {}
             }
+        }
+        for cross_section in &mut self.cross_sections {
+            cross_section.profile.convert_units(&c);
         }
         self.convert_features(&c);
         for constraint in &mut self.constraints {

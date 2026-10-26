@@ -54,6 +54,7 @@ fn same_data(a: Option<&ProjectNode>, b: Option<&ProjectNode>) -> bool {
     match (a, b) {
         (None, None) => true,
         (Some(ProjectNode::Materials(a)), Some(ProjectNode::Materials(b))) => a == b,
+        (Some(ProjectNode::CrossSections(a)), Some(ProjectNode::CrossSections(b))) => a == b,
         // The mesh is made from the primitive.
         (Some(ProjectNode::Mesh(a)), Some(ProjectNode::Mesh(b))) => {
             a.space == b.space && a.units == b.units && a.primitive == b.primitive

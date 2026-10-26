@@ -6,14 +6,11 @@ use std::collections::HashMap;
 
 use glam::DVec3;
 use plx_mesh::PartSkin;
-use plx_model::BeamProfile;
+use plx_model::{BeamProfile, Outline};
 
 use crate::contour::NO_VALUE;
 use crate::fe::{EDGE_COLOR, FEATURE_EDGE_OPACITY};
 use crate::mesh::{NodeBlend, RenderMesh, Vertex};
-
-/// Points on the outline of a round profile.
-const ROUND_POINTS: usize = 24;
 
 /// Largest angle in degrees between two segments of a line whose profiles are joined
 /// without an end face in between.
@@ -23,7 +20,7 @@ const JOIN_ANGLE_DEG: f64 = 45.0;
 /// projected onto the plane normal to the beam, direction 2 the beam axis crossed with
 /// direction 1. `offset` moves the beam axis off the nodes in the 1- and 2-direction in
 /// multiples of the profile's thickness there; 0.5 puts the nodes on the positive face.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BeamShape {
     pub profile: BeamProfile,
     pub normal: DVec3,
@@ -44,52 +41,14 @@ impl BeamShape {
 
     /// The thickness of the profile in the 1- and 2-direction, which the offsets refer to.
     fn size(&self) -> [f64; 2] {
-        match self.profile {
-            BeamProfile::Rect { a, b } | BeamProfile::Box { a, b, .. } => [a, b],
-            BeamProfile::Circ { radius } | BeamProfile::Pipe { radius, .. } => {
-                [2.0 * radius, 2.0 * radius]
-            }
-        }
+        self.profile.size()
     }
 
     /// The outlines of the profile about its centre in the 1-2 plane, counter-clockwise: the
     /// outer one first, then the hole of a hollow profile with as many points.
     fn loops(&self) -> Vec<Outline> {
-        let circle = |r: f64| Outline {
-            points: (0..ROUND_POINTS)
-                .map(|k| {
-                    let angle = std::f64::consts::TAU * k as f64 / ROUND_POINTS as f64;
-                    [r * angle.cos(), r * angle.sin()]
-                })
-                .collect(),
-            round: true,
-        };
-        let rect = |[u0, v0]: [f64; 2], [u1, v1]: [f64; 2]| Outline {
-            points: vec![[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
-            round: false,
-        };
-        match self.profile {
-            BeamProfile::Rect { a, b } => vec![rect([-a / 2.0, -b / 2.0], [a / 2.0, b / 2.0])],
-            BeamProfile::Circ { radius } => vec![circle(radius)],
-            BeamProfile::Pipe { radius, thickness } => {
-                vec![circle(radius), circle(radius - thickness)]
-            }
-            // Walls at +1, +2, -1 and -2.
-            BeamProfile::Box { a, b, t } => vec![
-                rect([-a / 2.0, -b / 2.0], [a / 2.0, b / 2.0]),
-                rect(
-                    [-a / 2.0 + t[2], -b / 2.0 + t[3]],
-                    [a / 2.0 - t[0], b / 2.0 - t[1]],
-                ),
-            ],
-        }
+        self.profile.outlines()
     }
-}
-
-/// An outline of a profile; a round one is shaded smooth around.
-struct Outline {
-    points: Vec<[f64; 2]>,
-    round: bool,
 }
 
 /// Where a profile sits at one end of a segment.
@@ -163,7 +122,9 @@ pub fn beam_mesh(
         (other.0 != index && cos >= JOIN_ANGLE_DEG.to_radians().cos()).then_some(other)
     };
     let frame = |index: usize, end: usize| -> Frame {
-        let shape = shapes[index].expect("segments with a profile only");
+        let shape = shapes[index]
+            .as_ref()
+            .expect("segments with a profile only");
         let mut tangent = direction(index);
         if let Some((other, other_end)) = joined(index, end) {
             let sign = if other_end == end { -1.0 } else { 1.0 };
@@ -195,7 +156,7 @@ pub fn beam_mesh(
     };
 
     for (index, &[a, b]) in skin.lines.iter().enumerate() {
-        let Some(shape) = shapes[index] else {
+        let Some(shape) = &shapes[index] else {
             continue;
         };
         let color = segment_color(index).unwrap_or(color);
@@ -274,7 +235,8 @@ pub fn beam_mesh(
             };
             let mut triangles: Vec<[u32; 3]> = Vec::new();
             match loops.get(1) {
-                Some(hole) => {
+                // A pipe or box: the wall between two outlines of as many points.
+                Some(hole) if loops.len() == 2 && hole.points.len() == n => {
                     for &at in outer.iter().chain(&hole.points) {
                         push(at);
                     }
@@ -285,7 +247,7 @@ pub fn beam_mesh(
                         triangles.push([i, n + j, n + i]);
                     }
                 }
-                None => {
+                None if loops[0].round => {
                     push([0.0, 0.0]);
                     for &at in outer {
                         push(at);
@@ -294,6 +256,28 @@ pub fn beam_mesh(
                     for i in 0..n {
                         triangles.push([0, 1 + i, 1 + (i + 1) % n]);
                     }
+                }
+                // A sketch with holes of their own shape.
+                Some(_) => {
+                    let rings: Vec<Vec<[f64; 2]>> =
+                        loops.iter().map(|o| o.points.clone()).collect();
+                    for &at in rings.iter().flatten() {
+                        push(at);
+                    }
+                    triangles.extend(
+                        (plx_model::triangulate_with_holes(&rings).into_iter())
+                            .map(|t| t.map(|k| k as u32)),
+                    );
+                }
+                // I, T, U and L profiles are concave: a fan from the centre would not fill
+                // them.
+                None => {
+                    for &at in outer {
+                        push(at);
+                    }
+                    triangles.extend(
+                        (plx_model::triangulate(outer).into_iter()).map(|t| t.map(|k| k as u32)),
+                    );
                 }
             }
             for [p, q, r] in triangles {
@@ -349,7 +333,7 @@ mod tests {
             DVec3::ZERO,
             [1.0; 3],
             |_| None,
-            |_| shape,
+            |_| shape.clone(),
             None,
         )
     }
@@ -430,11 +414,11 @@ mod tests {
             offset: [0.0; 2],
         };
         let polygon = |r: f64| {
-            let n = ROUND_POINTS as f64;
+            let n = plx_model::ROUND_POINTS as f64;
             0.5 * n * r * r * (std::f64::consts::TAU / n).sin()
         };
         let wall = 2.0 * (polygon(0.2) - polygon(0.15)) as f32;
-        let render = swept(&beam(), Some(pipe));
+        let render = swept(&beam(), Some(pipe.clone()));
         assert!(
             (volume(&render) - wall).abs() < 1e-5,
             "{} {wall}",
@@ -467,9 +451,54 @@ mod tests {
         let mut mesh = beam();
         mesh.set_node(3, [1.0, 1.0, 0.0]);
         let render = swept(&mesh, Some(rect(0.1, 0.1)));
-        // Four walls of two triangles along each element and four end faces, fans of four.
-        assert_eq!(render.triangles.len(), (2 * 4 * 2 + 4 * 4) * 3);
+        // Four walls of two triangles along each element and four end faces of two.
+        assert_eq!(render.triangles.len(), (2 * 4 * 2 + 4 * 2) * 3);
         assert!(render.mesh_edges.is_empty());
+    }
+
+    #[test]
+    fn concave_profiles_close_their_ends() {
+        let shape = BeamShape {
+            profile: BeamProfile::I {
+                h: 0.2,
+                b: 0.1,
+                tw: 0.01,
+                tf: 0.02,
+            },
+            normal: DVec3::Z,
+            offset: [0.0; 2],
+        };
+        let area = shape.profile.properties().area as f32;
+        let render = swept(&beam(), Some(shape));
+        assert!(
+            (volume(&render) - 2.0 * area).abs() < 1e-5,
+            "{} {}",
+            volume(&render),
+            2.0 * area
+        );
+    }
+
+    #[test]
+    fn sketches_close_their_ends_around_their_holes() {
+        let shape = BeamShape {
+            profile: BeamProfile::Sketch(plx_model::Sketch {
+                loops: vec![
+                    vec![[0.0, 0.0], [0.2, 0.0], [0.2, 0.1], [0.1, 0.15], [0.0, 0.1]],
+                    vec![[0.02, 0.02], [0.05, 0.02], [0.05, 0.05]],
+                    vec![[0.12, 0.03], [0.17, 0.03], [0.17, 0.07], [0.12, 0.07]],
+                ],
+            }),
+            normal: DVec3::Z,
+            offset: [0.0; 2],
+        };
+        let area = shape.profile.properties().area as f32;
+        let render = swept(&beam(), Some(shape));
+        assert!(
+            (volume(&render) - 2.0 * area).abs() < 1e-5,
+            "{} {}",
+            volume(&render),
+            2.0 * area
+        );
     }
 
     #[test]

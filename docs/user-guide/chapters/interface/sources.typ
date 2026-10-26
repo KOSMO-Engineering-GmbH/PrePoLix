@@ -48,6 +48,26 @@ the block's editor.
 #ui("OK") keeps the changes, and the analyses that link the block take them at once;
 #ui("Cancel") drops them.
 
+=== Cross-Sections <cross-sections-block>
+
+A cross-sections block holds beam cross-sections (@cross-sections) in the project file, like a
+materials block holds materials. Add it with #menu("Project", "Add Cross-Sections"). Its rows
+are #ui("Cross-Sections") and one row per cross-section, linked to the #ui("Setup") of an
+analysis, or to its #ui("Cross-Sections") row, in the same way; the beam sections of the
+analysis then pick the linked cross-sections. Its editor has #ui("Shown in"), #ui("New ..."),
+#ui("Edit ..."), #ui("Delete") and #ui("Import from Analysis") as for materials; the dialog of a
+cross-section is that of the FE Model tree, with the sketch and the second moments of area.
+
+#screenshot("cross-sections-block.png", [The width a of the cross-section Girder_Rect is
+  exposed in the block Profiles and set by a Parameters block; the analysis links both
+  cross-sections])
+
+Every dimension of a cross-section can be exposed with the #ui("P") button in its dialog. The
+block then shows it under #ui("Exposed Parameters") with a violet pin, so that a Parameters
+block (@parameters-block) or a parameter study sets it, and every analysis that links the
+cross-section takes the new profile. Exposed dimensions belong to the kind of profile: after a
+change of kind, expose the new dimensions again.
+
 === Box and Rectangle meshes <mesh-block>
 
 A mesh block makes a structured mesh from a few numbers, without geometry and without Gmsh:
@@ -293,7 +313,7 @@ spot. Add it with #menu("Project", "Add Parameters", "Parameters"); it starts wi
 Each parameter is a row with its value, typed or dragged in place, and a violet pin on
 either side. Drag the pin on the right to the pin on the left of a number of a mesh block
 (#ui("X") to #ui("nz")), to the #ui("Factor") of a Refine Mesh block or to an exposed parameter
-of an analysis or a Materials block (@exposed-parameters). The number then takes the value of
+of an analysis, a Materials block or a Cross-Sections block (@exposed-parameters). The number then takes the value of
 the parameter: it is shown in violet and read-only, and when the parameter changes the blocks
 after it are out of date, so #ui("Update Project") meshes and solves again. The pin on the left
 takes the value of another parameter. A value link joins like with like: a length goes to a
@@ -386,7 +406,8 @@ and the field in the dialog is read-only while the link is there. Renaming the i
 parameter. The numbers that can be exposed are those of loads, boundary conditions, defined
 fields and initial conditions, of materials and sections, the time period and first increment
 of steps and the number of modes of a frequency step. A Materials block (@materials-block)
-exposes the numbers of its own materials in the same way.
+exposes the numbers of its own materials in the same way, a Cross-Sections block
+(@cross-sections-block) the dimensions of its cross-sections.
 
 Exposing a number does not change the analysis: only a new value makes it out of date.
 

@@ -41,6 +41,10 @@ pub const WRITTEN_KEYWORDS: &[(&str, &str)] = &[
     ("*SHELL SECTION", "Shell sections"),
     ("*MEMBRANE SECTION", "Membrane sections"),
     ("*BEAM SECTION", "Beam sections"),
+    (
+        "*USER ELEMENT",
+        "General beam profiles (I, T, U, L, General)",
+    ),
     ("*SPRING", "Springs"),
     ("*GAP", "Compression only support"),
     ("*EQUATION", "Node ties and constraints"),

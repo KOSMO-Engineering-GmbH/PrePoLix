@@ -228,7 +228,7 @@ fn reads_the_thickness_of_shells_and_the_area_of_trusses() {
             (
                 "BEAM",
                 &SectionKind::Beam(BeamSection {
-                    profile: BeamProfile::Circ { radius: 2.0 },
+                    cross_section: "BEAM".into(),
                     orientation: BeamOrientation::Direction([0.0, 1.0, 0.0]),
                     offset: [0.0, 0.5],
                 })
@@ -236,5 +236,11 @@ fn reads_the_thickness_of_shells_and_the_area_of_trusses() {
         ]
     );
     assert_eq!(import.sections[0].region.elements(&import.mesh), vec![1]);
+    assert_eq!(import.cross_sections.len(), 1);
+    assert_eq!(import.cross_sections[0].name, "BEAM");
+    assert_eq!(
+        import.cross_sections[0].profile,
+        BeamProfile::Circ { radius: 2.0 }
+    );
     assert_eq!(import.skipped_keywords["SOLIDSECTION"], 2);
 }

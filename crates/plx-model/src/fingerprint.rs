@@ -33,6 +33,7 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
         properties,
         materials,
         sections,
+        cross_sections,
         constraints,
         surface_interactions,
         contact_pairs,
@@ -71,6 +72,9 @@ pub fn steps_input(mesh: &FeMesh, fe: &FeModel, count: usize) -> u64 {
     hash.add_debug(&properties);
     hash.add_debug(materials);
     hash.add_debug(sections);
+    if !cross_sections.is_empty() {
+        hash.add_debug(cross_sections);
+    }
     hash.add_debug(constraints);
     hash.add_debug(surface_interactions);
     hash.add_debug(contact_pairs);
