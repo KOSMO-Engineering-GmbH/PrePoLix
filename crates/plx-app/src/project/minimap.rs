@@ -81,6 +81,7 @@ impl ProjectApp {
             return;
         }
         let mut look_at = None;
+        let mut held = None;
         egui::Area::new(crate::ids::window(ctx, "project minimap"))
             .order(egui::Order::Foreground)
             .fixed_pos(rect.min)
@@ -94,7 +95,8 @@ impl ProjectApp {
                     egui::Stroke::new(1.0, crate::style::border()),
                     egui::StrokeKind::Inside,
                 );
-                let map = map_transform(content.bounds(), rect.shrink(6.0));
+                let bounds = self.minimap_bounds.unwrap_or_else(|| content.bounds());
+                let map = map_transform(bounds, rect.shrink(6.0));
                 for (frame, color) in &content.frames {
                     let [r, g, b] = *color;
                     painter.rect_filled(
@@ -118,16 +120,19 @@ impl ProjectApp {
                     egui::Stroke::new(1.5, crate::style::highlight()),
                     egui::StrokeKind::Inside,
                 );
-                if (response.is_pointer_button_down_on() || response.clicked())
+                let pressed = response.is_pointer_button_down_on() || response.dragged();
+                if (pressed || response.clicked())
                     && let Some(pointer) = response.interact_pointer_pos()
                 {
                     look_at = Some(map.inverse() * pointer);
                 }
+                held = pressed.then_some(bounds);
                 response.on_hover_text(
                     "All blocks of the project; the outline is the part in view. Click or \
                      drag here to move the view.",
                 );
             });
+        self.minimap_bounds = held;
         if look_at.is_some() {
             self.look_at = look_at;
             ctx.request_repaint();
