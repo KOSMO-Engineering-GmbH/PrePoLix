@@ -5,7 +5,7 @@
 //! of another, the submodel.
 //!
 //! A path names what is linked, as the block of the analysis lists it: `["Geometry"]`,
-//! `["Mesh"]`, `["Setup"]`, `["Setup", "Materials"]`, `["Setup", "Materials", "Steel"]` or
+//! one part of the geometry of a file `["Geometry", "BOLT"]`, `["Mesh"]`, `["Setup"]`, `["Setup", "Materials"]`, `["Setup", "Materials", "Steel"]` or
 //! `["Results", "Step-1"]`.
 //!
 //! Links are of two kinds. A reference link makes a row of the target the same as the row
@@ -167,6 +167,28 @@ pub fn output_path(link: &Link) -> Vec<String> {
     } else {
         link.item.clone()
     }
+}
+
+/// Whether the link takes one part of the geometry of its source, `["Geometry", part]`, into
+/// the Geometry row of its target. The parts a source gives to the same target go together:
+/// the target takes the geometry with only those parts, see [`linked_parts`].
+pub fn is_geometry_part(link: &Link) -> bool {
+    matches!(link.item.as_slice(), [cell, _] if cell == GEOMETRY)
+}
+
+/// The parts of the geometry of `source` that `target` takes through part links, in the
+/// order of the links.
+pub fn linked_parts(links: &[Link], source: u64, target: u64) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    for link in links
+        .iter()
+        .filter(|l| l.source == source && l.target == target)
+    {
+        if is_geometry_part(link) && !parts.contains(&link.item[1]) {
+            parts.push(link.item[1].clone());
+        }
+    }
+    parts
 }
 
 /// Whether the link takes a whole category of the setup. It goes to a collection, whose pin
@@ -1051,7 +1073,8 @@ impl DataType {
 
 /// Whether a link from `item` of one analysis may go to `slot` of another, by one of two
 /// rules. A reference goes from like to like: a row to the row of the same path, an item of
-/// a category to the category or its item of another name. An operation link goes from the
+/// a category to the category or its item of another name, a part of a geometry to the
+/// Geometry row. An operation link goes from the
 /// results of a step to a row that uses results: the State row, the initial conditions, a
 /// step of the setup or one of its inputs (see [`results_slot`]).
 pub fn compatible(item: &[String], slot: &[String]) -> bool {
@@ -1070,6 +1093,8 @@ pub fn compatible(item: &[String], slot: &[String]) -> bool {
         Some(STATE) | None => false,
         Some(_) => match (item, slot) {
             ([a], [b]) if b == ANALYSIS => a == SETUP,
+            // A part of a geometry goes to the Geometry row, with the other parts linked.
+            ([a, _], [b]) if a == GEOMETRY => b == GEOMETRY,
             ([a], [b]) => a == b && b != RESULTS && b != STATE,
             ([a, ..], [b, ..]) if a == SETUP && b == SETUP && slot.len() <= 3 => {
                 // A category or an item goes to the target's category, or into its setup.

@@ -146,10 +146,22 @@ pub(super) fn take_cad_input(nodes: &mut [Node], links: &[Link], id: u64) {
     let link = links
         .iter()
         .find(|l| l.target == id && l.item.first().is_some_and(|c| c == links::GEOMETRY));
-    let input = link
-        .and_then(|l| nodes.iter().find(|n| n.id == l.source))
-        .and_then(Node::link_data)
-        .and_then(|d| d.geometry.cloned());
+    let input = match link {
+        // Some parts of a file: the geometry with only them, once it is made.
+        Some(link) if links::is_geometry_part(link) => {
+            let parts = links::linked_parts(links, link.source, id);
+            let file = (nodes.iter_mut().find(|n| n.id == link.source)).and_then(Node::as_file_mut);
+            match file.map(|f| f.subset(&parts)) {
+                Some(Ok(None)) => return,
+                Some(Ok(Some(geometry))) => Some(geometry),
+                _ => None,
+            }
+        }
+        _ => link
+            .and_then(|l| nodes.iter().find(|n| n.id == l.source))
+            .and_then(Node::link_data)
+            .and_then(|d| d.geometry.cloned()),
+    };
     // An analysis that is loading in its window gives its geometry once it has loaded.
     if link.is_some() && input.is_none() {
         let loading = (link.and_then(|l| nodes.iter().find(|n| n.id == l.source)))

@@ -463,6 +463,11 @@ struct FileBlock {
     space: Option<ModelSpace>,
     /// The steps of a results file: the name of each row with its number in the file.
     steps: Vec<(String, u32)>,
+    /// The parts of a geometry file, which can be linked one by one.
+    parts: Vec<String>,
+    /// The geometry with only some of its parts, by those parts, for the analyses that link
+    /// only them; made on worker threads, as Gmsh removes the other parts.
+    subsets: BTreeMap<Vec<String>, Subset>,
     /// Fingerprint of the file as last read, see [`file_print`], and why that read failed.
     read: Option<u64>,
     error: Option<String>,
@@ -475,7 +480,88 @@ struct FileRead {
     model: LinkedModel,
     space: Option<ModelSpace>,
     steps: Vec<(String, u32)>,
+    parts: Vec<String>,
     summary: String,
+}
+
+/// The geometry of a file block with only some of its parts.
+enum Subset {
+    Making(Receiver<Result<plx_model::Geometry, String>>),
+    Made(plx_model::Geometry),
+    Failed(String),
+}
+
+impl FileBlock {
+    /// What was read is gone, or another file is read: so are the parts made of it.
+    fn forget(&mut self) {
+        self.model = LinkedModel::default();
+        self.steps.clear();
+        self.parts.clear();
+        self.subsets.clear();
+    }
+
+    /// The geometry with only `parts`: the whole geometry when those are all its parts;
+    /// `None` while it is being made, which starts here. Why it could not be made is an
+    /// error.
+    fn subset(&mut self, parts: &[String]) -> Result<Option<plx_model::Geometry>, String> {
+        let Some(geometry) = &self.model.geometry else {
+            return Ok(None);
+        };
+        if let Some(part) = parts.iter().find(|p| !self.parts.contains(p)) {
+            return Err(format!("the file has no part {part}"));
+        }
+        if self.parts.iter().all(|p| parts.contains(p)) {
+            return Ok(Some(geometry.clone()));
+        }
+        // In the order of the file, so that the same parts are made once.
+        let key: Vec<String> = (self.parts.iter())
+            .filter(|p| parts.contains(p))
+            .cloned()
+            .collect();
+        match self.subsets.get(&key) {
+            Some(Subset::Made(geometry)) => return Ok(Some(geometry.clone())),
+            Some(Subset::Failed(why)) => return Err(why.clone()),
+            Some(Subset::Making(_)) => return Ok(None),
+            None => {}
+        }
+        let others: Vec<String> = (self.parts.iter())
+            .filter(|p| !key.contains(p))
+            .cloned()
+            .collect();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let geometry = geometry.clone();
+        std::thread::spawn(move || {
+            let made = plx_mesher::delete_parts_renumbered(&geometry, &others)
+                .map_err(|e| e.to_string())
+                .and_then(|(made, _)| made.ok_or_else(|| "no part is left".to_owned()));
+            let _ = sender.send(made);
+        });
+        self.subsets.insert(key, Subset::Making(receiver));
+        Ok(None)
+    }
+
+    /// Takes the subsets made since; whether any was.
+    fn poll_subsets(&mut self) -> bool {
+        let mut done = false;
+        for subset in self.subsets.values_mut() {
+            if let Subset::Making(receiver) = subset {
+                *subset = match receiver.try_recv() {
+                    Ok(Ok(geometry)) => Subset::Made(geometry),
+                    Ok(Err(why)) => Subset::Failed(why),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => continue,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Subset::Failed("making it stopped unexpectedly".into())
+                    }
+                };
+                done = true;
+            }
+        }
+        done
+    }
+
+    fn making_subsets(&self) -> bool {
+        (self.subsets.values()).any(|s| matches!(s, Subset::Making(_)))
+    }
 }
 
 /// A Campbell block: its sweep and diagram, and the fingerprint of the analysis linked to it
@@ -585,6 +671,8 @@ impl Node {
             units,
             space: None,
             steps: Vec::new(),
+            parts: Vec::new(),
+            subsets: BTreeMap::new(),
             read: None,
             error: None,
             reading: None,
@@ -3357,6 +3445,7 @@ impl ProjectApp {
     fn set_source_path(&mut self, id: u64, path: String) {
         if let Some(file) = self.node(id).and_then(Node::as_file_mut) {
             file.path = path;
+            file.forget();
             file.read = None;
             file.error = None;
             file.reading = None;
@@ -3384,15 +3473,16 @@ impl ProjectApp {
                 match receiver.try_recv() {
                     Ok(Ok(read)) => {
                         lines.push(format!("{name}: {}", read.summary));
+                        file.forget();
                         file.model = read.model;
                         file.space = read.space;
                         file.steps = read.steps;
+                        file.parts = read.parts;
                         file.error = None;
                     }
                     Ok(Err(why)) => {
                         lines.push(format!("{name}: not read: {why}"));
-                        file.model = LinkedModel::default();
-                        file.steps.clear();
+                        file.forget();
                         file.error = Some(why);
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -3408,6 +3498,12 @@ impl ProjectApp {
                 changed = true;
                 continue;
             }
+            if file.poll_subsets() {
+                changed = true;
+            }
+            if file.making_subsets() {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
             if !look || file.path.trim().is_empty() {
                 continue;
             }
@@ -3417,8 +3513,7 @@ impl ProjectApp {
                 None => {
                     if file.read.take().is_some() {
                         lines.push(format!("{name}: {} is missing", path.display()));
-                        file.model = LinkedModel::default();
-                        file.steps.clear();
+                        file.forget();
                         file.error = None;
                         changed = true;
                     }
@@ -5562,8 +5657,9 @@ impl ProjectApp {
         let value = item.first().is_some_and(|c| c == links::VALUE) || feedback;
         let objective = slot.first().is_some_and(|c| c == links::OUTPUTS);
         let results = item.first().is_some_and(|c| c == links::RESULTS);
+        let part = matches!(item.as_slice(), [cell, _] if cell == links::GEOMETRY);
         // A category or item links into the same place of the target; a step's results go
-        // to the step they are dropped on.
+        // to the step they are dropped on, a part of a geometry to the Geometry row.
         let slot = if results {
             // What the results are used for follows from the steps at both ends.
             let fe = |id: u64| {
@@ -5591,7 +5687,7 @@ impl ProjectApp {
                     return;
                 }
             }
-        } else if value {
+        } else if value || part {
             slot
         } else {
             item.clone()
@@ -5656,6 +5752,10 @@ impl ProjectApp {
                     };
             }
             let other = links::slot(link);
+            // The parts of a geometry linked from the same source go together.
+            if part && links::is_geometry_part(link) && link.source == source {
+                return link.item == item;
+            }
             // A category is a collection: links of categories and items of it from other
             // sources stay, and the later one wins an item both have.
             if let ([a, b, ..], [c, d, ..]) = (other, slot.as_slice())
@@ -5740,7 +5840,11 @@ impl ProjectApp {
         self.links.push(Link {
             source,
             target,
-            slot: if results || value { slot } else { Vec::new() },
+            slot: if results || value || part {
+                slot
+            } else {
+                Vec::new()
+            },
             item,
             ..Default::default()
         });
@@ -6401,6 +6505,40 @@ impl ProjectApp {
                 }
                 self.applied.insert(key, print);
                 Some(Payload::Chain { mesh, fe, step })
+            }
+            Some(links::GEOMETRY) if links::is_geometry_part(link) => {
+                // The first of the part links of a source to the target takes them all.
+                let first = (self.links.iter()).find(|l| {
+                    l.source == link.source && l.target == link.target && links::is_geometry_part(l)
+                });
+                if first != Some(link) {
+                    return None;
+                }
+                let parts = links::linked_parts(&self.links, link.source, link.target);
+                let source = self.node(link.source)?;
+                let name = source.name.clone();
+                let file = source.as_file_mut()?;
+                let read = file.read?;
+                let geometry = match file.subset(&parts) {
+                    Ok(geometry) => geometry?,
+                    Err(why) => {
+                        let line = format!("{name}: the parts linked are not taken: {why}.");
+                        if self.warned.insert(line.clone()) {
+                            self.output.push(line);
+                        }
+                        return None;
+                    }
+                };
+                let mut print = plx_mesh::Fnv::new();
+                print.add(&read.to_le_bytes());
+                print.add_debug(&parts);
+                let print = print.finish();
+                let key = (link.target, vec![links::GEOMETRY.to_owned()]);
+                if self.applied.get(&key) == Some(&print) {
+                    return None;
+                }
+                self.applied.insert(key, print);
+                Some(Payload::Geometry(Some(geometry)))
             }
             Some(links::GEOMETRY | links::MESH) => {
                 let data = data?;
@@ -8613,12 +8751,18 @@ fn read_source(path: &Path, units: UnitSystem) -> Result<FileRead, String> {
         FileKind::Geometry => {
             let import = plx_mesher::import_cad_files(&[path.to_path_buf()], units)
                 .map_err(|e| e.to_string())?;
+            let parts = plx_mesher::part_names(&import.geometry).map_err(|e| e.to_string())?;
+            let summary = match parts.len() {
+                1 => format!("geometry read from {}", path.display()),
+                n => format!("geometry of {n} parts read from {}", path.display()),
+            };
             model.geometry = Some(import.geometry);
             Ok(FileRead {
                 model,
                 space: None,
                 steps: Vec::new(),
-                summary: format!("geometry read from {}", path.display()),
+                parts,
+                summary,
             })
         }
         FileKind::Mesh => {
@@ -8637,6 +8781,7 @@ fn read_source(path: &Path, units: UnitSystem) -> Result<FileRead, String> {
                 model,
                 space: Some(space),
                 steps: Vec::new(),
+                parts: Vec::new(),
                 summary,
             })
         }
@@ -8679,6 +8824,7 @@ fn read_source(path: &Path, units: UnitSystem) -> Result<FileRead, String> {
                 model,
                 space: Some(space),
                 steps,
+                parts: Vec::new(),
                 summary,
             })
         }
@@ -8732,14 +8878,41 @@ fn file_rows(node: &Node, base: Option<&Path>) -> Vec<Row> {
     match FileKind::of(&file.path) {
         Some(FileKind::Geometry) => {
             status.push_str(". Drag it to the Geometry row of an analysis to link it.");
-            rows.push(row(
-                vec![links::GEOMETRY.to_owned()],
+            let path = vec![links::GEOMETRY.to_owned()];
+            let mut geometry = row(
+                path.clone(),
                 links::GEOMETRY.to_owned(),
                 NodeIcon::Geometry,
                 Some(state),
                 ready,
                 format!("Geometry: {status}"),
-            ));
+            );
+            // An assembly opens to its parts, which link one by one.
+            let open = node.expanded.contains(&path);
+            if file.parts.len() > 1 {
+                geometry.expander = Some(open);
+                geometry.tip.push_str(&format!(
+                    " It has {} parts: open it to link only some of them.",
+                    file.parts.len()
+                ));
+            }
+            rows.push(geometry);
+            for part in file.parts.iter().filter(|_| open && file.parts.len() > 1) {
+                let mut part_row = row(
+                    vec![links::GEOMETRY.to_owned(), part.clone()],
+                    part.clone(),
+                    NodeIcon::Geometry,
+                    None,
+                    ready,
+                    format!(
+                        "Part {part} of the file: drag it to the Geometry row of an analysis \
+                         to link only this part. The parts linked to the same analysis go \
+                         there together."
+                    ),
+                );
+                part_row.depth = 1;
+                rows.push(part_row);
+            }
         }
         Some(FileKind::Mesh) => {
             let mesh = &file.model.mesh;
@@ -12205,6 +12378,75 @@ mod tests {
         // Other files say what it reads.
         let error = read_source(Path::new("notes.txt"), UnitSystem::default()).err();
         assert!(error.is_some_and(|e| e.contains("no results file")));
+    }
+
+    #[test]
+    fn the_parts_of_a_geometry_file_link_one_by_one() {
+        match plx_mesher::self_test() {
+            Ok(_) => {}
+            Err(error) if std::env::var_os("PREPOLIX_REQUIRE_GMSH").is_none() => {
+                eprintln!("Gmsh not available, test skipped: {error}");
+                return;
+            }
+            Err(error) => panic!("Gmsh is required: {error}"),
+        }
+        let step = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/zwei_bloecke.step");
+        let read = read_source(&step, UnitSystem::default()).unwrap();
+        assert_eq!(read.parts.len(), 2, "{:?}", read.parts);
+        let path = step.to_string_lossy().into_owned();
+        let mut node = Node::file_block(1, "File".into(), path, UnitSystem::default());
+        let file = node.as_file_mut().unwrap();
+        (file.model, file.parts) = (read.model, read.parts.clone());
+        file.read = file_print(&step);
+        // The Geometry row opens to the parts, each with an output of its own.
+        let geometry = [links::GEOMETRY.to_owned()];
+        let rows = file_rows(&node, None);
+        assert_eq!(rows[0].expander, Some(false));
+        assert_eq!(rows.iter().filter(|r| r.path[0] == geometry[0]).count(), 1);
+        node.expanded.insert(geometry.to_vec());
+        let rows = file_rows(&node, None);
+        let part = |name: &str| vec![links::GEOMETRY.to_owned(), name.to_owned()];
+        for name in &read.parts {
+            let row = rows.iter().find(|r| r.path == part(name)).unwrap();
+            assert!(row.output && !row.input && row.depth == 1);
+        }
+        // A part goes to the Geometry row of an analysis, and only there.
+        let first = part(&read.parts[0]);
+        assert!(links::compatible(&first, &geometry));
+        assert!(!links::compatible(&first, &[links::MESH.to_owned()]));
+        assert!(!links::compatible(&first, &first));
+        // The parts linked from the same source go together, in the order of the links.
+        let link = |source, item: Vec<String>| Link {
+            source,
+            target: 2,
+            item,
+            slot: geometry.to_vec(),
+            ..Default::default()
+        };
+        let all = [
+            link(1, part(&read.parts[1])),
+            link(3, part("OTHER")),
+            link(1, first.clone()),
+        ];
+        assert_eq!(
+            links::linked_parts(&all, 1, 2),
+            [read.parts[1].as_str(), read.parts[0].as_str()]
+        );
+        // All parts are the whole geometry; one part is made without the others.
+        let file = node.as_file_mut().unwrap();
+        let whole = file.subset(&read.parts).unwrap().unwrap();
+        assert_eq!(Some(&whole), file.model.geometry.as_ref());
+        assert!(file.subset(&["OTHER".to_owned()]).is_err());
+        let one = &read.parts[..1];
+        assert_eq!(file.subset(one), Ok(None), "made on a worker");
+        let made = loop {
+            file.poll_subsets();
+            match file.subset(one) {
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                made => break made.unwrap().unwrap(),
+            }
+        };
+        assert_eq!(plx_mesher::part_names(&made).unwrap(), one);
     }
 
     #[test]
