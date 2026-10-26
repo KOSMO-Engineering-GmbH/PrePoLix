@@ -5969,7 +5969,7 @@ mod tests {
             "wall thicker than the radius"
         );
         if let Draft::CrossSection(c) = &mut editor.draft {
-            c.profile = BeamProfile::ALL[2];
+            c.profile = BeamProfile::ALL[2].clone();
         }
         assert_eq!(editor.validate(&fe), Ok(()));
         editor.apply(&mut fe);

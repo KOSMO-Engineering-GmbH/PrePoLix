@@ -1621,7 +1621,7 @@ impl Model {
                 };
                 let shape = match &section.kind {
                     plx_model::SectionKind::Truss { area } => BeamShape::truss(*area),
-                    plx_model::SectionKind::Beam(beam) => profile.map(|profile| {
+                    plx_model::SectionKind::Beam(beam) => profile.as_ref().map(|profile| {
                         let element = &self.mesh.elements()[index];
                         let tangent = plx_model::line_tangent(&self.mesh, element);
                         // CalculiX refuses a normal along the beam; the model checks say so.
@@ -1629,7 +1629,7 @@ impl Model {
                             .or_else(|| BeamOrientation::Automatic.normal_for(tangent))
                             .unwrap_or([0.0, 0.0, 1.0]);
                         BeamShape {
-                            profile,
+                            profile: profile.clone(),
                             normal: DVec3::from(normal),
                             offset: beam.offset,
                         }
@@ -1677,7 +1677,7 @@ impl Model {
                 self.origin,
                 info.color,
                 |_| whole.then_some(HIGHLIGHT_COLOR),
-                |segment| solids.lines.get(&skin.line_elements[segment]).copied(),
+                |segment| solids.lines.get(&skin.line_elements[segment]).cloned(),
                 scalars,
             ));
         }
@@ -3130,7 +3130,7 @@ mod tests {
             profile: plx_model::BeamProfile::Rect { a: 4.0, b: 2.0 },
         });
         model.thick_lines = (model.line_sections())
-            .map(|(s, p)| (s.clone(), p.copied()))
+            .map(|(s, p)| (s.clone(), p.cloned()))
             .collect();
         assert_eq!(model.thick_lines.len(), 1);
         // 4 along the normal y, 2 along x cross y = z.
@@ -3231,7 +3231,7 @@ S
         let thin = z_range(&model);
         model.thick_shells = model.shell_sections().cloned().collect();
         model.thick_lines = (model.line_sections())
-            .map(|(s, p)| (s.clone(), p.copied()))
+            .map(|(s, p)| (s.clone(), p.cloned()))
             .collect();
         let thick = z_range(&model);
         // In millimetres: the bar reaches down to -1000 and the post up to 1000 either way.

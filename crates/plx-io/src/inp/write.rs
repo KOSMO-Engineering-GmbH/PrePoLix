@@ -1327,7 +1327,7 @@ fn profile_of(
     beam: &BeamSection,
 ) -> Result<BeamProfile, WriteError> {
     let cross_section = model.cross_section(&beam.cross_section);
-    (cross_section.map(|c| c.profile)).ok_or_else(|| WriteError::InvalidSection {
+    (cross_section.map(|c| c.profile.clone())).ok_or_else(|| WriteError::InvalidSection {
         item: section.to_owned(),
         reason: format!("Cross-Section {} does not exist", beam.cross_section),
     })

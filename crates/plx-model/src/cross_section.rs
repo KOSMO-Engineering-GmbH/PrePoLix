@@ -32,7 +32,7 @@ impl CrossSection {
 /// into solids. The others are *general* profiles: CalculiX knows them only as the user
 /// element `U1` with `SECTION=GENERAL`, a linear beam given by its area and second moments of
 /// area, whose axis runs through the centroid. They lie with the centroid on the nodes.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BeamProfile {
     /// Rectangle with thickness `a` in the 1-direction and `b` in the 2-direction.
     Rect { a: f64, b: f64 },
@@ -61,6 +61,144 @@ pub enum BeamProfile {
         i22: f64,
         k: f64,
     },
+    /// A profile sketched as polygons, see [`Sketch`].
+    Sketch(Sketch),
+}
+
+/// A profile drawn as closed polygons in the 1-2 plane: the outline first, then its holes.
+/// It lies with its centroid on the nodes, wherever it was drawn.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Sketch {
+    pub loops: Vec<Vec<[f64; 2]>>,
+}
+
+impl Sketch {
+    /// The outlines of a profile as a sketch to edit: a round one as a polygon.
+    pub fn of(profile: &BeamProfile) -> Self {
+        Self {
+            loops: profile.outlines().into_iter().map(|o| o.points).collect(),
+        }
+    }
+
+    /// Why the polygons make no profile, if they do not: too few points, an outline crossing
+    /// itself or another, a hole outside the outline or inside another hole.
+    pub fn problem(&self) -> Option<String> {
+        let Some(outer) = self.loops.first() else {
+            return Some("The sketch has no outline".into());
+        };
+        for (k, points) in self.loops.iter().enumerate() {
+            if points.len() < 3 {
+                return Some(format!("{} has fewer than 3 points", loop_name(k)));
+            }
+            if points.iter().flatten().any(|c| !c.is_finite()) {
+                return Some(format!("{} has an invalid point", loop_name(k)));
+            }
+            if polygon_area(points).abs() <= f64::EPSILON * extent(points).powi(2) {
+                return Some(format!("{} encloses no area", loop_name(k)));
+            }
+        }
+        // No two edges may cross or touch but at the corner they share.
+        let edges: Vec<(usize, usize, [f64; 2], [f64; 2])> = (self.loops.iter().enumerate())
+            .flat_map(|(k, points)| {
+                (0..points.len()).map(move |i| (k, i, points[i], points[(i + 1) % points.len()]))
+            })
+            .collect();
+        for (a, &(ka, ia, p, q)) in edges.iter().enumerate() {
+            for &(kb, ib, r, t) in &edges[a + 1..] {
+                let n = self.loops[ka].len();
+                let neighbours = ka == kb && (ib == (ia + 1) % n || ia == (ib + 1) % n);
+                if !neighbours && segments_meet(p, q, r, t) {
+                    return Some(if ka == kb {
+                        format!("{} crosses itself", loop_name(ka))
+                    } else {
+                        format!("{} and {} cross", loop_name(ka), loop_name(kb))
+                    });
+                }
+            }
+        }
+        for (k, hole) in self.loops.iter().enumerate().skip(1) {
+            if !inside(hole[0], outer) {
+                return Some(format!("{} lies outside the outline", loop_name(k)));
+            }
+            if (self.loops[1..].iter().enumerate())
+                .any(|(j, other)| j + 1 != k && inside(hole[0], other))
+            {
+                return Some(format!("{} lies inside another hole", loop_name(k)));
+            }
+        }
+        None
+    }
+}
+
+/// "The outline" or "Hole 2", for messages.
+fn loop_name(k: usize) -> String {
+    if k == 0 {
+        "The outline".into()
+    } else {
+        format!("Hole {k}")
+    }
+}
+
+/// The signed area of a polygon, positive counter-clockwise.
+fn polygon_area(points: &[[f64; 2]]) -> f64 {
+    let n = points.len();
+    (0..n)
+        .map(|i| {
+            let ([x0, y0], [x1, y1]) = (points[i], points[(i + 1) % n]);
+            x0 * y1 - x1 * y0
+        })
+        .sum::<f64>()
+        / 2.0
+}
+
+/// The largest coordinate difference of the points.
+fn extent(points: &[[f64; 2]]) -> f64 {
+    let (mut min, mut max) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for &[u, v] in points {
+        min = [min[0].min(u), min[1].min(v)];
+        max = [max[0].max(u), max[1].max(v)];
+    }
+    (max[0] - min[0]).max(max[1] - min[1])
+}
+
+/// Whether the segments p-q and r-t have a point in common.
+fn segments_meet(p: [f64; 2], q: [f64; 2], r: [f64; 2], t: [f64; 2]) -> bool {
+    let cross = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
+        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    };
+    let within = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
+        c[0] >= a[0].min(b[0])
+            && c[0] <= a[0].max(b[0])
+            && c[1] >= a[1].min(b[1])
+            && c[1] <= a[1].max(b[1])
+    };
+    let (d1, d2) = (cross(r, t, p), cross(r, t, q));
+    let (d3, d4) = (cross(p, q, r), cross(p, q, t));
+    if ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+    {
+        return true;
+    }
+    (d1 == 0.0 && within(r, t, p))
+        || (d2 == 0.0 && within(r, t, q))
+        || (d3 == 0.0 && within(p, q, r))
+        || (d4 == 0.0 && within(p, q, t))
+}
+
+/// Whether a point lies inside a polygon, by the crossings of a ray to +u.
+fn inside(point: [f64; 2], polygon: &[[f64; 2]]) -> bool {
+    let n = polygon.len();
+    let mut odd = false;
+    for i in 0..n {
+        let ([x0, y0], [x1, y1]) = (polygon[i], polygon[(i + 1) % n]);
+        if (y0 > point[1]) != (y1 > point[1]) {
+            let x = x0 + (point[1] - y0) / (y1 - y0) * (x1 - x0);
+            if x > point[0] {
+                odd = !odd;
+            }
+        }
+    }
+    odd
 }
 
 /// A number of a profile: the exposed field it is, its label in the dialog and its quantity;
@@ -74,7 +212,7 @@ pub struct Dimension<'a> {
 
 impl BeamProfile {
     /// The profiles with dimensions of a millimetre, in SI units.
-    pub const ALL: [BeamProfile; 9] = [
+    pub const ALL: [BeamProfile; 10] = [
         BeamProfile::Rect { a: 1e-3, b: 1e-3 },
         BeamProfile::Circ { radius: 1e-3 },
         BeamProfile::Pipe {
@@ -115,6 +253,7 @@ impl BeamProfile {
             i22: 1e-13,
             k: 5.0 / 6.0,
         },
+        BeamProfile::Sketch(Sketch { loops: Vec::new() }),
     ];
 
     /// Whether CalculiX has the profile as a beam section of its own; the others are written
@@ -151,6 +290,7 @@ impl BeamProfile {
             BeamProfile::U { .. } => "Channel (U)",
             BeamProfile::L { .. } => "Angle (L)",
             BeamProfile::General { .. } => "General (A, I)",
+            BeamProfile::Sketch(_) => "Sketch",
         }
     }
 
@@ -218,7 +358,10 @@ impl BeamProfile {
             BeamProfile::T { h, tw, tf, .. } => share((h - tf) * tw),
             BeamProfile::L { h, t, .. } => share(h * t),
             BeamProfile::General { k, .. } => k,
-            BeamProfile::Rect { .. } | BeamProfile::Circ { .. } => 5.0 / 6.0,
+            // A sketch may be anything; that of a solid section.
+            BeamProfile::Rect { .. } | BeamProfile::Circ { .. } | BeamProfile::Sketch(_) => {
+                5.0 / 6.0
+            }
             BeamProfile::Pipe { .. } | BeamProfile::Box { .. } => 0.5,
         }
     }
@@ -249,6 +392,7 @@ impl BeamProfile {
             BeamProfile::General { area, i11, i22, k } => {
                 [area, i11, i22, k].into_iter().all(positive)
             }
+            BeamProfile::Sketch(ref sketch) => sketch.problem().is_none(),
         }
     }
 
@@ -320,10 +464,17 @@ impl BeamProfile {
                     value: k,
                 },
             ],
+            // Its points are edited in the sketch, not exposed one by one.
+            BeamProfile::Sketch(_) => Vec::new(),
         }
     }
 
     pub fn convert_units(&mut self, c: &crate::convert::Conversion) {
+        if let BeamProfile::Sketch(sketch) = self {
+            for value in sketch.loops.iter_mut().flatten().flatten() {
+                c.value(value, Quantity::Length);
+            }
+        }
         for dimension in self.dimensions_mut() {
             if let Some(quantity) = dimension.quantity {
                 c.value(dimension.value, quantity);
@@ -334,6 +485,11 @@ impl BeamProfile {
     /// Scales the profile by `length`: lengths by it, areas by its square and second moments
     /// of area by its fourth power.
     pub fn scale(&mut self, length: f64) {
+        if let BeamProfile::Sketch(sketch) = self {
+            for value in sketch.loops.iter_mut().flatten().flatten() {
+                *value *= length;
+            }
+        }
         for dimension in self.dimensions_mut() {
             *dimension.value *= match dimension.quantity {
                 Some(Quantity::Area) => length * length,
@@ -357,6 +513,18 @@ impl BeamProfile {
             | BeamProfile::U { h, b, .. }
             | BeamProfile::L { h, b, .. } => [b, h],
             BeamProfile::General { area, i11, i22, .. } => equivalent_rectangle(area, i11, i22),
+            BeamProfile::Sketch(ref sketch) => {
+                let points: Vec<[f64; 2]> = sketch.loops.first().cloned().unwrap_or_default();
+                let (mut min, mut max) = ([f64::MAX; 2], [f64::MIN; 2]);
+                for [u, v] in points {
+                    min = [min[0].min(u), min[1].min(v)];
+                    max = [max[0].max(u), max[1].max(v)];
+                }
+                if min[0] > max[0] {
+                    return [0.0; 2];
+                }
+                [max[0] - min[0], max[1] - min[1]]
+            }
         }
     }
 
@@ -365,6 +533,22 @@ impl BeamProfile {
     /// centroid at the centre; one given by its values alone is drawn as the rectangle of the
     /// same second moments.
     pub fn outlines(&self) -> Vec<Outline> {
+        if let BeamProfile::Sketch(sketch) = self {
+            let [cu, cv] = SectionProperties::of_loops(&sketch.loops).centroid;
+            return (sketch.loops.iter())
+                .map(|points| {
+                    let mut points: Vec<[f64; 2]> =
+                        points.iter().map(|&[u, v]| [u - cu, v - cv]).collect();
+                    if signed_area(&points) < 0.0 {
+                        points.reverse();
+                    }
+                    Outline {
+                        points,
+                        round: false,
+                    }
+                })
+                .collect();
+        }
         let circle = |r: f64| Outline {
             points: (0..ROUND_POINTS)
                 .map(|k| {
@@ -452,6 +636,7 @@ impl BeamProfile {
                 let [a, b] = equivalent_rectangle(area, i11, i22);
                 vec![rect([-a / 2.0, -b / 2.0], [a / 2.0, b / 2.0])]
             }
+            BeamProfile::Sketch(_) => unreachable!("returned above"),
         }
     }
 
@@ -490,24 +675,129 @@ fn equivalent_rectangle(area: f64, i11: f64, i22: f64) -> [f64; 2] {
 /// Triangles filling a simple polygon, by ear clipping: indices into `points`, counter-
 /// clockwise. Concave outlines such as an I-beam's need it; a fan only fills convex ones.
 pub fn triangulate(points: &[[f64; 2]]) -> Vec<[usize; 3]> {
-    let n = points.len();
-    if n < 3 {
+    let mut left: Vec<usize> = (0..points.len()).collect();
+    if signed_area(points) < 0.0 {
+        left.reverse();
+    }
+    ear_clip(points, left)
+}
+
+/// Triangles filling the region inside the first loop and outside the others, indices into
+/// the points of all loops one after the other, counter-clockwise. Each hole is joined to
+/// the outline by a bridge to a vertex it sees, which turns the region into one polygon.
+pub fn triangulate_with_holes(loops: &[Vec<[f64; 2]>]) -> Vec<[usize; 3]> {
+    let Some(outer) = loops.first() else {
+        return Vec::new();
+    };
+    let points: Vec<[f64; 2]> = loops.iter().flatten().copied().collect();
+    let mut starts = vec![0];
+    for points in loops {
+        starts.push(starts.last().unwrap() + points.len());
+    }
+    // The outline counter-clockwise, the holes clockwise.
+    let ring = |k: usize| -> Vec<usize> {
+        let mut ring: Vec<usize> = (starts[k]..starts[k + 1]).collect();
+        let area = signed_area(&loops[k]);
+        if (k == 0) == (area < 0.0) {
+            ring.reverse();
+        }
+        ring
+    };
+    let mut polygon = ring(0);
+    if outer.len() < 3 {
         return Vec::new();
     }
-    let twice_area: f64 = (0..n)
+    // The holes from right to left, each from its rightmost point, as the bridges of the
+    // holes further right then cannot cross it.
+    let mut holes: Vec<usize> = (1..loops.len()).filter(|&k| loops[k].len() >= 3).collect();
+    let rightmost = |k: usize| {
+        (starts[k]..starts[k + 1])
+            .max_by(|&a, &b| points[a][0].total_cmp(&points[b][0]))
+            .unwrap()
+    };
+    holes.sort_by(|&a, &b| points[rightmost(b)][0].total_cmp(&points[rightmost(a)][0]));
+    for (done, &k) in holes.iter().enumerate() {
+        let hole = ring(k);
+        let m = rightmost(k);
+        let from = points[m];
+        // The edges a bridge must not cross: the polygon so far and the holes still to come.
+        let mut edges: Vec<(usize, usize)> = (0..polygon.len())
+            .map(|i| (polygon[i], polygon[(i + 1) % polygon.len()]))
+            .collect();
+        for &later in &holes[done..] {
+            let ring = ring(later);
+            edges.extend((0..ring.len()).map(|i| (ring[i], ring[(i + 1) % ring.len()])));
+        }
+        let distance = |i: usize| {
+            let p = points[polygon[i]];
+            (p[0] - from[0]).hypot(p[1] - from[1])
+        };
+        let visible = |i: usize| {
+            let to = points[polygon[i]];
+            // A point met twice, at both ends of an earlier bridge, takes the bridge on the
+            // side of its copy that it leaves into.
+            let n = polygon.len();
+            let (next, prev) = (
+                points[polygon[(i + 1) % n]],
+                points[polygon[(i + n - 1) % n]],
+            );
+            if !inside_corner(to, next, prev, from) {
+                return false;
+            }
+            !edges.iter().any(|&(a, b)| {
+                let shared = [a, b].iter().any(|&e| points[e] == to || points[e] == from);
+                !shared && segments_meet(from, to, points[a], points[b])
+            })
+        };
+        let mut order: Vec<usize> = (0..polygon.len()).collect();
+        order.sort_by(|&a, &b| distance(a).total_cmp(&distance(b)));
+        let Some(i) = order.into_iter().find(|&i| visible(i)) else {
+            continue;
+        };
+        // Into the hole at its rightmost point, around it and back along the bridge.
+        let at = hole.iter().position(|&h| h == m).unwrap();
+        let mut spliced: Vec<usize> = polygon[..=i].to_vec();
+        spliced.extend(hole[at..].iter().chain(&hole[..=at]));
+        spliced.push(polygon[i]);
+        spliced.extend(&polygon[i + 1..]);
+        polygon = spliced;
+    }
+    ear_clip(&points, polygon)
+}
+
+/// Whether `q` lies in the corner of a counter-clockwise polygon at `p`, which runs from the
+/// edge to `next` counter-clockwise round to the edge to `prev`.
+fn inside_corner(p: [f64; 2], next: [f64; 2], prev: [f64; 2], q: [f64; 2]) -> bool {
+    let cross =
+        |a: [f64; 2], b: [f64; 2]| (a[0] - p[0]) * (b[1] - p[1]) - (a[1] - p[1]) * (b[0] - p[0]);
+    if cross(next, prev) >= 0.0 {
+        cross(next, q) > 0.0 && cross(q, prev) > 0.0
+    } else {
+        !(cross(prev, q) >= 0.0 && cross(q, next) >= 0.0)
+    }
+}
+
+/// Twice the area of a polygon, positive counter-clockwise.
+fn signed_area(points: &[[f64; 2]]) -> f64 {
+    let n = points.len();
+    (0..n)
         .map(|i| {
             let ([x0, y0], [x1, y1]) = (points[i], points[(i + 1) % n]);
             x0 * y1 - x1 * y0
         })
-        .sum();
-    let mut left: Vec<usize> = (0..n).collect();
-    if twice_area < 0.0 {
-        left.reverse();
+        .sum()
+}
+
+/// Ear clipping of the counter-clockwise polygon through `left`, indices into `points`. A
+/// point may appear twice, at both ends of a bridge to a hole.
+fn ear_clip(points: &[[f64; 2]], mut left: Vec<usize>) -> Vec<[usize; 3]> {
+    if left.len() < 3 {
+        return Vec::new();
     }
     let cross = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
         (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
     };
-    let mut triangles = Vec::with_capacity(n - 2);
+    let mut triangles = Vec::with_capacity(left.len() - 2);
     while left.len() > 3 {
         let m = left.len();
         let ear = (0..m).find(|&k| {
@@ -515,12 +805,13 @@ pub fn triangulate(points: &[[f64; 2]]) -> Vec<[usize; 3]> {
             let (pa, pb, pc) = (points[a], points[b], points[c]);
             cross(pa, pb, pc) > 0.0
                 && !(left.iter()).any(|&o| {
-                    o != a
-                        && o != b
-                        && o != c
-                        && cross(pa, pb, points[o]) >= 0.0
-                        && cross(pb, pc, points[o]) >= 0.0
-                        && cross(pc, pa, points[o]) >= 0.0
+                    let po = points[o];
+                    po != pa
+                        && po != pb
+                        && po != pc
+                        && cross(pa, pb, po) >= 0.0
+                        && cross(pb, pc, po) >= 0.0
+                        && cross(pc, pa, po) >= 0.0
                 })
         });
         // A degenerate polygon has no ear left: fill the rest as a fan.
@@ -805,5 +1096,111 @@ mod tests {
         assert!(close(angle.abs(), std::f64::consts::FRAC_PI_4));
         // The sum of the moments does not depend on the axes.
         assert!(close(big + small, p.i11 + p.i22));
+    }
+
+    /// A square of side 10 with two square holes of side 2, the second one clockwise.
+    fn holed_square() -> Sketch {
+        Sketch {
+            loops: vec![
+                vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]],
+                vec![[2.0, 2.0], [4.0, 2.0], [4.0, 4.0], [2.0, 4.0]],
+                vec![[6.0, 8.0], [8.0, 8.0], [8.0, 6.0], [6.0, 6.0]],
+            ],
+        }
+    }
+
+    #[test]
+    fn sketches_subtract_their_holes() {
+        let sketch = holed_square();
+        assert_eq!(sketch.problem(), None);
+        let profile = BeamProfile::Sketch(sketch.clone());
+        let p = profile.properties();
+        assert!(close(p.area, 92.0));
+        // The holes lie symmetric about the diagonal u = v.
+        assert!(close(p.i11, p.i22));
+        assert_eq!(profile.size(), [10.0, 10.0]);
+        // The outlines lie about the centroid, all counter-clockwise.
+        let outlines = profile.outlines();
+        assert_eq!(outlines.len(), 3);
+        for outline in &outlines {
+            assert!(signed_area(&outline.points) > 0.0);
+        }
+        let moved = SectionProperties::of_loops(
+            &outlines
+                .iter()
+                .map(|o| o.points.clone())
+                .collect::<Vec<_>>(),
+        );
+        assert!(moved.centroid.iter().all(|c| c.abs() < 1e-12));
+        assert!(close(moved.i11, p.i11));
+    }
+
+    #[test]
+    fn holes_are_left_out_of_the_triangles() {
+        let sketch = holed_square();
+        let points: Vec<[f64; 2]> = sketch.loops.iter().flatten().copied().collect();
+        let triangles = triangulate_with_holes(&sketch.loops);
+        let mut area = 0.0;
+        for t in &triangles {
+            let [a, b, c] = t.map(|k| points[k]);
+            let twice = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+            assert!(twice > -1e-12, "clockwise triangle {t:?}");
+            area += twice / 2.0;
+        }
+        assert!(close(area, 92.0), "{area}");
+        // No triangle covers the middle of a hole.
+        let covers = |[x, y]: [f64; 2]| {
+            triangles.iter().any(|t| {
+                let [a, b, c] = t.map(|k| points[k]);
+                let side = |p: [f64; 2], q: [f64; 2]| {
+                    (q[0] - p[0]) * (y - p[1]) - (q[1] - p[1]) * (x - p[0]) > 0.0
+                };
+                side(a, b) && side(b, c) && side(c, a)
+            })
+        };
+        assert!(!covers([3.0, 3.0]) && !covers([7.0, 7.0]));
+        assert!(covers([5.3, 1.1]) && covers([1.2, 8.7]));
+    }
+
+    #[test]
+    fn sketches_tell_what_is_wrong() {
+        let mut sketch = holed_square();
+        sketch.loops[1] = vec![[-2.0, 2.0], [-1.0, 2.0], [-1.0, 3.0]];
+        assert!(sketch.problem().unwrap().contains("Hole 1"), "{sketch:?}");
+        let crossing = Sketch {
+            loops: vec![vec![[0.0, 0.0], [1.0, 1.0], [1.0, 0.0], [0.0, 1.0]]],
+        };
+        assert!(crossing.problem().is_some());
+        assert!(!BeamProfile::Sketch(crossing).is_valid());
+        // A sketch of a profile is that profile.
+        let i = BeamProfile::I {
+            h: 0.2,
+            b: 0.1,
+            tw: 0.01,
+            tf: 0.02,
+        };
+        let sketched = BeamProfile::Sketch(Sketch::of(&i)).properties();
+        assert!(close(sketched.area, i.properties().area));
+        assert!(close(sketched.i11, i.properties().i11));
+    }
+
+    #[test]
+    fn holes_beside_each_other_are_both_left_out() {
+        // A trapezoid tube with a second hole in its wall, both holes reaching as far right.
+        let loops = vec![
+            vec![[-60.0, 0.0], [60.0, 0.0], [40.0, 160.0], [-40.0, 160.0]],
+            vec![[-40.0, 15.0], [40.0, 15.0], [25.0, 135.0], [-25.0, 135.0]],
+            vec![[30.0, 130.0], [30.0, 140.0], [40.0, 140.0], [40.0, 130.0]],
+        ];
+        let points: Vec<[f64; 2]> = loops.iter().flatten().copied().collect();
+        let mut area = 0.0;
+        for t in triangulate_with_holes(&loops) {
+            let [a, b, c] = t.map(|k| points[k]);
+            let twice = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+            assert!(twice > -1e-9, "clockwise triangle {t:?}");
+            area += twice / 2.0;
+        }
+        let expected = SectionProperties::of_loops(&loops).area;
+        assert!(close(area, expected), "{area} != {expected}");
     }
 }

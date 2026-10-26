@@ -3,7 +3,7 @@
 //! axes through it.
 
 use egui::{Color32, FontId, Pos2, Rect, Shape, Stroke, Ui, pos2, vec2};
-use plx_model::{BeamProfile, CrossSection, Quantity, UnitSystem};
+use plx_model::{BeamProfile, CrossSection, Quantity, Sketch, UnitSystem};
 
 use crate::{expose, numeric, setup, style};
 
@@ -22,8 +22,8 @@ pub fn form(ui: &mut Ui, cross_section: &mut CrossSection, units: UnitSystem) {
         // All kinds without scrolling.
         .height(400.0)
         .show_ui(ui, |ui| {
-            for other in BeamProfile::ALL {
-                let selected = std::mem::discriminant(&other) == std::mem::discriminant(profile);
+            for other in &BeamProfile::ALL {
+                let selected = std::mem::discriminant(other) == std::mem::discriminant(profile);
                 if ui.selectable_label(selected, other.label()).clicked() && !selected {
                     *profile = scaled_like(other, profile);
                 }
@@ -54,14 +54,19 @@ pub fn form(ui: &mut Ui, cross_section: &mut CrossSection, units: UnitSystem) {
         );
         ui.end_row();
     }
-    ui.label("");
-    preview(ui, profile, units);
-    ui.end_row();
+    match profile {
+        BeamProfile::Sketch(sketch) => crate::sketch::rows(ui, sketch, units),
+        _ => {
+            ui.label("");
+            preview(ui, profile, units);
+            ui.end_row();
+        }
+    }
 }
 
 /// A profile of the kind of `kind` about as large as `like`, so that switching the kind
 /// keeps the size of the profile rather than falling back to a millimetre.
-fn scaled_like(kind: BeamProfile, like: &BeamProfile) -> BeamProfile {
+fn scaled_like(kind: &BeamProfile, like: &BeamProfile) -> BeamProfile {
     let [a, b] = like.size();
     let size = a.max(b);
     let wall = a.min(b) / 10.0;
@@ -106,6 +111,8 @@ fn scaled_like(kind: BeamProfile, like: &BeamProfile) -> BeamProfile {
                 k: like.shear_factor(),
             }
         }
+        // The outline of the profile it was, to draw on from there.
+        BeamProfile::Sketch(_) => BeamProfile::Sketch(Sketch::of(like)),
     }
 }
 
@@ -179,25 +186,32 @@ fn paint(ui: &Ui, rect: Rect, profile: &BeamProfile) {
     };
     let fill = style::adapt(Color32::from_rgb(170, 190, 215));
     let edge = Stroke::new(1.5, style::adapt(Color32::from_rgb(40, 70, 120)));
-    // The outer outline filled, the holes painted over with the background. I, T, U and L
-    // profiles are concave, so the outline is filled by its triangles.
-    for (k, outline) in outlines.iter().enumerate() {
-        let points: Vec<Pos2> = outline.points.iter().map(|&p| at(p)).collect();
-        let color = if k == 0 { fill } else { style::window() };
-        let mut mesh = egui::Mesh::default();
-        for &point in &points {
-            mesh.colored_vertex(point, color);
-        }
-        for [a, b, c] in plx_model::triangulate(&outline.points) {
-            mesh.add_triangle(a as u32, b as u32, c as u32);
-        }
-        painter.add(Shape::mesh(mesh));
-        painter.add(Shape::closed_line(points, edge));
-    }
-    // The beam's 1- and 2-direction from the nodes, at the centre of the profile.
-    let axis = Stroke::new(1.0, style::text());
-    let origin = at([0.0, 0.0]);
+    let rings: Vec<Vec<[f64; 2]>> = outlines.iter().map(|o| o.points.clone()).collect();
+    fill_rings(&painter, &rings, at, fill, edge);
+    let properties = profile.properties();
     let length = 0.3 * inner.width().min(inner.height());
+    let (_, angle) = properties.principal();
+    paint_axes(
+        &painter,
+        rect,
+        at([0.0, 0.0]),
+        at(properties.centroid),
+        angle,
+        length,
+    );
+}
+
+/// The beam's 1- and 2-direction from the nodes at `origin`, and the principal axes through
+/// the centroid, dashed across the whole of `rect`, the first one at `angle` in radians.
+pub(crate) fn paint_axes(
+    painter: &egui::Painter,
+    rect: Rect,
+    origin: Pos2,
+    centroid: Pos2,
+    angle: f64,
+    length: f32,
+) {
+    let axis = Stroke::new(1.0, style::text());
     let font = FontId::proportional(11.0);
     // The labels sit beside the arrow heads, clear of the principal axes along them.
     for (direction, label, beside, align) in [
@@ -214,9 +228,6 @@ fn paint(ui: &Ui, rect: Rect, profile: &BeamProfile) {
         painter.text(tip + beside, align, label, font.clone(), style::text());
     }
     // The principal axes through the centroid, dashed across the whole sketch.
-    let properties = profile.properties();
-    let centroid = at(properties.centroid);
-    let (_, angle) = properties.principal();
     let principal = Stroke::new(1.0, style::adapt(Color32::from_rgb(200, 60, 40)));
     let reach = rect.width().max(rect.height());
     for (k, turn) in [0.0, std::f64::consts::FRAC_PI_2].into_iter().enumerate() {
@@ -239,6 +250,31 @@ fn paint(ui: &Ui, rect: Rect, profile: &BeamProfile) {
     painter.circle_filled(centroid, 1.5, principal.color);
 }
 
+/// The region inside the first ring and outside the others filled by its triangles, as I, T,
+/// U and L profiles and sketches are concave, with the rings drawn around it.
+pub(crate) fn fill_rings(
+    painter: &egui::Painter,
+    rings: &[Vec<[f64; 2]>],
+    at: impl Fn([f64; 2]) -> Pos2,
+    fill: Color32,
+    edge: Stroke,
+) {
+    let mut mesh = egui::Mesh::default();
+    for &point in rings.iter().flatten() {
+        mesh.colored_vertex(at(point), fill);
+    }
+    for [a, b, c] in plx_model::triangulate_with_holes(rings) {
+        mesh.add_triangle(a as u32, b as u32, c as u32);
+    }
+    painter.add(Shape::mesh(mesh));
+    for ring in rings {
+        painter.add(Shape::closed_line(
+            ring.iter().map(|&p| at(p)).collect(),
+            edge,
+        ));
+    }
+}
+
 /// Where the ray from `start` along `direction` leaves `rect`.
 fn clip_to(rect: Rect, start: Pos2, direction: egui::Vec2) -> Pos2 {
     let mut t = f32::MAX;
@@ -257,9 +293,18 @@ fn clip_to(rect: Rect, start: Pos2, direction: egui::Vec2) -> Pos2 {
 
 /// Area, centroid and second moments of area of a profile as text, in the model's units.
 fn properties(ui: &mut Ui, profile: &BeamProfile, units: UnitSystem) {
-    let mut p = profile.properties();
+    property_lines(ui, profile.properties(), profile.size(), units);
+}
+
+/// The lines of [`properties`] for the values `p` of a profile of `size`.
+pub(crate) fn property_lines(
+    ui: &mut Ui,
+    mut p: plx_model::SectionProperties,
+    size: [f64; 2],
+    units: UnitSystem,
+) {
     // A centroid at the centre up to rounding is at the centre.
-    let size = profile.size().into_iter().fold(0.0, f64::max);
+    let size = size.into_iter().fold(0.0, f64::max);
     for c in &mut p.centroid {
         if c.abs() < 1e-9 * size {
             *c = 0.0;
@@ -306,17 +351,17 @@ mod tests {
     #[test]
     fn switching_the_kind_keeps_the_size() {
         let rect = BeamProfile::Rect { a: 0.02, b: 0.04 };
-        let pipe = scaled_like(BeamProfile::ALL[2], &rect);
+        let pipe = scaled_like(&BeamProfile::ALL[2], &rect);
         assert_eq!(pipe.size(), [0.04, 0.04]);
         assert!(pipe.is_valid());
-        let boxed = scaled_like(BeamProfile::ALL[3], &rect);
+        let boxed = scaled_like(&BeamProfile::ALL[3], &rect);
         assert_eq!(boxed.size(), [0.02, 0.04]);
         assert!(boxed.is_valid());
         // Every kind made from it is valid, the general one with its values.
-        for kind in BeamProfile::ALL {
+        for kind in &BeamProfile::ALL {
             assert!(scaled_like(kind, &rect).is_valid(), "{kind:?}");
         }
-        let general = scaled_like(BeamProfile::ALL[8], &rect);
+        let general = scaled_like(&BeamProfile::ALL[8], &rect);
         assert_eq!(general.properties().i11, rect.properties().i11);
     }
 

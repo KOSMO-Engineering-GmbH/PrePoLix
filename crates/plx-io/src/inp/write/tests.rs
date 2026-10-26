@@ -3905,7 +3905,7 @@ fn line_cross_sections() -> Vec<CrossSection> {
             },
         ),
         ("Circ", BeamProfile::Circ { radius: 2.0 }),
-        ("Box", BeamProfile::ALL[3]),
+        ("Box", BeamProfile::ALL[3].clone()),
     ];
     (profiles.into_iter())
         .map(|(name, profile)| CrossSection {
@@ -3991,7 +3991,7 @@ fn general_profiles_are_written_for_user_element_u1() {
     );
     model.cross_sections.push(CrossSection {
         name: "I".into(),
-        profile: i_beam,
+        profile: i_beam.clone(),
     });
     let text = write_inp(&mesh, &model, "").unwrap();
     for line in [
@@ -4031,7 +4031,7 @@ fn general_profiles_are_written_for_user_element_u1() {
         b: 40.0,
         t: 6.0,
     };
-    model.cross_sections.last_mut().unwrap().profile = angle;
+    model.cross_sections.last_mut().unwrap().profile = angle.clone();
     let text = write_inp(&mesh, &model, "").unwrap();
     let (sin, cos) = angle.principal_turn().sin_cos();
     let general = format!("Section=GENERAL\n{}, ", number(angle.data_line()[0]));
@@ -4065,6 +4065,57 @@ fn general_profiles_are_written_for_user_element_u1() {
             "{lateral} != {side}"
         );
     }
+}
+
+/// A sketched profile goes the way of the I-beam: a general section of U1, its polygons in
+/// the comment, which may be longer than a line of CalculiX.
+#[test]
+fn sketched_profiles_are_written_for_user_element_u1() {
+    let mesh = line_chain(10, 0, 1000.0, false);
+    // A hollow rectangle with an off-centre hole, so that the centroid is not the centre.
+    let sketch = BeamProfile::Sketch(plx_model::Sketch {
+        loops: vec![
+            vec![[0.0, 0.0], [50.0, 0.0], [50.0, 100.0], [0.0, 100.0]],
+            vec![[5.0, 5.0], [45.0, 5.0], [45.0, 80.0], [5.0, 80.0]],
+        ],
+    });
+    let mut model = line_model(
+        &mesh,
+        SectionKind::Beam(BeamSection {
+            orientation: BeamOrientation::Direction([0.0, 0.0, 1.0]),
+            ..beam("Sketch")
+        }),
+        LoadKind::force([0.0, 0.0, 100.0]),
+    );
+    model.cross_sections.push(CrossSection {
+        name: "Sketch".into(),
+        profile: sketch.clone(),
+    });
+    let text = write_inp(&mesh, &model, "").unwrap();
+    assert!(text.contains("Section=GENERAL\n"), "{text}");
+    let comment = (text.lines()).find(|l| l.starts_with("** Profile: Sketch("));
+    assert!(comment.is_some_and(|c| c.len() > 132), "{text}");
+    let import = read_inp_str(&text, None).unwrap();
+    assert_eq!(import.cross_sections[0].profile, sketch);
+    if let Some(frd) = run_ccx("u1-sketch", &text) {
+        let p = sketch.properties();
+        let g = 210_000.0 / 2.6;
+        let expected = 100.0 * 1000.0_f64.powi(3) / (3.0 * 210_000.0 * p.i22)
+            + 100.0 * 1000.0 / (sketch.shear_factor() * g * p.area);
+        let sag = node_value(&frd, "DISP", "U3", 11);
+        assert!(
+            (sag - expected).abs() < 0.02 * expected,
+            "{sag} != {expected}"
+        );
+    }
+    // A round one with many points, far wider than CalculiX reads a line.
+    let round = BeamProfile::Sketch(plx_model::Sketch::of(&BeamProfile::Circ { radius: 0.0123 }));
+    model.cross_sections.last_mut().unwrap().profile = round.clone();
+    let text = write_inp(&mesh, &model, "").unwrap();
+    let import = read_inp_str(&text, None).unwrap();
+    assert_eq!(import.cross_sections[0].profile, round);
+    // CalculiX skips the comment however long it is.
+    run_ccx("u1-round-sketch", &text);
 }
 
 #[test]

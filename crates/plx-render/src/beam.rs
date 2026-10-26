@@ -20,7 +20,7 @@ const JOIN_ANGLE_DEG: f64 = 45.0;
 /// projected onto the plane normal to the beam, direction 2 the beam axis crossed with
 /// direction 1. `offset` moves the beam axis off the nodes in the 1- and 2-direction in
 /// multiples of the profile's thickness there; 0.5 puts the nodes on the positive face.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BeamShape {
     pub profile: BeamProfile,
     pub normal: DVec3,
@@ -122,7 +122,9 @@ pub fn beam_mesh(
         (other.0 != index && cos >= JOIN_ANGLE_DEG.to_radians().cos()).then_some(other)
     };
     let frame = |index: usize, end: usize| -> Frame {
-        let shape = shapes[index].expect("segments with a profile only");
+        let shape = shapes[index]
+            .as_ref()
+            .expect("segments with a profile only");
         let mut tangent = direction(index);
         if let Some((other, other_end)) = joined(index, end) {
             let sign = if other_end == end { -1.0 } else { 1.0 };
@@ -154,7 +156,7 @@ pub fn beam_mesh(
     };
 
     for (index, &[a, b]) in skin.lines.iter().enumerate() {
-        let Some(shape) = shapes[index] else {
+        let Some(shape) = &shapes[index] else {
             continue;
         };
         let color = segment_color(index).unwrap_or(color);
@@ -233,7 +235,8 @@ pub fn beam_mesh(
             };
             let mut triangles: Vec<[u32; 3]> = Vec::new();
             match loops.get(1) {
-                Some(hole) => {
+                // A pipe or box: the wall between two outlines of as many points.
+                Some(hole) if loops.len() == 2 && hole.points.len() == n => {
                     for &at in outer.iter().chain(&hole.points) {
                         push(at);
                     }
@@ -253,6 +256,18 @@ pub fn beam_mesh(
                     for i in 0..n {
                         triangles.push([0, 1 + i, 1 + (i + 1) % n]);
                     }
+                }
+                // A sketch with holes of their own shape.
+                Some(_) => {
+                    let rings: Vec<Vec<[f64; 2]>> =
+                        loops.iter().map(|o| o.points.clone()).collect();
+                    for &at in rings.iter().flatten() {
+                        push(at);
+                    }
+                    triangles.extend(
+                        (plx_model::triangulate_with_holes(&rings).into_iter())
+                            .map(|t| t.map(|k| k as u32)),
+                    );
                 }
                 // I, T, U and L profiles are concave: a fan from the centre would not fill
                 // them.
@@ -318,7 +333,7 @@ mod tests {
             DVec3::ZERO,
             [1.0; 3],
             |_| None,
-            |_| shape,
+            |_| shape.clone(),
             None,
         )
     }
@@ -403,7 +418,7 @@ mod tests {
             0.5 * n * r * r * (std::f64::consts::TAU / n).sin()
         };
         let wall = 2.0 * (polygon(0.2) - polygon(0.15)) as f32;
-        let render = swept(&beam(), Some(pipe));
+        let render = swept(&beam(), Some(pipe.clone()));
         assert!(
             (volume(&render) - wall).abs() < 1e-5,
             "{} {wall}",
@@ -450,6 +465,29 @@ mod tests {
                 tw: 0.01,
                 tf: 0.02,
             },
+            normal: DVec3::Z,
+            offset: [0.0; 2],
+        };
+        let area = shape.profile.properties().area as f32;
+        let render = swept(&beam(), Some(shape));
+        assert!(
+            (volume(&render) - 2.0 * area).abs() < 1e-5,
+            "{} {}",
+            volume(&render),
+            2.0 * area
+        );
+    }
+
+    #[test]
+    fn sketches_close_their_ends_around_their_holes() {
+        let shape = BeamShape {
+            profile: BeamProfile::Sketch(plx_model::Sketch {
+                loops: vec![
+                    vec![[0.0, 0.0], [0.2, 0.0], [0.2, 0.1], [0.1, 0.15], [0.0, 0.1]],
+                    vec![[0.02, 0.02], [0.05, 0.02], [0.05, 0.05]],
+                    vec![[0.12, 0.03], [0.17, 0.03], [0.17, 0.07], [0.12, 0.07]],
+                ],
+            }),
             normal: DVec3::Z,
             offset: [0.0; 2],
         };

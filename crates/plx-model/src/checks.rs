@@ -3315,7 +3315,7 @@ mod tests {
     fn beam_section(model: &mut FeModel) {
         model.cross_sections.push(crate::CrossSection {
             name: "Rect".into(),
-            profile: crate::BeamProfile::ALL[0],
+            profile: crate::BeamProfile::ALL[0].clone(),
         });
         model.sections[0].kind = crate::SectionKind::Beam(crate::BeamSection {
             cross_section: "Rect".into(),
@@ -4546,7 +4546,7 @@ mod tests {
         model.steps[0].kind = StepKind::Frequency(Default::default());
         assert!(refused(&model).is_empty());
         // Native profiles are CalculiX's own beams, which take every step.
-        model.cross_sections[0].profile = crate::BeamProfile::ALL[0];
+        model.cross_sections[0].profile = crate::BeamProfile::ALL[0].clone();
         model.steps[0].kind = StepKind::Buckle(Default::default());
         assert!(refused(&model).is_empty());
     }

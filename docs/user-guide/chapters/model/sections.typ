@@ -46,6 +46,8 @@ Double-click #ui("Cross-Sections"), right-click it and choose #ui("Create ..."),
     I22 about the 1- and 2-axis through the centroid and the factor k of CalculiX described
     below. It is drawn as the rectangle with the same moments. Switching another profile to
     #ui("General") takes over its values.],
+  [Sketch], [A profile of your own drawn as polygons: an outline and any number of holes
+    (@sketched-profiles).],
 )
 
 The sketch below the fields shows the profile with the 1-direction to the right and the
@@ -84,6 +86,32 @@ and second moments of area. So:
 
 #screenshot("general-beam-results.png", [A portal frame of I-beam columns and a channel
   girder, solved as U1 beams, with the profiles in the results])
+
+==== Sketched profiles <sketched-profiles>
+
+#ui("Sketch") draws a profile of any shape. Switching a profile to #ui("Sketch") starts from its
+outline, so an I-beam becomes the polygon of the I-beam to adjust; a round profile becomes a
+polygon of 48 points. The dialog shows the sketch on a grid instead of the fields:
+
+- Drag a point to move it. It snaps to the grid, whose step is a round number in the model's
+  units; hold Shift to place it freely.
+- Double-click an edge to add a point there, right-click a point to delete it. An outline or
+  hole keeps at least 3 points.
+- #ui("Polygon") picks the outline or a hole for the table below it; #ui("Add Hole") puts a small
+  square hole inside the outline to drag into place, #ui("Delete Hole") removes the hole picked.
+- #ui("Points") lists the 1- and 2-coordinates of the polygon picked, to type exact values;
+  #ui("Add Point") adds one halfway to the next point, #ui("Delete Point") removes the one
+  picked.
+
+The centroid and the principal axes follow every change, with the area and second moments of
+area below. The sketch needs no particular origin: the profile lies with its centroid on the
+beam's nodes, as all general profiles do (@general-profiles). Edges must not cross, and every
+hole must lie inside the outline and outside the other holes; otherwise the dialog names the
+problem, draws the polygons red and does not accept the cross-section. The shear factor k is
+5/6. A sketch has no dimensions to expose as parameters.
+
+#screenshot("cross-section-sketch.png", [A sketched girder: a trapezoid with a hole, its centroid
+  above the middle of its height])
 
 Every dimension can be exposed as a parameter with the #ui("P") button next to it, so that a
 parameter study can vary the profile. Renaming a cross-section renames it in the beam sections

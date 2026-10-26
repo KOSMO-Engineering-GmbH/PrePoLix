@@ -58,6 +58,7 @@ mod section;
 mod selection;
 mod settings;
 mod setup;
+mod sketch;
 mod solution_monitor;
 mod solver_check;
 mod sound;

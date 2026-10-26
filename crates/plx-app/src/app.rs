@@ -6585,7 +6585,7 @@ impl Workbench {
         }
         model.thick_shells = (model.shell_sections().filter(|_| shells).cloned()).collect();
         model.thick_lines = (model.line_sections().filter(|_| lines))
-            .map(|(s, p)| (s.clone(), p.copied()))
+            .map(|(s, p)| (s.clone(), p.cloned()))
             .collect();
         self.results_changed = true;
     }

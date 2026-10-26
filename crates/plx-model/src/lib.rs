@@ -68,7 +68,8 @@ pub use contact::{
 pub use contact_check::{ContactCheck, ContactStatus};
 pub use contact_steps::{ContactChange, ContactState};
 pub use cross_section::{
-    BeamProfile, CrossSection, Dimension, Outline, ROUND_POINTS, SectionProperties, triangulate,
+    BeamProfile, CrossSection, Dimension, Outline, ROUND_POINTS, SectionProperties, Sketch,
+    triangulate, triangulate_with_holes,
 };
 pub use detection::{
     ContactDetection, DetectionFilter, DetectionGeometry, DetectionGrouping, DetectionReport,
