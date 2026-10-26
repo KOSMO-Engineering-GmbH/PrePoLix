@@ -15,6 +15,7 @@ mod connections;
 mod constraint_dialog;
 mod contact_search;
 mod contacts;
+mod cross_section;
 mod distribution_dialog;
 mod exploded;
 mod expose;

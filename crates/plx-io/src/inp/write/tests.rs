@@ -3,10 +3,10 @@ use std::process::Command;
 
 use plx_mesh::CadEntity;
 use plx_model::{
-    BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, DefinedField,
-    DefinedFieldKind, Displacement, DynamicStep, Elastic, EquationSolver, Hardening, Load,
-    Material, ModalDamping, ModalDynamicsStep, NodeTie, Plastic, PlasticPoint, ReferencePoint,
-    RigidBody, Section, SectionKind, SteadyStateDynamicsStep, UnitSystem,
+    BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition, CrossSection,
+    DefinedField, DefinedFieldKind, Displacement, DynamicStep, Elastic, EquationSolver, Hardening,
+    Load, Material, ModalDamping, ModalDynamicsStep, NodeTie, Plastic, PlasticPoint,
+    ReferencePoint, RigidBody, Section, SectionKind, SteadyStateDynamicsStep, UnitSystem,
 };
 
 use super::*;
@@ -3867,6 +3867,7 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
         factor_amplitude: None,
     });
     FeModel {
+        cross_sections: line_cross_sections(),
         materials: vec![Material {
             name: "Steel".into(),
             density: None,
@@ -3892,11 +3893,40 @@ fn line_model(mesh: &FeMesh, kind: SectionKind, load: LoadKind) -> FeModel {
     }
 }
 
+/// The cross-sections of [`line_model`], by name.
+fn line_cross_sections() -> Vec<CrossSection> {
+    let profiles = [
+        ("Rect", BeamProfile::Rect { a: 10.0, b: 5.0 }),
+        (
+            "Pipe",
+            BeamProfile::Pipe {
+                radius: 5.0,
+                thickness: 1.0,
+            },
+        ),
+        ("Circ", BeamProfile::Circ { radius: 2.0 }),
+        ("Box", BeamProfile::ALL[3]),
+    ];
+    (profiles.into_iter())
+        .map(|(name, profile)| CrossSection {
+            name: name.into(),
+            profile,
+        })
+        .collect()
+}
+
+/// A beam section of a cross-section of [`line_cross_sections`].
+fn beam(cross_section: &str) -> BeamSection {
+    BeamSection {
+        cross_section: cross_section.into(),
+        ..BeamSection::DEFAULT
+    }
+}
+
 fn rect_beam(orientation: BeamOrientation) -> SectionKind {
     SectionKind::Beam(BeamSection {
-        profile: BeamProfile::Rect { a: 10.0, b: 5.0 },
         orientation,
-        offset: [0.0, 0.0],
+        ..beam("Rect")
     })
 }
 
@@ -3920,12 +3950,8 @@ fn beam_sections_type_their_elements_and_write_the_normal() {
     // Pipes and boxes need B32R and carry the offsets.
     let mut model = model;
     model.sections[0].kind = SectionKind::Beam(BeamSection {
-        profile: BeamProfile::Pipe {
-            radius: 5.0,
-            thickness: 1.0,
-        },
-        orientation: BeamOrientation::Automatic,
         offset: [0.5, 0.0],
+        ..beam("Pipe")
     });
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("*Element, Type=B32R, Elset=BEAM\n"), "{text}");
@@ -3939,10 +3965,7 @@ fn beam_sections_type_their_elements_and_write_the_normal() {
         "{text}"
     );
     // A circle is written by its diameter, as CalculiX reads it.
-    model.sections[0].kind = SectionKind::Beam(BeamSection {
-        profile: BeamProfile::Circ { radius: 2.0 },
-        ..BeamSection::DEFAULT
-    });
+    model.sections[0].kind = SectionKind::Beam(beam("Circ"));
     let text = write_inp(&mesh, &model, "").unwrap();
     assert!(text.contains("Section=CIRC\n4, 4\n0, 0, 1\n"), "{text}");
 }
@@ -4007,10 +4030,7 @@ fn sections_must_fit_their_elements() {
             if item == "Beam-1" && reason.contains("line element")),
         "{error}"
     );
-    model.sections[0].kind = SectionKind::Beam(BeamSection {
-        profile: BeamProfile::ALL[3],
-        ..BeamSection::DEFAULT
-    });
+    model.sections[0].kind = SectionKind::Beam(beam("Box"));
     let error = write_inp(&mesh, &model, "").unwrap_err();
     assert!(
         matches!(&error, WriteError::InvalidSection { reason, .. } if reason.contains("B32R")),
@@ -4404,13 +4424,8 @@ fn calculix_bends_a_pipe_like_beam_theory() {
     let mesh = line_chain(10, 0, 100.0, true);
     let model = line_model(
         &mesh,
-        SectionKind::Beam(BeamSection {
-            profile: BeamProfile::Pipe {
-                radius: r,
-                thickness: t,
-            },
-            ..BeamSection::DEFAULT
-        }),
+        // The pipe of line_cross_sections.
+        SectionKind::Beam(beam("Pipe")),
         LoadKind::force([0.0, -100.0, 0.0]),
     );
     let Some(frd) = run_ccx("rohr_b32r", &write_inp(&mesh, &model, "").unwrap()) else {

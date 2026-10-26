@@ -10,6 +10,7 @@ use crate::{Constraint, FeModel, LoadKind, Region, Section, SectionKind, line_ta
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ModelItem {
     Section(usize),
+    CrossSection(usize),
     Constraint(usize),
     ContactPair(usize),
     Tie(usize),
@@ -51,6 +52,14 @@ impl FeModel {
         for (i, section) in self.sections.iter().enumerate() {
             let reason = if !self.materials.iter().any(|m| m.name == section.material) {
                 Some(format!("Material {} does not exist", section.material))
+            } else if let SectionKind::Beam(beam) = &section.kind
+                && self.cross_section(&beam.cross_section).is_none()
+            {
+                Some(if beam.cross_section.is_empty() {
+                    "The beam section has no cross-section".into()
+                } else {
+                    format!("Cross-Section {} does not exist", beam.cross_section)
+                })
             } else {
                 section.region.missing_reference(mesh)
             };
@@ -58,6 +67,14 @@ impl FeModel {
                 invalid.push(Invalid {
                     item: ModelItem::Section(i),
                     reason,
+                });
+            }
+        }
+        for (i, cross_section) in self.cross_sections.iter().enumerate() {
+            if !cross_section.profile.is_valid() {
+                invalid.push(Invalid {
+                    item: ModelItem::CrossSection(i),
+                    reason: "The profile dimensions are invalid".into(),
                 });
             }
         }
@@ -314,7 +331,8 @@ impl Section {
     /// Why the section's kind does not fit its elements or its own values, if it does not:
     /// a beam section on solids, a solid section on lines, a pipe on 2-node lines, a normal
     /// parallel to a beam, or dimensions CalculiX would reject.
-    pub fn kind_problem(&self, mesh: &FeMesh) -> Option<String> {
+    pub fn kind_problem(&self, fe: &FeModel, mesh: &FeMesh) -> Option<String> {
+        let profile = fe.section_profile(&self.kind);
         match &self.kind {
             SectionKind::Solid => {}
             SectionKind::Truss { area } => {
@@ -322,11 +340,21 @@ impl Section {
                     return Some("The cross-section area must be greater than 0".into());
                 }
             }
-            SectionKind::Beam(beam) => {
-                if !beam.profile.is_valid() {
-                    return Some("The profile dimensions are invalid".into());
+            SectionKind::Beam(beam) => match profile {
+                None => {
+                    return Some(format!(
+                        "Cross-Section {} does not exist",
+                        beam.cross_section
+                    ));
                 }
-            }
+                Some(profile) if !profile.is_valid() => {
+                    return Some(format!(
+                        "The profile dimensions of Cross-Section {} are invalid",
+                        beam.cross_section
+                    ));
+                }
+                Some(_) => {}
+            },
             SectionKind::Shell { thickness, .. } | SectionKind::Membrane { thickness, .. } => {
                 if !(thickness.is_finite() && *thickness > 0.0) {
                     return Some(format!(
@@ -338,7 +366,7 @@ impl Section {
         }
         let elements = self.region.elements(mesh);
         for element in elements.iter().filter_map(|&id| mesh.element(id)) {
-            if let Some(reason) = self.kind.rejects(element) {
+            if let Some(reason) = self.kind.rejects(element, profile) {
                 return Some(reason);
             }
             if let SectionKind::Beam(beam) = &self.kind
@@ -500,6 +528,30 @@ mod tests {
     #[test]
     fn complete_model_is_valid() {
         assert_eq!(model().invalid_items(&mesh()), []);
+    }
+
+    #[test]
+    fn beam_section_without_its_cross_section_is_invalid() {
+        let mut model = model();
+        model.sections[0].kind = SectionKind::Beam(crate::BeamSection {
+            cross_section: "Tube".into(),
+            ..crate::BeamSection::DEFAULT
+        });
+        let invalid = model.invalid_items(&mesh());
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].item, ModelItem::Section(0));
+        assert!(invalid[0].reason.contains("Cross-Section Tube"));
+        model.cross_sections.push(crate::CrossSection {
+            name: "Tube".into(),
+            profile: crate::BeamProfile::Pipe {
+                radius: 1.0,
+                thickness: 2.0,
+            },
+        });
+        // The wall is thicker than the radius.
+        let invalid = model.invalid_items(&mesh());
+        assert_eq!(invalid.len(), 1);
+        assert_eq!(invalid[0].item, ModelItem::CrossSection(0));
     }
 
     #[test]

@@ -17,6 +17,7 @@ mod contact;
 mod contact_check;
 mod contact_steps;
 pub mod convert;
+mod cross_section;
 mod detection;
 mod distribution;
 mod element_type;
@@ -66,6 +67,7 @@ pub use contact::{
 };
 pub use contact_check::{ContactCheck, ContactStatus};
 pub use contact_steps::{ContactChange, ContactState};
+pub use cross_section::{BeamProfile, CrossSection, Outline, ROUND_POINTS, SectionProperties};
 pub use detection::{
     ContactDetection, DetectionFilter, DetectionGeometry, DetectionGrouping, DetectionReport,
     auto_detection_tolerance, auto_geometry_detection_tolerance,
@@ -97,8 +99,7 @@ pub use remote::{
     rigid_rows,
 };
 pub use section::{
-    BeamOrientation, BeamProfile, BeamSection, Section, SectionKind, line_tangent, membrane_type,
-    unit_thickness,
+    BeamOrientation, BeamSection, Section, SectionKind, line_tangent, membrane_type, unit_thickness,
 };
 pub use signature::{EntitySignature, TagMap, match_entities};
 pub use study::{DesignPoint, FillMode, FillRule, PointRun, PointState, StudyColumn, StudyTable};
@@ -138,6 +139,9 @@ pub struct FeModel {
     pub properties: ModelProperties,
     pub materials: Vec<Material>,
     pub sections: Vec<Section>,
+    /// Profiles of beams, which beam sections pick by name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cross_sections: Vec<CrossSection>,
     /// Springs, supports and ties, PrePoMax's Constraints.
     #[serde(default)]
     pub constraints: Vec<Constraint>,
@@ -432,6 +436,19 @@ impl FeModel {
     /// The amplitude of the name, if the model has it.
     pub fn amplitude(&self, name: &str) -> Option<&Amplitude> {
         self.amplitudes.iter().find(|a| a.name == name)
+    }
+
+    pub fn cross_section(&self, name: &str) -> Option<&CrossSection> {
+        self.cross_sections.iter().find(|c| c.name == name)
+    }
+
+    /// The profile of a beam section's cross-section; `None` for other sections or a
+    /// cross-section the model lacks.
+    pub fn section_profile(&self, kind: &SectionKind) -> Option<&BeamProfile> {
+        match kind {
+            SectionKind::Beam(beam) => Some(&self.cross_section(&beam.cross_section)?.profile),
+            _ => None,
+        }
     }
 
     pub fn distribution(&self, name: &str) -> Option<&Distribution> {

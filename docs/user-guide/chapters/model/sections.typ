@@ -26,12 +26,39 @@ are written as `T3D2` truss elements.
 #note[Trusses must form a stable truss structure. If they can move without resistance, the model
 check reports "Truss structure is a mechanism".]
 
+=== Cross-sections <cross-sections>
+
+The profile of a beam is a cross-section of its own, kept under #ui("Sections") >
+#ui("Cross-Sections") in the FE Model tree, so that several beam sections share one definition.
+Double-click #ui("Cross-Sections"), right-click it and choose #ui("Create ..."), or use
+#menu("Model", "Create Cross-Section ...").
+
+#fields(
+  [Profile], [#ui("Rectangular") (thicknesses a and b in the 1- and 2-direction),
+    #ui("Circular") (radius), #ui("Pipe") (outer radius and wall thickness) or #ui("Box") (widths a
+    and b and the wall thicknesses t1 to t4 at +1, +2, -1 and -2).],
+)
+
+The sketch below the fields shows the profile with the 1-direction to the right and the
+2-direction up, starting at the beam's nodes. The red dashed lines are the principal axes through
+the centroid (circle): #ui("I") has the largest second moment of area, #ui("II") the smallest.
+Below the sketch are the area A, the position of the centroid, the second moments of area I11
+(about the 1-axis) and I22 (about the 2-axis) and the principal moments with the angle of axis I
+from the 1-direction, in the units of the model.
+
+#screenshot("cross-section-dialog.png", [The cross-sections under Sections and the dialog of a box
+profile whose thicker wall at +1 moves the centroid in the 1-direction])
+
+Every dimension can be exposed as a parameter with the #ui("P") button next to it, so that a
+parameter study can vary the profile. Renaming a cross-section renames it in the beam sections
+that use it. In the project schematic the cross-sections are a category of the setup that other
+analyses can link to, like the materials.
+
 === Beam section
 
 #fields(
-  [Profile], [#ui("Rectangle") (thicknesses a and b in the 1- and 2-direction), #ui("Circle")
-    (radius), #ui("Pipe") (outer radius and wall thickness) or #ui("Box") (widths a and b and the
-    four wall thicknesses).],
+  [Cross-section], [One of the model's cross-sections (@cross-sections); the dialog shows its
+    sketch. A new beam section takes the first one.],
   [Normal (1-direction)], [#ui("Automatic") uses the global z axis, or x for beams parallel to z.
     #ui("Vector") takes the direction from x, y and z; it must not be parallel to a beam.],
   [Offset in 1-/2-direction], [Shifts the beam axis by a multiple of the section dimension.],

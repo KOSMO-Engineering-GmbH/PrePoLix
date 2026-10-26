@@ -9443,6 +9443,7 @@ fn category_icon(category: &str) -> NodeIcon {
         "Features" => NodeIcon::Features,
         "Materials" => NodeIcon::Materials,
         "Sections" => NodeIcon::Sections,
+        crate::tree::CROSS_SECTIONS => NodeIcon::CrossSections,
         "Constraints" => NodeIcon::Constraints,
         "Contacts" => NodeIcon::Contacts,
         "Amplitudes" => NodeIcon::Amplitudes,

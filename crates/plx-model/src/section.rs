@@ -10,7 +10,7 @@ use glam::DVec3;
 use plx_mesh::{Element, ElementFamily, ElementShape};
 use serde::{Deserialize, Serialize};
 
-use crate::Region;
+use crate::{BeamProfile, Region};
 
 /// Assigns a material to the elements of a region, PrePoMax's solid section, or a beam or
 /// truss section of CalculiX.
@@ -100,27 +100,33 @@ impl SectionKind {
     /// The CalculiX type the section gives a line element; `None` when the section does
     /// not change the element's type. Trusses are always `T3D2`: CalculiX 2.21 gets the
     /// stiffness of `T3D3` wrong (3.6 times too soft in a tension test), so a quadratic
-    /// line is written with its end nodes only. Pipe and box profiles need `B32R`.
-    pub fn element_type(&self, shape: ElementShape) -> Option<&'static str> {
+    /// line is written with its end nodes only. Pipe and box profiles need `B32R`; `profile`
+    /// is the one of a beam section's cross-section.
+    pub fn element_type(
+        &self,
+        shape: ElementShape,
+        profile: Option<&BeamProfile>,
+    ) -> Option<&'static str> {
         match (self, shape) {
             (SectionKind::Solid | SectionKind::Shell { .. } | SectionKind::Membrane { .. }, _) => {
                 None
             }
             (SectionKind::Truss { .. }, ElementShape::Line2 | ElementShape::Line3) => Some("T3D2"),
             (SectionKind::Beam(_), ElementShape::Line2) => Some("B31"),
-            (SectionKind::Beam(beam), ElementShape::Line3) => {
-                Some(if beam.profile.needs_reduced_integration() {
+            (SectionKind::Beam(_), ElementShape::Line3) => Some(
+                if profile.is_some_and(BeamProfile::needs_reduced_integration) {
                     "B32R"
                 } else {
                     "B32"
-                })
-            }
+                },
+            ),
             _ => None,
         }
     }
 
     /// Why the section cannot be written for an element of the region, if it cannot.
-    pub fn rejects(&self, element: &Element) -> Option<String> {
+    /// `profile` is the one of a beam section's cross-section.
+    pub fn rejects(&self, element: &Element, profile: Option<&BeamProfile>) -> Option<String> {
         let line = element.shape.family() == ElementFamily::Line;
         let surface = element.shape.family() == ElementFamily::Surface;
         let upper = element.type_name.to_ascii_uppercase();
@@ -173,8 +179,8 @@ impl SectionKind {
             }
             SectionKind::Membrane { .. } => None,
             _ if !line => Some(format!("Element {} is not a line element", element.id)),
-            SectionKind::Beam(beam)
-                if beam.profile.needs_reduced_integration()
+            SectionKind::Beam(_)
+                if profile.is_some_and(BeamProfile::needs_reduced_integration)
                     && element.shape != ElementShape::Line3 =>
             {
                 Some(format!(
@@ -200,10 +206,13 @@ pub fn membrane_type(shell_type: &str) -> Option<&'static str> {
     }
 }
 
-/// A CalculiX beam section: the profile, its orientation and the offset of the beam axis.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+/// A CalculiX beam section: the cross-section, its orientation and the offset of the beam
+/// axis.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BeamSection {
-    pub profile: BeamProfile,
+    /// Name of the [`crate::CrossSection`] of the model the beam has.
+    #[serde(default)]
+    pub cross_section: String,
     #[serde(default)]
     pub orientation: BeamOrientation,
     /// Offset of the beam axis from the nodes in the 1- and 2-direction, in multiples of
@@ -214,7 +223,7 @@ pub struct BeamSection {
 
 impl BeamSection {
     pub const DEFAULT: BeamSection = BeamSection {
-        profile: BeamProfile::Rect { a: 1e-3, b: 1e-3 },
+        cross_section: String::new(),
         orientation: BeamOrientation::Automatic,
         offset: [0.0, 0.0],
     };
@@ -223,93 +232,6 @@ impl BeamSection {
 impl Default for BeamSection {
     fn default() -> Self {
         Self::DEFAULT
-    }
-}
-
-/// Cross-section of a beam, with CalculiX's dimensions: the 1-direction is the normal of
-/// the section, the 2-direction the beam axis crossed with it.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub enum BeamProfile {
-    /// Rectangle with thickness `a` in the 1-direction and `b` in the 2-direction.
-    Rect { a: f64, b: f64 },
-    /// Circle; CalculiX takes the diameter, see [`BeamProfile::data_line`].
-    Circ { radius: f64 },
-    /// Hollow circle with outer radius and wall thickness (`B32R` only).
-    Pipe { radius: f64, thickness: f64 },
-    /// Hollow rectangle `a` by `b` with four wall thicknesses, in the order CalculiX reads
-    /// them: at +1, +2, -1 and -2 (`B32R` only).
-    Box { a: f64, b: f64, t: [f64; 4] },
-}
-
-impl BeamProfile {
-    /// The profiles with dimensions of a millimetre, in SI units.
-    pub const ALL: [BeamProfile; 4] = [
-        BeamProfile::Rect { a: 1e-3, b: 1e-3 },
-        BeamProfile::Circ { radius: 1e-3 },
-        BeamProfile::Pipe {
-            radius: 1e-3,
-            thickness: 1e-4,
-        },
-        BeamProfile::Box {
-            a: 1e-3,
-            b: 1e-3,
-            t: [1e-4; 4],
-        },
-    ];
-
-    /// Value of `SECTION=` in the input file.
-    pub fn keyword(&self) -> &'static str {
-        match self {
-            BeamProfile::Rect { .. } => "RECT",
-            BeamProfile::Circ { .. } => "CIRC",
-            BeamProfile::Pipe { .. } => "PIPE",
-            BeamProfile::Box { .. } => "BOX",
-        }
-    }
-
-    pub fn label(&self) -> &'static str {
-        match self {
-            BeamProfile::Rect { .. } => "Rectangular",
-            BeamProfile::Circ { .. } => "Circular",
-            BeamProfile::Pipe { .. } => "Pipe",
-            BeamProfile::Box { .. } => "Box",
-        }
-    }
-
-    /// Pipes and boxes exist for `B32R` only in CalculiX.
-    pub fn needs_reduced_integration(&self) -> bool {
-        matches!(self, BeamProfile::Pipe { .. } | BeamProfile::Box { .. })
-    }
-
-    /// The dimensions as CalculiX 2.21 reads them on the first data line of `*BEAM
-    /// SECTION`. A circle is given by its thickness in both directions, the diameter: a
-    /// value of 4 puts the expanded nodes at radius 2. A pipe takes the radius itself.
-    pub fn data_line(&self) -> Vec<f64> {
-        match *self {
-            BeamProfile::Rect { a, b } => vec![a, b],
-            BeamProfile::Circ { radius } => vec![2.0 * radius, 2.0 * radius],
-            BeamProfile::Pipe { radius, thickness } => vec![radius, thickness],
-            BeamProfile::Box { a, b, t } => vec![a, b, t[0], t[1], t[2], t[3]],
-        }
-    }
-
-    /// Whether the dimensions make a section CalculiX accepts.
-    pub fn is_valid(&self) -> bool {
-        let positive = |v: f64| v.is_finite() && v > 0.0;
-        match *self {
-            BeamProfile::Rect { a, b } => positive(a) && positive(b),
-            BeamProfile::Circ { radius } => positive(radius),
-            BeamProfile::Pipe { radius, thickness } => {
-                positive(radius) && positive(thickness) && thickness < radius
-            }
-            BeamProfile::Box { a, b, t } => {
-                positive(a)
-                    && positive(b)
-                    && t.iter().all(|&t| positive(t))
-                    && t[0] + t[2] < a
-                    && t[1] + t[3] < b
-            }
-        }
     }
 }
 
@@ -372,17 +294,18 @@ mod tests {
     #[test]
     fn line_types_follow_the_section() {
         let beam = SectionKind::Beam(BeamSection::DEFAULT);
-        assert_eq!(beam.element_type(ElementShape::Line2), Some("B31"));
-        assert_eq!(beam.element_type(ElementShape::Line3), Some("B32"));
-        assert_eq!(beam.element_type(ElementShape::Tet4), None);
-        let pipe = SectionKind::Beam(BeamSection {
-            profile: BeamProfile::ALL[2],
-            ..BeamSection::DEFAULT
-        });
-        assert_eq!(pipe.element_type(ElementShape::Line3), Some("B32R"));
+        let rect = Some(&BeamProfile::ALL[0]);
+        assert_eq!(beam.element_type(ElementShape::Line2, rect), Some("B31"));
+        assert_eq!(beam.element_type(ElementShape::Line3, rect), Some("B32"));
+        assert_eq!(beam.element_type(ElementShape::Tet4, rect), None);
+        let pipe = Some(&BeamProfile::ALL[2]);
+        assert_eq!(beam.element_type(ElementShape::Line3, pipe), Some("B32R"));
         let truss = SectionKind::Truss { area: 2.0 };
-        assert_eq!(truss.element_type(ElementShape::Line3), Some("T3D2"));
-        assert_eq!(SectionKind::Solid.element_type(ElementShape::Line2), None);
+        assert_eq!(truss.element_type(ElementShape::Line3, None), Some("T3D2"));
+        assert_eq!(
+            SectionKind::Solid.element_type(ElementShape::Line2, None),
+            None
+        );
     }
 
     #[test]
@@ -442,34 +365,52 @@ mod tests {
         };
         for type_name in ["M3D3", "M3D4", "M3D4R"] {
             let shape = ElementShape::from_type_name(type_name).unwrap();
-            assert_eq!(membrane.rejects(&element(type_name, shape)), None);
-            assert!(shell.rejects(&element(type_name, shape)).is_some());
+            assert_eq!(membrane.rejects(&element(type_name, shape), None), None);
+            assert!(shell.rejects(&element(type_name, shape), None).is_some());
             assert!(
                 SectionKind::Solid
-                    .rejects(&element(type_name, shape))
+                    .rejects(&element(type_name, shape), None)
                     .is_some()
             );
         }
         // Linear shells are written as membranes.
-        assert_eq!(membrane.rejects(&element("S4R", ElementShape::Quad4)), None);
+        assert_eq!(
+            membrane.rejects(&element("S4R", ElementShape::Quad4), None),
+            None
+        );
         assert_eq!(membrane_type("S4R"), Some("M3D4R"));
         assert!(
             membrane
-                .rejects(&element("S8", ElementShape::Quad8))
+                .rejects(&element("S8", ElementShape::Quad8), None)
                 .is_some()
         );
         assert!(
             membrane
-                .rejects(&element("C3D8", ElementShape::Hex8))
+                .rejects(&element("C3D8", ElementShape::Hex8), None)
                 .is_some()
         );
         // CalculiX gets quadratic membranes wrong.
         assert!(
             membrane
-                .rejects(&element("M3D8", ElementShape::Quad8))
+                .rejects(&element("M3D8", ElementShape::Quad8), None)
                 .is_some()
         );
-        assert_eq!(shell.rejects(&element("S8R", ElementShape::Quad8)), None);
+        assert_eq!(
+            shell.rejects(&element("S8R", ElementShape::Quad8), None),
+            None
+        );
+    }
+
+    #[test]
+    fn beam_sections_name_their_cross_section() {
+        let text = r#"(cross_section: "Tube", orientation: Automatic, offset: (0.0, 0.5))"#;
+        let beam: BeamSection = ron::from_str(text).unwrap();
+        assert_eq!(beam.cross_section, "Tube");
+        // A beam section saved with its own profile reads without a cross-section, which
+        // the model checks then ask for.
+        let text = r#"(profile: Rect(a: 1.0, b: 2.0), orientation: Automatic)"#;
+        let beam: BeamSection = ron::from_str(text).unwrap();
+        assert_eq!(beam.cross_section, "");
     }
 
     #[test]

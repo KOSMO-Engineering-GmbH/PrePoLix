@@ -1314,7 +1314,7 @@ impl FeModel {
         for (i, section) in self.sections.iter().enumerate() {
             let item = ModelItem::Section(i);
             if !findings.iter().any(|f| f.item == item)
-                && let Some(reason) = section.kind_problem(mesh)
+                && let Some(reason) = section.kind_problem(self, mesh)
             {
                 findings.push(Finding::new(item, Problem::InvalidSection, reason));
             }
@@ -3262,6 +3262,18 @@ mod tests {
     };
     use crate::{InteractionProperty, SurfaceBehavior};
 
+    /// Makes the first section a beam section of a rectangular cross-section.
+    fn beam_section(model: &mut FeModel) {
+        model.cross_sections.push(crate::CrossSection {
+            name: "Rect".into(),
+            profile: crate::BeamProfile::ALL[0],
+        });
+        model.sections[0].kind = crate::SectionKind::Beam(crate::BeamSection {
+            cross_section: "Rect".into(),
+            ..crate::BeamSection::DEFAULT
+        });
+    }
+
     /// Unit cubes side by side along x, one C3D8 and one part each; neighbours share nodes
     /// when `joined`.
     fn cubes(count: u32, joined: bool) -> FeMesh {
@@ -4422,7 +4434,7 @@ mod tests {
         };
         let mesh = line("B31");
         let mut model = model(&mesh);
-        model.sections[0].kind = crate::SectionKind::Beam(crate::BeamSection::DEFAULT);
+        beam_section(&mut model);
         model.steps[0].boundary_conditions[0].region = Region::Nodes(vec![1]);
         model.steps[0].loads[0].region = Region::Nodes(vec![3]);
         assert_eq!(check(&model, &mesh), []);
@@ -4455,7 +4467,7 @@ mod tests {
             elements: vec![1, 2],
         });
         let mut model = model(&mesh);
-        model.sections[0].kind = crate::SectionKind::Beam(crate::BeamSection::DEFAULT);
+        beam_section(&mut model);
         let bc = &mut model.steps[0].boundary_conditions[0];
         bc.region = Region::Nodes(vec![1]);
         bc.kind = BoundaryKind::Displacement(crate::Displacement::rigid([Some(0.0); 6]));
@@ -4505,7 +4517,7 @@ mod tests {
             elements: vec![1, 2],
         });
         let mut model = model(&mesh);
-        model.sections[0].kind = crate::SectionKind::Beam(crate::BeamSection::DEFAULT);
+        beam_section(&mut model);
         model.steps[0].loads[0].region = Region::Nodes(vec![2]);
         let bcs = &mut model.steps[0].boundary_conditions;
         bcs[0].region = Region::Nodes(vec![1]);

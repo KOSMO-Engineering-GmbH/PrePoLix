@@ -154,6 +154,7 @@ fn rows_of(model: &Model, item: &TreeItem, rows: &mut Vec<(&'static str, String)
         | TreeItem::FieldOutputs
         | TreeItem::Material(_)
         | TreeItem::Section(_)
+        | TreeItem::CrossSection(_)
         | TreeItem::Constraint(_)
         | TreeItem::SurfaceInteraction(_)
         | TreeItem::ContactRegion(_)

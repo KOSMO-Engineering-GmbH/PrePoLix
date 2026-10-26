@@ -642,9 +642,13 @@ mod tests {
                 region: line.clone(),
                 thickness: 1.0,
                 kind: SectionKind::Beam(plx_model::BeamSection {
-                    profile: plx_model::BeamProfile::Rect { a: 10.0, b: 10.0 },
+                    cross_section: "Rect".into(),
                     ..plx_model::BeamSection::DEFAULT
                 }),
+            }],
+            cross_sections: vec![plx_model::CrossSection {
+                name: "Rect".into(),
+                profile: plx_model::BeamProfile::Rect { a: 10.0, b: 10.0 },
             }],
             node_ties: vec![plx_model::NodeTie {
                 region: tied.clone(),

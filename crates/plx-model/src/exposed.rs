@@ -17,6 +17,7 @@ pub enum ItemRef {
     DefinedField { step: String, name: String },
     Material(String),
     Section(String),
+    CrossSection(String),
     Step(String),
     InitialCondition(String),
 }
@@ -29,6 +30,7 @@ impl ItemRef {
             | Self::DefinedField { name, .. }
             | Self::Material(name)
             | Self::Section(name)
+            | Self::CrossSection(name)
             | Self::Step(name)
             | Self::InitialCondition(name) => name,
         }
@@ -42,6 +44,7 @@ impl ItemRef {
             Self::DefinedField { .. } => "Defined field",
             Self::Material(_) => "Material",
             Self::Section(_) => "Section",
+            Self::CrossSection(_) => "Cross-Section",
             Self::Step(_) => "Step",
             Self::InitialCondition(_) => "Initial condition",
         }
@@ -56,6 +59,7 @@ impl ItemRef {
             | Self::DefinedField { name, .. }
             | Self::Material(name)
             | Self::Section(name)
+            | Self::CrossSection(name)
             | Self::Step(name)
             | Self::InitialCondition(name) => new.clone_into(name),
         }
@@ -125,6 +129,11 @@ pub enum Field {
     BeamA,
     BeamB,
     Radius,
+    /// The walls of a box profile at +1, +2, -1 and -2.
+    Wall1,
+    Wall2,
+    Wall3,
+    Wall4,
     TimePeriod,
     InitialIncrement,
     /// The number of eigenfrequencies of a frequency step.
@@ -167,6 +176,10 @@ impl Field {
             Self::BeamA => "a",
             Self::BeamB => "b",
             Self::Radius => "Radius",
+            Self::Wall1 => "t1",
+            Self::Wall2 => "t2",
+            Self::Wall3 => "t3",
+            Self::Wall4 => "t4",
             Self::TimePeriod => "Time period",
             Self::InitialIncrement => "Initial increment",
             Self::Modes => "Modes",
@@ -184,7 +197,7 @@ impl Field {
     pub const ROTATION: [Self; 3] = [Self::RotationX, Self::RotationY, Self::RotationZ];
     pub const LOCATION: [Self; 3] = [Self::LocationX, Self::LocationY, Self::LocationZ];
     pub const AXIS: [Self; 3] = [Self::AxisX, Self::AxisY, Self::AxisZ];
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 36] = [
         Self::Value,
         Self::X,
         Self::Y,
@@ -207,6 +220,10 @@ impl Field {
         Self::BeamA,
         Self::BeamB,
         Self::Radius,
+        Self::Wall1,
+        Self::Wall2,
+        Self::Wall3,
+        Self::Wall4,
         Self::TimePeriod,
         Self::InitialIncrement,
         Self::Modes,
@@ -340,27 +357,26 @@ fn slot_mut<'a>(fe: &'a mut FeModel, path: &ValuePath) -> Option<(Slot<'a>, Valu
                     SectionKind::Shell { thickness, .. } | SectionKind::Membrane { thickness, .. },
                     Field::Thickness,
                 ) => real(thickness, Quantity::Length),
-                (SectionKind::Beam(beam), field) => {
-                    let value = match (&mut beam.profile, field) {
-                        (
-                            BeamProfile::Rect { a, .. } | BeamProfile::Box { a, .. },
-                            Field::BeamA,
-                        ) => a,
-                        (
-                            BeamProfile::Rect { b, .. } | BeamProfile::Box { b, .. },
-                            Field::BeamB,
-                        ) => b,
-                        (
-                            BeamProfile::Circ { radius } | BeamProfile::Pipe { radius, .. },
-                            Field::Radius,
-                        ) => radius,
-                        (BeamProfile::Pipe { thickness, .. }, Field::Thickness) => thickness,
-                        _ => return None,
-                    };
-                    real(value, Quantity::Length)
-                }
                 _ => None,
             }
+        }
+        ItemRef::CrossSection(name) => {
+            let cross_section = fe.cross_sections.iter_mut().find(|c| &c.name == name)?;
+            let value = match (&mut cross_section.profile, field) {
+                (BeamProfile::Rect { a, .. } | BeamProfile::Box { a, .. }, Field::BeamA) => a,
+                (BeamProfile::Rect { b, .. } | BeamProfile::Box { b, .. }, Field::BeamB) => b,
+                (
+                    BeamProfile::Circ { radius } | BeamProfile::Pipe { radius, .. },
+                    Field::Radius,
+                ) => radius,
+                (BeamProfile::Pipe { thickness, .. }, Field::Thickness) => thickness,
+                (BeamProfile::Box { t, .. }, Field::Wall1) => &mut t[0],
+                (BeamProfile::Box { t, .. }, Field::Wall2) => &mut t[1],
+                (BeamProfile::Box { t, .. }, Field::Wall3) => &mut t[2],
+                (BeamProfile::Box { t, .. }, Field::Wall4) => &mut t[3],
+                _ => return None,
+            };
+            real(value, Quantity::Length)
         }
         ItemRef::Step(name) => {
             let step = step_named(fe, name)?;
@@ -502,6 +518,9 @@ impl FeModel {
             ItemRef::Section(name) => fe
                 .sections
                 .push(self.sections.iter().find(|s| &s.name == name)?.clone()),
+            ItemRef::CrossSection(name) => {
+                fe.cross_sections.push(self.cross_section(name)?.clone())
+            }
             ItemRef::InitialCondition(name) => fe.initial_conditions.push(
                 (self.initial_conditions.iter())
                     .find(|c| &c.name == name)?

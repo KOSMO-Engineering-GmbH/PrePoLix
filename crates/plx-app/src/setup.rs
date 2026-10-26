@@ -11,15 +11,16 @@ use egui::Ui;
 use plx_mesh::{CadEntity, ElementId, FeMesh, NodeId};
 use plx_model::{
     AXIS_LABELS, Amplitude, BeamOrientation, BeamProfile, BeamSection, Behavior, BoundaryCondition,
-    BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CyclicSymmetry,
-    DefinedField, DefinedFieldKind, Displacement, Distribution, DynamicProcedure, DynamicStep,
-    Elastic, EquationSolver, FeModel, Field, FieldOutput, Formulation, FrequencyStep, GLOBAL,
-    Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialCondition,
-    InitialConditionKind, ItemRef, Load, LoadKind, Material, MeshSet, ModalDamping,
-    ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie, OutputDimension, OutputKind,
-    PlasticPoint, Quantity, Region, RemoteBehavior, Section, SectionKind, SensitivityStep, SetKind,
-    StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceInteraction, SymmetryError, Tie,
-    UnitSystem, ViscoStep, Wheel, next_name, symmetry_plane,
+    BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint, ContactPair, CrossSection,
+    CyclicSymmetry, DefinedField, DefinedFieldKind, Displacement, Distribution, DynamicProcedure,
+    DynamicStep, Elastic, EquationSolver, FeModel, Field, FieldOutput, Formulation, FrequencyStep,
+    GLOBAL, Hardening, HeatTransferStep, HistoryKind, HistoryOutput, Incrementation,
+    InitialCondition, InitialConditionKind, ItemRef, Load, LoadKind, Material, MeshSet,
+    ModalDamping, ModalDynamicsStep, ModeDamping, ModelSpace, MovingLoad, NodeTie, OutputDimension,
+    OutputKind, PlasticPoint, Quantity, Region, RemoteBehavior, Section, SectionKind,
+    SensitivityStep, SetKind, StaticStep, SteadyStateDynamicsStep, Step, StepKind,
+    SurfaceInteraction, SymmetryError, Tie, UnitSystem, ViscoStep, Wheel, next_name,
+    symmetry_plane,
 };
 
 use crate::amplitude_dialog::{self, AmplitudeView, amplitude_row, amplitude_row_with};
@@ -48,6 +49,8 @@ pub enum ContactItem {
 pub enum NewItem {
     Material,
     Section,
+    /// A beam profile that beam sections pick.
+    CrossSection,
     InitialCondition,
     Step,
     BoundaryCondition(usize),
@@ -1070,6 +1073,7 @@ pub fn region_highlight(model: &Model, region: &Region) -> Highlight {
 enum Draft {
     Material(Material),
     Section(Section, RegionDraft),
+    CrossSection(CrossSection),
     /// The step with the design region of a sensitivity step.
     Step(Step, RegionDraft),
     BoundaryCondition(usize, BoundaryCondition, RegionDraft),
@@ -1741,6 +1745,11 @@ impl Editor {
                 }),
                 ..Material::default()
             }),
+            NewItem::CrossSection => Draft::CrossSection(CrossSection {
+                name: next_name(CrossSection::PREFIX, names(&fe.cross_sections, |c| &c.name)),
+                // Ten by ten millimetres, in SI units.
+                profile: BeamProfile::Rect { a: 0.01, b: 0.01 },
+            }),
             NewItem::Section => Draft::Section(
                 Section {
                     name: next_name("Solid_Section", names(&fe.sections, |s| &s.name)),
@@ -2032,6 +2041,9 @@ impl Editor {
             }
             TreeItem::Surface(ref name) => return Self::edit_set(SetKind::Surface, name, fe, mesh),
             TreeItem::Material(i) => (Draft::Material(fe.materials.get(i)?.clone()), i),
+            TreeItem::CrossSection(i) => {
+                (Draft::CrossSection(fe.cross_sections.get(i)?.clone()), i)
+            }
             TreeItem::Section(i) => {
                 let section = fe.sections.get(i)?.clone();
                 let region =
@@ -2170,6 +2182,7 @@ impl Editor {
         let (kind, name): (&str, &str) = match &self.draft {
             Draft::Material(m) => ("Material", &m.name),
             Draft::Section(s, _) => ("Section", &s.name),
+            Draft::CrossSection(c) => ("Cross-Section", &c.name),
             Draft::Step(s, _) => ("Step", &s.name),
             Draft::BoundaryCondition(_, b, _) => ("Boundary Condition", &b.name),
             Draft::Load(_, l, _) => ("Load", &l.name),
@@ -2323,6 +2336,9 @@ impl Editor {
         Some(match &self.draft {
             Draft::Material(_) => ItemRef::Material(fe.materials.get(index)?.name.clone()),
             Draft::Section(..) => ItemRef::Section(fe.sections.get(index)?.name.clone()),
+            Draft::CrossSection(_) => {
+                ItemRef::CrossSection(fe.cross_sections.get(index)?.name.clone())
+            }
             Draft::Step(..) => ItemRef::Step(step(index)?),
             Draft::BoundaryCondition(s, ..) => ItemRef::BoundaryCondition {
                 name: fe
@@ -2372,6 +2388,10 @@ impl Editor {
             Draft::Section(section, _) => {
                 model.sections.push(section.clone());
                 ItemRef::Section(section.name.clone())
+            }
+            Draft::CrossSection(cross_section) => {
+                model.cross_sections.push(cross_section.clone());
+                ItemRef::CrossSection(cross_section.name.clone())
             }
             Draft::Step(own, _) => {
                 model.steps.push(own.clone());
@@ -2496,6 +2516,9 @@ impl Editor {
         let units = model.fe.properties.units;
         match &mut self.draft {
             Draft::Material(material) => material_form(ui, material, units),
+            Draft::CrossSection(cross_section) => {
+                crate::cross_section::form(ui, cross_section, units);
+            }
             Draft::Section(section, region) => {
                 name_row(ui, &mut section.name);
                 ui.label("Type");
@@ -2570,7 +2593,7 @@ impl Editor {
                         });
                         ui.end_row();
                     }
-                    SectionKind::Beam(beam) => beam_form(ui, beam, units),
+                    SectionKind::Beam(beam) => beam_form(ui, beam, &model.fe, units),
                     SectionKind::Shell { thickness, offset }
                     | SectionKind::Membrane { thickness, offset } => {
                         ui.label("Thickness");
@@ -3319,6 +3342,7 @@ impl Editor {
         let mut siblings = match &self.draft {
             Draft::Material(_) => names(&fe.materials, |m| &m.name),
             Draft::Section(..) => names(&fe.sections, |s| &s.name),
+            Draft::CrossSection(_) => names(&fe.cross_sections, |c| &c.name),
             Draft::Step(..) => names(&fe.steps, |s| &s.name),
             Draft::BoundaryCondition(step, ..) => {
                 names(&fe.steps[*step].boundary_conditions, |b| &b.name)
@@ -3352,6 +3376,7 @@ impl Editor {
         let name = match &self.draft {
             Draft::Material(m) => &m.name,
             Draft::Section(s, _) => &s.name,
+            Draft::CrossSection(c) => &c.name,
             Draft::Step(s, _) => &s.name,
             Draft::BoundaryCondition(_, b, _) => &b.name,
             Draft::Load(_, l, _) => &l.name,
@@ -3417,12 +3442,10 @@ impl Editor {
                 }
                 SectionKind::Shell { .. } | SectionKind::Membrane { .. } => {}
                 SectionKind::Beam(beam) => {
-                    if !beam.profile.is_valid() {
-                        return Err(
-                            "The profile dimensions must be greater than 0; walls thinner \
-                             than the profile."
-                                .into(),
-                        );
+                    if fe.cross_section(&beam.cross_section).is_none() {
+                        return Err("Please select a cross-section; create one under \
+                                    Sections > Cross-Sections first."
+                            .into());
                     }
                     if let BeamOrientation::Direction(n) = beam.orientation
                         && n.iter().all(|v| *v == 0.0)
@@ -3453,6 +3476,13 @@ impl Editor {
             Draft::Material(material) => {
                 if let Some(problem) = material.creep.as_ref().and_then(|c| c.problem()) {
                     return Err(problem.into());
+                }
+            }
+            Draft::CrossSection(cross_section) => {
+                if !cross_section.profile.is_valid() {
+                    return Err("The dimensions must be greater than 0; walls thinner than \
+                                the profile."
+                        .into());
                 }
             }
             Draft::Amplitude(amplitude, _) => amplitude_dialog::validate(amplitude)?,
@@ -3649,6 +3679,20 @@ impl Editor {
             Draft::Section(mut section, region) => {
                 section.region = region.region();
                 put(&mut fe.sections, index, section);
+            }
+            Draft::CrossSection(cross_section) => {
+                // Beam sections follow a renamed cross-section.
+                if let Some(old) = index.and_then(|i| fe.cross_sections.get(i)) {
+                    let old = old.name.clone();
+                    for section in &mut fe.sections {
+                        if let SectionKind::Beam(beam) = &mut section.kind
+                            && beam.cross_section == old
+                        {
+                            beam.cross_section = cross_section.name.clone();
+                        }
+                    }
+                }
+                put(&mut fe.cross_sections, index, cross_section);
             }
             Draft::Step(mut step, region) => {
                 if let Some(design) = step.kind.design_region_mut() {
@@ -3879,6 +3923,7 @@ pub fn delete(fe: &mut FeModel, item: &TreeItem) -> bool {
     match *item {
         TreeItem::Material(i) => remove(&mut fe.materials, i),
         TreeItem::Section(i) => remove(&mut fe.sections, i),
+        TreeItem::CrossSection(i) => remove(&mut fe.cross_sections, i),
         TreeItem::Step(i) => remove(&mut fe.steps, i),
         TreeItem::BoundaryCondition(s, i) => fe
             .steps
@@ -4518,7 +4563,7 @@ fn rename_default(name: &mut String, from: &str, to: &str, taken: &[&str]) {
     }
 }
 
-fn name_row(ui: &mut Ui, name: &mut String) {
+pub(crate) fn name_row(ui: &mut Ui, name: &mut String) {
     ui.label("Name");
     ui.add(egui::TextEdit::singleline(name).desired_width(200.0));
     ui.end_row();
@@ -4526,59 +4571,49 @@ fn name_row(ui: &mut Ui, name: &mut String) {
 
 /// Profile, normal and offsets of a beam section, with CalculiX's directions: the
 /// 1-direction is the normal, the 2-direction the beam axis crossed with it.
-fn beam_form(ui: &mut Ui, beam: &mut BeamSection, units: UnitSystem) {
-    ui.label("Profile");
-    egui::ComboBox::from_id_salt("beam profile")
-        .selected_text(beam.profile.label())
+fn beam_form(ui: &mut Ui, beam: &mut BeamSection, fe: &FeModel, units: UnitSystem) {
+    if fe.cross_section(&beam.cross_section).is_none()
+        && let Some(first) = fe.cross_sections.first()
+        && beam.cross_section.is_empty()
+    {
+        beam.cross_section = first.name.clone();
+    }
+    ui.label("Cross-section");
+    let text = match beam.cross_section.as_str() {
+        "" => "Select …",
+        name => name,
+    };
+    egui::ComboBox::from_id_salt("beam cross-section")
+        .selected_text(text)
         .width(200.0)
         .show_ui(ui, |ui| {
-            for profile in BeamProfile::ALL {
-                let selected = profile.keyword() == beam.profile.keyword();
-                if ui.selectable_label(selected, profile.label()).clicked() && !selected {
-                    beam.profile = profile;
-                }
+            for cross_section in &fe.cross_sections {
+                let label = format!("{} ({})", cross_section.name, cross_section.profile.label());
+                let name = cross_section.name.clone();
+                ui.selectable_value(&mut beam.cross_section, name, label);
             }
         });
     ui.end_row();
-    let positive = |ui: &mut Ui, label: &str, value: &mut f64, field: Option<Field>| {
-        ui.label(label);
-        let mut add = |ui: &mut Ui| {
-            ui.add(numeric::quantity(value, units, Quantity::Length).range(0.0..=f64::MAX))
-        };
-        match field {
-            Some(field) => expose::field(ui, field, add),
-            None => add(ui),
-        };
-        ui.end_row();
-    };
-    match &mut beam.profile {
-        BeamProfile::Rect { a, b } => {
-            positive(ui, "Thickness in 1-direction (a)", a, Some(Field::BeamA));
-            positive(ui, "Thickness in 2-direction (b)", b, Some(Field::BeamB));
+    match fe.cross_section(&beam.cross_section) {
+        Some(cross_section) => {
+            ui.label("");
+            crate::cross_section::preview(ui, &cross_section.profile, units);
+            ui.end_row();
+            if cross_section.profile.needs_reduced_integration() {
+                ui.label("");
+                ui.label(
+                    egui::RichText::new("Pipe and box need lines with 3 nodes (B32R).")
+                        .small()
+                        .weak(),
+                );
+                ui.end_row();
+            }
         }
-        BeamProfile::Circ { radius } => positive(ui, "Radius", radius, Some(Field::Radius)),
-        BeamProfile::Pipe { radius, thickness } => {
-            positive(ui, "Outer radius", radius, Some(Field::Radius));
-            positive(ui, "Wall thickness", thickness, Some(Field::Thickness));
+        None => {
+            ui.label("");
+            ui.weak("Create cross-sections under Sections > Cross-Sections.");
+            ui.end_row();
         }
-        BeamProfile::Box { a, b, t } => {
-            positive(ui, "Width in 1-direction (a)", a, Some(Field::BeamA));
-            positive(ui, "Width in 2-direction (b)", b, Some(Field::BeamB));
-            let [t1, t2, t3, t4] = t;
-            positive(ui, "Wall thickness at +1", t1, None);
-            positive(ui, "Wall thickness at +2", t2, None);
-            positive(ui, "Wall thickness at -1", t3, None);
-            positive(ui, "Wall thickness at -2", t4, None);
-        }
-    }
-    if beam.profile.needs_reduced_integration() {
-        ui.label("");
-        ui.label(
-            egui::RichText::new("Pipe and box need lines with 3 nodes (B32R).")
-                .small()
-                .weak(),
-        );
-        ui.end_row();
     }
     ui.label("Normal (1-direction)");
     ui.horizontal(|ui| {
@@ -5900,6 +5935,50 @@ mod tests {
             ("Displacement_Rotation-1", &Region::Nodes(vec![1, 4]))
         );
         assert!(Editor::create(NewItem::Load(3), &fe).is_none());
+    }
+
+    #[test]
+    fn beam_sections_follow_a_renamed_cross_section() {
+        let mut fe = FeModel::default();
+        Editor::create(NewItem::CrossSection, &fe)
+            .unwrap()
+            .apply(&mut fe);
+        assert_eq!(fe.cross_sections[0].name, "Cross_Section-1");
+        fe.sections.push(Section {
+            name: "Beam_Section-1".into(),
+            material: String::new(),
+            region: Region::Parts(Vec::new()),
+            thickness: 1.0,
+            kind: SectionKind::Beam(BeamSection {
+                cross_section: "Cross_Section-1".into(),
+                ..BeamSection::DEFAULT
+            }),
+        });
+        let mesh = FeMesh::default();
+        let mut editor = Editor::edit(&TreeItem::CrossSection(0), &fe, &mesh).unwrap();
+        let Draft::CrossSection(cross_section) = &mut editor.draft else {
+            panic!("not a cross-section");
+        };
+        cross_section.name = "Tube".into();
+        cross_section.profile = BeamProfile::Pipe {
+            radius: 0.01,
+            thickness: 0.02,
+        };
+        assert!(
+            editor.validate(&fe).is_err(),
+            "wall thicker than the radius"
+        );
+        if let Draft::CrossSection(c) = &mut editor.draft {
+            c.profile = BeamProfile::ALL[2];
+        }
+        assert_eq!(editor.validate(&fe), Ok(()));
+        editor.apply(&mut fe);
+        let SectionKind::Beam(beam) = &fe.sections[0].kind else {
+            panic!("not a beam");
+        };
+        assert_eq!(beam.cross_section, "Tube");
+        assert!(delete(&mut fe, &TreeItem::CrossSection(0)));
+        assert!(fe.cross_sections.is_empty());
     }
 
     #[test]

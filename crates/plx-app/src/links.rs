@@ -34,7 +34,7 @@ use plx_model::{
     TagMap,
 };
 
-use crate::tree::TreeItem;
+use crate::tree::{CROSS_SECTIONS, TreeItem};
 
 pub const GEOMETRY: &str = "Geometry";
 pub const MESH: &str = "Mesh";
@@ -57,9 +57,10 @@ pub const ANALYSIS: &str = "Analysis";
 
 /// The categories of the setup in the order of the FE Model tree; each can be linked as a
 /// whole or item by item.
-pub const CATEGORIES: [&str; 8] = [
+pub const CATEGORIES: [&str; 9] = [
     "Features",
     "Materials",
+    CROSS_SECTIONS,
     "Sections",
     "Constraints",
     "Contacts",
@@ -615,6 +616,7 @@ pub fn entries(fe: &FeModel, category: &str) -> Vec<String> {
                 .chain(fe.planes.iter().map(|p| p.name.as_str())),
         ),
         "Materials" => names(&mut fe.materials.iter().map(|m| m.name.as_str())),
+        CROSS_SECTIONS => names(&mut fe.cross_sections.iter().map(|c| c.name.as_str())),
         "Sections" => names(&mut fe.sections.iter().map(|s| s.name.as_str())),
         "Constraints" => names(&mut fe.constraints.iter().map(|c| c.name())),
         "Contacts" => names(
@@ -763,6 +765,7 @@ fn category_fingerprint(hash: &mut Fnv, fe: &FeModel, category: &str, name: Opti
             add(hash, &fe.planes, |p| &p.name, name);
         }
         "Materials" => add(hash, &fe.materials, |m| &m.name, name),
+        CROSS_SECTIONS => add(hash, &fe.cross_sections, |c| &c.name, name),
         "Sections" => add(hash, &fe.sections, |s| &s.name, name),
         "Constraints" => add(hash, &fe.constraints, |c| c.name(), name),
         "Contacts" => {
@@ -883,6 +886,12 @@ fn copy_category(target: &mut FeModel, source: &FeModel, category: &str, name: M
             copy(&mut target.planes, &source.planes, |p| &p.name, name);
         }
         "Materials" => copy(&mut target.materials, &source.materials, |m| &m.name, name),
+        CROSS_SECTIONS => copy(
+            &mut target.cross_sections,
+            &source.cross_sections,
+            |c| &c.name,
+            name,
+        ),
         "Sections" => copy(&mut target.sections, &source.sections, |s| &s.name, name),
         "Constraints" => copy(
             &mut target.constraints,
@@ -1203,6 +1212,11 @@ fn category_items(fe: &FeModel, category: &str, name: Option<&str>) -> Vec<TreeI
                 .filter(|(_, m)| wanted(&m.name))
                 .map(|(i, _)| TreeItem::Material(i)),
         ),
+        CROSS_SECTIONS => items.extend(
+            (fe.cross_sections.iter().enumerate())
+                .filter(|(_, c)| wanted(&c.name))
+                .map(|(i, _)| TreeItem::CrossSection(i)),
+        ),
         "Sections" => items.extend(
             (fe.sections.iter().enumerate())
                 .filter(|(_, s)| wanted(&s.name))
@@ -1296,6 +1310,7 @@ pub fn path_of(fe: &FeModel, item: &TreeItem) -> Option<Vec<String>> {
         | TreeItem::Surface(_) => Some(vec![MESH.to_owned()]),
         TreeItem::MeshItem(_) => Some(vec![MESH.to_owned()]),
         TreeItem::Material(i) => entry("Materials", &fe.materials.get(*i)?.name),
+        TreeItem::CrossSection(i) => entry(CROSS_SECTIONS, &fe.cross_sections.get(*i)?.name),
         TreeItem::Section(i) => entry("Sections", &fe.sections.get(*i)?.name),
         TreeItem::Constraint(i) => entry("Constraints", fe.constraints.get(*i)?.name()),
         TreeItem::SurfaceInteraction(i) => {

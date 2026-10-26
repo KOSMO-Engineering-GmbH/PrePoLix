@@ -987,6 +987,7 @@ mod tests {
             .mesh;
         let model = FeModel {
             bolts: Vec::new(),
+            cross_sections: Vec::new(),
             distributions: Vec::new(),
             properties: Default::default(),
             materials: vec![Material {

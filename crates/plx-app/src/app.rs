@@ -3397,6 +3397,7 @@ impl Workbench {
         let mut kind = None;
         for (item, label, enabled) in [
             (NewItem::Material, "Create Material …", true),
+            (NewItem::CrossSection, "Create Cross-Section …", true),
             (NewItem::Section, "Create Section …", true),
             (
                 NewItem::InitialCondition,
@@ -6575,7 +6576,7 @@ impl Workbench {
             model.thick_shells.is_empty()
         };
         let lines_current = if lines {
-            model.line_sections().eq(&model.thick_lines)
+            (model.line_sections()).eq((model.thick_lines.iter()).map(|(s, p)| (s, p.as_ref())))
         } else {
             model.thick_lines.is_empty()
         };
@@ -6583,7 +6584,9 @@ impl Workbench {
             return;
         }
         model.thick_shells = (model.shell_sections().filter(|_| shells).cloned()).collect();
-        model.thick_lines = (model.line_sections().filter(|_| lines).cloned()).collect();
+        model.thick_lines = (model.line_sections().filter(|_| lines))
+            .map(|(s, p)| (s.clone(), p.copied()))
+            .collect();
         self.results_changed = true;
     }
 
@@ -7286,6 +7289,7 @@ fn new_item_container(kind: &NewItem) -> Option<TreeItem> {
     Some(match kind {
         NewItem::Material => TreeItem::Group("Materials"),
         NewItem::Section => TreeItem::Group("Sections"),
+        NewItem::CrossSection => TreeItem::Group(crate::tree::CROSS_SECTIONS),
         NewItem::InitialCondition => TreeItem::Group("Initial Conditions"),
         NewItem::Step => TreeItem::Group("Steps"),
         NewItem::BoundaryCondition(s)

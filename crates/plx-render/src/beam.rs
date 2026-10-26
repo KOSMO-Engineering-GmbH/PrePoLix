@@ -6,14 +6,11 @@ use std::collections::HashMap;
 
 use glam::DVec3;
 use plx_mesh::PartSkin;
-use plx_model::BeamProfile;
+use plx_model::{BeamProfile, Outline};
 
 use crate::contour::NO_VALUE;
 use crate::fe::{EDGE_COLOR, FEATURE_EDGE_OPACITY};
 use crate::mesh::{NodeBlend, RenderMesh, Vertex};
-
-/// Points on the outline of a round profile.
-const ROUND_POINTS: usize = 24;
 
 /// Largest angle in degrees between two segments of a line whose profiles are joined
 /// without an end face in between.
@@ -44,52 +41,14 @@ impl BeamShape {
 
     /// The thickness of the profile in the 1- and 2-direction, which the offsets refer to.
     fn size(&self) -> [f64; 2] {
-        match self.profile {
-            BeamProfile::Rect { a, b } | BeamProfile::Box { a, b, .. } => [a, b],
-            BeamProfile::Circ { radius } | BeamProfile::Pipe { radius, .. } => {
-                [2.0 * radius, 2.0 * radius]
-            }
-        }
+        self.profile.size()
     }
 
     /// The outlines of the profile about its centre in the 1-2 plane, counter-clockwise: the
     /// outer one first, then the hole of a hollow profile with as many points.
     fn loops(&self) -> Vec<Outline> {
-        let circle = |r: f64| Outline {
-            points: (0..ROUND_POINTS)
-                .map(|k| {
-                    let angle = std::f64::consts::TAU * k as f64 / ROUND_POINTS as f64;
-                    [r * angle.cos(), r * angle.sin()]
-                })
-                .collect(),
-            round: true,
-        };
-        let rect = |[u0, v0]: [f64; 2], [u1, v1]: [f64; 2]| Outline {
-            points: vec![[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
-            round: false,
-        };
-        match self.profile {
-            BeamProfile::Rect { a, b } => vec![rect([-a / 2.0, -b / 2.0], [a / 2.0, b / 2.0])],
-            BeamProfile::Circ { radius } => vec![circle(radius)],
-            BeamProfile::Pipe { radius, thickness } => {
-                vec![circle(radius), circle(radius - thickness)]
-            }
-            // Walls at +1, +2, -1 and -2.
-            BeamProfile::Box { a, b, t } => vec![
-                rect([-a / 2.0, -b / 2.0], [a / 2.0, b / 2.0]),
-                rect(
-                    [-a / 2.0 + t[2], -b / 2.0 + t[3]],
-                    [a / 2.0 - t[0], b / 2.0 - t[1]],
-                ),
-            ],
-        }
+        self.profile.outlines()
     }
-}
-
-/// An outline of a profile; a round one is shaded smooth around.
-struct Outline {
-    points: Vec<[f64; 2]>,
-    round: bool,
 }
 
 /// Where a profile sits at one end of a segment.
@@ -430,7 +389,7 @@ mod tests {
             offset: [0.0; 2],
         };
         let polygon = |r: f64| {
-            let n = ROUND_POINTS as f64;
+            let n = plx_model::ROUND_POINTS as f64;
             0.5 * n * r * r * (std::f64::consts::TAU / n).sin()
         };
         let wall = 2.0 * (polygon(0.2) - polygon(0.15)) as f32;

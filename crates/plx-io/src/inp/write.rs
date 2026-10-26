@@ -10,15 +10,15 @@ use std::fmt::Write as _;
 
 use plx_mesh::{ElementFamily, ElementId, FeMesh, NodeId, SurfaceDefinition};
 use plx_model::{
-    Amplitude, AmplitudeTime, BoundaryKind, BuckleStep, ComplexFrequencyStep, Constraint,
-    ContactMethod, ContactPair, ContactScale, DefinedFieldKind, DynamicStep, FeModel, FieldOutput,
-    Formulation, FrequencyStep, GapConductance, HeatTransferStep, HistoryKind, HistoryOutput,
-    Incrementation, InitialConditionKind, InteractionProperty, LoadKind, ModalDamping,
-    ModalDynamicsStep, ModelSpace, MovingFrame, NodeTie, OutputDimension, OutputKind, Quantity,
-    Region, RemoteBehavior, RemoteDof, Sampler, Section, SectionKind, SectorDisplay,
-    SensitivityStep, StaticStep, SteadyStateDynamicsStep, Step, StepKind, SurfaceBehavior,
-    SurfaceInteraction, Tie, Totals, UnitSystem, ViscoStep, line_tangent, symmetry_dofs,
-    symmetry_plane,
+    Amplitude, AmplitudeTime, BeamProfile, BeamSection, BoundaryKind, BuckleStep,
+    ComplexFrequencyStep, Constraint, ContactMethod, ContactPair, ContactScale, DefinedFieldKind,
+    DynamicStep, FeModel, FieldOutput, Formulation, FrequencyStep, GapConductance,
+    HeatTransferStep, HistoryKind, HistoryOutput, Incrementation, InitialConditionKind,
+    InteractionProperty, LoadKind, ModalDamping, ModalDynamicsStep, ModelSpace, MovingFrame,
+    NodeTie, OutputDimension, OutputKind, Quantity, Region, RemoteBehavior, RemoteDof, Sampler,
+    Section, SectionKind, SectorDisplay, SensitivityStep, StaticStep, SteadyStateDynamicsStep,
+    Step, StepKind, SurfaceBehavior, SurfaceInteraction, Tie, Totals, UnitSystem, ViscoStep,
+    line_tangent, symmetry_dofs, symmetry_plane,
 };
 
 #[derive(Debug, thiserror::Error, PartialEq)]
@@ -540,7 +540,7 @@ impl LineElements {
     fn new(mesh: &FeMesh, model: &FeModel) -> Result<Self, WriteError> {
         let mut types = BTreeMap::new();
         for section in &model.sections {
-            if let Some(reason) = section.kind_problem(mesh) {
+            if let Some(reason) = section.kind_problem(model, mesh) {
                 return Err(WriteError::InvalidSection {
                     item: section.name.clone(),
                     reason,
@@ -552,7 +552,9 @@ impl LineElements {
             for element in
                 (section.region.elements(mesh).into_iter()).filter_map(|id| mesh.element(id))
             {
-                if let Some(type_name) = section.kind.element_type(element.shape) {
+                if let Some(type_name) =
+                    (section.kind).element_type(element.shape, model.section_profile(&section.kind))
+                {
                     types.insert(element.id, type_name);
                 }
             }
@@ -1273,21 +1275,19 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError
                 let _ = writeln!(out, "\n{}", number(*thickness));
             }
             SectionKind::Beam(beam) => {
-                let mut options = format!("Section={}", beam.profile.keyword());
+                let profile = profile_of(model, &section.name, beam)?;
+                let _ = writeln!(out, "** Cross-Section: {}", beam.cross_section);
+                let mut options = format!("Section={}", profile.keyword());
                 for (k, offset) in (1..).zip(beam.offset) {
                     if offset != 0.0 {
                         let _ = write!(options, ", Offset{k}={}", number(offset));
                     }
                 }
-                let dimensions: Vec<String> = beam
-                    .profile
-                    .data_line()
-                    .iter()
-                    .map(|&v| number(v))
-                    .collect();
+                let dimensions: Vec<String> =
+                    profile.data_line().iter().map(|&v| number(v)).collect();
                 // One keyword per normal: CalculiX takes one normal per section, and an
                 // automatic orientation may differ between the beams of the region.
-                for (normal, set) in beam_groups(sets, section)? {
+                for (normal, set) in beam_groups(sets, section, &profile)? {
                     let _ = writeln!(
                         out,
                         "*Beam section, Elset={set}, Material={material}, {options}"
@@ -1308,9 +1308,26 @@ fn sections(sets: &mut Sets, model: &FeModel) -> Result<Vec<Keyword>, WriteError
     Ok(keywords)
 }
 
+/// The profile of a beam section's cross-section.
+fn profile_of(
+    model: &FeModel,
+    section: &str,
+    beam: &BeamSection,
+) -> Result<BeamProfile, WriteError> {
+    let cross_section = model.cross_section(&beam.cross_section);
+    (cross_section.map(|c| c.profile)).ok_or_else(|| WriteError::InvalidSection {
+        item: section.to_owned(),
+        reason: format!("Cross-Section {} does not exist", beam.cross_section),
+    })
+}
+
 /// The beams of a section grouped by the normal they are written with, each group as an
 /// element set. A region whose beams all share one normal keeps its own set.
-fn beam_groups(sets: &mut Sets, section: &Section) -> Result<Vec<([f64; 3], String)>, WriteError> {
+fn beam_groups(
+    sets: &mut Sets,
+    section: &Section,
+    profile: &BeamProfile,
+) -> Result<Vec<([f64; 3], String)>, WriteError> {
     let SectionKind::Beam(beam) = &section.kind else {
         return Ok(Vec::new());
     };
@@ -1340,7 +1357,7 @@ fn beam_groups(sets: &mut Sets, section: &Section) -> Result<Vec<([f64; 3], Stri
     }
     // CalculiX 2.21 reads the element set of a pipe or box section 20 characters wide and
     // fails on longer names, so those get short sets of their own.
-    let short = beam.profile.needs_reduced_integration();
+    let short = profile.needs_reduced_integration();
     if groups.len() == 1 && !short {
         let set = sets.element_set(&section.name, &section.region)?;
         return Ok(vec![(groups[0].0, set)]);

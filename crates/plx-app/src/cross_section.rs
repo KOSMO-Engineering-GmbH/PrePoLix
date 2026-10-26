@@ -1,0 +1,270 @@
+//! The dialog of a cross-section and the sketch of a profile shown in it and in the beam
+//! section dialog: the outline with the 1- and 2-direction, the centroid and the principal
+//! axes through it.
+
+use egui::{Color32, FontId, Pos2, Rect, Shape, Stroke, Ui, pos2, vec2};
+use plx_model::{BeamProfile, CrossSection, Field, Quantity, UnitSystem};
+
+use crate::{expose, numeric, setup, style};
+
+/// Size of the sketch of a profile.
+const SKETCH: egui::Vec2 = egui::vec2(240.0, 180.0);
+
+/// The rows of the cross-section dialog: name, profile type, dimensions and the sketch with
+/// the area and second moments.
+pub fn form(ui: &mut Ui, cross_section: &mut CrossSection, units: UnitSystem) {
+    setup::name_row(ui, &mut cross_section.name);
+    let profile = &mut cross_section.profile;
+    ui.label("Profile");
+    egui::ComboBox::from_id_salt("cross-section profile")
+        .selected_text(profile.label())
+        .width(200.0)
+        .show_ui(ui, |ui| {
+            for other in BeamProfile::ALL {
+                let selected = other.keyword() == profile.keyword();
+                if ui.selectable_label(selected, other.label()).clicked() && !selected {
+                    *profile = scaled_like(other, profile);
+                }
+            }
+        });
+    ui.end_row();
+    dimensions(ui, profile, units);
+    if profile.needs_reduced_integration() {
+        ui.label("");
+        ui.weak("Pipe and box need beams on lines with 3 nodes (B32R).");
+        ui.end_row();
+    }
+    ui.label("");
+    preview(ui, profile, units);
+    ui.end_row();
+}
+
+/// A profile of the kind of `kind` about as large as `like`, so that switching the kind
+/// keeps the size of the profile rather than falling back to a millimetre.
+fn scaled_like(kind: BeamProfile, like: &BeamProfile) -> BeamProfile {
+    let [a, b] = like.size();
+    let size = a.max(b);
+    let wall = a.min(b) / 10.0;
+    match kind {
+        BeamProfile::Rect { .. } => BeamProfile::Rect { a, b },
+        BeamProfile::Circ { .. } => BeamProfile::Circ { radius: size / 2.0 },
+        BeamProfile::Pipe { .. } => BeamProfile::Pipe {
+            radius: size / 2.0,
+            thickness: wall,
+        },
+        BeamProfile::Box { .. } => BeamProfile::Box { a, b, t: [wall; 4] },
+    }
+}
+
+/// The dimension fields of a profile, each one an exposable parameter.
+fn dimensions(ui: &mut Ui, profile: &mut BeamProfile, units: UnitSystem) {
+    let length = |ui: &mut Ui, label: &str, value: &mut f64, field: Field| {
+        ui.label(label);
+        expose::field(ui, field, |ui| {
+            ui.add(numeric::quantity(value, units, Quantity::Length).range(0.0..=f64::MAX))
+        });
+        ui.end_row();
+    };
+    match profile {
+        BeamProfile::Rect { a, b } => {
+            length(ui, "Thickness in 1-direction (a)", a, Field::BeamA);
+            length(ui, "Thickness in 2-direction (b)", b, Field::BeamB);
+        }
+        BeamProfile::Circ { radius } => length(ui, "Radius", radius, Field::Radius),
+        BeamProfile::Pipe { radius, thickness } => {
+            length(ui, "Outer radius", radius, Field::Radius);
+            length(ui, "Wall thickness", thickness, Field::Thickness);
+        }
+        BeamProfile::Box { a, b, t } => {
+            length(ui, "Width in 1-direction (a)", a, Field::BeamA);
+            length(ui, "Width in 2-direction (b)", b, Field::BeamB);
+            let [t1, t2, t3, t4] = t;
+            length(ui, "Wall thickness at +1 (t1)", t1, Field::Wall1);
+            length(ui, "Wall thickness at +2 (t2)", t2, Field::Wall2);
+            length(ui, "Wall thickness at -1 (t3)", t3, Field::Wall3);
+            length(ui, "Wall thickness at -2 (t4)", t4, Field::Wall4);
+        }
+    }
+}
+
+/// The sketch of a profile with its area and second moments of area below, in the model's
+/// units. The 1-direction points right and the 2-direction up, from the beam's nodes at the
+/// centre of the profile.
+pub fn preview(ui: &mut Ui, profile: &BeamProfile, units: UnitSystem) {
+    ui.vertical(|ui| {
+        let (rect, _) = ui.allocate_exact_size(SKETCH, egui::Sense::hover());
+        if ui.is_rect_visible(rect) {
+            paint(ui, rect, profile);
+        }
+        if profile.is_valid() {
+            properties(ui, profile, units);
+        } else {
+            ui.colored_label(style::error(), "Invalid dimensions");
+        }
+    });
+}
+
+fn paint(ui: &Ui, rect: Rect, profile: &BeamProfile) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 2.0, style::window());
+    painter.rect_stroke(
+        rect,
+        2.0,
+        Stroke::new(1.0, style::border()),
+        egui::StrokeKind::Inside,
+    );
+    if !profile.is_valid() {
+        return;
+    }
+    let outlines = profile.outlines();
+    let (mut min, mut max) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for &[u, v] in outlines.iter().flat_map(|o| &o.points) {
+        min = [min[0].min(u), min[1].min(v)];
+        max = [max[0].max(u), max[1].max(v)];
+    }
+    // Room for the axis labels around the profile.
+    let inner = rect.shrink(22.0);
+    let span = (max[0] - min[0]).max(max[1] - min[1]);
+    if span.is_nan() || span <= 0.0 {
+        return;
+    }
+    let scale = f64::from(inner.width().min(inner.height())) / span;
+    let mid = [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0];
+    let centre = inner.center();
+    let at = |[u, v]: [f64; 2]| -> Pos2 {
+        pos2(
+            centre.x + ((u - mid[0]) * scale) as f32,
+            centre.y - ((v - mid[1]) * scale) as f32,
+        )
+    };
+    let fill = style::adapt(Color32::from_rgb(170, 190, 215));
+    let edge = Stroke::new(1.5, style::adapt(Color32::from_rgb(40, 70, 120)));
+    // The outer outline filled, the holes painted over with the background; every profile
+    // has convex outlines.
+    for (k, outline) in outlines.iter().enumerate() {
+        let points: Vec<Pos2> = outline.points.iter().map(|&p| at(p)).collect();
+        let color = if k == 0 { fill } else { style::window() };
+        painter.add(Shape::convex_polygon(points.clone(), color, Stroke::NONE));
+        painter.add(Shape::closed_line(points, edge));
+    }
+    // The beam's 1- and 2-direction from the nodes, at the centre of the profile.
+    let axis = Stroke::new(1.0, style::text());
+    let origin = at([0.0, 0.0]);
+    let length = 0.3 * inner.width().min(inner.height());
+    let font = FontId::proportional(11.0);
+    // The labels sit beside the arrow heads, clear of the principal axes along them.
+    for (direction, label, beside, align) in [
+        (
+            vec2(1.0, 0.0),
+            "1",
+            vec2(-2.0, 4.0),
+            egui::Align2::RIGHT_TOP,
+        ),
+        (vec2(0.0, -1.0), "2", vec2(4.0, 2.0), egui::Align2::LEFT_TOP),
+    ] {
+        let tip = origin + direction * length;
+        painter.arrow(origin, tip - origin, axis);
+        painter.text(tip + beside, align, label, font.clone(), style::text());
+    }
+    // The principal axes through the centroid, dashed across the whole sketch.
+    let properties = profile.properties();
+    let centroid = at(properties.centroid);
+    let (_, angle) = properties.principal();
+    let principal = Stroke::new(1.0, style::adapt(Color32::from_rgb(200, 60, 40)));
+    let reach = rect.width().max(rect.height());
+    for (k, turn) in [0.0, std::f64::consts::FRAC_PI_2].into_iter().enumerate() {
+        let (sin, cos) = (angle + turn).sin_cos();
+        // Up on the screen is the positive 2-direction.
+        let direction = vec2(cos as f32, -sin as f32);
+        let ends = [centroid - direction * reach, centroid + direction * reach];
+        painter.extend(Shape::dashed_line(&ends, principal, 5.0, 3.0));
+        let label = if k == 0 { "I" } else { "II" };
+        let at_edge = clip_to(rect.shrink(9.0), centroid, direction);
+        painter.text(
+            at_edge,
+            egui::Align2::CENTER_CENTER,
+            label,
+            font.clone(),
+            principal.color,
+        );
+    }
+    painter.circle(centroid, 3.5, style::window(), principal);
+    painter.circle_filled(centroid, 1.5, principal.color);
+}
+
+/// Where the ray from `start` along `direction` leaves `rect`.
+fn clip_to(rect: Rect, start: Pos2, direction: egui::Vec2) -> Pos2 {
+    let mut t = f32::MAX;
+    for (d, low, high, s) in [
+        (direction.x, rect.left(), rect.right(), start.x),
+        (direction.y, rect.top(), rect.bottom(), start.y),
+    ] {
+        if d > 1e-6 {
+            t = t.min((high - s) / d);
+        } else if d < -1e-6 {
+            t = t.min((low - s) / d);
+        }
+    }
+    start + direction * t.max(0.0)
+}
+
+/// Area, centroid and second moments of area of a profile as text, in the model's units.
+fn properties(ui: &mut Ui, profile: &BeamProfile, units: UnitSystem) {
+    let p = profile.properties();
+    let length = plx_model::STORED.factor_to(Quantity::Length, units);
+    let unit = units.unit(Quantity::Length);
+    let value = |v: f64, power: i32| {
+        let shown = numeric::fit(v * length.powi(power), |t| t.len() <= 9);
+        match power {
+            1 => format!("{shown} {unit}"),
+            power => format!("{shown} {unit}^{power}"),
+        }
+    };
+    let ([big, small], angle) = p.principal();
+    let lines = [
+        format!("A = {}", value(p.area, 2)),
+        format!(
+            "Centroid at 1 = {}, 2 = {}",
+            value(p.centroid[0], 1),
+            value(p.centroid[1], 1)
+        ),
+        format!("I11 = {}, I22 = {}", value(p.i11, 4), value(p.i22, 4)),
+        format!("Principal: I = {}, II = {}", value(big, 4), value(small, 4)),
+        format!(
+            "Axis I at {:.1} deg from the 1-direction",
+            angle.to_degrees()
+        ),
+    ];
+    for line in lines {
+        ui.label(egui::RichText::new(line).small());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switching_the_kind_keeps_the_size() {
+        let rect = BeamProfile::Rect { a: 0.02, b: 0.04 };
+        let pipe = scaled_like(BeamProfile::ALL[2], &rect);
+        assert_eq!(pipe.size(), [0.04, 0.04]);
+        assert!(pipe.is_valid());
+        let boxed = scaled_like(BeamProfile::ALL[3], &rect);
+        assert_eq!(boxed.size(), [0.02, 0.04]);
+        assert!(boxed.is_valid());
+    }
+
+    #[test]
+    fn rays_leave_the_rect_at_its_border() {
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(10.0, 20.0));
+        assert_eq!(
+            clip_to(rect, pos2(5.0, 10.0), vec2(1.0, 0.0)),
+            pos2(10.0, 10.0)
+        );
+        assert_eq!(
+            clip_to(rect, pos2(5.0, 10.0), vec2(0.0, -1.0)),
+            pos2(5.0, 0.0)
+        );
+    }
+}

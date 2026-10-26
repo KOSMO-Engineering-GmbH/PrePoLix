@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use plx_mesh::{
     Element, ElementFamily, ElementId, ElementShape, FeMesh, NodeId, Part, SurfaceDefinition,
 };
-use plx_model::{BeamOrientation, BeamProfile, BeamSection, Region, Section, SectionKind};
+use plx_model::{
+    BeamOrientation, BeamProfile, BeamSection, CrossSection, Region, Section, SectionKind,
+};
 
 pub use write::{
     Keyword, KeywordKind, SHORTENED_NAME, WriteError, model_keywords, resolved_overlaps,
@@ -57,6 +59,8 @@ pub struct InpImport {
     /// on element sets of `mesh`, to draw the elements with their thickness or profile. They stay in
     /// `skipped_keywords`: the model does not take them over.
     pub sections: Vec<Section>,
+    /// The profiles of the beam sections in `sections`, each named like its section.
+    pub cross_sections: Vec<CrossSection>,
 }
 
 pub fn read_inp(path: &Path) -> Result<InpImport, InpError> {
@@ -398,7 +402,13 @@ impl Reader {
                 let elements = mesh.element_sets.get(set.as_str()).into_iter().flatten();
                 let lines = (elements.filter_map(|&id| mesh.element(id)))
                     .any(|e| e.shape.family() == ElementFamily::Line);
-                if let Some(kind) = read_section(kind, profile, values, lines) {
+                if let Some((kind, profile)) = read_section(kind, profile, values, lines, set) {
+                    if let Some(profile) = profile {
+                        self.import.cross_sections.push(CrossSection {
+                            name: set.clone(),
+                            profile,
+                        });
+                    }
                     self.import.sections.push(Section {
                         name: set.clone(),
                         material: material.clone(),
@@ -567,24 +577,33 @@ impl Reader {
 
 /// The section `kind` stands for with the numbers of its data lines, if they make one;
 /// solid sections count only on `lines`, as trusses.
+/// The section of a section keyword with its data lines, and the profile of a beam section,
+/// whose cross-section is named `set` like the section.
 fn read_section(
     kind: &SectionKind,
     profile: &str,
     values: &[Vec<f64>],
     lines: bool,
-) -> Option<SectionKind> {
+    set: &str,
+) -> Option<(SectionKind, Option<BeamProfile>)> {
     let first = |k: usize| values[0].get(k).copied().filter(|v| *v > 0.0);
-    Some(match *kind {
-        SectionKind::Shell { offset, .. } => SectionKind::Shell {
-            thickness: first(0)?,
-            offset,
-        },
-        SectionKind::Membrane { offset, .. } => SectionKind::Membrane {
-            thickness: first(0)?,
-            offset,
-        },
+    Some(match kind {
+        &SectionKind::Shell { offset, .. } => (
+            SectionKind::Shell {
+                thickness: first(0)?,
+                offset,
+            },
+            None,
+        ),
+        &SectionKind::Membrane { offset, .. } => (
+            SectionKind::Membrane {
+                thickness: first(0)?,
+                offset,
+            },
+            None,
+        ),
         // Solid sections of solid and plane elements have no area.
-        SectionKind::Truss { .. } if lines => SectionKind::Truss { area: first(0)? },
+        SectionKind::Truss { .. } if lines => (SectionKind::Truss { area: first(0)? }, None),
         SectionKind::Beam(beam) => {
             let profile = match profile {
                 "RECT" => BeamProfile::Rect {
@@ -607,11 +626,12 @@ fn read_section(
                 _ => return None,
             };
             let normal = values[1].get(..3)?;
-            SectionKind::Beam(BeamSection {
-                profile,
+            let beam = SectionKind::Beam(BeamSection {
+                cross_section: set.to_owned(),
                 orientation: BeamOrientation::Direction([normal[0], normal[1], normal[2]]),
-                ..beam
-            })
+                offset: beam.offset,
+            });
+            (beam, Some(profile))
         }
         _ => return None,
     })

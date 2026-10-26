@@ -145,8 +145,9 @@ pub struct Model {
     /// thickness and offset, see [`Model::shell_sections`]; empty draws them as surfaces.
     pub thick_shells: Vec<plx_model::Section>,
     /// Beam and truss sections whose elements are drawn as their profile swept along the
-    /// line, see [`Model::line_sections`]; empty draws them as lines.
-    pub thick_lines: Vec<plx_model::Section>,
+    /// line, with the profile of a beam's cross-section, see [`Model::line_sections`]; empty
+    /// draws them as lines.
+    pub thick_lines: Vec<(plx_model::Section, Option<plx_model::BeamProfile>)>,
     /// Results: the shell, membrane, beam and truss sections of the input CalculiX ran.
     input_sections: InputSections,
     /// The global results of a submodel, see [`ResultsView::show_global_contours`].
@@ -179,6 +180,7 @@ impl GlobalModel {
 #[derive(Default)]
 struct InputSections {
     sections: Vec<plx_model::Section>,
+    cross_sections: Vec<plx_model::CrossSection>,
     sets: BTreeMap<String, Vec<ElementId>>,
 }
 
@@ -414,25 +416,20 @@ fn shown_sections(import: &mut InpImport, units: UnitSystem) -> InputSections {
     let length = plx_model::STORED.factor_to(plx_model::Quantity::Length, units);
     let mut sections = InputSections {
         sections: std::mem::take(&mut import.sections),
+        cross_sections: std::mem::take(&mut import.cross_sections),
         sets: BTreeMap::new(),
     };
+    for cross_section in &mut sections.cross_sections {
+        for value in cross_section.profile.lengths_mut() {
+            *value *= length;
+        }
+    }
     for section in &mut sections.sections {
         match &mut section.kind {
             plx_model::SectionKind::Shell { thickness, .. }
             | plx_model::SectionKind::Membrane { thickness, .. } => *thickness *= length,
             plx_model::SectionKind::Truss { area } => *area *= length * length,
-            plx_model::SectionKind::Beam(beam) => match &mut beam.profile {
-                plx_model::BeamProfile::Rect { a, b } => [*a, *b] = [*a * length, *b * length],
-                plx_model::BeamProfile::Circ { radius } => *radius *= length,
-                plx_model::BeamProfile::Pipe { radius, thickness } => {
-                    [*radius, *thickness] = [*radius * length, *thickness * length];
-                }
-                plx_model::BeamProfile::Box { a, b, t } => {
-                    [*a, *b] = [*a * length, *b * length];
-                    *t = t.map(|t| t * length);
-                }
-            },
-            plx_model::SectionKind::Solid => {}
+            plx_model::SectionKind::Beam(_) | plx_model::SectionKind::Solid => {}
         }
         if let plx_model::Region::ElementSet(set) = &section.region
             && let Some(elements) = import.mesh.element_sets.remove(set)
@@ -1510,13 +1507,30 @@ impl Model {
     /// The beam and truss sections whose elements can be drawn as their profile swept along
     /// the line, see [`Model::thick_lines`]. Results hold beams as lines only where the
     /// input asked for `OUTPUT=2D`, as it does with shells; else CalculiX expanded them.
-    pub fn line_sections(&self) -> impl Iterator<Item = &plx_model::Section> {
-        self.solid_sections().filter(|s| {
-            matches!(
-                s.kind,
-                plx_model::SectionKind::Beam(_) | plx_model::SectionKind::Truss { .. }
-            )
-        })
+    /// A beam section comes with the profile of its cross-section.
+    pub fn line_sections(
+        &self,
+    ) -> impl Iterator<Item = (&plx_model::Section, Option<&plx_model::BeamProfile>)> {
+        let cross_sections = match &self.results {
+            Some(_) => &self.input_sections.cross_sections[..],
+            None => &self.fe.cross_sections[..],
+        };
+        (self.solid_sections())
+            .filter(|s| {
+                matches!(
+                    s.kind,
+                    plx_model::SectionKind::Beam(_) | plx_model::SectionKind::Truss { .. }
+                )
+            })
+            .map(move |s| {
+                let profile = match &s.kind {
+                    plx_model::SectionKind::Beam(beam) => (cross_sections.iter())
+                        .find(|c| c.name == beam.cross_section)
+                        .map(|c| &c.profile),
+                    _ => None,
+                };
+                (s, profile)
+            })
     }
 
     /// The elements of [`Model::thick_shells`] and [`Model::thick_lines`] with what they are
@@ -1549,26 +1563,26 @@ impl Model {
                 }
             }
         }
-        for section in &self.thick_lines {
+        for (section, profile) in &self.thick_lines {
             for id in elements(section) {
                 let Some(index) = of_family(id, ElementFamily::Line) else {
                     continue;
                 };
                 let shape = match &section.kind {
                     plx_model::SectionKind::Truss { area } => BeamShape::truss(*area),
-                    plx_model::SectionKind::Beam(beam) => {
+                    plx_model::SectionKind::Beam(beam) => profile.map(|profile| {
                         let element = &self.mesh.elements()[index];
                         let tangent = plx_model::line_tangent(&self.mesh, element);
                         // CalculiX refuses a normal along the beam; the model checks say so.
                         let normal = (beam.orientation.normal_for(tangent))
                             .or_else(|| BeamOrientation::Automatic.normal_for(tangent))
                             .unwrap_or([0.0, 0.0, 1.0]);
-                        Some(BeamShape {
-                            profile: beam.profile,
+                        BeamShape {
+                            profile,
                             normal: DVec3::from(normal),
                             offset: beam.offset,
-                        })
-                    }
+                        }
+                    }),
                     _ => None,
                 };
                 if let Some(shape) = shape {
@@ -2999,7 +3013,7 @@ mod tests {
             region: plx_model::Region::Parts(vec!["Beam".into()]),
             thickness: 1.0,
             kind: SectionKind::Beam(plx_model::BeamSection {
-                profile: plx_model::BeamProfile::Rect { a: 4.0, b: 2.0 },
+                cross_section: "Rect".into(),
                 orientation: BeamOrientation::Direction([0.0, 1.0, 0.0]),
                 offset: [0.0; 2],
             }),
@@ -3009,7 +3023,13 @@ mod tests {
             max - min
         };
         assert_eq!(extent(&model), Vec3::new(10.0, 0.0, 0.0));
-        model.thick_lines = model.line_sections().cloned().collect();
+        model.fe.cross_sections.push(plx_model::CrossSection {
+            name: "Rect".into(),
+            profile: plx_model::BeamProfile::Rect { a: 4.0, b: 2.0 },
+        });
+        model.thick_lines = (model.line_sections())
+            .map(|(s, p)| (s.clone(), p.copied()))
+            .collect();
         assert_eq!(model.thick_lines.len(), 1);
         // 4 along the normal y, 2 along x cross y = z.
         let size = extent(&model);
@@ -3108,7 +3128,9 @@ S
         };
         let thin = z_range(&model);
         model.thick_shells = model.shell_sections().cloned().collect();
-        model.thick_lines = model.line_sections().cloned().collect();
+        model.thick_lines = (model.line_sections())
+            .map(|(s, p)| (s.clone(), p.copied()))
+            .collect();
         let thick = z_range(&model);
         // In millimetres: the bar reaches down to -1000 and the post up to 1000 either way.
         for range in [thin, thick] {
