@@ -21,7 +21,7 @@ use crate::cad_editor::{CadEditorResult, CadOperationEditor};
 use crate::campbell::CampbellWindow;
 use crate::icons::{self, Icon};
 use crate::links;
-use crate::material_set::{MaterialSetEditor, MaterialSetResult};
+use crate::material_set::{Collection, MaterialSetEditor, MaterialSetResult};
 use crate::measure::{MeasureEditor, MeasureEditorResult};
 use crate::mesh_block::{MeshBlockEditor, MeshBlockResult};
 use crate::model::PROJECT_EXTENSION;
@@ -51,6 +51,7 @@ const LAST_PROJECT_KEY: &str = "last_project";
 enum Kind {
     Analysis,
     Materials,
+    CrossSections,
     Mesh,
     RefineMesh,
     CadOperation,
@@ -76,6 +77,7 @@ impl Kind {
         match self {
             Self::Analysis => "analysis",
             Self::Materials => "materials block",
+            Self::CrossSections => "cross-sections block",
             Self::Mesh => "mesh block",
             Self::RefineMesh => "refine mesh block",
             Self::CadOperation => "CAD operation block",
@@ -115,7 +117,9 @@ struct Node {
 enum Block {
     Analysis(Box<AnalysisBlock>),
     /// A collection of materials, a source of data for analyses that is not solved.
-    Materials(Box<MaterialsBlock>),
+    Materials(Box<CollectionBlock>),
+    /// A collection of cross-sections, like the materials.
+    CrossSections(Box<CollectionBlock>),
     /// A structured mesh made from a few parameters.
     Mesh(Box<MeshBlock>),
     /// The mesh linked to it made again with a factor on its fineness.
@@ -305,9 +309,9 @@ impl ModelMut<'_> {
     }
 }
 
-/// A materials block: its materials, in the setup of a model, and the units they are shown
-/// in.
-struct MaterialsBlock {
+/// A materials or cross-sections block: its items, in the setup of a model, and the units
+/// they are shown in.
+struct CollectionBlock {
     model: LinkedModel,
     units: UnitSystem,
 }
@@ -491,6 +495,7 @@ impl Node {
         // A materials block shows its materials at first.
         let expanded = match block {
             Block::Materials(_) => BTreeSet::from([material_set_path()]),
+            Block::CrossSections(_) => BTreeSet::from([cross_section_set_path()]),
             _ => BTreeSet::new(),
         };
         let mut node = Self {
@@ -605,6 +610,7 @@ impl Node {
         match &self.block {
             Block::Analysis(_) => Kind::Analysis,
             Block::Materials(_) => Kind::Materials,
+            Block::CrossSections(_) => Kind::CrossSections,
             Block::Mesh(_) => Kind::Mesh,
             Block::RefineMesh(_) => Kind::RefineMesh,
             Block::CadOperation(_) => Kind::CadOperation,
@@ -634,16 +640,25 @@ impl Node {
         }
     }
 
-    fn as_materials(&self) -> Option<&MaterialsBlock> {
-        match &self.block {
-            Block::Materials(m) => Some(m),
+    /// What a collection block holds.
+    fn collection(&self) -> Option<Collection> {
+        match self.block {
+            Block::Materials(_) => Some(Collection::Materials),
+            Block::CrossSections(_) => Some(Collection::CrossSections),
             _ => None,
         }
     }
 
-    fn as_materials_mut(&mut self) -> Option<&mut MaterialsBlock> {
+    fn as_collection(&self) -> Option<&CollectionBlock> {
+        match &self.block {
+            Block::Materials(m) | Block::CrossSections(m) => Some(m),
+            _ => None,
+        }
+    }
+
+    fn as_collection_mut(&mut self) -> Option<&mut CollectionBlock> {
         match &mut self.block {
-            Block::Materials(m) => Some(m),
+            Block::Materials(m) | Block::CrossSections(m) => Some(m),
             _ => None,
         }
     }
@@ -849,7 +864,7 @@ impl Node {
             Block::Analysis(_) => {
                 (self.link_data()).map_or_else(UnitSystem::default, |d| d.fe.properties.units)
             }
-            Block::Materials(m) => m.units,
+            Block::Materials(m) | Block::CrossSections(m) => m.units,
             Block::Mesh(m) => m.units,
             Block::Parameters(p) => p.units,
             Block::Measure(m) => m.units,
@@ -980,11 +995,21 @@ impl Node {
                 let mut model = LinkedModel::default();
                 model.fe.materials = set.materials;
                 model.fe.exposed = set.exposed;
-                let block = MaterialsBlock {
+                let block = CollectionBlock {
                     model,
                     units: set.units,
                 };
                 Self::new(set.id, set.name, Block::Materials(Box::new(block)))
+            }
+            ProjectNode::CrossSections(set) => {
+                let mut model = LinkedModel::default();
+                model.fe.cross_sections = set.cross_sections;
+                model.fe.exposed = set.exposed;
+                let block = CollectionBlock {
+                    model,
+                    units: set.units,
+                };
+                Self::new(set.id, set.name, Block::CrossSections(Box::new(block)))
             }
             ProjectNode::Mesh(block) => {
                 let block = *block;
@@ -1097,6 +1122,14 @@ impl Node {
                 position,
                 units: m.units,
                 materials: m.model.fe.materials.clone(),
+                exposed: m.model.fe.exposed.clone(),
+            }),
+            Block::CrossSections(m) => ProjectNode::CrossSections(file::CrossSectionSet {
+                id,
+                name,
+                position,
+                units: m.units,
+                cross_sections: m.model.fe.cross_sections.clone(),
                 exposed: m.model.fe.exposed.clone(),
             }),
             Block::Mesh(m) => ProjectNode::Mesh(Box::new(file::MeshBlock {
@@ -1228,7 +1261,15 @@ impl Node {
             Block::Materials(m) => {
                 let mut model = LinkedModel::default();
                 model.fe.materials = m.model.fe.materials.clone();
-                Block::Materials(Box::new(MaterialsBlock {
+                Block::Materials(Box::new(CollectionBlock {
+                    model,
+                    units: m.units,
+                }))
+            }
+            Block::CrossSections(m) => {
+                let mut model = LinkedModel::default();
+                model.fe.cross_sections = m.model.fe.cross_sections.clone();
+                Block::CrossSections(Box::new(CollectionBlock {
                     model,
                     units: m.units,
                 }))
@@ -1337,7 +1378,7 @@ impl Node {
                 }),
                 _ => None,
             },
-            Block::Materials(m) => Some(m.model.data()),
+            Block::Materials(m) | Block::CrossSections(m) => Some(m.model.data()),
             Block::Mesh(m) => Some(m.model.data()),
             Block::RefineMesh(r) => Some(r.model.data()),
             Block::CadOperation(c) => c.link_data(),
@@ -1365,7 +1406,7 @@ impl Node {
                     mesh_inputs: &mut data.mesh_inputs,
                 })
             }
-            Block::Materials(m) => Some(m.model.data_mut()),
+            Block::Materials(m) | Block::CrossSections(m) => Some(m.model.data_mut()),
             Block::Mesh(m) => Some(m.model.data_mut()),
             Block::MeshExport(e) => Some(e.model.data_mut()),
             _ => None,
@@ -1376,7 +1417,9 @@ impl Node {
     /// block; `None` while the window of an analysis loads it.
     fn exposing_fe(&self) -> Option<&plx_model::FeModel> {
         match self.kind() {
-            Kind::Analysis | Kind::Materials => self.link_data().map(|d| d.fe),
+            Kind::Analysis | Kind::Materials | Kind::CrossSections => {
+                self.link_data().map(|d| d.fe)
+            }
             _ => None,
         }
     }
@@ -1388,7 +1431,7 @@ impl Node {
                 (None, Some(data)) => Some(&mut data.model),
                 _ => None,
             },
-            Block::Materials(m) => Some(&mut m.model.fe),
+            Block::Materials(m) | Block::CrossSections(m) => Some(&mut m.model.fe),
             _ => None,
         }
     }
@@ -1555,6 +1598,7 @@ enum Action {
     New(egui::Pos2),
     /// A new materials block at the position.
     AddMaterials(egui::Pos2),
+    AddCrossSections(egui::Pos2),
     /// A new mesh block meshing the primitive at the position.
     AddMesh(egui::Pos2, MeshPrimitive),
     /// A new refine mesh block at the position.
@@ -1941,17 +1985,26 @@ impl ProjectApp {
 
     /// Adds an empty materials block; returns its id.
     fn add_materials(&mut self, position: egui::Pos2) -> u64 {
+        self.add_collection(position, Collection::Materials)
+    }
+
+    /// Adds an empty materials or cross-sections block; returns its id.
+    fn add_collection(&mut self, position: egui::Pos2, collection: Collection) -> u64 {
         let id = self.next_id();
-        let name = self.unique_name("Materials");
-        let block = MaterialsBlock {
+        let name = self.unique_name(collection.title());
+        let block = Box::new(CollectionBlock {
             model: LinkedModel::default(),
             units: self.settings.new_model.units,
+        });
+        let block = match collection {
+            Collection::Materials => Block::Materials(block),
+            Collection::CrossSections => Block::CrossSections(block),
         };
-        let block = Block::Materials(Box::new(block));
         self.nodes.push(Node::new(id, name.clone(), block));
         self.graph.insert_node(position, id);
         self.output.push(format!(
-            "{name} created: double-click it to add materials, then drag them to analyses."
+            "{name} created: double-click it to add {}, then drag them to analyses.",
+            collection.title().to_lowercase()
         ));
         id
     }
@@ -2649,7 +2702,7 @@ impl ProjectApp {
             };
             print.add(&at.to_le_bytes());
             match &node.block {
-                Block::Analysis(_) | Block::Materials(_) => {
+                Block::Analysis(_) | Block::Materials(_) | Block::CrossSections(_) => {
                     let data = node.link_data()?;
                     // A mesh the study makes anew counts by the block that makes it.
                     let remeshed = (self.links.iter()).any(|l| {
@@ -2658,7 +2711,7 @@ impl ProjectApp {
                             && (l.item.first())
                                 .is_some_and(|c| c == links::MESH || c == links::GEOMETRY)
                     });
-                    let mesh = if node.kind() == Kind::Materials {
+                    let mesh = if node.collection().is_some() {
                         StudyMesh::None
                     } else if remeshed {
                         StudyMesh::Remeshed
@@ -3893,18 +3946,19 @@ impl ProjectApp {
         }
     }
 
-    /// Opens the editor of a materials block, with the materials of the analyses to import.
-    fn edit_materials(&mut self, id: u64) {
-        let analyses = (self.nodes.iter())
-            .filter(|n| n.kind() == Kind::Analysis)
-            .filter_map(|n| Some((n.name.clone(), n.link_data()?.fe.materials.clone())))
-            .collect();
+    /// Opens the editor of a materials or cross-sections block, with the items of the
+    /// analyses to import.
+    fn edit_collection(&mut self, id: u64) {
         let Some(node) = self.nodes.iter().find(|n| n.id == id) else {
             return;
         };
-        let Some(block) = node.as_materials() else {
+        let (Some(collection), Some(block)) = (node.collection(), node.as_collection()) else {
             return;
         };
+        let analyses = (self.nodes.iter())
+            .filter(|n| n.kind() == Kind::Analysis)
+            .filter_map(|n| Some((n.name.clone(), collection.copy(n.link_data()?.fe))))
+            .collect();
         let linked = (self.links.iter())
             .filter(|l| l.target == id)
             .flat_map(|l| links::filled_paths(l, &self.name_of(l.source)))
@@ -3912,6 +3966,7 @@ impl ProjectApp {
         self.material_set = Some(MaterialSetEditor::new(
             id,
             &node.name,
+            collection,
             &block.model.fe,
             block.units,
             analyses,
@@ -3927,13 +3982,17 @@ impl ProjectApp {
         match editor.show(ctx) {
             MaterialSetResult::Open => {}
             MaterialSetResult::Cancel => self.material_set = None,
-            MaterialSetResult::Ok(materials, exposed, units) => {
+            MaterialSetResult::Ok(edited) => {
                 self.checkpoint(&[]);
                 self.material_set = None;
-                if let Some(block) = self.node(id).and_then(Node::as_materials_mut) {
-                    block.model.fe.materials = materials;
-                    block.model.fe.exposed = exposed;
-                    block.units = units;
+                let node = self.node(id);
+                let collection = node.as_ref().and_then(|n| n.collection());
+                if let (Some(block), Some(collection)) =
+                    (node.and_then(Node::as_collection_mut), collection)
+                {
+                    collection.take(&mut block.model.fe, &edited);
+                    block.model.fe.exposed = edited.exposed;
+                    block.units = edited.properties.units;
                 }
 
                 // The analyses that link them take them now.
@@ -3952,10 +4011,10 @@ impl ProjectApp {
     fn open_window(&mut self, ctx: &egui::Context, id: u64, view: Option<Show>) {
         match self.nodes.iter().find(|n| n.id == id).map(Node::kind) {
             Some(Kind::Analysis) => {}
-            Some(Kind::Materials) => {
+            Some(Kind::Materials | Kind::CrossSections) => {
                 // Asked for from an analysis window: the editor is in the project window.
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
-                return self.edit_materials(id);
+                return self.edit_collection(id);
             }
             Some(Kind::Mesh) => {
                 ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus);
@@ -5179,9 +5238,10 @@ impl ProjectApp {
             .map(|n| {
                 let fe = n.link_data().map(|d| d.fe);
                 let rows = match (n.kind(), &n.status()) {
-                    (Kind::Materials, _) => fe
-                        .map(|fe| {
-                            let mut rows = material_rows(fe, &n.expanded);
+                    (Kind::Materials | Kind::CrossSections, _) => fe
+                        .zip(n.collection())
+                        .map(|(fe, collection)| {
+                            let mut rows = collection_rows(collection, fe, &n.expanded);
                             let incoming = incoming.get(&n.id).map_or(&[][..], Vec::as_slice);
                             rows.extend(exposed_rows(fe, &n.expanded, incoming));
                             rows
@@ -6665,6 +6725,7 @@ impl ProjectApp {
                 .map(|l| l.source)
                 .collect(),
             Action::AddMaterials(_)
+            | Action::AddCrossSections(_)
             | Action::AddMesh(..)
             | Action::AddRefineMesh(_)
             | Action::SetRefinement(..)
@@ -6709,6 +6770,9 @@ impl ProjectApp {
             Action::New(pos) => self.ask_new_analysis(pos),
             Action::AddMaterials(pos) => {
                 self.add_materials(pos);
+            }
+            Action::AddCrossSections(pos) => {
+                self.add_collection(pos, Collection::CrossSections);
             }
             Action::AddMesh(pos, primitive) => {
                 self.add_mesh(pos, primitive);
@@ -7016,6 +7080,7 @@ impl ProjectApp {
         let what = match kind {
             Kind::Analysis => "with its model and results",
             Kind::Materials => "with its materials",
+            Kind::CrossSections => "with its cross-sections",
             Kind::Mesh | Kind::RefineMesh => "with its mesh",
             Kind::CadOperation => "with the geometry it made",
             Kind::Parameters => "with its parameters",
@@ -7977,39 +8042,45 @@ fn block_rows(
     rows
 }
 
-/// The rows of a materials block: all materials, then each of them while that row is open,
-/// to link to analyses.
-fn material_rows(fe: &plx_model::FeModel, expanded: &BTreeSet<Vec<String>>) -> Vec<Row> {
-    let path = material_set_path();
+/// The rows of a materials or cross-sections block: all items, then each of them while that
+/// row is open, to link to analyses.
+fn collection_rows(
+    collection: Collection,
+    fe: &plx_model::FeModel,
+    expanded: &BTreeSet<Vec<String>>,
+) -> Vec<Row> {
+    let path = collection_path(collection);
     let open = expanded.contains(&path);
+    let names = collection.names(fe);
+    let title = collection.title();
+    let icon = category_icon(title);
+    let noun = title.to_lowercase();
     let mut rows = vec![Row {
-        text: format!("Materials ({})", fe.materials.len()),
+        text: format!("{title} ({})", names.len()),
         depth: 0,
-        icon: NodeIcon::Materials,
+        icon,
         state: None,
-        expander: (!fe.materials.is_empty()).then_some(open),
+        expander: (!names.is_empty()).then_some(open),
         input: false,
-        output: !fe.materials.is_empty(),
+        output: !names.is_empty(),
         linked_from: None,
         collection: false,
         partial: false,
         widget: None,
-        tip: "All materials: drag them to the Materials row of an analysis, which then takes \
-              each of them, also those added here later"
-            .into(),
+        tip: format!(
+            "All {noun}: drag them to the {title} row of an analysis, which then takes each \
+             of them, also those added here later"
+        ),
         path: path.clone(),
     }];
-    for material in fe.materials.iter().filter(|_| open) {
+    for name in names.into_iter().filter(|_| open) {
         let mut path = path.clone();
-        path.push(material.name.clone());
+        path.push(name.to_owned());
         rows.push(Row {
-            tip: format!(
-                "{}: drag it to the Materials row of an analysis to link it",
-                material.name
-            ),
-            text: material.name.clone(),
+            tip: format!("{name}: drag it to the {title} row of an analysis to link it"),
+            text: name.to_owned(),
             depth: 1,
-            icon: NodeIcon::Materials,
+            icon,
             state: None,
             expander: None,
             input: false,
@@ -9164,6 +9235,7 @@ fn campbell_rows(node: &Node, incoming: &[(Vec<String>, String)], state: CellSta
 enum BlockKind {
     Analysis,
     Materials,
+    CrossSections,
     Mesh(MeshPrimitive),
     RefineMesh,
     CadOperation,
@@ -9182,6 +9254,7 @@ fn block_kinds() -> Vec<BlockKind> {
     vec![
         BlockKind::Analysis,
         BlockKind::Materials,
+        BlockKind::CrossSections,
         BlockKind::Mesh(MeshPrimitive::default_box()),
         BlockKind::Mesh(MeshPrimitive::default_rectangle()),
         BlockKind::RefineMesh,
@@ -9212,6 +9285,12 @@ impl BlockKind {
                 "Materials",
                 "library elastic density",
                 MATERIALS_TIP,
+            ),
+            Self::CrossSections => (
+                "Cross-Sections",
+                "Cross-Sections",
+                "beam profile section rectangle circle pipe box tube area moment of inertia",
+                CROSS_SECTIONS_TIP,
             ),
             Self::Mesh(primitive) => {
                 let keywords = match primitive {
@@ -9322,6 +9401,7 @@ impl BlockKind {
         match self {
             Self::Analysis => "New Analysis …",
             Self::Materials => "Add Materials",
+            Self::CrossSections => "Add Cross-Sections",
             Self::Mesh(primitive) => primitive.label(),
             Self::RefineMesh => "Refine Mesh",
             Self::CadOperation => "Add CAD Operation",
@@ -9342,6 +9422,7 @@ impl BlockKind {
         match self {
             Self::Analysis => Action::New(pos),
             Self::Materials => Action::AddMaterials(pos),
+            Self::CrossSections => Action::AddCrossSections(pos),
             Self::Mesh(primitive) => Action::AddMesh(pos, primitive.clone()),
             Self::RefineMesh => Action::AddRefineMesh(pos),
             Self::CadOperation => Action::AddCadOperation(pos),
@@ -9406,7 +9487,16 @@ fn mesh_tip(primitive: &MeshPrimitive) -> &'static str {
 
 /// The row of all materials of a materials block, open when the block is added.
 fn material_set_path() -> Vec<String> {
-    vec![links::SETUP.to_owned(), "Materials".to_owned()]
+    collection_path(Collection::Materials)
+}
+
+fn cross_section_set_path() -> Vec<String> {
+    collection_path(Collection::CrossSections)
+}
+
+/// The row of all items of a collection block, as the category of an analysis' setup.
+fn collection_path(collection: Collection) -> Vec<String> {
+    vec![links::SETUP.to_owned(), collection.title().to_owned()]
 }
 
 /// "materials block" as "Materials Block", for window titles.
@@ -9495,7 +9585,7 @@ fn wire_color(path: &[String]) -> egui::Color32 {
 /// for the default one.
 fn header_fill(kind: Kind) -> Option<egui::Color32> {
     Some(match kind {
-        Kind::Materials => crate::style::materials_header(),
+        Kind::Materials | Kind::CrossSections => crate::style::materials_header(),
         Kind::Mesh | Kind::RefineMesh | Kind::File => crate::style::mesh_header(),
         Kind::Parameters | Kind::Math | Kind::Switch => crate::style::parameters_header(),
         Kind::Measure => crate::style::measure_header(),
@@ -9988,6 +10078,11 @@ impl SnarlViewer<u64> for Viewer {
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Materials, ink);
                 icon.on_hover_text("Materials for analyses to link");
             }
+            Kind::CrossSections => {
+                let ink = ui.visuals().text_color();
+                node_icons::paint(ui.painter(), rect.min, NodeIcon::CrossSections, ink);
+                icon.on_hover_text("Beam cross-sections for analyses to link");
+            }
             Kind::Parameters => {
                 let ink = ui.visuals().text_color();
                 node_icons::paint(ui.painter(), rect.min, NodeIcon::Setup, ink);
@@ -10075,6 +10170,7 @@ impl SnarlViewer<u64> for Viewer {
         let tip = match kind {
             Kind::Analysis => "Double-click opens the analysis in its own window.",
             Kind::Materials => "Double-click edits the materials.",
+            Kind::CrossSections => "Double-click edits the cross-sections.",
             Kind::Mesh => "Double-click edits the size and division of the mesh.",
             Kind::RefineMesh => "Its factor makes the mesh finer or coarser.",
             Kind::CadOperation => "Double-click picks the edges and shows the result.",
@@ -11078,6 +11174,11 @@ const STUDY_TIP: &str = "Adds a parameter study: a table of design points, each 
 const MATERIALS_TIP: &str = "Adds a block of materials kept in the project: analyses link \
      them one by one or all at once, so that they are defined in one place.";
 
+/// Tooltip of Add Cross-Sections.
+const CROSS_SECTIONS_TIP: &str = "Adds a block of beam cross-sections kept in the project: \
+     analyses link them one by one or all at once, and their dimensions can be exposed as \
+     parameters, so that a parameter study varies the profile of every analysis that links it.";
+
 /// Tooltip of Update Project.
 const UNDO_TIP: &str = "Undoes the last change of the project: blocks added, deleted, renamed or \
                         moved, links, and what the blocks hold. Changes inside an analysis are \
@@ -11271,12 +11372,63 @@ mod tests {
         let mut target = plx_model::FeModel::default();
         links::apply_setup(&mut target, data.fe, &steel);
         assert_eq!(target.materials, set.materials);
-        let rows = material_rows(data.fe, &node.expanded);
+        let rows = collection_rows(Collection::Materials, data.fe, &node.expanded);
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.output && !r.input));
         assert_eq!(rows[1].path, steel);
         match node.written([5.0, 6.0]) {
             Some(ProjectNode::Materials(written)) => assert_eq!(written, set),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cross_sections_block_gives_its_profiles_with_their_exposed_dimensions() {
+        use plx_model::{BeamProfile, CrossSection, Field, ItemRef, ValuePath};
+        let set = file::CrossSectionSet {
+            id: 7,
+            name: "Cross-Sections".into(),
+            position: [1.0, 2.0],
+            units: plx_model::UnitSystem::MmTonSC,
+            cross_sections: vec![CrossSection {
+                name: "Girder".into(),
+                profile: BeamProfile::Rect { a: 0.02, b: 0.04 },
+            }],
+            exposed: Vec::new(),
+        };
+        let mut node = Node::read(ProjectNode::CrossSections(set.clone()));
+        assert_eq!(node.kind(), Kind::CrossSections);
+        assert!(node.status().is_none(), "a source is not solved");
+        // Its height is a parameter of the block, which a study sets.
+        let height = ValuePath::new(ItemRef::CrossSection("Girder".into()), Field::BeamB);
+        let fe = node.exposing_fe_mut().unwrap();
+        let key = fe.expose(height.clone());
+        assert!(fe.set_value(&height, 0.05));
+        assert!(node.exposing_fe().unwrap().exposed(key).is_some());
+        // Analyses link the profile like the materials of a materials block.
+        let data = node.link_data().unwrap();
+        let path = vec![
+            links::SETUP.to_owned(),
+            crate::tree::CROSS_SECTIONS.to_owned(),
+        ];
+        assert!(links::exists(data, &path));
+        let mut girder = path.clone();
+        girder.push("Girder".into());
+        let mut target = plx_model::FeModel::default();
+        links::apply_setup(&mut target, data.fe, &girder);
+        assert_eq!(
+            target.cross_sections[0].profile,
+            BeamProfile::Rect { a: 0.02, b: 0.05 }
+        );
+        let rows = collection_rows(Collection::CrossSections, data.fe, &node.expanded);
+        assert_eq!(rows.len(), 2, "open at first");
+        assert_eq!(rows[0].text, "Cross-Sections (1)");
+        assert_eq!(rows[1].path, girder);
+        match node.written([1.0, 2.0]) {
+            Some(ProjectNode::CrossSections(written)) => {
+                assert_eq!(written.exposed.len(), 1);
+                assert_eq!(written.cross_sections, target.cross_sections);
+            }
             other => panic!("{other:?}"),
         }
     }

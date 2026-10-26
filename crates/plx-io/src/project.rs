@@ -71,6 +71,8 @@ pub enum ProjectNode {
     Analysis(Box<ProjectAnalysis>),
     /// A collection of materials kept in the project, unlike the user's material library.
     Materials(MaterialSet),
+    /// A collection of beam cross-sections kept in the project.
+    CrossSections(CrossSectionSet),
     /// A mesh made from a few parameters, such as a box.
     Mesh(Box<MeshBlock>),
     /// The mesh linked to it, made again finer or coarser by a factor.
@@ -104,6 +106,7 @@ impl ProjectNode {
         match self {
             Self::Analysis(a) => a.id,
             Self::Materials(m) => m.id,
+            Self::CrossSections(c) => c.id,
             Self::Mesh(m) => m.id,
             Self::RefineMesh(r) => r.id,
             Self::CadOperation(c) => c.id,
@@ -123,6 +126,7 @@ impl ProjectNode {
         match self {
             Self::Analysis(a) => &a.name,
             Self::Materials(m) => &m.name,
+            Self::CrossSections(c) => &c.name,
             Self::Mesh(m) => &m.name,
             Self::RefineMesh(r) => &r.name,
             Self::CadOperation(c) => &c.name,
@@ -143,6 +147,7 @@ impl ProjectNode {
         match self {
             Self::Analysis(a) => a.position,
             Self::Materials(m) => m.position,
+            Self::CrossSections(c) => c.position,
             Self::Mesh(m) => m.position,
             Self::RefineMesh(r) => r.position,
             Self::CadOperation(c) => c.position,
@@ -414,6 +419,23 @@ pub struct MaterialSet {
     #[serde(default)]
     pub materials: Vec<plx_model::Material>,
     /// Fields of the materials exposed as parameters, which value links set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exposed: Vec<plx_model::Exposed>,
+}
+
+/// A block that holds beam cross-sections for analyses to link, item by item or all of them.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CrossSectionSet {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub position: [f32; 2],
+    /// The unit system its dimensions are shown in; they are stored in SI units.
+    #[serde(default)]
+    pub units: plx_model::UnitSystem,
+    #[serde(default)]
+    pub cross_sections: Vec<plx_model::CrossSection>,
+    /// Dimensions of the cross-sections exposed as parameters, which value links set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exposed: Vec<plx_model::Exposed>,
 }
@@ -1234,6 +1256,43 @@ mod tests {
             read_project(&path),
             Err(ProjectError::Older { format: 1, .. })
         ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn cross_section_blocks_read_back() {
+        let dir = std::env::temp_dir().join(format!("plx-cross-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cross.plx");
+        let set = CrossSectionSet {
+            id: 4,
+            name: "Cross-Sections".into(),
+            position: [10.0, 200.0],
+            units: plx_model::UnitSystem::MmTonSC,
+            cross_sections: vec![plx_model::CrossSection {
+                name: "Tube".into(),
+                profile: plx_model::BeamProfile::Pipe {
+                    radius: 0.02,
+                    thickness: 0.002,
+                },
+            }],
+            exposed: vec![plx_model::Exposed {
+                key: 1,
+                name: "Tube Radius".into(),
+                path: plx_model::ValuePath::new(
+                    plx_model::ItemRef::CrossSection("Tube".into()),
+                    plx_model::Field::Radius,
+                ),
+            }],
+        };
+        let mut saved = single(None, &FeMesh::default(), &FeModel::default(), None);
+        saved.nodes.push(ProjectNode::CrossSections(set.clone()));
+        save_project(&path, &saved).unwrap();
+        let project = read_project(&path).unwrap();
+        match &project.nodes[1] {
+            ProjectNode::CrossSections(read) => assert_eq!(read, &set),
+            other => panic!("{other:?}"),
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 

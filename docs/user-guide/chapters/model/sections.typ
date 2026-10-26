@@ -52,7 +52,8 @@ profile whose thicker wall at +1 moves the centroid in the 1-direction])
 Every dimension can be exposed as a parameter with the #ui("P") button next to it, so that a
 parameter study can vary the profile. Renaming a cross-section renames it in the beam sections
 that use it. In the project schematic the cross-sections are a category of the setup that other
-analyses can link to, like the materials.
+analyses can link to, like the materials, and a Cross-Sections block (@cross-sections-block)
+keeps them in one place for several analyses.
 
 === Beam section
 
