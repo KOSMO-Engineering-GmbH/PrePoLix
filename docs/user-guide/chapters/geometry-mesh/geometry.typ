@@ -46,7 +46,7 @@ parts*, for example a mesh written by #menu("File", "Export Deformed Mesh (.inp)
 
 #screenshot("mesh-import.png", [A deformed mesh imported next to the original part])
 
-=== Parts
+=== Parts <geometry-parts>
 
 Every solid becomes a part. Faces that do not belong to a solid become shell parts, edges that do
 not belong to a face become line parts (for beams and trusses). Faces that share an edge form one

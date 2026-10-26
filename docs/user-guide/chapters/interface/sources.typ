@@ -157,6 +157,24 @@ dialog asks for the file at once. Its rows depend on the file:
 - an input file: #ui("Mesh"), to link to the #ui("Mesh") row of analyses;
 - geometry: #ui("Geometry"), to link to the #ui("Geometry") row of analyses.
 
+==== Single parts of an assembly <file-block-parts>
+
+A STEP file often holds a whole assembly while an analysis needs only some of its parts. When
+the geometry has more than one part, the #ui("Geometry") row opens with its arrow, like the
+#ui("Setup") of an analysis, and lists the parts by their names in the file, each with a pin
+of its own. Linking the #ui("Geometry") row gives the whole file; linking a part gives only
+that part. Link several parts to the #ui("Geometry") row of the same analysis and it takes
+them together, the other parts left out. A part link replaces a link of the whole geometry
+and the other way round, and parts of another block replace those linked before.
+
+#screenshot("file-block-parts.png", [Two of the three parts of an assembly go to the analysis])
+
+The geometry without the other parts is made in the background, in the same way as
+#ui("Delete") of geometry parts (@geometry-parts): the parts keep their names, and the
+analysis meshes and sets up its parts as with any geometry it takes. When the file changes,
+the parts are taken again by their names; a part the file no longer has is reported in the
+output pane, and the analysis keeps the geometry it had.
+
 #screenshot("file-block.png", [The results of a CalculiX run made elsewhere drive a submodel])
 
 The #ui("File") row holds the path: type it, or double-click the block or use
