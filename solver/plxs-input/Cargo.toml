@@ -1,0 +1,17 @@
+[package]
+name = "plxs-input"
+description = "PrePoLix solver: CalculiX input file (.inp) reader into the IR"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+plxs-core.workspace = true
+
+[dev-dependencies]
+plx-io.workspace = true
+plx-mesh.workspace = true
+
+[lints]
+workspace = true

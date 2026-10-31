@@ -228,10 +228,31 @@ fn empty_regions_and_unknown_materials_are_errors() {
 
 /// Runs CalculiX on the input file, if it is installed; CI does not have it.
 fn run_ccx(name: &str, text: &str) -> Option<FrdImport> {
+    dump_fixture(name, text);
     let dir = ccx_dir(name)?;
     let frd = run_ccx_in(&dir, name, text);
     remove_ccx_dir(&dir);
     Some(frd)
+}
+
+/// Keeps the input file as a fixture of the solver corpus (`solver/fixtures`, see
+/// `scripts/solver_reference.sh`) when `PLXS_FIXTURE_DIR` names the directory to collect them
+/// in. Two tests must not share a name with different inputs.
+fn dump_fixture(name: &str, text: &str) {
+    let Some(dir) = std::env::var_os("PLXS_FIXTURE_DIR") else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let name = name.to_ascii_lowercase().replace(' ', "-");
+    let path = dir.join(format!("{name}.inp"));
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        assert_eq!(
+            existing, text,
+            "fixture {name} written twice with different inputs"
+        );
+    }
+    std::fs::write(path, text).unwrap();
 }
 
 /// A fresh directory for a CalculiX run, `None` without CalculiX.
@@ -4501,7 +4522,7 @@ fn a_rigid_remote_displacement_couples_beam_nodes_by_equations() {
     ] {
         assert!(text.contains(&expected), "{expected}\n{text}");
     }
-    if let Some(frd) = run_ccx("balken_starr", &text) {
+    if let Some(frd) = run_ccx("balken_remote_starr", &text) {
         let u2 = min_u2(&frd);
         assert!((u2 + 1.0).abs() < 1e-6, "{u2}");
     }

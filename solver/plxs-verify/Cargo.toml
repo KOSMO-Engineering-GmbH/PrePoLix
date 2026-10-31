@@ -1,0 +1,20 @@
+[package]
+name = "plxs-verify"
+description = "PrePoLix solver: verification harness against CalculiX golden files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+flate2.workspace = true
+plx-io.workspace = true
+plx-mesh.workspace = true
+plx-results.workspace = true
+plxs-core.workspace = true
+plxs-input.workspace = true
+serde.workspace = true
+toml = "1.1"
+
+[lints]
+workspace = true

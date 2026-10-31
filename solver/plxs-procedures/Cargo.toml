@@ -1,0 +1,12 @@
+[package]
+name = "plxs-procedures"
+description = "PrePoLix solver: step procedures (static, dynamic, frequency, heat, ...)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,7 @@
+name = "balken_starr"
+area = "structural"
+class = "A"
+stage = "M2"
+features = ["*HEADING", "*NODE", "*ELEMENT", "B32", "*NSET", "*ELSET", "*MATERIAL", "*ELASTIC", "*BEAM SECTION", "*EQUATION", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*END STEP"]
+source = "plx-io writer test"
+reference = "ccx 2.21"

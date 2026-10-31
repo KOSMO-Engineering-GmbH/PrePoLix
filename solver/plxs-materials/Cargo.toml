@@ -1,0 +1,12 @@
+[package]
+name = "plxs-materials"
+description = "PrePoLix solver: material laws and their state variables"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

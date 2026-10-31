@@ -1,0 +1,7 @@
+name = "waermedehnung-entkoppelt"
+area = "heat"
+class = "A"
+stage = "M2"
+features = ["*HEADING", "*NODE", "*ELEMENT", "C3D8", "*NSET", "*ELSET", "*SURFACE", "*MATERIAL", "*DENSITY", "*ELASTIC", "*EXPANSION", "*CONDUCTIVITY", "*SPECIFIC HEAT", "*SOLID SECTION", "*INITIAL CONDITIONS", "*STEP", "*UNCOUPLED TEMPERATURE-DISPLACEMENT", "*BOUNDARY", "*CLOAD", "*DLOAD", "*CFLUX", "*NODE FILE", "*EL FILE", "*END STEP"]
+source = "plx-io writer test"
+reference = "ccx 2.21"

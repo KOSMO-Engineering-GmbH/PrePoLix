@@ -1,0 +1,7 @@
+name = "film-2d"
+area = "heat"
+class = "A"
+stage = "M2"
+features = ["*HEADING", "*NODE", "*ELEMENT", "CPS8", "*NSET", "*ELSET", "*SURFACE", "*MATERIAL", "*ELASTIC", "*CONDUCTIVITY", "*SOLID SECTION", "*STEP", "*HEAT TRANSFER", "*BOUNDARY", "*CFLUX", "*FILM", "*NODE FILE", "*EL FILE", "*END STEP"]
+source = "plx-io writer test"
+reference = "ccx 2.21"
