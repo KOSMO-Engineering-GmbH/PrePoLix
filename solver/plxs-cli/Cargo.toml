@@ -1,0 +1,21 @@
+[package]
+name = "plxs-cli"
+description = "PrePoLix solver: command line plxs, a drop-in replacement for ccx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "plxs"
+path = "src/main.rs"
+
+[dependencies]
+plxs-core.workspace = true
+plxs-input.workspace = true
+
+[dev-dependencies]
+plxs-verify.workspace = true
+
+[lints]
+workspace = true

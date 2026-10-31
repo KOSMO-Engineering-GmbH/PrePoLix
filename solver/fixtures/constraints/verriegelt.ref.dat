@@ -1,0 +1,28 @@
+
+                        S T E P       1
+
+
+                                INCREMENT     1
+
+
+ forces (fx,fy,fz) for set INTERNAL_SELECTION-1_PRE_TENSION-1 and time  0.1000000E+01
+
+       109 -7.105427E-15  0.000000E+00  0.000000E+00
+
+ displacements (vx,vy,vz) for set INTERNAL_SELECTION-1_PRE_TENSION-1 and time  0.1000000E+01
+
+       109  4.673366E-03  0.000000E+00  0.000000E+00
+
+                        S T E P       2
+
+
+                                INCREMENT     1
+
+
+ forces (fx,fy,fz) for set INTERNAL_SELECTION-1_PRE_TENSION-1 and time  0.2000000E+01
+
+       109  8.526513E-14  0.000000E+00  0.000000E+00
+
+ displacements (vx,vy,vz) for set INTERNAL_SELECTION-1_PRE_TENSION-1 and time  0.2000000E+01
+
+       109  4.673366E-03  0.000000E+00  0.000000E+00

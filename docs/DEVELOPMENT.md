@@ -146,3 +146,18 @@ and MinGW's `windres`, into `prepolix.exe` itself.
 
 The lower crates know nothing about the UI and can be tested on their own (`cargo test`).
 The plan and architecture notes are in [PLANUNG_TECH_STACK.md](PLANUNG_TECH_STACK.md).
+
+## PrePoLix solver (plxs)
+
+`solver/` holds the own solver that is to replace CalculiX (concept in the project folder,
+`KONZEPT_EIGENER_SOLVER.md`): a set of crates with the prefix `plxs-` and the binary `plxs`,
+called like `ccx` (`plxs -i <job>`, `plxs -v`). The interfaces between the crates are in
+[docs/solver/SCHNITTSTELLEN.md](solver/SCHNITTSTELLEN.md), the verification corpus in
+[docs/solver/FIXTURES.md](solver/FIXTURES.md). Rules: no code from CalculiX (GPL-2.0-only),
+numerics from `faer` and `rayon` only, every solver PR comes with fixtures.
+
+```sh
+cargo test -p plxs-verify                                        # corpus self-check (CI)
+cargo run -p plxs-verify --bin plxs-fixtures -- run --solver target/debug/plxs
+scripts/solver_reference.sh                                      # golden files with ccx
+```

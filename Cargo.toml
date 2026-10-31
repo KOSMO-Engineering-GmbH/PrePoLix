@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "solver/plxs-*"]
 exclude = ["vendor/egui-snarl"]
 
 [workspace.package]
@@ -18,6 +18,25 @@ plx-results = { path = "crates/plx-results" }
 plx-mesher = { path = "crates/plx-mesher" }
 plx-job = { path = "crates/plx-job" }
 plx-render = { path = "crates/plx-render" }
+
+# The PrePoLix solver (solver/, prefix plxs-). Numerics come from one ecosystem only: faer for
+# dense and sparse linear algebra and rayon for parallelism; no second numerics crate beside them.
+plxs-core = { path = "solver/plxs-core" }
+plxs-input = { path = "solver/plxs-input" }
+plxs-verify = { path = "solver/plxs-verify" }
+plxs-cli = { path = "solver/plxs-cli" }
+plxs-linalg = { path = "solver/plxs-linalg" }
+plxs-elements = { path = "solver/plxs-elements" }
+plxs-materials = { path = "solver/plxs-materials" }
+plxs-constraints = { path = "solver/plxs-constraints" }
+plxs-contact = { path = "solver/plxs-contact" }
+plxs-assembly = { path = "solver/plxs-assembly" }
+plxs-procedures = { path = "solver/plxs-procedures" }
+plxs-output = { path = "solver/plxs-output" }
+plxs-session = { path = "solver/plxs-session" }
+faer = "0.24"
+rayon = "1.12"
+postcard = { version = "1.1", features = ["use-std"] }
 
 base64 = "0.22"
 bytemuck = { version = "1.25", features = ["derive"] }

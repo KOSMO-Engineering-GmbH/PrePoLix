@@ -1,0 +1,7 @@
+name = "feder-flaeche"
+area = "constraints"
+class = "A"
+stage = "M2"
+features = ["*HEADING", "*NODE", "*ELEMENT", "C3D8", "SPRING2", "*NSET", "*ELSET", "*MATERIAL", "*ELASTIC", "*SOLID SECTION", "*SPRING", "*EQUATION", "*STEP", "*STATIC", "*BOUNDARY", "*CLOAD", "*DLOAD", "*NODE FILE", "*EL FILE", "*END STEP"]
+source = "plx-io writer test"
+reference = "ccx 2.21"
