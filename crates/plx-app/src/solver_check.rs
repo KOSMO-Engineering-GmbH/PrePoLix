@@ -670,6 +670,28 @@ mod tests {
         assert!(solvers.contains(&EquationSolver::Spooles), "{solvers:?}");
     }
 
+    /// The self test with PrePoLix's own solver: `PLXS=target/debug/plxs cargo test` after
+    /// `cargo build -p plxs-cli` (skipped when the variable is not set).
+    #[test]
+    fn plxs_passes() {
+        let Ok(executable) = std::env::var("PLXS") else {
+            eprintln!("PLXS not set, test skipped");
+            return;
+        };
+        let solver = plx_job::Solver {
+            executable: executable.into(),
+            threads: 1,
+        };
+        let dir = std::env::temp_dir().join(format!("plx-selftest-plxs-{}", std::process::id()));
+        let report = run(&solver, &dir, &Default::default());
+        let _ = std::fs::remove_dir_all(&dir);
+        for result in &report.checks {
+            eprintln!("{}: {}", result.name, result.message);
+        }
+        assert_eq!(report.checks.len(), 5);
+        assert!(report.checks.iter().all(|r| r.passed), "{report:#?}");
+    }
+
     #[test]
     fn unknown_keywords_are_found() {
         if Command::new("ccx").arg("-v").output().is_err() {

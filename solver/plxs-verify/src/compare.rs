@@ -157,6 +157,12 @@ pub fn compare_frd(reference: &FrdImport, candidate: &FrdImport, class: Class) -
             continue;
         }
         for (rf, kf) in r.fields.iter().zip(&k.fields) {
+            // The stress error estimator is a CalculiX-internal heuristic (its numbers do
+            // not follow the manual's description); only its presence is compared, see
+            // docs/solver/SCHNITTSTELLEN.md.
+            if rf.name == "ERROR" {
+                continue;
+            }
             for rc in rf.components.iter().filter(|c| !c.derived) {
                 let Some(kc) = kf.component(&rc.name) else {
                     c.fail(format!("{label}: {} has no component {}", rf.name, rc.name));

@@ -13,6 +13,8 @@ path = "src/main.rs"
 [dependencies]
 plxs-core.workspace = true
 plxs-input.workspace = true
+plxs-session.workspace = true
+plxs-output.workspace = true
 
 [dev-dependencies]
 plxs-verify.workspace = true

@@ -256,6 +256,83 @@ This is Version <x>            (plxs -v; die Startzeile enthält das Wort Calcul
 
 stdout wird nach jeder Zeile geflusht. Exit-Code 0 nur nach `Job finished`.
 
+## Stand nach M1 (lineare Statik, Volumenelemente)
+
+Was M1 gebaut hat und wo es von den Signaturen oben abweicht (Entscheidungen des M1-Threads):
+
+- `plxs-linalg`: `Pattern` ist ein CSC-Muster der **oberen Dreieckshälfte** (faer erwartet CSC;
+  für eine symmetrische Matrix sind CSC und CSR der oberen Hälfte dieselben Daten).
+  `Pattern::from_blocks(n, blöcke)` baut es aus den DOF-Listen der Elemente, `SparseMatrix::add_block`
+  streut eine dichte Elementmatrix ein, `restrict(keep)` schneidet die freien DOFs heraus
+  (SPC-Behandlung in M1; `plxs-constraints` mit `T` kommt in M2). `LinearSolver` wie oben,
+  Implementierung `LdltSolver` (faer, supernodales LDLᵀ, AMD-Ordering, `inertia()` aus D);
+  `LuSolver`/`CgSolver`/`EigenSolver` folgen in M2/M3.
+- `plxs-elements`: statt des Traits `ElementFormulation` vorerst ein konkreter `SolidElement`
+  (`solid(kind)`) mit `stiffness`, `strains`, `internal_force`, `face_load`, `body_force`,
+  `volume`, `integration_point_coordinates`, `extrapolation()`; `mass` und `expansion` kommen
+  mit M2 (Eigenfrequenzen, Strukturelemente). Das `shape`-Modul hält Formfunktionen,
+  Flächen und Integrationsregeln aller sechs Familien.
+- `plxs-materials`: `LinearElastic::of(material, temperatur)` (Temperaturinterpolation der
+  IR-Tabelle), `isotropic_matrix`, `density`; der Trait `MaterialLaw` kommt mit der Plastizität.
+- `plxs-assembly`: `DofMap` (3 DOF je Knoten), `Spc::of_step`, `Reduction` (freie DOFs,
+  vorgeschriebene Werte), `ElementTable` (Formulierung, Materialindex, Dichte, IP-Layout),
+  `assemble_stiffness` (rayon, Batches von ~64 MB, sequentielles Einstreuen), `load_vector`
+  (CLOAD, DLOAD P/GRAV/CENTRIF, Amplituden).
+- `plxs-procedures`: `run_step` verteilt auf `StaticLinear` (feste Inkremente aus
+  `initial`/`period`, K und Faktorisierung einmal je Step, Reaktionen = K·u); `fields` und
+  `history` bauen die Felder der `.frd` und die Blöcke der `.dat` in CalculiX-Reihenfolge.
+- `plxs-output`: `write_frd(path, model, results, version)` schreibt ASCII (binär folgt),
+  `write_dat`, `write_sta`, `write_cvg`.
+- `plxs-session`: wie oben; `run_step` führt die Prozedur auf dem Pool in einem Scoped Thread
+  aus und reicht `ProgressEvent`s über einen Kanal an das (nicht `Send`-pflichtige) `progress`.
+- Abnahmetest: `solver/plxs-cli/tests/static_corpus.rs` löst alle `static/*`-Fixtures mit dem
+  gebauten `plxs` und vergleicht mit den Golden Files (läuft im CI ohne ccx). Der Selbsttest
+  der App läuft mit `PLXS=target/debug/plxs cargo test -p plx-app plxs_passes`.
+
+### Was von CalculiX nur durch Beobachtung bekannt ist
+
+Kein CalculiX-Quelltext wurde gelesen. Die folgenden Konventionen wurden aus ccx-Ausgaben
+(Einzelelement-Orakel mit zufälligen Lastfällen, `scripts/`-freie Skripte im Thread) abgeleitet
+und sind in `plxs-elements/src/solid.rs` bzw. `plxs-procedures/src/fields.rs` dokumentiert:
+
+- **Knotenextrapolation** (`extrapolation_matrix`): C3D8/C3D20R mit den Tabellenwerten
+  2.549/−0.683/0.183/−0.04904 (Ecken) und 0.933/−0.25/0.06698 (Mittelknoten), d. h. trilineare
+  Lagrange-Werte auf ~4 Stellen gerundet; C3D20 (27 Punkte) die Least-Squares-Anpassung der
+  Serendipity-Formfunktionen, auf 5 Dezimalen gerundet (die triquadratische Lagrange-Lösung
+  weicht bei verzerrten Elementen um Prozente ab); Tetraeder exakt linear; C3D15 linear im
+  Dreieck × Least-Squares-Gerade durch die drei ζ-Ebenen; **C3D6**: Gewichte 1.1455/−0.1455,
+  wobei ccx den bevorzugten Punkt nach der Parität der lokalen Knotennummer wählt statt nach
+  der ζ-Lage des Knotens (vermutlich ein ccx-Fehler; wird nachgebildet, damit Klasse A hält).
+- **FORC** in der `.frd` ist K·u an allen Knoten (innere Kräfte), nicht nur die Reaktionen.
+- **Knotenspannungen** sind der ungewichtete Mittelwert der je Element extrapolierten Werte.
+- **C3D8R**: ccx = Uniform-Strain-Element (mittlere B-Matrix, exaktes Volumen) plus
+  Flanagan-Belytschko-Hourglass-Steifigkeit mit `ε = 0.004·E·V·Σ_j b_j·b_j` je Mode (unabhängig
+  von ν; für Quader auf 1e-6 bestätigt, Fixture `elementtyp-c3d8r` grün). Bei verzerrten
+  Elementen nutzt ccx leicht andere Hourglass-Vektoren (~0,1 % der Steifigkeit, nicht
+  identifiziert); plxs nimmt die orthogonalisierten γ-Vektoren nach Flanagan-Belytschko.
+- **ERROR (STR(%))**: ccx schreibt das Feld immer, wenn `S` angefordert ist und `NOE` fehlt.
+  Der Wert ist je Element konstant und an den Knoten das Maximum der Nachbarelemente, folgt
+  aber **nicht** der Handbuchbeschreibung (Spannweite der ersten Hauptspannung an den
+  Integrationspunkten relativ zu ihrem Betragsmaximum); keine der getesteten Formeln
+  (Hauptspannungen, von Mises, Komponenten, Spannweite/Standardabweichung, IP- oder
+  Knotenwerte) reproduziert die Zahlen. plxs schreibt die Handbuchformel; `plxs-verify`
+  vergleicht beim Feld `ERROR` nur die Präsenz. Die App zeigt das Feld nur an.
+
+### Benchmark (M1-Abnahme)
+
+Block 38×38×38 C3D8 (59 319 Knoten, 177 957 DOF, 173 394 Gleichungen), Fuß fest, Druck
+oben, 4 Threads, im Cloud-Container (4 Kerne; ccx 2.21 aus Debian mit SPOOLES, kein PaStiX):
+
+| Löser | Wand-Zeit | davon Faktorisierung |
+|---|---|---|
+| ccx 2.21, SPOOLES, 4 Threads | 91 s | – |
+| plxs 0.3.15, faer LDLᵀ (AMD), 4 Threads | 62 s | 59 s (Assemblierung 0,8 s, Lösen 0,5 s) |
+
+Verschiebungen stimmen auf 2e-6 überein. Die Faktorisierung dominiert: AMD erzeugt für den
+3D-Block 444 Mio. Einträge in L (natürliche Ordnung 864 Mio.); ein Nested-Dissection-Ordering
+(Minimum-Fill für 3D-Gitter typisch 3–5× weniger) ist der Hebel für M4, nicht die
+Assemblierung. Die Messlatte des Konzepts (ccx/PaStiX 8,7 s) stammt von anderer Hardware.
+
 ## Was M1 zu liefern hat (Abnahme)
 
 - `solver_check::run` aus `plx-app` besteht mit `plxs` als Executable (Kragbalken mit Kraft

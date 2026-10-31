@@ -3496,6 +3496,8 @@ version = "0.3.15"
 dependencies = [
  "plxs-core",
  "plxs-input",
+ "plxs-output",
+ "plxs-session",
  "plxs-verify",
 ]
 
@@ -3550,14 +3552,33 @@ dependencies = [
 [[package]]
 name = "plxs-output"
 version = "0.3.15"
+dependencies = [
+ "plxs-core",
+]
 
 [[package]]
 name = "plxs-procedures"
 version = "0.3.15"
+dependencies = [
+ "plxs-assembly",
+ "plxs-core",
+ "plxs-elements",
+ "plxs-linalg",
+ "plxs-output",
+ "rayon",
+]
 
 [[package]]
 name = "plxs-session"
 version = "0.3.15"
+dependencies = [
+ "plxs-assembly",
+ "plxs-core",
+ "plxs-linalg",
+ "plxs-output",
+ "plxs-procedures",
+ "rayon",
+]
 
 [[package]]
 name = "plxs-verify"
