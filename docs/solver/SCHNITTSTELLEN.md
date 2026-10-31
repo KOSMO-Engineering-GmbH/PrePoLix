@@ -383,6 +383,64 @@ Offen für andere Threads:
 Abnahme: `solver/plxs-cli/tests/loads_corpus.rs` (alle `loads/*`-Fixtures, läuft im CI ohne
 ccx), dazu die Übernahmetests in `plxs-input/src/tests.rs`.
 
+## Stand nach M2 T6 (Constraints und MPCs)
+
+`plxs-constraints` ist gefüllt; die Signatur oben (`ConstraintSet::build`) wurde aufgeteilt:
+
+- `ModelConstraints::new(&mut Model)` bereitet einmal je Modell vor (in `Session::new`, vor der
+  Elementtabelle): `*TIE` projiziert die Slave-Knoten auf die nächste Master-Fläche
+  (Gauß-Newton auf den Flächenkoordinaten, Gitter-Suche) und verschiebt sie bei `ADJUST`
+  (Default) auf die Fläche, wie ccx auch in der `.frd`; `*RIGID BODY` wird linearisiert
+  (`u_i = u_ref + θ × (x_i − x_ref)`, θ = Verschiebungen des ROT NODE), `*EQUATION` übernommen,
+  `*TRANSFORM` (R und C) als Rotation je Knoten. Alles wird zu linearen Bedingungen auf den
+  **primären DOFs** `knoten * 3 + d` (an transformierten Knoten die lokalen Richtungen, wie
+  ccx SPCs, Equation-Terme und CLOADs dort liest).
+- `ModelConstraints::step_set(knoten, aktiv, spc_dofs) -> ConstraintSet` je Step: SPCs zuerst,
+  dann Rigid Bodies, Equations, Ties. Ist der abhängige DOF schon gebunden, wird die
+  Bedingung in den unabhängigen DOFs umgeschrieben und auf einen anderen Term pivotiert
+  (bevorzugt derselbe Knoten; `ConstraintSet::notes`); widersprüchliche fallen mit Warnung
+  heraus (`warnings`), redundante still. Ausnahme `*TIE`: gebundene Slave-DOFs bleiben wie bei
+  ccx ungekoppelt. DOFs ohne Element und ohne Bedingung (z. B. reine Hilfsknoten) sind wie bei
+  ccx inaktiv.
+- `ConstraintSet`: `u = T v + g` mit `reduce(K) = TᵀKT` (neues Muster, `Pattern::from_columns`),
+  `reduce_rhs`, `particular(spc_werte) = g`, `expand(v, g)`. Die Prozeduren nutzen das statt
+  `Reduction` (die für SPC-only bleibt); M2-Threads mit eigenen Prozeduren (Eigenwerte,
+  Nichtlinear, Wärme) sollten ebenfalls `step_set` nehmen, sonst fehlen MPCs.
+- `plxs-assembly`: `ElementTable::discrete` (SPRING1/2, GAPUNI; `entries` hält nur noch
+  Kontinuumselemente, `entry_of` bildet Modell-Index auf Eintrag ab), `active_dofs()`,
+  `rotate_concentrated_loads` (CLOAD lokal an transformierten Knoten),
+  `Spc::apply_fixed` (`*BOUNDARY, FIXED` = Verschiebung am Ende des Vorsteps).
+- `StaticLinear`: Gaps werden mit einer Statusiteration gelöst (offen/geschlossen bis
+  stabil, ohne Reibung pfadunabhängig); ccx rechnet `GAPUNI` als nichtlineare Feder mit
+  Inkrementen, das Ergebnis am Step-Ende ist dasselbe (Klasse B, die sechs
+  `nonlinear/druck-nur-*` sind grün). Die Zugkraft σ∞ von `*GAP` wird ignoriert.
+
+Beobachtete ccx-Konventionen (Orakel, kein Quelltext):
+
+- Die `.frd` enthält nur Knoten, die zu Elementen gehören (Referenz-/Rotationsknoten von
+  Rigid Bodies und reine Equation-Hilfsknoten fehlen); `SPRING2` und `GAPUNI` stehen als
+  Linienelement Typ 11 im Netz, `SPRING1` nicht.
+- Die Knotenmittelung von S/E zählt `SPRING2`/`GAPUNI` als Elemente mit Spannung null mit
+  (an einem Knoten mit 2 Volumen- und 3 Federelementen ist der Wert 2/5 des Volumenmittels).
+- `*GAP`: Feld 5 ist unbenutzt, Feld 6 die Steifigkeit (Default ≈ 1e12), Feld 7 σ∞; der
+  Parser las vorher Feld 5 als Steifigkeit (= 0).
+- Rigid Bodies verhalten sich in linearer Statik wie die linearisierte Bedingung (Fixtures
+  auf 1e-6).
+
+`plxs-verify`: Abweichungen sind jetzt relativ zur Norm des ganzen Feldes (alle Komponenten;
+vorher je Komponente, wodurch reines Rundungsrauschen wie S12 bei einachsigem Zug als Fehler
+zählte), mindestens `ABSOLUTE_FLOOR = 1e-7`. Neues Fixture-Feld `undetermined` für
+Komponenten, die das Modell nicht bestimmt (Teil nur in z gehalten; ccx liefert dort
+beliebige Starrkörperwerte), mit Begründung in `note`.
+
+Abnahme: `solver/plxs-cli/tests/constraints_corpus.rs` (alle `constraints/*` plus
+`nonlinear/druck-nur-*`; ausgenommen mit Grund: vier CPS8-Fixtures → T4,
+`verteilte-temperatur` → T9/T10, `tet-schraeg`/`tet-vorspannung`: C3D10-Knotenspannungen
+überall 1,7e-5 neben ccx bei Verschiebungen und Kräften auf 1e-6 → Elementthema) und
+`held_dependent_dofs_are_repivoted` (Equations mit gehaltenem ersten Term ergeben dasselbe
+wie die vom Writer umgestellten). Gegencheck 30³-C3D8-Block mit Rigid Body und Moment:
+plxs 6,0 s, ccx 2.21 12,4 s (4 Threads), Verschiebungen auf 6,6e-6 gleich.
+
 ## Was M1 zu liefern hat (Abnahme)
 
 - `solver_check::run` aus `plx-app` besteht mit `plxs` als Executable (Kragbalken mit Kraft

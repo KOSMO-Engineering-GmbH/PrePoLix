@@ -10,12 +10,15 @@
 //!
 //! No CalculiX code was consulted.
 
+pub mod discrete;
 pub mod dofs;
 pub mod elements;
 pub mod loads;
+pub mod local_loads;
 pub mod stiffness;
 
 pub use dofs::{DofMap, Reduction, Spc};
 pub use elements::{ElementTable, IntegrationPointLayout};
 pub use loads::load_vector;
+pub use local_loads::rotate_concentrated_loads;
 pub use stiffness::{assemble_stiffness, build_pattern};
