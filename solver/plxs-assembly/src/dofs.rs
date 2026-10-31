@@ -121,6 +121,48 @@ impl Spc {
         }
     }
 
+    /// `*BOUNDARY, FIXED`: the DOFs keep the displacement they had at the end of the previous
+    /// step (`previous`, global components; at nodes with a local system the local
+    /// component, `rotation` gives the system).
+    pub fn apply_fixed(
+        &mut self,
+        model: &Model,
+        step: &Step,
+        dofs: &DofMap,
+        previous: &[f64],
+        rotation: &dyn Fn(u32) -> Option<[[f64; 3]; 3]>,
+    ) {
+        for boundary in step.boundaries.iter().filter(|b| b.fixed) {
+            for node in Self::nodes(model, boundary) {
+                let Some(index) = model.nodes.index(node) else {
+                    continue;
+                };
+                for d in boundary.first_dof..=boundary.last_dof {
+                    let Some(dof) = (1..=6)
+                        .contains(&d)
+                        .then(|| dofs.dof(index, d as usize - 1))
+                        .flatten()
+                    else {
+                        continue;
+                    };
+                    let k = d as usize - 1;
+                    let global = |c: usize| {
+                        dofs.dof(index, c)
+                            .and_then(|g| previous.get(g as usize).copied())
+                            .unwrap_or(0.0)
+                    };
+                    let value = match rotation(index) {
+                        Some(r) if k < 3 => (0..3).map(|c| r[c][k] * global(c)).sum(),
+                        _ => global(k),
+                    };
+                    if let Ok(pos) = self.dofs.binary_search(&dof) {
+                        self.values[pos] = value;
+                    }
+                }
+            }
+        }
+    }
+
     pub fn is_fixed(&self, dof: u32) -> bool {
         self.dofs.binary_search(&dof).is_ok()
     }

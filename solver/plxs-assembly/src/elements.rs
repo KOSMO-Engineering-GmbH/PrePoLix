@@ -14,6 +14,8 @@ use crate::DofMap;
 /// One element of the table.
 #[derive(Clone, Debug)]
 pub struct ElementEntry {
+    /// Dense index of the element in the model.
+    pub element: u32,
     /// Index into [`ElementTable::formulations`].
     pub formulation: u32,
     /// Index into [`ElementTable::materials`].
@@ -49,7 +51,12 @@ impl IntegrationPointLayout {
 
 /// The resolved elements of a model.
 pub struct ElementTable {
+    /// The continuum elements (springs and gaps are in [`ElementTable::discrete`]).
     pub entries: Vec<ElementEntry>,
+    /// For every model element (dense index) its entry, `u32::MAX` for discrete elements.
+    pub entry_of: Vec<u32>,
+    /// Springs and gaps.
+    pub discrete: Vec<crate::discrete::DiscreteElement>,
     pub formulations: Vec<SolidElement>,
     /// Elastic constants and matrix per (section, temperature) combination.
     pub materials: Vec<(LinearElastic, [[f64; 6]; 6])>,
@@ -69,7 +76,22 @@ impl ElementTable {
         let mut entries = Vec::with_capacity(model.elements.len());
         let mut offsets = Vec::with_capacity(model.elements.len() + 1);
         offsets.push(0u32);
-        for element in &model.elements {
+        let mut entry_of = Vec::with_capacity(model.elements.len());
+        let mut discrete = Vec::new();
+        for (index, element) in model.elements.iter().enumerate() {
+            if matches!(
+                element.kind.family(),
+                ElementFamily::Spring | ElementFamily::Gap
+            ) {
+                discrete.push(crate::discrete::DiscreteElement::new(
+                    model,
+                    index as u32,
+                    &Self::node_indices(model, element)?,
+                )?);
+                entry_of.push(u32::MAX);
+                continue;
+            }
+            entry_of.push(entries.len() as u32);
             if element.kind.family() != ElementFamily::Solid {
                 return Err(Error::Unsupported(format!(
                     "element type {} is not implemented yet (element {})",
@@ -125,6 +147,7 @@ impl ElementTable {
             let points = formulations[formulation as usize].integration_points() as u32;
             offsets.push(offsets.last().unwrap() + points);
             entries.push(ElementEntry {
+                element: index as u32,
                 formulation,
                 material,
                 nodes,
@@ -134,6 +157,8 @@ impl ElementTable {
         }
         Ok(Self {
             entries,
+            entry_of,
+            discrete,
             formulations,
             materials,
             dofs,
@@ -151,6 +176,25 @@ impl ElementTable {
                 })
             })
             .collect()
+    }
+
+    /// The user id of the element of an entry.
+    pub fn element_id(&self, model: &Model, entry: u32) -> u32 {
+        model.elements[self.entries[entry as usize].element as usize].id
+    }
+
+    /// Marks the DOFs that some element (continuum or discrete) uses.
+    pub fn active_dofs(&self) -> Vec<bool> {
+        let mut active = vec![false; self.dofs.len()];
+        for dof in self
+            .entries
+            .iter()
+            .flat_map(|e| &e.dofs)
+            .chain(self.discrete.iter().flat_map(|e| &e.dofs))
+        {
+            active[*dof as usize] = true;
+        }
+        active
     }
 
     pub fn formulation(&self, entry: &ElementEntry) -> &SolidElement {
