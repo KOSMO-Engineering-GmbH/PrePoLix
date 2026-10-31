@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+faer.workspace = true
+rayon.workspace = true
+plxs-core.workspace = true
 
 [lints]
 workspace = true

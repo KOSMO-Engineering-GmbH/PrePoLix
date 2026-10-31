@@ -118,34 +118,93 @@ fn run(args: Vec<String>) -> i32 {
     say("");
 
     let mut progress = |event: ProgressEvent| print_event(&event);
-    for (index, step) in analysis.steps.iter().enumerate() {
-        let number = index as u32 + 1;
-        plxs_core::Progress::event(&mut progress, ProgressEvent::Step { step: number });
-        match &step.procedure {
-            Procedure::NoAnalysis => {
-                say(" *NO ANALYSIS: the model was read and checked, nothing is computed.");
-            }
-            other => {
+    let job_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| job.clone());
+    let output = |ext: &str| job_dir.join(format!("{stem}.{ext}"));
+
+    // A model check only reads the input.
+    if analysis
+        .steps
+        .iter()
+        .all(|s| matches!(s.procedure, Procedure::NoAnalysis))
+    {
+        for (index, _) in analysis.steps.iter().enumerate() {
+            plxs_core::Progress::event(
+                &mut progress,
+                ProgressEvent::Step {
+                    step: index as u32 + 1,
+                },
+            );
+            say(" *NO ANALYSIS: the model was read and checked, nothing is computed.");
+        }
+        say("");
+        say(" Job finished");
+        say("");
+        return 0;
+    }
+
+    let options = plxs_session::SessionOptions {
+        threads,
+        work_dir: job_dir.clone(),
+    };
+    let mut session = match plxs_session::Session::new(analysis.model, options) {
+        Ok(s) => s,
+        Err(error) => {
+            report_error(&error);
+            return 1;
+        }
+    };
+    for step in &analysis.steps {
+        for variable in plxs_procedures_unsupported(step) {
+            say(&format!(
+                "*WARNING: output variable {variable} is not implemented yet and is left out"
+            ));
+        }
+        match session.run_step(step, &mut progress) {
+            Ok(plxs_session::StepOutcome::Converged) => {}
+            Ok(plxs_session::StepOutcome::Diverged { increment, message }) => {
                 say(&format!(
-                    "*ERROR: procedure not implemented yet: {} (step {})",
-                    other.keyword(),
-                    step.name
+                    "*ERROR: no convergence in increment {increment}: {message}"
                 ));
+                let _ = write_results(&session, &output);
+                return 1;
+            }
+            Ok(plxs_session::StepOutcome::Partial { .. }) => {}
+            Err(error) => {
+                report_error(&error);
                 return 1;
             }
         }
-        plxs_core::Progress::event(
-            &mut progress,
-            ProgressEvent::StepDone {
-                step: number,
-                converged: true,
-            },
-        );
+        say("");
+    }
+    if let Err(error) = write_results(&session, &output) {
+        report_error(&error);
+        return 1;
     }
     say("");
     say(" Job finished");
     say("");
     0
+}
+
+fn plxs_procedures_unsupported(step: &plxs_core::Step) -> Vec<String> {
+    plxs_session::unsupported_outputs(step)
+}
+
+/// Writes `.frd`, `.sta` and, when there is history output, `.dat`.
+fn write_results(
+    session: &plxs_session::Session,
+    output: &dyn Fn(&str) -> PathBuf,
+) -> Result<(), Error> {
+    plxs_output::write_frd(&output("frd"), session.model(), session.results(), VERSION)?;
+    plxs_output::write_sta(&output("sta"), session.sta_rows())?;
+    if !session.results().history.is_empty() {
+        plxs_output::write_dat(&output("dat"), session.results())?;
+    }
+    Ok(())
 }
 
 /// `<job>` or `<job>.inp`.

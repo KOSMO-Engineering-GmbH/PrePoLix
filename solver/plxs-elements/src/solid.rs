@@ -1,0 +1,1044 @@
+//! Three-dimensional continuum elements: C3D4, C3D10, C3D10T, C3D6, C3D15, C3D8, C3D8R,
+//! C3D8I, C3D20, C3D20R. Isoparametric displacement formulation with Gauss integration
+//! (Zienkiewicz & Taylor, chapters 5 and 8; Hughes, chapter 3); the incompatible modes of
+//! C3D8I after Wilson et al. with Taylor's modification (Taylor, Beresford & Wilson 1976),
+//! condensed at element level.
+//!
+//! Integration points as the CalculiX manual lists them: C3D8 and C3D20R 2×2×2, C3D20
+//! 3×3×3, C3D8R one point, C3D4 one point, C3D10 four points, C3D6 two points, C3D15 nine
+//! points. Strains and stresses are computed at these points; `extrapolation` maps them to
+//! the nodes.
+//!
+//! Vector conventions: nodal displacements `[u1x, u1y, u1z, u2x, ...]`; strain and stress
+//! as `[xx, yy, zz, xy, yz, zx]` with engineering shear strains (γ) in the element
+//! formulation.
+
+use plxs_core::ElementType;
+
+use crate::shape::{Family, IntegrationRule, face_rule, face_shape};
+
+/// How the element integrates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Formulation {
+    /// Full displacement formulation.
+    Standard,
+    /// One integration point (C3D8R).
+    Reduced,
+    /// Incompatible modes (C3D8I).
+    Incompatible,
+}
+
+#[derive(Clone, Debug)]
+pub struct SolidElement {
+    pub kind: ElementType,
+    pub family: Family,
+    pub rule: IntegrationRule,
+    pub formulation: Formulation,
+    /// `extrapolation[node * ips + ip]`: integration-point values to nodal values.
+    extrapolation: Vec<f64>,
+}
+
+/// The solid element of a type, `None` for types that are no solids.
+pub fn solid(kind: ElementType) -> Option<SolidElement> {
+    use ElementType::*;
+    let (family, rule, formulation) = match kind {
+        C3D8 => (Family::Hex8, IntegrationRule::hex(2), Formulation::Standard),
+        C3D8R => (
+            Family::Hex8,
+            IntegrationRule::hex_reduced(),
+            Formulation::Reduced,
+        ),
+        C3D8I => (
+            Family::Hex8,
+            IntegrationRule::hex(2),
+            Formulation::Incompatible,
+        ),
+        C3D20 => (
+            Family::Hex20,
+            IntegrationRule::hex(3),
+            Formulation::Standard,
+        ),
+        C3D20R => (
+            Family::Hex20,
+            IntegrationRule::hex(2),
+            Formulation::Standard,
+        ),
+        C3D4 => (Family::Tet4, IntegrationRule::tet1(), Formulation::Standard),
+        C3D10 | C3D10T => (
+            Family::Tet10,
+            IntegrationRule::tet4(),
+            Formulation::Standard,
+        ),
+        C3D6 => (
+            Family::Wedge6,
+            IntegrationRule::wedge2(),
+            Formulation::Standard,
+        ),
+        C3D15 => (
+            Family::Wedge15,
+            IntegrationRule::wedge9(),
+            Formulation::Standard,
+        ),
+        _ => return None,
+    };
+    let extrapolation = extrapolation_matrix(family, &rule);
+    Some(SolidElement {
+        kind,
+        family,
+        rule,
+        formulation,
+        extrapolation,
+    })
+}
+
+/// Matrix `nodes × ips` that extrapolates integration-point values to the nodes.
+///
+/// The schemes reproduce what CalculiX writes, inferred by fitting its nodal stresses of a
+/// single distorted element under many load cases against its integration-point stresses
+/// (black-box use; no CalculiX source was consulted):
+/// * 2×2×2 hexahedra: the trilinear Lagrange polynomial through the Gauss points, with the
+///   weights rounded to about four digits as CalculiX tabulates them.
+/// * 3×3×3 hexahedra: the least-squares fit of the element's own shape functions through
+///   the 27 points (for C3D20 the serendipity functions; the triquadratic Lagrange
+///   polynomial differs by percent on distorted elements), rounded to five decimals.
+/// * tetrahedra: the linear polynomial through the four points.
+/// * wedges: linear in the triangle; along the axis CalculiX's two-point weights (which
+///   alternate with the node number, see below) or the least-squares line through the
+///   three planes of the nine-point rule.
+/// * one-point rules: the value itself.
+fn extrapolation_matrix(family: Family, rule: &IntegrationRule) -> Vec<f64> {
+    let nodes = family.node_coordinates();
+    let ips = rule.len();
+    let mut m = vec![0.0; nodes.len() * ips];
+    if matches!(family, Family::Hex8 | Family::Hex20) && ips == 27 {
+        // CalculiX tabulates these weights to five decimals.
+        return least_squares_extrapolation(family, rule)
+            .into_iter()
+            .map(|w| (w * 1e5).round() / 1e5)
+            .collect();
+    }
+    for (a, node) in nodes.iter().enumerate() {
+        let row = &mut m[a * ips..(a + 1) * ips];
+        match (family, ips) {
+            (_, 1) => row[0] = 1.0,
+            (Family::Hex8 | Family::Hex20, 8) => {
+                // CalculiX's tables, indexed by the number of axes on which the node and
+                // the point lie on the same side (the trilinear Lagrange values rounded to
+                // about four digits).
+                const CORNER: [f64; 4] = [-0.04904, 0.183, -0.683, 2.549];
+                const MID: [f64; 3] = [0.06698, -0.25, 0.933];
+                let axes: Vec<usize> = (0..3).filter(|&k| node[k] != 0.0).collect();
+                for (g, p) in rule.points.iter().enumerate() {
+                    let same = axes.iter().filter(|&&k| node[k] * p[k] > 0.0).count();
+                    row[g] = if axes.len() == 3 {
+                        CORNER[same]
+                    } else {
+                        MID[same]
+                    };
+                }
+            }
+            (Family::Tet4 | Family::Tet10, 4) => {
+                let a = 0.585_410_196_624_968_5;
+                let b = 0.138_196_601_125_010_5;
+                let l: [f64; 3] = [0, 1, 2].map(|k| (node[k] - b) / (a - b));
+                row[0] = 1.0 - l[0] - l[1] - l[2];
+                row[1] = l[0];
+                row[2] = l[1];
+                row[3] = l[2];
+            }
+            (Family::Wedge6 | Family::Wedge15, 2) => {
+                // CalculiX's weights: 1.1455 and -0.1455 (points at ±√0.6), and the point
+                // they favour alternates with the local node number rather than following
+                // the node's axial position — reproduced here so the nodal values match.
+                let (near, far) = (1.1455, -0.1455);
+                let (w0, w1) = if a % 2 == 0 { (near, far) } else { (far, near) };
+                row[0] = w0;
+                row[1] = w1;
+            }
+            (Family::Wedge6 | Family::Wedge15, 9) => {
+                let a2: f64 = 0.6;
+                // Least-squares line through the planes at ζ = -√0.6, 0, √0.6.
+                let lz = |x: f64, g: f64| -> f64 {
+                    if g < 0.0 {
+                        1.0 / 3.0 - x / (2.0 * a2.sqrt())
+                    } else if g > 0.0 {
+                        1.0 / 3.0 + x / (2.0 * a2.sqrt())
+                    } else {
+                        1.0 / 3.0
+                    }
+                };
+                let l1 = 2.0 * (node[0] - 1.0 / 6.0);
+                let l2 = 2.0 * (node[1] - 1.0 / 6.0);
+                let tri = [1.0 - l1 - l2, l1, l2];
+                for (g, p) in rule.points.iter().enumerate() {
+                    row[g] = tri[g % 3] * lz(node[2], p[2]);
+                }
+            }
+            _ => unreachable!("no extrapolation for {family:?} with {ips} points"),
+        }
+    }
+    m
+}
+
+/// Nodal values `v` minimizing `Σ_ip (N(ξ_ip)·v − value_ip)²`: `(NᵀN)⁻¹Nᵀ`.
+fn least_squares_extrapolation(family: Family, rule: &IntegrationRule) -> Vec<f64> {
+    let n = family.node_count();
+    let ips = rule.len();
+    let mut shape = vec![0.0; ips * n];
+    let mut dn = vec![[0.0; 3]; n];
+    for (g, p) in rule.points.iter().enumerate() {
+        family.shape(*p, &mut shape[g * n..(g + 1) * n], &mut dn);
+    }
+    let mut ntn = vec![0.0; n * n];
+    for g in 0..ips {
+        let row = &shape[g * n..(g + 1) * n];
+        for a in 0..n {
+            for b in 0..n {
+                ntn[a * n + b] += row[a] * row[b];
+            }
+        }
+    }
+    // Solve (NᵀN) M = Nᵀ column by column; `solve_dense` takes `b` as `n` columns of length
+    // `m`, so pass Nᵀ as an `ips`-column matrix.
+    let mut nt = vec![0.0; n * ips];
+    for g in 0..ips {
+        for a in 0..n {
+            nt[a * ips + g] = shape[g * n + a];
+        }
+    }
+    solve_dense(&mut ntn, n, &nt, ips)
+}
+
+/// Jacobian, its determinant and the Cartesian shape function derivatives at a point.
+struct Point {
+    det: f64,
+    /// `dndx[i] = [dN_i/dx, dN_i/dy, dN_i/dz]`.
+    dndx: Vec<[f64; 3]>,
+    n: Vec<f64>,
+}
+
+fn jacobian(dn: &[[f64; 3]], coords: &[[f64; 3]]) -> [[f64; 3]; 3] {
+    let mut j = [[0.0; 3]; 3];
+    for (d, x) in dn.iter().zip(coords) {
+        for (r, row) in j.iter_mut().enumerate() {
+            for (c, v) in row.iter_mut().enumerate() {
+                *v += d[r] * x[c];
+            }
+        }
+    }
+    j
+}
+
+fn invert3(j: &[[f64; 3]; 3]) -> (f64, [[f64; 3]; 3]) {
+    let det = j[0][0] * (j[1][1] * j[2][2] - j[1][2] * j[2][1])
+        - j[0][1] * (j[1][0] * j[2][2] - j[1][2] * j[2][0])
+        + j[0][2] * (j[1][0] * j[2][1] - j[1][1] * j[2][0]);
+    let inv = [
+        [
+            (j[1][1] * j[2][2] - j[1][2] * j[2][1]) / det,
+            (j[0][2] * j[2][1] - j[0][1] * j[2][2]) / det,
+            (j[0][1] * j[1][2] - j[0][2] * j[1][1]) / det,
+        ],
+        [
+            (j[1][2] * j[2][0] - j[1][0] * j[2][2]) / det,
+            (j[0][0] * j[2][2] - j[0][2] * j[2][0]) / det,
+            (j[0][2] * j[1][0] - j[0][0] * j[1][2]) / det,
+        ],
+        [
+            (j[1][0] * j[2][1] - j[1][1] * j[2][0]) / det,
+            (j[0][1] * j[2][0] - j[0][0] * j[2][1]) / det,
+            (j[0][0] * j[1][1] - j[0][1] * j[1][0]) / det,
+        ],
+    ];
+    (det, inv)
+}
+
+impl SolidElement {
+    pub fn node_count(&self) -> usize {
+        self.family.node_count()
+    }
+
+    pub fn dof_count(&self) -> usize {
+        3 * self.node_count()
+    }
+
+    pub fn integration_points(&self) -> usize {
+        self.rule.len()
+    }
+
+    /// `extrapolation[node * ips + ip]`.
+    pub fn extrapolation(&self) -> &[f64] {
+        &self.extrapolation
+    }
+
+    fn point(&self, p: [f64; 3], coords: &[[f64; 3]]) -> Point {
+        let count = self.node_count();
+        let mut n = vec![0.0; count];
+        let mut dn = vec![[0.0; 3]; count];
+        self.family.shape(p, &mut n, &mut dn);
+        let j = jacobian(&dn, coords);
+        let (det, inv) = invert3(&j);
+        // dN/dξ_r = Σ_c J_rc dN/dx_c with J_rc = dx_c/dξ_r, so dN/dx_c = Σ_r inv[c][r] dN/dξ_r.
+        let dndx = dn
+            .iter()
+            .map(|d| {
+                let mut g = [0.0; 3];
+                for (c, gc) in g.iter_mut().enumerate() {
+                    *gc = d[0] * inv[c][0] + d[1] * inv[c][1] + d[2] * inv[c][2];
+                }
+                g
+            })
+            .collect();
+        Point { det, dndx, n }
+    }
+
+    /// Element volume.
+    pub fn volume(&self, coords: &[[f64; 3]]) -> f64 {
+        self.rule
+            .points
+            .iter()
+            .zip(&self.rule.weights)
+            .map(|(&p, &w)| self.point(p, coords).det * w)
+            .sum()
+    }
+
+    /// Fills the strain-displacement matrix `b` (6 × 3n, row-major) from Cartesian
+    /// derivatives.
+    fn fill_b(dndx: &[[f64; 3]], b: &mut [f64]) {
+        let cols = 3 * dndx.len();
+        b.iter_mut().for_each(|v| *v = 0.0);
+        for (i, g) in dndx.iter().enumerate() {
+            let (x, y, z) = (3 * i, 3 * i + 1, 3 * i + 2);
+            b[x] = g[0];
+            b[cols + y] = g[1];
+            b[2 * cols + z] = g[2];
+            b[3 * cols + x] = g[1];
+            b[3 * cols + y] = g[0];
+            b[4 * cols + y] = g[2];
+            b[4 * cols + z] = g[1];
+            b[5 * cols + x] = g[2];
+            b[5 * cols + z] = g[0];
+        }
+    }
+
+    /// The incompatible-mode strain matrix `g` (6 × 9) at a point: the modes
+    /// `1 - ξ²`, `1 - η²`, `1 - ζ²` with the derivatives taken through the Jacobian at
+    /// the centroid scaled by `det J0 / det J` (Taylor's modification, passes the patch
+    /// test).
+    fn fill_g(p: [f64; 3], inv0: &[[f64; 3]; 3], det0: f64, det: f64, g: &mut [f64]) {
+        let dmodes = [
+            [-2.0 * p[0], 0.0, 0.0],
+            [0.0, -2.0 * p[1], 0.0],
+            [0.0, 0.0, -2.0 * p[2]],
+        ];
+        let scale = det0 / det;
+        let mut dndx = [[0.0; 3]; 3];
+        for (m, d) in dmodes.iter().enumerate() {
+            for c in 0..3 {
+                dndx[m][c] = scale * (d[0] * inv0[c][0] + d[1] * inv0[c][1] + d[2] * inv0[c][2]);
+            }
+        }
+        Self::fill_b(&dndx, g);
+    }
+
+    /// Stiffness matrix (row-major `3n × 3n`) for the material matrix `d` (6 × 6, acting
+    /// on engineering strains).
+    pub fn stiffness(&self, coords: &[[f64; 3]], d: &[[f64; 6]; 6], out: &mut Vec<f64>) {
+        let ndof = self.dof_count();
+        out.clear();
+        out.resize(ndof * ndof, 0.0);
+        let mut b = vec![0.0; 6 * ndof];
+        if self.formulation == Formulation::Incompatible {
+            self.stiffness_incompatible(coords, d, out, &mut b);
+            return;
+        }
+        if self.formulation == Formulation::Reduced {
+            self.stiffness_reduced(coords, d, out, &mut b);
+            return;
+        }
+        for (&p, &w) in self.rule.points.iter().zip(&self.rule.weights) {
+            let point = self.point(p, coords);
+            Self::fill_b(&point.dndx, &mut b);
+            accumulate_btdb(&b, d, ndof, point.det * w, out);
+        }
+    }
+
+    /// C3D8R as the uniform-strain hexahedron of Flanagan and Belytschko (1981): the
+    /// stiffness of the mean strain-displacement matrix over the element volume (the
+    /// 2×2×2 average of B) plus the orthogonal hourglass control with the stiffness
+    /// CalculiX uses, which was identified from its output on rectangular elements:
+    /// `ε = 0.004 E V Σ_j b_j·b_j` per hourglass mode (independent of Poisson's ratio), so
+    /// that `K_hg = ε/8 Σ_α γ_α γ_αᵀ ⊗ I`. For distorted elements CalculiX's hourglass
+    /// vectors differ slightly from the orthogonalised `γ_α` (about 0.1 % of the stiffness).
+    fn stiffness_reduced(
+        &self,
+        coords: &[[f64; 3]],
+        d: &[[f64; 6]; 6],
+        out: &mut [f64],
+        b: &mut [f64],
+    ) {
+        let ndof = self.dof_count();
+        let full = IntegrationRule::hex(2);
+        let mut volume = 0.0;
+        let mut mean = vec![[0.0; 3]; 8];
+        for (&p, &w) in full.points.iter().zip(&full.weights) {
+            let point = self.point(p, coords);
+            let f = point.det * w;
+            volume += f;
+            for (m, g) in mean.iter_mut().zip(&point.dndx) {
+                for c in 0..3 {
+                    m[c] += f * g[c];
+                }
+            }
+        }
+        for m in mean.iter_mut() {
+            for c in m.iter_mut() {
+                *c /= volume;
+            }
+        }
+        Self::fill_b(&mean, b);
+        accumulate_btdb(b, d, ndof, volume, out);
+
+        // Hourglass control. Young's modulus from the isotropic material matrix.
+        let mu = d[3][3];
+        let lambda = d[0][1];
+        let young = mu * (3.0 * lambda + 2.0 * mu) / (lambda + mu);
+        let bb: f64 = mean
+            .iter()
+            .map(|m| m[0] * m[0] + m[1] * m[1] + m[2] * m[2])
+            .sum();
+        let epsilon = 0.004 * young * volume * bb / 8.0;
+        const H: [[f64; 8]; 4] = [
+            [1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0],
+            [1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0, -1.0],
+            [1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0],
+            [-1.0, 1.0, -1.0, 1.0, 1.0, -1.0, 1.0, -1.0],
+        ];
+        for h in &H {
+            // γ = h − Σ_j (h·x_j) b_j, orthogonal to the linear displacement fields.
+            let mut gamma = *h;
+            for j in 0..3 {
+                let hx: f64 = (0..8).map(|a| h[a] * coords[a][j]).sum();
+                for a in 0..8 {
+                    gamma[a] -= hx * mean[a][j];
+                }
+            }
+            for a in 0..8 {
+                for c in 0..8 {
+                    let v = epsilon * gamma[a] * gamma[c];
+                    for k in 0..3 {
+                        out[(3 * a + k) * ndof + 3 * c + k] += v;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Condensation data of the incompatible modes: `K_aa^-1 K_au` (9 × 3n) so that the
+    /// mode amplitudes are `α = -K_aa^-1 K_au u`.
+    fn incompatible_coupling(
+        &self,
+        coords: &[[f64; 3]],
+        d: &[[f64; 6]; 6],
+    ) -> (Vec<f64>, [[f64; 3]; 3], f64) {
+        let ndof = self.dof_count();
+        let mut b = vec![0.0; 6 * ndof];
+        let mut g = vec![0.0; 6 * 9];
+        let centre = self.point([0.0; 3], coords);
+        let j0 = {
+            let mut n = vec![0.0; 8];
+            let mut dn = vec![[0.0; 3]; 8];
+            self.family.shape([0.0; 3], &mut n, &mut dn);
+            jacobian(&dn, coords)
+        };
+        let (det0, inv0) = invert3(&j0);
+        let mut kaa = vec![0.0; 81];
+        let mut kau = vec![0.0; 9 * ndof];
+        for (&p, &w) in self.rule.points.iter().zip(&self.rule.weights) {
+            let point = self.point(p, coords);
+            Self::fill_b(&point.dndx, &mut b);
+            Self::fill_g(p, &inv0, det0, point.det, &mut g);
+            let f = point.det * w;
+            accumulate_btdb(&g, d, 9, f, &mut kaa);
+            accumulate_atdb(&g, 9, &b, ndof, d, f, &mut kau);
+        }
+        let _ = centre;
+        // Solve K_aa X = K_au for X (9 × ndof) by Gaussian elimination with pivoting.
+        let x = solve_dense(&mut kaa, 9, &kau, ndof);
+        (x, inv0, det0)
+    }
+
+    fn stiffness_incompatible(
+        &self,
+        coords: &[[f64; 3]],
+        d: &[[f64; 6]; 6],
+        out: &mut [f64],
+        b: &mut [f64],
+    ) {
+        let ndof = self.dof_count();
+        let (x, inv0, det0) = self.incompatible_coupling(coords, d);
+        let mut g = vec![0.0; 6 * 9];
+        let mut kau = vec![0.0; 9 * ndof];
+        for (&p, &w) in self.rule.points.iter().zip(&self.rule.weights) {
+            let point = self.point(p, coords);
+            Self::fill_b(&point.dndx, b);
+            Self::fill_g(p, &inv0, det0, point.det, &mut g);
+            let f = point.det * w;
+            accumulate_btdb(b, d, ndof, f, out);
+            accumulate_atdb(&g, 9, b, ndof, d, f, &mut kau);
+        }
+        // K = K_uu - K_ua K_aa^-1 K_au = K_uu - K_auᵀ X.
+        for i in 0..ndof {
+            for j in 0..ndof {
+                let mut s = 0.0;
+                for m in 0..9 {
+                    s += kau[m * ndof + i] * x[m * ndof + j];
+                }
+                out[i * ndof + j] -= s;
+            }
+        }
+    }
+
+    /// Engineering strains at the integration points for nodal displacements `u`.
+    pub fn strains(&self, coords: &[[f64; 3]], d: &[[f64; 6]; 6], u: &[f64]) -> Vec<[f64; 6]> {
+        let ndof = self.dof_count();
+        let mut b = vec![0.0; 6 * ndof];
+        let incompatible = (self.formulation == Formulation::Incompatible).then(|| {
+            let (x, inv0, det0) = self.incompatible_coupling(coords, d);
+            let mut alpha = [0.0; 9];
+            for (m, a) in alpha.iter_mut().enumerate() {
+                *a = -(0..ndof).map(|j| x[m * ndof + j] * u[j]).sum::<f64>();
+            }
+            (alpha, inv0, det0)
+        });
+        let mut g = vec![0.0; 6 * 9];
+        self.rule
+            .points
+            .iter()
+            .map(|&p| {
+                let point = self.point(p, coords);
+                Self::fill_b(&point.dndx, &mut b);
+                let mut e = [0.0; 6];
+                for (r, er) in e.iter_mut().enumerate() {
+                    *er = (0..ndof).map(|c| b[r * ndof + c] * u[c]).sum();
+                }
+                if let Some((alpha, inv0, det0)) = &incompatible {
+                    Self::fill_g(p, inv0, *det0, point.det, &mut g);
+                    for (r, er) in e.iter_mut().enumerate() {
+                        *er += (0..9).map(|c| g[r * 9 + c] * alpha[c]).sum::<f64>();
+                    }
+                }
+                e
+            })
+            .collect()
+    }
+
+    /// Internal nodal forces `∫ Bᵀ σ dV` for stresses at the integration points.
+    pub fn internal_force(&self, coords: &[[f64; 3]], stresses: &[[f64; 6]], out: &mut [f64]) {
+        let ndof = self.dof_count();
+        out.iter_mut().for_each(|v| *v = 0.0);
+        let mut b = vec![0.0; 6 * ndof];
+        for ((&p, &w), s) in self
+            .rule
+            .points
+            .iter()
+            .zip(&self.rule.weights)
+            .zip(stresses)
+        {
+            let point = self.point(p, coords);
+            Self::fill_b(&point.dndx, &mut b);
+            let f = point.det * w;
+            for (c, o) in out.iter_mut().enumerate() {
+                *o += f * (0..6).map(|r| b[r * ndof + c] * s[r]).sum::<f64>();
+            }
+        }
+    }
+
+    /// Equivalent nodal forces of a pressure on face `face` (1-based CalculiX number),
+    /// positive into the element, added to `out` (3 per node of the element).
+    pub fn face_load(&self, coords: &[[f64; 3]], face: u8, pressure: f64, out: &mut [f64]) {
+        let faces = self.family.faces();
+        let f = &faces[face as usize - 1];
+        let quadratic = self.family.is_quadratic();
+        let nodes: Vec<usize> = if quadratic {
+            f.corners.iter().chain(f.mids).copied().collect()
+        } else {
+            f.corners.to_vec()
+        };
+        let (points, weights) = face_rule(f.corners.len(), quadratic);
+        let mut n = vec![0.0; nodes.len()];
+        let mut dn = vec![[0.0; 2]; nodes.len()];
+        for (p, w) in points.iter().zip(weights) {
+            face_shape(f.corners.len(), quadratic, *p, &mut n, &mut dn);
+            let mut t1 = [0.0; 3];
+            let mut t2 = [0.0; 3];
+            for (i, &node) in nodes.iter().enumerate() {
+                for k in 0..3 {
+                    t1[k] += dn[i][0] * coords[node][k];
+                    t2[k] += dn[i][1] * coords[node][k];
+                }
+            }
+            let normal = [
+                t1[1] * t2[2] - t1[2] * t2[1],
+                t1[2] * t2[0] - t1[0] * t2[2],
+                t1[0] * t2[1] - t1[1] * t2[0],
+            ];
+            for (i, &node) in nodes.iter().enumerate() {
+                for k in 0..3 {
+                    out[3 * node + k] -= pressure * n[i] * normal[k] * w;
+                }
+            }
+        }
+    }
+
+    /// Equivalent nodal forces of a body force per unit volume `f(x)`, added to `out`.
+    pub fn body_force(
+        &self,
+        coords: &[[f64; 3]],
+        f: impl Fn([f64; 3]) -> [f64; 3],
+        out: &mut [f64],
+    ) {
+        for (&p, &w) in self.rule.points.iter().zip(&self.rule.weights) {
+            let point = self.point(p, coords);
+            let mut x = [0.0; 3];
+            for (ni, c) in point.n.iter().zip(coords) {
+                for k in 0..3 {
+                    x[k] += ni * c[k];
+                }
+            }
+            let force = f(x);
+            let factor = point.det * w;
+            for (i, ni) in point.n.iter().enumerate() {
+                for k in 0..3 {
+                    out[3 * i + k] += ni * force[k] * factor;
+                }
+            }
+        }
+    }
+
+    /// Coordinates of the integration points.
+    pub fn integration_point_coordinates(&self, coords: &[[f64; 3]]) -> Vec<[f64; 3]> {
+        self.rule
+            .points
+            .iter()
+            .map(|&p| {
+                let point = self.point(p, coords);
+                let mut x = [0.0; 3];
+                for (ni, c) in point.n.iter().zip(coords) {
+                    for k in 0..3 {
+                        x[k] += ni * c[k];
+                    }
+                }
+                x
+            })
+            .collect()
+    }
+}
+
+/// `out += f · Bᵀ D B` for `b` of size 6 × n.
+fn accumulate_btdb(b: &[f64], d: &[[f64; 6]; 6], n: usize, f: f64, out: &mut [f64]) {
+    // db = D B (6 × n).
+    let mut db = vec![0.0; 6 * n];
+    for r in 0..6 {
+        for c in 0..n {
+            let mut s = 0.0;
+            for k in 0..6 {
+                s += d[r][k] * b[k * n + c];
+            }
+            db[r * n + c] = s;
+        }
+    }
+    for i in 0..n {
+        for j in i..n {
+            let mut s = 0.0;
+            for k in 0..6 {
+                s += b[k * n + i] * db[k * n + j];
+            }
+            out[i * n + j] += f * s;
+            if i != j {
+                out[j * n + i] += f * s;
+            }
+        }
+    }
+}
+
+/// `out += f · Aᵀ D B` for `a` of size 6 × m and `b` of size 6 × n (`out` is m × n).
+fn accumulate_atdb(
+    a: &[f64],
+    m: usize,
+    b: &[f64],
+    n: usize,
+    d: &[[f64; 6]; 6],
+    f: f64,
+    out: &mut [f64],
+) {
+    let mut db = vec![0.0; 6 * n];
+    for r in 0..6 {
+        for c in 0..n {
+            let mut s = 0.0;
+            for k in 0..6 {
+                s += d[r][k] * b[k * n + c];
+            }
+            db[r * n + c] = s;
+        }
+    }
+    for i in 0..m {
+        for j in 0..n {
+            let mut s = 0.0;
+            for k in 0..6 {
+                s += a[k * m + i] * db[k * n + j];
+            }
+            out[i * n + j] += f * s;
+        }
+    }
+}
+
+/// Solves `A X = B` for a dense `m × m` matrix `a` (destroyed) and `B` of size `m × n`,
+/// Gaussian elimination with partial pivoting.
+fn solve_dense(a: &mut [f64], m: usize, b: &[f64], n: usize) -> Vec<f64> {
+    let mut x = b.to_vec();
+    for k in 0..m {
+        let pivot = (k..m)
+            .max_by(|&i, &j| a[i * m + k].abs().total_cmp(&a[j * m + k].abs()))
+            .unwrap();
+        if pivot != k {
+            for c in 0..m {
+                a.swap(k * m + c, pivot * m + c);
+            }
+            for c in 0..n {
+                x.swap(k * n + c, pivot * n + c);
+            }
+        }
+        let akk = a[k * m + k];
+        for i in k + 1..m {
+            let factor = a[i * m + k] / akk;
+            if factor == 0.0 {
+                continue;
+            }
+            for c in k..m {
+                a[i * m + c] -= factor * a[k * m + c];
+            }
+            for c in 0..n {
+                x[i * n + c] -= factor * x[k * n + c];
+            }
+        }
+    }
+    for k in (0..m).rev() {
+        for c in 0..n {
+            let mut s = x[k * n + c];
+            for j in k + 1..m {
+                s -= a[k * m + j] * x[j * n + c];
+            }
+            x[k * n + c] = s / a[k * m + k];
+        }
+    }
+    x
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn isotropic(e: f64, nu: f64) -> [[f64; 6]; 6] {
+        let l = e * nu / ((1.0 + nu) * (1.0 - 2.0 * nu));
+        let g = e / (2.0 * (1.0 + nu));
+        let mut d = [[0.0; 6]; 6];
+        for i in 0..3 {
+            d[i][..3].fill(l);
+            d[i][i] = l + 2.0 * g;
+            d[i + 3][i + 3] = g;
+        }
+        d
+    }
+
+    fn unit_cube(family: Family) -> Vec<[f64; 3]> {
+        family
+            .node_coordinates()
+            .iter()
+            .map(|c| [0.5 * (c[0] + 1.0), 0.5 * (c[1] + 1.0), 0.5 * (c[2] + 1.0)])
+            .collect()
+    }
+
+    fn reference(family: Family) -> Vec<[f64; 3]> {
+        family.node_coordinates().to_vec()
+    }
+
+    fn all_kinds() -> Vec<ElementType> {
+        use ElementType::*;
+        vec![C3D8, C3D8R, C3D8I, C3D20, C3D20R, C3D4, C3D10, C3D6, C3D15]
+    }
+
+    #[test]
+    fn volumes_are_right() {
+        for kind in all_kinds() {
+            let e = solid(kind).unwrap();
+            let coords = match e.family {
+                Family::Hex8 | Family::Hex20 => unit_cube(e.family),
+                _ => reference(e.family),
+            };
+            let expected = match e.family {
+                Family::Hex8 | Family::Hex20 => 1.0,
+                Family::Tet4 | Family::Tet10 => 1.0 / 6.0,
+                Family::Wedge6 | Family::Wedge15 => 1.0,
+            };
+            assert!((e.volume(&coords) - expected).abs() < 1e-12, "{kind}");
+        }
+    }
+
+    #[test]
+    fn stiffness_is_symmetric_and_rigid_body_free() {
+        let d = isotropic(1000.0, 0.3);
+        for kind in all_kinds() {
+            let e = solid(kind).unwrap();
+            let mut coords = match e.family {
+                Family::Hex8 | Family::Hex20 => unit_cube(e.family),
+                _ => reference(e.family),
+            };
+            // Distort a little so that the Jacobian is not constant.
+            for (i, c) in coords.iter_mut().enumerate() {
+                c[0] += 0.05 * (i as f64 * 0.7).sin();
+                c[2] += 0.04 * (i as f64 * 1.3).cos();
+            }
+            let n = e.dof_count();
+            let mut k = Vec::new();
+            e.stiffness(&coords, &d, &mut k);
+            for i in 0..n {
+                for j in 0..n {
+                    assert!(
+                        (k[i * n + j] - k[j * n + i]).abs() < 1e-9 * d[0][0],
+                        "{kind}"
+                    );
+                }
+            }
+            // Translation and small rotation give no forces.
+            let modes: Vec<Vec<f64>> = (0..6)
+                .map(|m| {
+                    (0..e.node_count())
+                        .flat_map(|a| {
+                            let x = coords[a];
+                            match m {
+                                0 => [1.0, 0.0, 0.0],
+                                1 => [0.0, 1.0, 0.0],
+                                2 => [0.0, 0.0, 1.0],
+                                3 => [0.0, -x[2], x[1]],
+                                4 => [x[2], 0.0, -x[0]],
+                                _ => [-x[1], x[0], 0.0],
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            for u in &modes {
+                for i in 0..n {
+                    let f: f64 = (0..n).map(|j| k[i * n + j] * u[j]).sum();
+                    assert!(
+                        f.abs() < 1e-8 * d[0][0],
+                        "{kind}: rigid mode gives force {f}"
+                    );
+                }
+            }
+            // A uniform strain field gives uniform strains at the integration points.
+            let u: Vec<f64> = coords
+                .iter()
+                .flat_map(|x| {
+                    [
+                        0.01 * x[0] + 0.002 * x[1],
+                        0.003 * x[1],
+                        -0.004 * x[2] + 0.001 * x[0],
+                    ]
+                })
+                .collect();
+            for s in e.strains(&coords, &d, &u) {
+                let expected = [0.01, 0.003, -0.004, 0.002, 0.0, 0.001];
+                for (a, b) in s.iter().zip(expected) {
+                    assert!((a - b).abs() < 1e-10, "{kind}: strain {s:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pressure_gives_force_times_area() {
+        for kind in all_kinds() {
+            let e = solid(kind).unwrap();
+            let coords = match e.family {
+                Family::Hex8 | Family::Hex20 => unit_cube(e.family),
+                _ => reference(e.family),
+            };
+            for (f, face) in e.family.faces().iter().enumerate() {
+                let mut out = vec![0.0; e.dof_count()];
+                e.face_load(&coords, f as u8 + 1, 2.0, &mut out);
+                let total: [f64; 3] =
+                    [0, 1, 2].map(|k| (0..e.node_count()).map(|a| out[3 * a + k]).sum());
+                // Outward normal of the face from the corners.
+                let c = face.corners;
+                let (a, b, d) = (coords[c[0]], coords[c[1]], coords[c[2]]);
+                let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let e2 = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
+                let n = [
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                ];
+                let area = if c.len() == 4 {
+                    (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt()
+                } else {
+                    0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt()
+                };
+                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                for k in 0..3 {
+                    let expected = -2.0 * area * n[k] / len;
+                    assert!(
+                        (total[k] - expected).abs() < 1e-12,
+                        "{kind} face {}: {total:?}",
+                        f + 1
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extrapolation_reproduces_linear_fields() {
+        // A field linear in the natural coordinates is reproduced at the nodes by every
+        // rule with more than one point: exactly, up to CalculiX's four-digit tables for
+        // the 2×2×2 hexahedra, and only in the plane for the two-point wedge rule, whose
+        // axial weights follow CalculiX rather than the rule's points.
+        for kind in all_kinds() {
+            let e = solid(kind).unwrap();
+            if e.integration_points() == 1 {
+                continue;
+            }
+            let field = |p: [f64; 3]| 1.0 + 2.0 * p[0] - p[1] + 0.5 * p[2];
+            let ips: Vec<f64> = e.rule.points.iter().map(|&p| field(p)).collect();
+            let ipn = ips.len();
+            let hex8_points = matches!(e.family, Family::Hex8 | Family::Hex20) && ipn == 8;
+            let wedge_plane = matches!(e.family, Family::Wedge6 | Family::Wedge15) && ipn == 2;
+            let hex27_points = matches!(e.family, Family::Hex8 | Family::Hex20) && ipn == 27;
+            let tolerance = if hex8_points || wedge_plane {
+                2e-3
+            } else if hex27_points {
+                1e-4
+            } else {
+                1e-10
+            };
+            for (a, node) in e.family.node_coordinates().iter().enumerate() {
+                let v: f64 = (0..ipn)
+                    .map(|g| e.extrapolation[a * ipn + g] * ips[g])
+                    .sum();
+                let expected = if wedge_plane {
+                    // Constant in the plane: the centroid value; axially CalculiX's weights
+                    // favour the first point on even nodes and the second on odd ones.
+                    let sign = if a % 2 == 0 { -1.0 } else { 1.0 };
+                    1.0 + 2.0 / 3.0 - 1.0 / 3.0 + 0.5 * sign * 1.291 / 3.0_f64.sqrt()
+                } else {
+                    field(*node)
+                };
+                assert!(
+                    (v - expected).abs() < tolerance,
+                    "{kind} node {a}: {v} vs {expected}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extrapolation_weights_match_calculix_tables() {
+        // The 2×2×2 corner weights CalculiX tabulates (fitted from its output).
+        let e = solid(ElementType::C3D8).unwrap();
+        let mut corner: Vec<f64> = e.extrapolation[0..8].to_vec();
+        corner.sort_by(|a, b| a.total_cmp(b));
+        assert_eq!(corner[7], 2.549);
+        assert_eq!(corner[0], -0.683);
+        assert_eq!(corner[6], 0.183);
+        assert_eq!(corner[3], -0.04904);
+        let e = solid(ElementType::C3D20R).unwrap();
+        let mut mid: Vec<f64> = e.extrapolation[8 * 8..9 * 8].to_vec();
+        mid.sort_by(|a, b| a.total_cmp(b));
+        assert_eq!(mid[7], 0.933);
+        assert_eq!(mid[0], -0.25);
+        assert_eq!(mid[4], 0.06698);
+        // Each row of every extrapolation matrix sums to one.
+        for kind in all_kinds() {
+            let e = solid(kind).unwrap();
+            let ipn = e.integration_points();
+            for a in 0..e.family.node_count() {
+                let sum: f64 = e.extrapolation[a * ipn..(a + 1) * ipn].iter().sum();
+                assert!((sum - 1.0).abs() < 2e-3, "{kind} node {a}: row sum {sum}");
+            }
+        }
+    }
+
+    #[test]
+    fn reduced_integration_matches_calculix_hourglass_stiffness() {
+        // CalculiX's C3D8R stiffness of a 2 × 0.5 × 0.2 box: the one-point stiffness plus
+        // 11.7 on each of the twelve hourglass modes (identified from its output with
+        // E = 1000, ν = 0.3).
+        let d = isotropic(1000.0, 0.3);
+        let e = solid(ElementType::C3D8R).unwrap();
+        let coords: Vec<[f64; 3]> = Family::Hex8
+            .node_coordinates()
+            .iter()
+            .map(|c| [1.0 * (c[0] + 1.0), 0.25 * (c[1] + 1.0), 0.1 * (c[2] + 1.0)])
+            .collect();
+        let mut k = Vec::new();
+        e.stiffness(&coords, &d, &mut k);
+        let h = [1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0, 1.0];
+        let mut u = [0.0; 24];
+        for a in 0..8 {
+            u[3 * a + 2] = h[a];
+        }
+        let f: Vec<f64> = (0..24)
+            .map(|i| (0..24).map(|j| k[i * 24 + j] * u[j]).sum())
+            .collect();
+        for i in 0..24 {
+            assert!(
+                (f[i] - 11.7 * u[i]).abs() < 1e-6,
+                "dof {i}: {} vs {}",
+                f[i],
+                11.7 * u[i]
+            );
+        }
+    }
+
+    #[test]
+    fn incompatible_modes_bend_better_than_c3d8() {
+        // A single element in pure bending: C3D8I reproduces the beam solution much more
+        // closely than C3D8 (which locks in shear).
+        let d = isotropic(1000.0, 0.0);
+        let coords: Vec<[f64; 3]> = Family::Hex8
+            .node_coordinates()
+            .iter()
+            .map(|c| [5.0 * (c[0] + 1.0), 0.5 * (c[1] + 1.0), 0.5 * (c[2] + 1.0)])
+            .collect();
+        // Pure bending displacement field about y: u = -κ x z, w = κ x²/2 (plus the
+        // Poisson-free part) — apply it on all nodes and compare the energy with the exact
+        // one (M² L / 2EI); C3D8I should be exact, C3D8 stiffer.
+        let kappa = 0.01;
+        let u: Vec<f64> = coords
+            .iter()
+            .flat_map(|x| {
+                let z = x[2] - 0.5;
+                [-kappa * x[0] * z, 0.0, kappa * x[0] * x[0] / 2.0]
+            })
+            .collect();
+        let energy = |kind: ElementType| {
+            let e = solid(kind).unwrap();
+            let n = e.dof_count();
+            let mut k = Vec::new();
+            e.stiffness(&coords, &d, &mut k);
+            let mut s = 0.0;
+            for i in 0..n {
+                for j in 0..n {
+                    s += u[i] * k[i * n + j] * u[j];
+                }
+            }
+            0.5 * s
+        };
+        let exact = 0.5 * 1000.0 * (1.0 / 12.0) * kappa * kappa * 10.0;
+        let e8 = energy(ElementType::C3D8);
+        let e8i = energy(ElementType::C3D8I);
+        assert!((e8i - exact).abs() < 1e-3 * exact, "C3D8I {e8i} vs {exact}");
+        assert!(e8 > 1.5 * exact, "C3D8 {e8} vs {exact}");
+    }
+}
